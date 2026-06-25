@@ -1,0 +1,34 @@
+# TOOLS.md · link16-agent-infra 工具索引（SSOT）
+
+> 本仓所有可复用工具的唯一索引 · 分 **🔵 feishu** / **🟢 wmux** 两段 · 「有没有工具干 X」查这里。
+> 路径相对本仓根（`feishu/…` / `wmux/…`）。详细机制见 `docs/`（ARCH-110 桥 / ARCH-010 wmux / SOP-120 注册）。
+
+## 🔵 feishu —— 飞书桥（`feishu/`）
+
+| 工具 | 职责 | 怎么调 |
+|---|---|---|
+| `feishu/feishu_bridge.py` | **双向桥主进程**：N 个 bot 长连接，@bot→注入对应 wmux 会话 / 回传 v8（hook→outbox→drainer）· `send`/`status`/`stop`/`doctor` | `python feishu/feishu_bridge.py start`（`stop`/`status`） |
+| `feishu/wmux_session.py` | 桥的 wmux 会话原语：spawn 新 workspace 起 ccp / pty_alive 探活 / close | （库 · 桥内部用） |
+| `feishu/bridge_outbox.py` | **v8 回传唯一发送引擎 drainer**：增量读 outbox → 发卡片 / 进度限流合并 / 去重 | （桥 runner 起的后台 task） |
+| `feishu/bridge_doctor.py` | 机械自愈：outbox 三态诊断 + 卡→自动重启 drainer | `python feishu/bridge_doctor.py [--bot X]` |
+| `feishu/hooks/bridge_stop.py`+`bridge_posttool.py`(+pretool, codex) | 桥会话 hook：Stop→写 outbox answer / PostToolUse→写 progress | （桥 spawn 的会话自动调） |
+| `feishu/jsonl_reply_extract.py` | 从 transcript 提回复（`last_turn_reply` / `extract` / `progress`） | （Stop hook 用） |
+| `feishu/register_feishu_app.py` | **一键建飞书 bot**（扫码 OAuth + 预置 40+ 权限 + WS）· 末步打印开全权限链 | `python feishu/register_feishu_app.py --name X --bot wsN` |
+| `feishu/bridge_scope_audit.py` ⭐ | **查 bot 权限矩阵 + 缺权限授权链**（官方 `/scopes`）· **查权限唯一入口** | `python feishu/bridge_scope_audit.py --all-env` |
+| `feishu/bridge_feishu_probe.py` ⭐ | **飞书 API 调试探针**：读各 bot 真实消息历史 / 验真送达 | `python feishu/bridge_feishu_probe.py --all --recent 3` / `--bot X --verify "片段"` |
+| `feishu/feishu_docs.py` | 本地 md/HTML → 飞书云在线文档（`send --doc` 底层） | `python feishu/feishu_bridge.py send --bot X --doc <file>` |
+| `feishu/send_feishu_msg.py` ⭐ | 主动发**纯文字 + @人/@bot**（agent↔agent 喊话原语） | `python feishu/send_feishu_msg.py --bot X --to oc_群 --text "..." --at ou_对方` |
+| `feishu/send_feishu_file.py` ⭐ | 发**文件本体**附件 | `python feishu/send_feishu_file.py --bot X --to oc_群 --file <f>` |
+| `feishu/send_feishu_voice.py` ⭐ | 发**可拖进度条语音**（带 duration） | `python feishu/send_feishu_voice.py --bot X --audio <a> --text "说明"` |
+| `feishu/send_feishu_media.py` ⭐ | 发**图/视频/媒体在线看**链接（嵌 docx） | `python feishu/send_feishu_media.py --bot X --media <m> --title "..."` |
+| `feishu/feishu_rest.py` | 飞书 REST 原语（api/tenant_token/send_msg · 纯标库绕代理） | （feishu_docs/media/voice 内部用） |
+| `feishu/agent_runtime.py` · `feishu/bridge_env.py` | 多 runtime SSOT（Claude/Codex） · 跨机路径解析（.env/名册/wmux-rpc） | （库） |
+
+## 🟢 wmux —— 面板驱动层（`wmux/`）
+
+| 工具 | 职责 | 怎么调 |
+|---|---|---|
+| `wmux/wmux-rpc.js` | **wmux daemon JSON-RPC 客户端**（带 token+workspaceId·免 MCP 身份闸）：`panes`/`surfaces`/`read`/`send`/`key`/`enter`/`split-here`/`close`/`rpc` · 裸 `pane.split` 已禁 | `node wmux/wmux-rpc.js read <pty>` / `send <pty> "..."` / `close <pty> --allow-ws <id>` |
+| probe / kickoff / spinner 原语 | **确切信号**：判面板死活靠 side-effect 探针、派活靠验 spinner、不信空闲 banner read | 待从 xhs `spawn_worker.py` 提拔进本包 · 现暂在 xhs · 见 `docs/ARCH-010 §8` |
+
+> ⚠️ **xhs 巡航专属、不在本仓**：`spawn_worker.py`（写帖角色/lease/N+3）、`check_pane_layout.py`、`watchdog.py`（盯 posts/）——那些是 xhs 自己的工作负载、只是用 wmux，留在 xhs。
