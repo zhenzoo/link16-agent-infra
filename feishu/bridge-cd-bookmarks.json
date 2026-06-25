@@ -1,0 +1,17 @@
+{
+  "_README": "飞书桥 /cd = 像文件浏览器一样在目录树里走。① `/cd`（无参）= 列【bot 当前所在目录】的全部直接子目录·带编号·你回一个数字就钻进去起会话（手机零打字·不过滤·dotfolder/归档都列）。当前目录 = 会话注册表 bridge-session-<bot>.json 的 cwd（每次 spawn/`/cd` 写）· 没有则 bot 默认 cwd（= 本仓库根，config 这类配了 cwd 的 = 其 cwd）。② `/cd ..` = 回上一级。③ `/cd <名字>` = 先看当前目录的直接子目录（`/cd compass` 从 Yoach 直进 Yoach/compass），不是才轮到 bookmarks（短名→路径·大小写不敏感）→ search_roots 各根「直接子目录」全局模糊搜（唯一命中直进·多个列编号回数字）→ 绝对路径。bookmarks/search_roots 现仅服务「跳到别处」这一步（无参列当前目录用不到它们）。④ 路径支持跨机 token（绝不写死盘符/用户名·遵 CLAUDE.md 跨机铁律）：`$PROJECT`=本仓库根（自适应 E:/Post/xhs-card-gen 或 D:/.../Post/tools/xhs-card-gen）· `$VIBECODING_ROOT`=各机 VibeCoding 根 · `~`=各机 home · 其它环境变量照常展开。改完即时生效（每次 /cd 现读·不用重启桥）。",
+  "bookmarks": {
+    "post": "$PROJECT",
+    "xhs": "$PROJECT",
+    "yoach": "$VIBECODING_ROOT/Yoach",
+    "lab": "$VIBECODING_ROOT/Lab",
+    "personal": "~/.claude-personal"
+  },
+  "search_roots": [
+    "$VIBECODING_ROOT/Yoach",
+    "$VIBECODING_ROOT/Post",
+    "$VIBECODING_ROOT/Lab",
+    "$VIBECODING_ROOT",
+    "~/.claude-personal"
+  ]
+}

@@ -1,0 +1,11 @@
+# 飞书桥（orchestrator/feishu_bridge.py）的 Python 依赖
+# 装：pip install -r orchestrator/requirements.txt
+# 完整新机器流程见 orchestrator/SETUP-new-machine.md
+#
+# 注意：桥还依赖两样【不在 pip 里】的东西（见 SETUP 文档）：
+#   ① ~/wmux-rpc.js  —— 连 wmux daemon 的 node 客户端（仓库外·没提交·必须手动放）
+#   ② ccp 别名        —— git-bash 里起 Claude（CLAUDE_CONFIG_DIR=~/.claude-personal claude …）
+
+lark_oapi>=1.6.8            # 飞书官方 SDK · register_feishu_app.py 一键建应用 + 长连接底座
+lark-channel-sdk>=1.0.0     # 飞书 CardKit / WebSocket channel · feishu_bridge.py 收发消息(import lark_channel)
+                            # （requests-toolbelt 由 lark_oapi 自动带入·无需单列）

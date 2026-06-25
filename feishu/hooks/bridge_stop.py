@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""bridge_stop.py — Claude Code **Stop hook**：一轮回复结束 → 把最终回复写进
+`_autopilot/bridge-outbox-<bot>.jsonl`（桥 drainer 读它发飞书 DM）。
+
+v8 设计（_BRIDGE-HARDENING-LOG.md §5）：hook 是【单写者】，只往 outbox 追一行，
+**不碰飞书凭据/连接**（那是桥的 SSOT）。env-scope：只对桥 spawn 的会话生效。
+
+settings.json 挂法（async fire-and-forget · 不阻塞会话）：
+  "Stop":[{"matcher":"*","hooks":[{"type":"command","command":"python",
+    "args":["${CLAUDE_PROJECT_DIR}/orchestrator/hooks/bridge_stop.py"],
+    "async":true,"timeout":15}]}]
+
+v9（_BRIDGE-HARDENING-LOG.md §9 · 2026-06-18）抽取竞态防护：hook 开火与「最终答案落盘」
+几乎同刻 → 旧法取 transcript 末块文本会抢在写前、抓到调工具前的过渡句(stop_reason=tool_use)。
+改用 `_final_turn_reply`：只认【终结态消息】(end_turn 等)文本 + 短轮询等落盘（见下）。
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def _project_dir():
+    p = os.environ.get("CLAUDE_PROJECT_DIR")
+    if p and os.path.isdir(p):
+        return Path(p)
+    return Path(__file__).resolve().parents[2]   # orchestrator/hooks/this → 仓库根
+
+
+# ---------- v9 竞态防护（§9）：只认终结态文本 + 短轮询等落盘 ----------
+_TERMINAL_STOP = {"end_turn", "max_tokens", "stop_sequence", "refusal"}  # 「这轮真结束」；tool_use/pause_turn=还要继续 → 排除
+_POLL_TRIES = 60        # 最多轮询次数
+_POLL_DELAY = 0.2       # 间隔(秒)；60×0.2=12s · 稳在 Stop hook 15s timeout 内（耐心些·宁等勿缺收尾）
+# v8.5.2（2026-06-19）：中段「文本→普通工具」的【实质答案】必达。旧版只收①终结态+②问前结论 →
+# 「答完顺手存记忆/再核一下」这种 stop_reason=tool_use 的实质正文被当旁白丢（实证 social_media
+# 一会话丢 13 条实质答案·含 2155/2187 字·全无 AskUserQuestion）。阈值经验值：观测过渡旁白 ≤150 字、
+# 实质答案 ≥400 字 → 200 落在空档。中段文本 Stop 开火时早已落盘·不破①的竞态防护。
+_SUBSTANTIVE_MIN = 200  # 中段 assistant 文本 ≥ 此长度即当【给用户的实质正文】补发（短于此的「让我查下X」过渡旁白仍只走进度卡）
+
+
+def _read_records(tp):
+    """读 transcript 全部可解析记录 → [(line_no, rec)]。绝不抛。"""
+    recs = []
+    try:
+        with open(tp, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    recs.append((i + 1, json.loads(line)))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return recs
+
+
+def _asst_has_ask(rec):
+    """rec 是不是【含 AskUserQuestion tool_use】的 assistant 消息（结构化·非读屏）。"""
+    if rec.get("type") != "assistant":
+        return False
+    c = (rec.get("message") or {}).get("content")
+    return isinstance(c, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion"
+        for b in c)
+
+
+def _final_turn_reply(tp, is_user, asst_texts):
+    """竞态安全抽取本轮【收尾正文】= anchor(末条真用户消息)之后按记录序归三类 assistant 文本：
+      ① 终结态消息(stop_reason ∈ _TERMINAL_STOP)的文本 = 最终 wrap-up（真收尾）；
+      ② 紧贴 AskUserQuestion 之前那条 assistant 文本 = 「它问之前的收尾结论」——该文本在你回答前
+         **不落盘 jsonl**(2026-06-19 throwaway 实测钉死：PreToolUse 开火那刻 transcript 末条还是 user·
+         prose 尚未落·PreToolUse 结构上抓不到)，turn 真结束/恢复后才落 → **只能在此 Stop 时补发**；
+      ③ 中段「文本→普通工具」的【实质答案】(len ≥ _SUBSTANTIVE_MIN) = 给用户的正文（v8.5.2·答完顺手
+         存记忆/再核一下时 stop_reason=tool_use·旧版当旁白丢·实证 social_media 一会话丢 13 条·含 2155 字）。
+    **组装规则（2026-06-23 修「中段实质正文被丢」根因·替代 2026-06-21 的「只发收尾」）**：2026-06-21 为治
+    「收尾被淹没在一张大卡」曾改成「有实质终结 wrap-up 就只发它·丢中段」——但这会把中段的实质正文(如授权
+    链接)静默丢掉(实证 tb25-lab 建 bot turn·授权链接随中段块蒸发·用户飞书收不到)。现改为【不丢·也不拼大卡】：
+      · 每个实质中段块(②问前结论 / ③中段正文·len ≥ _SUBSTANTIVE_MIN)各自成【一张独立卡】(按文档序);
+      · 终结态 wrap-up(①)合为【最后一张卡】;
+    → 既不丢正文、收尾又因「独立成卡」而不被淹没(2026-06-21 的目标仍达成·只是靠分卡而非靠丢)。短的过渡
+    旁白(< 阈值)仍不成卡(只走进度卡)。结构信号驱动:终结态 = stop_reason ∈ _TERMINAL_STOP;实质 = 长度阈值。
+    短轮询等终结态落盘(race guard)；到点仍无终结态但已抓到②/③正文 → 照发（铁律：正文必达·永不因竞态丢）。
+    ⚠️ 前提：picker 真能提交让 turn 结束(否则 Stop 不开火·收尾结论丢)→ 根治在 _drive_picker 闭环校验。
+    返回 {cards: [按发送序的多张卡文本], anchor_line}。复用 SSOT is_user / asst_texts · 零硬编码 · 不碰 thinking。"""
+    anchor_ln = None
+    pre_blocks, term_texts = [], []                   # pre_blocks=非终结实质块(②问前结论+③中段正文·按文档序)·各自成卡; term=终结 wrap-up
+    for attempt in range(_POLL_TRIES):
+        recs = _read_records(tp)
+        anchor_idx = None
+        for idx, (ln, rec) in enumerate(recs):
+            if is_user(rec):
+                anchor_idx, anchor_ln = idx, ln
+        if anchor_idx is not None:
+            sub = [r for _ln, r in recs[anchor_idx + 1:]]
+            pre_blocks, term_texts, has_terminal = [], [], False
+            for i, rec in enumerate(sub):
+                atxts = [t for t in asst_texts(rec) if t.strip()]
+                if not atxts:
+                    continue
+                if (rec.get("message") or {}).get("stop_reason") in _TERMINAL_STOP:
+                    term_texts.extend(atxts)                 # ① 终结态 wrap-up（真收尾）
+                    has_terminal = True
+                    continue
+                pre_ask = False                              # ② 其后第一条 assistant 是 AskUserQuestion → 问前收尾结论
+                for nxt in sub[i + 1:]:
+                    if nxt.get("type") == "assistant":
+                        pre_ask = _asst_has_ask(nxt)
+                        break
+                # ②问前结论 或 ③中段实质正文(len≥阈值) → 收入 pre_blocks(按文档序)·各自单独成卡·不丢；短旁白不收
+                if pre_ask or sum(len(t) for t in atxts) >= _SUBSTANTIVE_MIN:
+                    pre_blocks.extend(atxts)
+            # 装配：每个实质中段块各自一张卡(保序) + 终结 wrap-up 合为最后一张卡 → 不丢正文·收尾又不被淹没在大卡里
+            cards = list(pre_blocks)
+            term_card = "\n\n".join(term_texts).strip()
+            if term_card:
+                cards.append(term_card)
+            if cards and has_terminal:                       # 等到终结态再返回（race guard·防抓在 wrap-up 落盘前）
+                return {"cards": cards, "anchor_line": anchor_ln}
+        if attempt + 1 < _POLL_TRIES:
+            time.sleep(_POLL_DELAY)
+    # 到点仍无终结态：把已抓到的中段/问前实质正文照发（必达·不缺）；真没正文则 cards 空 → main 不发
+    cards = list(pre_blocks)
+    tc = "\n\n".join(term_texts).strip()
+    if tc:
+        cards.append(tc)
+    return {"cards": cards, "anchor_line": anchor_ln}
+
+
+def main():
+    bot = os.environ.get("FEISHU_BRIDGE_SESSION")
+    if not bot:
+        return                                    # 非桥会话 → 不管（env-scope 隔离）
+    try:
+        inp = json.load(sys.stdin)
+    except Exception:                             # noqa: BLE001
+        return
+    tp = inp.get("transcript_path")
+    sid = inp.get("session_id", "")
+    if not tp or not os.path.exists(tp):
+        return                                    # 首轮 transcript 可能未落 → 跳过（下轮 Stop 再来）
+
+    proj = _project_dir()
+    # import 从【hook 自身的 orchestrator/】(永在 xhs 仓库)·不靠 CLAUDE_PROJECT_DIR：config bot cwd≠xhs 时
+    # 它指错 → import 失败 → 下面 except 静默 return → 该 bot 回复全丢(2026-06-17 实证 config bot 形同失声)。
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    try:
+        from jsonl_reply_extract import _is_real_user_message, _assistant_texts  # 复用 SSOT 解析
+    except Exception:                             # noqa: BLE001
+        return
+    r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts)
+    cards = [c.strip() for c in (r.get("cards") or []) if c and c.strip()]
+    if not cards:
+        return                                    # 终结态无文本（只工具/思考收尾）或竞态超时 → 不发
+
+    # 过程小结 footer 只附在【最后一张卡】(收尾卡)（复用 progress·像旧答案卡的「✅已完成·🔧·💭·🪙」行·失败不致命）
+    try:
+        from jsonl_reply_extract import progress, _fmt_k
+        p = progress(tp, None)
+        steps = p.get("steps") or []
+        nt = sum(1 for s in steps if s.get("kind") == "tool")
+        nk = sum(1 for s in steps if s.get("kind") == "thinking")
+        u = p.get("usage") or {}
+        o, i = int(u.get("output") or 0), int(u.get("input") or 0)
+        cards[-1] += (f"\n\n---\n✅ 已完成 · 🔧{nt} 💭{nk}"
+                      + (f" · 🪙出{_fmt_k(o)}·入{_fmt_k(i)}" if (o or i) else ""))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 每张卡各写一条 answer 记录（drainer 按 _ans_key=hash(text) 内容去重·不同卡内容不同→各自成卡·保序）
+    anchor = r.get("anchor_line")
+    outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
+    outbox = outdir / f"bridge-outbox-{bot}.jsonl"
+    try:
+        outbox.parent.mkdir(exist_ok=True)
+        with open(outbox, "a", encoding="utf-8") as f:
+            for c in cards:
+                rec = {"kind": "answer", "ts": int(time.time()), "session": sid,
+                       "anchor": anchor, "text": c}
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+if __name__ == "__main__":
+    main()

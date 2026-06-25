@@ -1,0 +1,55 @@
+{
+  "_README": "飞书智能体桥多 bot 配置（owned-session · ARCH-101）。每 bot = 一个飞书应用 = 一条长连接 = 桥托管的一个 wmux 会话。密钥不放这里(在 .env)·这里只存 .env 键名 + at_name(+ 特殊 cwd)。改完重启 bridge(stop→start)生效。加 bot：① register_feishu_app.py --name X --bot wsN 扫码 ② 这里 bots 加一行。pty 桥 spawn 自得·不用配。⚠️ cwd 机器无关铁律(2026-06-18)：仓库类 bot【不写 cwd】→ 自动落本仓库根 str(PROJECT)·任何机/任何盘/有无 tools 层都自适应(E:/ 或 D:/.../tools/ 都对)；只有非本仓库目录的 bot 才写 cwd·且用 `~/...`(load_bots 会 expanduser·各机自己 home)·绝不写死盘符/用户名。每台机选跑哪些 bot(防撞同一飞书应用) → 各自建 bridge-bots.local.json(gitignored·整盘覆盖)·local 里仓库 bot 同样别写 cwd。",
+  "_example_add_bot": {
+    "name": "ws2",
+    "app_id_env": "FEISHU_BRIDGE_WS2_APP_ID",
+    "app_secret_env": "FEISHU_BRIDGE_WS2_APP_SECRET",
+    "at_name": "@xhs总控-ws2"
+  },
+  "bots": [
+    {
+      "name": "default",
+      "app_id_env": "FEISHU_BRIDGE_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_APP_SECRET",
+      "at_name": "@xhs总控桥"
+    },
+    {
+      "name": "arch",
+      "app_id_env": "FEISHU_BRIDGE_ARCH_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_ARCH_APP_SECRET",
+      "at_name": "@xhs架构师"
+    },
+    {
+      "name": "explore",
+      "app_id_env": "FEISHU_BRIDGE_EXPLORE_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_EXPLORE_APP_SECRET",
+      "at_name": "@xhs探索者"
+    },
+    {
+      "name": "twitter",
+      "app_id_env": "FEISHU_BRIDGE_TWITTER_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_TWITTER_APP_SECRET",
+      "at_name": "@Twitter随笔",
+      "cwd": "$PROJECT/../notes"
+    },
+    {
+      "name": "config",
+      "app_id_env": "FEISHU_BRIDGE_CONFIG_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_CONFIG_APP_SECRET",
+      "at_name": "@ccp配置",
+      "cwd": "~/.claude-personal"
+    },
+    {
+      "name": "social_media",
+      "app_id_env": "FEISHU_BRIDGE_SOCIAL_MEDIA_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_SOCIAL_MEDIA_APP_SECRET",
+      "at_name": "@sm社媒分发"
+    },
+    {
+      "name": "podcast",
+      "app_id_env": "FEISHU_BRIDGE_PODCAST_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_PODCAST_APP_SECRET",
+      "at_name": "@solo单口相声"
+    }
+  ]
+}

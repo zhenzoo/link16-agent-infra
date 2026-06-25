@@ -1,0 +1,18 @@
+{
+  "_README": "机器本地 bot 名册模板（ARCH-101 §4.1）。它存在为 bridge-bots.local.json（去掉 .example）时，桥【只跑】这个文件里的 bot，整盘覆盖 committed 的 bridge-bots.json —— 这样本机不会去连另一台机的飞书应用（同一应用两台机各连一条 WS 会撞），也不改动入了 git 的共享文件，跨机零冲突。bridge-bots.local.json 已 gitignore。",
+  "_用法": [
+    "1) cp orchestrator/bridge-bots.local.example.json orchestrator/bridge-bots.local.json",
+    "2) python orchestrator/register_feishu_app.py --name 本机助手 --bot local1   # 扫码建飞书应用·凭据写进 .env 的 FEISHU_BRIDGE_LOCAL1_APP_ID / FEISHU_BRIDGE_LOCAL1_APP_SECRET",
+    "3) 把下面 bots 改成你的：name 对应 --bot 标识 · app_id_env/app_secret_env 是 .env 里的键名 · at_name 是群里 @ 它的显示名 · cwd 指向【本机】要驱动的仓库绝对路径",
+    "4) python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.py start   # 重启桥生效"
+  ],
+  "bots": [
+    {
+      "name": "local1",
+      "app_id_env": "FEISHU_BRIDGE_LOCAL1_APP_ID",
+      "app_secret_env": "FEISHU_BRIDGE_LOCAL1_APP_SECRET",
+      "at_name": "@本机助手",
+      "cwd": "D:/path/to/your/local/repo"
+    }
+  ]
+}
