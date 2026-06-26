@@ -53,10 +53,10 @@ def bots_config_path(project_root):
     语义「present = 整盘接管」而非合并：本机若起桥，**只跑** local 文件里列的 bot —— 不会去连另一台机的
     飞书应用（同一应用两台机各连一条 WS 会撞），也不会动 committed 文件。另一台机没有 local 文件 → 行为零变化。
     """
-    local = Path(project_root) / "orchestrator" / "bridge-bots.local.json"
+    local = Path(project_root) / "feishu" / "bridge-bots.local.json"   # link16: 桥代码在 feishu/(原 orchestrator/)
     if local.exists():
         return local
-    return Path(project_root) / "orchestrator" / "bridge-bots.json"
+    return Path(project_root) / "feishu" / "bridge-bots.json"
 
 
 def resolve_wmux_rpc(project_root):
@@ -76,4 +76,4 @@ def resolve_wmux_rpc(project_root):
     home = Path.home() / "wmux-rpc.js"
     if home.exists():
         return home
-    return Path(project_root) / "orchestrator" / "wmux-rpc.js"
+    return Path(project_root) / "wmux" / "wmux-rpc.js"   # link16: 正本在 wmux/(原 orchestrator/)
