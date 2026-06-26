@@ -37,10 +37,10 @@ from bridge_env import resolve_env_path, bots_config_path, resolve_wmux_rpc  # n
 ENV_PATH = resolve_env_path()                             # 跨机解析(VIBECODING_ROOT / 上溯找 .env / legacy 兜底)·不写死盘符
 PROJECT = Path(__file__).resolve().parent.parent          # 仓库根
 WMUX_RPC = resolve_wmux_rpc(PROJECT)                      # ~/wmux-rpc.js 优先·兜底仓库副本 orchestrator/wmux-rpc.js·不写死(WMUX_RPC_PATH 可 override)
-BOTS_CONFIG = PROJECT / "orchestrator" / "bridge-bots.json"  # committed 共享名册(default)·实际用 bots_config_path() 选本地 overlay
-CD_BOOKMARKS = PROJECT / "orchestrator" / "bridge-cd-bookmarks.json"
+BOTS_CONFIG = PROJECT / "feishu" / "bridge-bots.json"  # committed 共享名册(default)·实际用 bots_config_path() 选本地 overlay · link16: orchestrator→feishu
+CD_BOOKMARKS = PROJECT / "feishu" / "bridge-cd-bookmarks.json"
 AUTOPILOT = PROJECT / "_autopilot"
-LOG_DIR = PROJECT / "orchestrator" / "_logs"
+LOG_DIR = PROJECT / "feishu" / "_logs"
 INBOX_ROOT = AUTOPILOT / "inbox"   # 入站附件落地（你发飞书的图/文件）· 按 bot/日期分目录 · scratch（agent 收下后移到目标资产目录）
 
 REPLY_POLL_SEC = 2
@@ -1416,7 +1416,7 @@ def run(bot_name=None):
         # v8：hook→outbox→drainer 取代 mirror_tailer 轮询。drainer=唯一发送引擎 + doctor=机械自愈。
         bname = bot["name"]
         ad = str(AUTOPILOT)
-        bridge_outbox.write_hooks_settings(ad, str(PROJECT / "orchestrator" / "hooks"))  # 生成 bridge-hooks.json
+        bridge_outbox.write_hooks_settings(ad, str(PROJECT / "feishu" / "hooks"))  # 生成 bridge-hooks.json · link16: orchestrator→feishu（回传 hook 路径）
 
         def _rit(t):
             t = str(t or "")

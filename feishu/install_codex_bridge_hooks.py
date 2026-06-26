@@ -28,8 +28,8 @@ def _hook_cmd(path: Path) -> str:
 
 
 def bridge_hooks(repo: Path) -> dict:
-    stop = repo / "orchestrator" / "hooks" / "codex_bridge_stop.py"
-    post = repo / "orchestrator" / "hooks" / "codex_bridge_posttool.py"
+    stop = repo / "feishu" / "hooks" / "codex_bridge_stop.py"
+    post = repo / "feishu" / "hooks" / "codex_bridge_posttool.py"
     return {
         "Stop": [{
             "matcher": "*",
