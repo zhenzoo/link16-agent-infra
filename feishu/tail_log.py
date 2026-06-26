@@ -27,7 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-LOGS_DIR = PROJECT_ROOT / "orchestrator" / "_logs"
+LOGS_DIR = PROJECT_ROOT / "feishu" / "_logs"   # link16: orchestrator→feishu
 
 
 def find_log(spec: str) -> Path:

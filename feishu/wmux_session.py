@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT / "orchestrator"))
+sys.path.insert(0, str(PROJECT / "feishu"))   # link16: 桥代码在 feishu/(原 orchestrator/)
 from bridge_env import resolve_wmux_rpc  # noqa: E402
 
 WMUX_RPC = resolve_wmux_rpc(PROJECT)   # ~/wmux-rpc.js 优先·兜底仓库副本 orchestrator/wmux-rpc.js·WMUX_RPC_PATH 可 override
