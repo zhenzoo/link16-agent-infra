@@ -38,6 +38,7 @@ _POLL_DELAY = 0.2       # 间隔(秒)；60×0.2=12s · 稳在 Stop hook 15s time
 # 一会话丢 13 条实质答案·含 2155/2187 字·全无 AskUserQuestion）。阈值经验值：观测过渡旁白 ≤150 字、
 # 实质答案 ≥400 字 → 200 落在空档。中段文本 Stop 开火时早已落盘·不破①的竞态防护。
 _SUBSTANTIVE_MIN = 200  # 中段 assistant 文本 ≥ 此长度即当【给用户的实质正文】补发（短于此的「让我查下X」过渡旁白仍只走进度卡）
+_MID_TAIL_KEEP = 2      # 🔑 防长 turn 刷屏(2026-06-25)：中段实质旁白只保留【最后 N 段】各自成卡（早段那一长串英文旁白只留进度卡·不再每段重发一张飞书卡）。真答案/授权链接总在末尾几段→落窗口内不丢。0=全保留(旧 2026-06-23 行为)
 
 
 def _read_records(tp):
@@ -76,13 +77,16 @@ def _final_turn_reply(tp, is_user, asst_texts):
          prose 尚未落·PreToolUse 结构上抓不到)，turn 真结束/恢复后才落 → **只能在此 Stop 时补发**；
       ③ 中段「文本→普通工具」的【实质答案】(len ≥ _SUBSTANTIVE_MIN) = 给用户的正文（v8.5.2·答完顺手
          存记忆/再核一下时 stop_reason=tool_use·旧版当旁白丢·实证 social_media 一会话丢 13 条·含 2155 字）。
-    **组装规则（2026-06-23 修「中段实质正文被丢」根因·替代 2026-06-21 的「只发收尾」）**：2026-06-21 为治
-    「收尾被淹没在一张大卡」曾改成「有实质终结 wrap-up 就只发它·丢中段」——但这会把中段的实质正文(如授权
-    链接)静默丢掉(实证 tb25-lab 建 bot turn·授权链接随中段块蒸发·用户飞书收不到)。现改为【不丢·也不拼大卡】：
-      · 每个实质中段块(②问前结论 / ③中段正文·len ≥ _SUBSTANTIVE_MIN)各自成【一张独立卡】(按文档序);
+    **组装规则（2026-06-25 加「中段只留末 _MID_TAIL_KEEP 段」防刷屏·叠加 2026-06-23 的「分卡不丢」）**：
+    2026-06-21 曾为治「收尾被淹没在一张大卡」改成「只发终结 wrap-up·丢中段」→ 丢掉了中段实质正文(如授权
+    链接·实证 tb25-lab 建 bot turn·链接随中段块蒸发)。2026-06-23 改「每个实质中段块各自成卡·不丢」→ 又走
+    向另一极端：长 autonomous turn 有几十段英文旁白·每段一张卡 → 一次收尾刷 ~40 条(实证 tb25-lab-3 网球
+    drill 收尾 39 段中段卡 + 1 收尾卡)。现折中【不丢末尾正文·也不刷屏】：
+      · 中段实质块(②问前结论 / ③中段正文·len ≥ _SUBSTANTIVE_MIN)里·**问前结论全留 + 实质旁白只留最后
+        _MID_TAIL_KEEP 段**·各自成【一张独立卡】(按文档序)；早段旁白只弃(它本就在「🤖进行中」进度卡实时滚过);
       · 终结态 wrap-up(①)合为【最后一张卡】;
-    → 既不丢正文、收尾又因「独立成卡」而不被淹没(2026-06-21 的目标仍达成·只是靠分卡而非靠丢)。短的过渡
-    旁白(< 阈值)仍不成卡(只走进度卡)。结构信号驱动:终结态 = stop_reason ∈ _TERMINAL_STOP;实质 = 长度阈值。
+    → 真答案/授权链接总在末尾几段(实证 social_media 2155字答案=末段·tb25-lab 链接=倒数第二段)·落窗口内不丢；
+      收尾独立成卡不被淹没；消息数封顶 ≈ _MID_TAIL_KEEP+1。短过渡旁白(< 阈值)仍不成卡(只走进度卡)。
     短轮询等终结态落盘(race guard)；到点仍无终结态但已抓到②/③正文 → 照发（铁律：正文必达·永不因竞态丢）。
     ⚠️ 前提：picker 真能提交让 turn 结束(否则 Stop 不开火·收尾结论丢)→ 根治在 _drive_picker 闭环校验。
     返回 {cards: [按发送序的多张卡文本], anchor_line}。复用 SSOT is_user / asst_texts · 零硬编码 · 不碰 thinking。"""
@@ -96,7 +100,7 @@ def _final_turn_reply(tp, is_user, asst_texts):
                 anchor_idx, anchor_ln = idx, ln
         if anchor_idx is not None:
             sub = [r for _ln, r in recs[anchor_idx + 1:]]
-            pre_blocks, term_texts, has_terminal = [], [], False
+            mid, term_texts, has_terminal = [], [], False    # mid=[{text, always}] 按文档序（②问前结论 always / ③中段旁白）
             for i, rec in enumerate(sub):
                 atxts = [t for t in asst_texts(rec) if t.strip()]
                 if not atxts:
@@ -110,10 +114,14 @@ def _final_turn_reply(tp, is_user, asst_texts):
                     if nxt.get("type") == "assistant":
                         pre_ask = _asst_has_ask(nxt)
                         break
-                # ②问前结论 或 ③中段实质正文(len≥阈值) → 收入 pre_blocks(按文档序)·各自单独成卡·不丢；短旁白不收
+                # ②问前结论(always 留) 或 ③中段实质旁白(len≥阈值) → 收入 mid(按文档序)；短过渡旁白不收(只走进度卡)
                 if pre_ask or sum(len(t) for t in atxts) >= _SUBSTANTIVE_MIN:
-                    pre_blocks.extend(atxts)
-            # 装配：每个实质中段块各自一张卡(保序) + 终结 wrap-up 合为最后一张卡 → 不丢正文·收尾又不被淹没在大卡里
+                    mid.append({"text": "\n\n".join(atxts).strip(), "always": pre_ask})
+            # 🔑 防刷屏(2026-06-25)：问前结论全留 + 实质旁白只留最后 _MID_TAIL_KEEP 段·各自成卡；早段旁白弃(进度卡已实时滚过)
+            subs = [j for j, m in enumerate(mid) if not m["always"]]
+            keep = set(subs[-_MID_TAIL_KEEP:]) if _MID_TAIL_KEEP else set(subs)
+            pre_blocks = [m["text"] for j, m in enumerate(mid) if (m["always"] or j in keep) and m["text"]]
+            # 装配：保留的中段块各自一张卡(保序) + 终结 wrap-up 合为最后一张卡 → 不丢末尾正文·收尾不被淹没·不刷屏
             cards = list(pre_blocks)
             term_card = "\n\n".join(term_texts).strip()
             if term_card:

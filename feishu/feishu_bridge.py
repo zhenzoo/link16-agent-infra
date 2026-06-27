@@ -298,6 +298,19 @@ def current_cwd(bot):
     return (bot.get("cwd") or str(PROJECT)).replace("\\", "/")
 
 
+def default_cwd(bot):
+    """bot【名册默认目录】（/cd 之前的起始目录·/close 后下次重开回到这里·不写死盘符=load_bots 已按机器解析）。"""
+    return (bot.get("cwd") or str(PROJECT)).replace("\\", "/")
+
+
+def _same_dir(a, b):
+    """跨机/跨大小写比两个目录是否同一个（Windows 大小写不敏感·归一分隔符与 `..`）。用于「默认 / 已切」标注。"""
+    try:
+        return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+    except Exception:  # noqa: BLE001
+        return str(a) == str(b)
+
+
 # ---------- /cd 编号待选态（无参/多命中列编号清单 → 你回数字即切目录起会话·手机零打字）----------
 def _cd_pending_file(bot_name):
     return STATE_DIR / f"bridge-cd-pending-{bot_name}.json"
@@ -631,13 +644,14 @@ def ensure_session(bot):
         except Exception:  # noqa: BLE001
             pass
     before = {str(p) for p, _ in _project_jsonls(bot)}
-    r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, bot.get("cwd")), cwd=bot.get("cwd"))  # cwd 交给 spawn 单独发 cd + 探就绪(分行不合并)
+    cwd = current_cwd(bot)  # 沿用【当前所在目录】：/cd 过则自愈重生仍回那个目录（与账号自愈对称）·/close 清过或没 /cd 过则回名册默认
+    r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)  # cwd 交给 spawn 单独发 cd + 探就绪(分行不合并)
     ws, pty = r["workspace_id"], r["pty"]
     if not _wait_agent_ready(bot, pty, ws):
         # 首发 worker 没起来（瞬时竞态：新 shell 没就绪时被吞 / 首启 trust 提示挡）→ 同壳补发一次再等
         blog(bot["name"], f"⏳ {pty} 首发 {agent_runtime.display_name(bot)} 未就绪 → 补发一次再等")
         try:
-            wmux("send", pty, _worker_cmd(bot, bot.get("cwd")), "--allow-ws", ws)
+            wmux("send", pty, _worker_cmd(bot, cwd), "--allow-ws", ws)
             time.sleep(0.3)
             wmux("enter", pty, "--allow-ws", ws)
         except Exception:  # noqa: BLE001
@@ -652,7 +666,7 @@ def ensure_session(bot):
     jsonl = str(newj) if newj else None
     _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl, "agent": agent_runtime.runtime_name(bot),
                                  "daemon_fp": wmux_session.daemon_fingerprint(),  # 钉死起这会话时的 daemon 实例·下次复用前比对(变了=daemon 重启过=会话已死)
-                                 "cwd": (bot.get("cwd") or str(PROJECT)).replace("\\", "/")})  # 记当前目录(给 /cd 列子目录用)
+                                 "cwd": cwd})  # 记当前目录(给 /cd 列子目录 + 自愈重生复用)
     return ws, pty, True, jsonl
 
 
@@ -1053,26 +1067,36 @@ def run(bot_name=None):
     def make_handler(bot, channel):
         account_default = agent_runtime.account_snapshot(bot)   # 名册默认账号快照（/account 临时切·/close 切回这个）
 
+        def default_account():
+            """名册默认账号 alias（/account 临时切之前·/close 切回这个）。从快照反推·不写死。"""
+            return agent_runtime.current_account(
+                {"name": bot["name"], **{k: v for k, v in account_default.items() if v is not None}})
+
+        def runtime_labels(cur_dir):
+            """飞书提示用：把【当前账号 + 当前目录】各自标注「（默认）/（已切·默认 X）」。
+            cur_dir 由调用方先取（含一次会话注册表读）·账号/默认都是内存+路径运算·无阻塞 IO。"""
+            cur_acc, def_acc = agent_runtime.current_account(bot), default_account()
+            def_dir = default_cwd(bot)
+            acc = f"`{cur_acc}`" + ("（默认）" if cur_acc == def_acc else f"（已切·默认 `{def_acc}`）")
+            drc = f"`{cur_dir}`" + ("（默认）" if _same_dir(cur_dir, def_dir) else f"（已切·默认 `{def_dir}`）")
+            return acc, drc
+
         async def reply(chat_id, text=None, md=None):
             # 所有短回复（斜杠命令应答 / 起会话提示 / 错误）走互动卡片（失败退 markdown→text→webhook）
             await card_send(channel, chat_id, md if md is not None else text, bot["name"])
 
         async def _do_cd(chat_id, target_dir):
-            """关旧会话 → 在 target_dir 起新会话（`/cd` 解析命中 + 编号选中共用）。"""
+            """【只选定目录·不起会话】(懒启动模型 2026-06-26)：关旧会话(若在) + 把目标目录暂存进注册表 `cwd`。
+            真正起会话推迟到你发【下一条正式消息(提示词)】——那时 on_message→ensure_session 在这个目录(+ 当前账号)冷启。
+            好处：`切目录`/`切账号` 可任意叠加、互不清除、也不会各自先抢起一个空会话。`/cd ..`/`/cd <名字>`/编号选中共用。"""
             rec = load_session(bot["name"])
             if rec and rec.get("pty") and await asyncio.to_thread(wmux_session.pty_alive, rec["pty"]):
-                await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
-            await reply(chat_id, f"📂 正在 {target_dir} 起一个新会话…稍等十几秒")
-            r = await asyncio.to_thread(wmux_session.spawn, f"bot-{bot['name']}", _worker_cmd(bot, target_dir), target_dir)
-            ready = await asyncio.to_thread(_wait_agent_ready, bot, r["pty"], r["workspace_id"])
-            if not ready:
-                await reply(chat_id, f"⚠️ {agent_runtime.display_name(bot)} 在 {target_dir} 没就绪，发 `/screen` 看现场")
-                return
-            _merge_session(bot["name"], {"workspace_id": r["workspace_id"], "pty": r["pty"], "jsonl": None,
-                                         "agent": agent_runtime.runtime_name(bot),
-                                         "daemon_fp": wmux_session.daemon_fingerprint(),  # 同 ensure_session：钉死起这会话的 daemon 实例
-                                         "cwd": str(target_dir).replace("\\", "/")})  # 记新当前目录(给 /cd 列子目录用)
-            await reply(chat_id, f"✅ 已在 {target_dir} 起好新会话")
+                await asyncio.to_thread(wmux_session.close, rec["workspace_id"])   # 关旧会话→下条消息必冷启到新目录(pty 置空=ensure_session 不复用)
+            # 只暂存目录(current_cwd 读 cwd)·清掉旧会话 runtime 字段(pty/ws/jsonl/daemon_fp)·保留 chat_id/open_id/account
+            _merge_session(bot["name"], {"cwd": str(target_dir).replace("\\", "/"),
+                                         "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
+            _acc = agent_runtime.current_account(bot)
+            await reply(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
         async def handle_slash(chat_id, text):
             cmd = text.split()[0].lower()
@@ -1114,15 +1138,14 @@ def run(bot_name=None):
                         ("（输入框还有残留·去终端瞄一眼）" if cleared is False else ""))
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
-                switched = agent_runtime.current_account(bot)
                 agent_runtime.reset_account(bot, account_default)         # /close = 结束本会话 = 账号切回名册默认
-                default_acc = agent_runtime.current_account(bot)
-                reverted = (switched != default_acc)
-                if not alive:
-                    await reply(chat_id, "🛌 本来就没有会话" + (f"·账号已切回默认 `{default_acc}`" if reverted else "")); return
-                await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
-                clear_session(bot["name"])
-                await reply(chat_id, f"🗑 已关闭会话（下次 @ 我自动重开·用默认账号 `{default_acc}`）"); return
+                if alive:
+                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
+                clear_session(bot["name"])                                # 清掉会话注册表（含 /cd 过的 cwd）→ 下次重开回名册默认目录
+                default_acc = default_account()                          # reset 后 = 名册默认账号
+                def_dir = default_cwd(bot)                               # 名册默认目录（下次重开用这个）
+                head = "🗑 已关闭会话" if alive else "🛌 本来就没有会话"
+                await reply(chat_id, f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）"); return
             if cmd == "/cd":
                 cur = await asyncio.to_thread(current_cwd, bot)
                 if not arg:
@@ -1162,12 +1185,14 @@ def run(bot_name=None):
                 cur = await asyncio.to_thread(current_cwd, bot)
                 await reply(chat_id, md=(
                     "🤖 **可用命令**\n"
-                    "· `/cd` — 列【当前目录】的子目录带编号 → 回数字钻进去（手机零打字）\n"
-                    "· `/cd ..` — 回上一级 · `/cd <名字/路径>` — 跳到子目录/书签/任意路径\n"
+                    "· `/cd` — 列【当前目录】子目录带编号 → 回数字【选中目录】（不立刻起会话）\n"
+                    "· `/cd ..` 上一级 · `/cd <名字/路径>` 选别处（子目录/书签/任意路径·同样只选不起）\n"
+                    "· `/account ccw2` — 【选】登录账号（cc/ccp/ccw/ccw2/ccw3/cx/cxp·临时·不立刻起）\n"
+                    "· `/account ccw2 <目录>` — 一条命令同时选【账号+目录】（目录写法同 `/cd`）\n"
+                    "· 💡 `/cd` 选目录、`/account` 选账号都【只是选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录+账号冷启）\n"
                     "· `/clear` — 清空当前会话上下文\n"
                     "· `/screen` — 看现场\n"
                     "· `/stop` — 打断当前任务（顺手清空输入框）\n"
-                    "· `/account` — 看/切登录账号（`/account ccw2`·cc/ccp/ccw/ccw2/ccw3/cx/cxp·**临时**切·关旧会话用新号重起）\n"
                     "· `/close` — 关会话（顺手把临时切的账号切回名册默认）\n"
                     "· `/help` — 本帮助\n\n"
                     f"📂 **当前在** `{cur}`\n**书签**：{bm}（如 `/cd yoach` `/cd post`）")); return
@@ -1175,33 +1200,75 @@ def run(bot_name=None):
                 aliases = agent_runtime.account_aliases()
                 cur = agent_runtime.current_account(bot)
                 lst = " · ".join(f"`{a}`" for a in aliases)
-                default_acc = agent_runtime.current_account(
-                    {"name": bot["name"], **{k: v for k, v in account_default.items() if v is not None}})
+                default_acc = default_account()
                 if not arg:
                     await reply(chat_id, md=(
                         f"🔑 **当前账号** `{cur}`（{agent_runtime.display_name(bot)}）· **名册默认** `{default_acc}`\n"
                         f"**可切**：{lst}\n"
-                        f"`/account ccw2` —— **临时**切到新号（关旧会话→在当前目录用新号重起·十几秒丢上下文）。\n"
-                        f"恢复：`/close`（关会话）或整桥重启 → 切回默认 `{default_acc}`；会话死掉自愈重生仍是临时号、`/clear` 也保留。")); return
-                al = arg.split()[0].strip().lower()
+                        f"`/account ccw2` —— **选**新号（临时·关旧会话；**不立刻起新会话**）。\n"
+                        f"`/account ccw2 <目录>` —— 一条命令同时**选账号 + 选目录**（目录写法同 `/cd`：子目录名/书签/`..`/绝对路径）。\n"
+                        f"💡 **懒启动**：`/cd` 选目录、`/account` 选账号都只是【选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录 + 账号冷启·十几秒）。\n"
+                        f"恢复：`/close`（关会话）或整桥重启 → 切回默认 `{default_acc}`；账号临时切·`/clear` 保留。")); return
+                # 拆 `<账号> [目录]`：第二段=可选目录（解析同 /cd）→ 一次重起里同时换账号+换目录，省掉「切完账号又得切目录、各重起一次」
+                parts = arg.split(None, 1)
+                al = parts[0].strip().lower()
+                dir_arg = parts[1].strip() if len(parts) > 1 else ""
                 if al not in aliases:
                     await reply(chat_id, f"❓ 没有账号别名「{al}」。可选：{lst}"); return
-                if al == cur:
-                    await reply(chat_id, f"✅ 已经在 `{al}` 账号上了，无需切换"); return
-                cur_dir = await asyncio.to_thread(current_cwd, bot)   # 保留当前所在目录（可能 /cd 过）
+                if al == cur and not dir_arg:
+                    await reply(chat_id, f"✅ 已经在 `{al}` 账号上了，无需切换（要顺带换目录就 `/account {al} <目录>`）"); return
+                cur_dir = await asyncio.to_thread(current_cwd, bot)   # 当前所在目录（可能 /cd 过）
+                # ① 先把目标目录解析出来（带目录参=同时切目录·写法同 /cd；不带=留在当前目录）
+                target_dir, cd_pending = cur_dir, None
+                if dir_arg:
+                    if dir_arg in ("..", "../", "..\\"):
+                        target_dir = str(Path(cur_dir).parent).replace("\\", "/")
+                    else:
+                        cand = Path(cur_dir) / dir_arg                # 相对优先：当前目录的直接子目录
+                        if cand.is_dir():
+                            target_dir = str(cand).replace("\\", "/")
+                        else:
+                            status, payload = await asyncio.to_thread(resolve_cd_target, dir_arg)  # 书签/全局模糊/绝对路径
+                            if status == "none":
+                                await reply(chat_id, f"❓ 账号 `{al}` 没问题，但目录「{dir_arg}」当前目录下没有、全局也没找到。先 `/account {al}` 单切账号，或换个目录名/绝对路径。"); return
+                            if status == "many":
+                                cd_pending = payload                 # 目录歧义 → 账号先切好，列编号让你回数字定目录
+                            else:
+                                target_dir = payload
+                else:
+                    # 无目录参 + 当前有 `/cd` 编号待选 → 复用那份清单：账号切好后回数字，就用【新账号】在你选中的目录起会话。
+                    # （流程：`/cd` 列编号 → `/account ccw3`【先不起会话】→ 回数字，一次重起里账号+目录一起办。
+                    #  解决「又要切账号、又要走 /cd 交互选目录」——以前先输哪个哪个就立刻起会话、且 /account 会把 /cd 待选清掉。）
+                    _outstanding = await asyncio.to_thread(load_cd_pending, bot["name"])
+                    if _outstanding:
+                        cd_pending = _outstanding
+                # ② 切账号（原地改 bot dict）+ 关旧会话
                 if alive:
                     await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 label = agent_runtime.apply_account(bot, al)          # 原地改 bot dict 账号/runtime
-                await reply(chat_id, f"🔑 切到 `{al}` 账号（{label}）…在 {cur_dir} 用新账号重起会话，稍等十几秒")
-                r = await asyncio.to_thread(wmux_session.spawn, f"bot-{bot['name']}", _worker_cmd(bot, cur_dir), cur_dir)
-                ready = await asyncio.to_thread(_wait_agent_ready, bot, r["pty"], r["workspace_id"])
-                if not ready:
-                    await reply(chat_id, f"⚠️ 切到 `{al}` 后 {agent_runtime.display_name(bot)} 没就绪，发 `/screen` 看现场"); return
-                _merge_session(bot["name"], {"workspace_id": r["workspace_id"], "pty": r["pty"], "jsonl": None,
-                                             "agent": agent_runtime.runtime_name(bot), "account": al,
-                                             "daemon_fp": wmux_session.daemon_fingerprint(),
-                                             "cwd": str(cur_dir).replace("\\", "/")})
-                await reply(chat_id, f"✅ 已切到 `{al}` 账号（{agent_runtime.display_name(bot)}），新会话就绪。临时切·`/close` 切回默认 `{default_acc}`"); return
+                # ③ 目录歧义：账号已切·存编号待选 → 你回数字时走 _do_cd，用【新账号】在选中目录起会话（bot dict 已被 apply_account 改）
+                if cd_pending is not None:
+                    # 账号已选·列编号待选 → 回数字走 _do_cd 暂存目录(用新账号在选中目录懒启动)·都【不起会话】
+                    _merge_session(bot["name"], {"account": al, "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
+                    await asyncio.to_thread(save_cd_pending, bot["name"], cd_pending)
+                    lines = "\n".join(f"`{i}` · {h}" for i, h in enumerate(cd_pending, 1))
+                    _src = (f"目录「{dir_arg}」匹配到 {len(cd_pending)} 个" if dir_arg
+                            else f"刚才 `/cd` 列的 {len(cd_pending)} 个子目录还在")
+                    await reply(chat_id, md=(
+                        f"🔑 账号已选 `{al}`（{label}）· **会话还没起**。{_src}，回一个数字选目录，再发你的正式消息就用新账号在那儿起会话：\n{lines}\n\n"
+                        f"（不挑目录就直接发消息，我在当前目录用新账号 `{al}` 起）")); return
+                await asyncio.to_thread(clear_cd_pending, bot["name"])   # 防旧编号待选残留误用
+                # ④ 只暂存账号(+ 带目录参则连目录一起)·【不起会话】——发下一条正式消息时 ensure_session 在这冷启(懒启动)。
+                #    无目录参时 patch 只覆盖 account/runtime 字段、保留之前 `/cd` 暂存的 cwd（=「切完账号不清除已选目录」）。
+                patch = {"account": al, "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None}
+                if dir_arg:
+                    patch["cwd"] = str(target_dir).replace("\\", "/")
+                _merge_session(bot["name"], patch)
+                staged_dir = str(target_dir).replace("\\", "/") if dir_arg else cur_dir
+                moved = bool(dir_arg) and not _same_dir(target_dir, cur_dir)
+                await reply(chat_id, (
+                    f"🔑 已选账号 `{al}`（{label}）· 目录 `{staged_dir}`{'（新目录）' if moved else ''} · **会话还没起** —— "
+                    f"发下一条正式消息我就用它起会话。临时切·`/close` 切回默认 `{default_acc}`")); return
             # 非 bridge 命令 → 当 agent CLI 自己的 slash command，原样转发进会话（/resume /rename /model /compact …）
             # ⚠️ 必须 verbatim·绝不缀 [飞书] 标记，否则行首不是「/」→ CC 不认成 slash command。
             if not alive:
@@ -1301,11 +1368,13 @@ def run(bot_name=None):
                     # 预测要不要冷启 → daemon 重启后注进死壳的老 bug 不再静默,改成「会话已失效·起新的」。
                     reusable, ws_present, _ = await asyncio.to_thread(_reuse_check, bot, rec)
                     if not reusable:
-                        _acc = agent_runtime.current_account(bot)   # ccp/ccw/ccw2… 让用户一眼看出用哪个账号起的会话
+                        # 让用户一眼看出用【哪个账号 + 哪个目录】起会话·各自标「默认 / 已切」（ensure_session 实际就在 current_cwd 起）
+                        _dir = await asyncio.to_thread(current_cwd, bot)
+                        _acc_lbl, _dir_lbl = runtime_labels(_dir)
                         await reply(msg.chat_id,
-                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用 `{_acc}` 账号为你起一个新的 {agent_runtime.display_name(bot)}…十几秒后开始流式进度"
+                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}…十几秒后开始流式进度"
                                      if ws_present else
-                                     f"🆕 你还没有会话，正在 wmux 里用 `{_acc}` 账号起一个 {agent_runtime.display_name(bot)}…十几秒后开始流式显示进度"))
+                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}…十几秒后开始流式显示进度"))
                     ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
                     # 入站附件：真下载字节到 inbox，注入【本地路径】而非 SDK 的 `![image](key)` 占位。
                     # download_resource_to_file 带 message_id → 走 im/v1/messages/{id}/resources（入站正确端点·非 image.get）。
