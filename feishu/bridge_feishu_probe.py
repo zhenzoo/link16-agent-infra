@@ -27,7 +27,7 @@ from bridge_env import resolve_env_path, bots_config_path  # noqa: E402
 
 PROJECT = Path(__file__).resolve().parent.parent
 ENV_PATH = resolve_env_path()                       # 跨机解析·不写死盘符
-AUTOPILOT = PROJECT / "_autopilot"
+STATE_DIR = PROJECT / "feishu" / "_state"   # link16: 桥状态目录(原 xhs 借住的 _autopilot)
 BOTS_CONFIG = bots_config_path(PROJECT)              # 本地 overlay 优先（同桥本体一致）
 BASE = "https://open.feishu.cn/open-apis"
 
@@ -87,7 +87,7 @@ def tenant_token(bot):
 
 
 def _chat_id(bot):
-    f = AUTOPILOT / f"bridge-session-{bot}.json"
+    f = STATE_DIR / f"bridge-session-{bot}.json"
     if f.exists():
         return json.loads(f.read_text(encoding="utf-8")).get("chat_id")
     return None

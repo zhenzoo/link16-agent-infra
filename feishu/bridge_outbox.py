@@ -28,24 +28,24 @@ PROGRESS_TOOLS = "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Gl
 
 
 # ---------- outbox / HWM 文件 ----------
-def outbox_path(autopilot_dir, bot):
-    return os.path.join(autopilot_dir, f"bridge-outbox-{bot}.jsonl")
+def outbox_path(state_dir, bot):
+    return os.path.join(state_dir, f"bridge-outbox-{bot}.jsonl")
 
 
-def hwm_path(autopilot_dir, bot):
-    return os.path.join(autopilot_dir, f"bridge-outbox-hwm-{bot}.json")
+def hwm_path(state_dir, bot):
+    return os.path.join(state_dir, f"bridge-outbox-hwm-{bot}.json")
 
 
-def load_hwm(autopilot_dir, bot):
-    p = hwm_path(autopilot_dir, bot)
+def load_hwm(state_dir, bot):
+    p = hwm_path(state_dir, bot)
     try:
         return int(json.loads(open(p, encoding="utf-8").read()).get("offset", 0))
     except (OSError, ValueError, json.JSONDecodeError):
         return 0
 
 
-def save_hwm(autopilot_dir, bot, offset):
-    p = hwm_path(autopilot_dir, bot)
+def save_hwm(state_dir, bot, offset):
+    p = hwm_path(state_dir, bot)
     tmp = p + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -58,15 +58,15 @@ def save_hwm(autopilot_dir, bot, offset):
 # ---------- 注入投递保证：pending 记账 + 结构化卡死检测（根治 compact 吃消息→静默黑洞 · ARCH-101 §2.13）----------
 # on_message 正常注入后记 pending；doctor 周期查：outbox 文件 getsize 自注入起没涨(零活动)且超时 → 那一轮
 # 被吃/卡了(典型撞 auto-compact·上下文满时提交被压缩吃掉)→ 必达重投+通知。size 涨=turn 发生/进行中→清。
-def pending_path(autopilot_dir, bot):
-    return os.path.join(autopilot_dir, f"bridge-pending-{bot}.json")
+def pending_path(state_dir, bot):
+    return os.path.join(state_dir, f"bridge-pending-{bot}.json")
 
 
-def pending_write(autopilot_dir, bot, *, text, size0, attempts=0, now=None):
+def pending_write(state_dir, bot, *, text, size0, attempts=0, now=None):
     """记一条「已注入·等回传」。size0 = 注入时该 bot outbox 字节数(活动基线)。原子写。"""
     rec = {"ts": int(now if now is not None else time.time()), "size0": int(size0),
            "attempts": int(attempts), "text": (text or "")[:400]}
-    p = pending_path(autopilot_dir, bot)
+    p = pending_path(state_dir, bot)
     tmp = p + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -76,33 +76,33 @@ def pending_write(autopilot_dir, bot, *, text, size0, attempts=0, now=None):
         pass
 
 
-def pending_load(autopilot_dir, bot):
+def pending_load(state_dir, bot):
     try:
-        return json.loads(open(pending_path(autopilot_dir, bot), encoding="utf-8").read())
+        return json.loads(open(pending_path(state_dir, bot), encoding="utf-8").read())
     except (OSError, ValueError, json.JSONDecodeError):
         return None
 
 
-def pending_clear(autopilot_dir, bot):
+def pending_clear(state_dir, bot):
     try:
-        os.remove(pending_path(autopilot_dir, bot))
+        os.remove(pending_path(state_dir, bot))
     except OSError:
         pass
 
 
-def pending_status(autopilot_dir, bot, *, now=None, timeout=120):
+def pending_status(state_dir, bot, *, now=None, timeout=120):
     """纯判定·注入的那条消息当前投递态 → (status, pending)：
       none   无 pending。
       active outbox 自注入起字节涨了(turn 发生/进行中) → 调用方清 pending(信任 drainer 回传)。
       stuck  零活动 且 超时 → 被吃/卡(典型 auto-compact) → 调用方重投/通知。
       waiting 零活动 但没到超时 → 继续等。
     用 getsize 增长当活动信号：每 bot 独立 outbox → 只有它自己 hook 写入会涨·O(1)·精确无同秒歧义。"""
-    p = pending_load(autopilot_dir, bot)
+    p = pending_load(state_dir, bot)
     if not p:
         return ("none", None)
     now = now if now is not None else time.time()
     try:
-        cur = os.path.getsize(outbox_path(autopilot_dir, bot))
+        cur = os.path.getsize(outbox_path(state_dir, bot))
     except OSError:
         cur = 0
     if cur > int(p.get("size0", 0)):
@@ -115,8 +115,8 @@ def pending_status(autopilot_dir, bot, *, now=None, timeout=120):
 # ---------- 交互 picker 结构化状态（答题侧不读屏的唯一真相 · ARCH-101 §2.10）----------
 # drainer 渲 ask 卡时写 bridge-picker-<bot>.json；回合恢复（下条 progress/answer）时清。
 # on_message 读它判「在不在 picker」+ 每问的选项布局（编号按 len(options) 算·零硬编码）。
-def picker_path(autopilot_dir, bot):
-    return os.path.join(autopilot_dir, f"bridge-picker-{bot}.json")
+def picker_path(state_dir, bot):
+    return os.path.join(state_dir, f"bridge-picker-{bot}.json")
 
 
 def _picker_meta(questions):
@@ -133,8 +133,8 @@ def _picker_meta(questions):
     return out
 
 
-def picker_write(autopilot_dir, bot, questions, session="", key=""):
-    p = picker_path(autopilot_dir, bot)
+def picker_write(state_dir, bot, questions, session="", key=""):
+    p = picker_path(state_dir, bot)
     tmp = p + ".tmp"
     rec = {"ts": int(time.time()), "session": session or "", "key": str(key or ""),
            "questions": _picker_meta(questions)}
@@ -146,17 +146,17 @@ def picker_write(autopilot_dir, bot, questions, session="", key=""):
         pass
 
 
-def picker_clear(autopilot_dir, bot):
+def picker_clear(state_dir, bot):
     try:
-        os.remove(picker_path(autopilot_dir, bot))
+        os.remove(picker_path(state_dir, bot))
     except OSError:
         pass
 
 
-def picker_load(autopilot_dir, bot, max_age_sec=7200):
+def picker_load(state_dir, bot, max_age_sec=7200):
     """返回 picker 状态 dict 或 None（不存在 / 无问题 / 超龄=会话早结束）。"""
     try:
-        rec = json.loads(open(picker_path(autopilot_dir, bot), encoding="utf-8").read())
+        rec = json.loads(open(picker_path(state_dir, bot), encoding="utf-8").read())
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     if not rec.get("questions"):
@@ -262,7 +262,7 @@ def fmt_progress(labels):
     return "🤖 **进行中**\n\n" + "\n".join(labels[-PROGRESS_TAIL:])
 
 
-def write_hooks_settings(autopilot_dir, hooks_dir):
+def write_hooks_settings(state_dir, hooks_dir):
     """运行时生成 bridge-hooks.json（abs hook 路径·跨机/跨 repo 安全 → spawn 时 --settings 指它）。
     async=true 不阻塞会话；PostToolUse 收窄到实质动作。返回文件路径。"""
     stop = (Path(hooks_dir) / "bridge_stop.py").as_posix()
@@ -286,8 +286,8 @@ def write_hooks_settings(autopilot_dir, hooks_dir):
         "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [
             {"type": "command", "command": f'python "{pre}"', "timeout": 10, "async": True}]}],
     }}
-    Path(autopilot_dir).mkdir(parents=True, exist_ok=True)   # fresh repo(link16/新机 clone)首跑 _autopilot 还不存在·先建（xhs 早有此目录·故旧桥从没暴露这个缺口）
-    p = Path(autopilot_dir) / "bridge-hooks.json"
+    Path(state_dir).mkdir(parents=True, exist_ok=True)   # fresh repo(link16/新机 clone)首跑状态目录还不存在·先建（xhs 里桥借住的 _autopilot 早有·故旧桥从没暴露这缺口）
+    p = Path(state_dir) / "bridge-hooks.json"
     payload = json.dumps(cfg, ensure_ascii=False, indent=2)
     # 多 bot 并发启动会同时写这同一份（内容恒等）→ 内容已一致就别动，绕开 race
     try:
@@ -483,25 +483,25 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
 
 
 # ---------- 常驻 drainer ----------
-async def outbox_drainer(bot, *, autopilot_dir, new_card, edit_card, send_plain, asleep,
+async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asleep,
                          hwm_load=None, hwm_save=None,
                          clock=time.time, poll=0.5, coalesce_sec=3.0):
     """常驻：增量 drain → 统一卡片流(进度卡原地长大/满轮换/回复多卡/ask 结构化卡)。HWM 防重放·绝不崩。
     deps（均 coroutine）：new_card(text)->mid|None · edit_card(mid,text)->bool · send_plain(text)。
-    hwm_load()->offset / hwm_save(offset)：默认走 autopilot_dir 下的 hwm 文件。
+    hwm_load()->offset / hwm_save(offset)：默认走 state_dir 下的 hwm 文件。
     （AskUserQuestion 检测已改 PreToolUse hook 写 kind:"ask"·不再读屏轮询——旧 _maybe_forward_ask 退役。）"""
     if hwm_load is None:
-        hwm_load = lambda: load_hwm(autopilot_dir, bot)          # noqa: E731
+        hwm_load = lambda: load_hwm(state_dir, bot)          # noqa: E731
     if hwm_save is None:
-        hwm_save = lambda off: save_hwm(autopilot_dir, bot, off)  # noqa: E731
-    path = outbox_path(autopilot_dir, bot)
+        hwm_save = lambda off: save_hwm(state_dir, bot, off)  # noqa: E731
+    path = outbox_path(state_dir, bot)
     offset = hwm_load()
     state = {"turn": None, "steps": [], "usage": {}, "seg_start": 0, "cur_mid": None,
              "flushed": 0, "last_flush": clock(), "sent": set(), "picker_active": False}
     deps = dict(new_card=new_card, edit_card=edit_card, send_plain=send_plain)
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
-    on_ask = lambda qs, key, sess: picker_write(autopilot_dir, bot, qs, session=sess, key=key)   # noqa: E731
-    on_resume = lambda: picker_clear(autopilot_dir, bot)                                          # noqa: E731
+    on_ask = lambda qs, key, sess: picker_write(state_dir, bot, qs, session=sess, key=key)   # noqa: E731
+    on_resume = lambda: picker_clear(state_dir, bot)                                          # noqa: E731
     while True:
         await asleep(poll)
         try:

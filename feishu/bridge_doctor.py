@@ -25,7 +25,7 @@ import bridge_outbox as ob          # noqa: E402
 from bridge_env import bots_config_path  # noqa: E402
 
 PROJECT = Path(__file__).resolve().parent.parent
-AUTOPILOT = PROJECT / "_autopilot"
+STATE_DIR = PROJECT / "feishu" / "_state"   # link16: 桥状态目录(原 xhs 借住的 _autopilot)
 BOTS_CONFIG = bots_config_path(PROJECT)   # 本地 overlay 优先（同桥本体一致）
 
 
@@ -43,12 +43,12 @@ def list_bots():
         return ["default"]
 
 
-def diagnose_outbox(autopilot_dir, bot, *, now, stale_sec=60):
+def diagnose_outbox(state_dir, bot, *, now, stale_sec=60):
     """outbox 投递健康（纯函数·可测）。"""
-    obx = ob.outbox_path(autopilot_dir, bot)
+    obx = ob.outbox_path(state_dir, bot)
     size = os.path.getsize(obx) if os.path.exists(obx) else 0
-    offset = ob.load_hwm(autopilot_dir, bot)
-    hwm_mt = _mtime(ob.hwm_path(autopilot_dir, bot))
+    offset = ob.load_hwm(state_dir, bot)
+    hwm_mt = _mtime(ob.hwm_path(state_dir, bot))
     backlog = max(0, size - offset)
     hwm_age = (now - hwm_mt) if hwm_mt else None
     if backlog == 0:
@@ -61,7 +61,7 @@ def diagnose_outbox(autopilot_dir, bot, *, now, stale_sec=60):
             "hwm_age_sec": round(hwm_age, 1) if hwm_age is not None else None, "status": status}
 
 
-async def doctor_loop(autopilot_dir, get_bots, *, asleep, now=time.time,
+async def doctor_loop(state_dir, get_bots, *, asleep, now=time.time,
                       interval=30, stale_sec=60, remediate=None, notify=None,
                       escalate_after=3, recover_pending=None):
     """常驻自愈：周期诊断每个 bot；stuck → 第 1 轮 remediate(bot)；连续 escalate_after 轮仍 stuck → notify。
@@ -77,7 +77,7 @@ async def doctor_loop(autopilot_dir, get_bots, *, asleep, now=time.time,
                         await recover_pending(bot)        # 投递保证：撞 compact 被吃的消息重投/通知（与 outbox 健康独立）
                     except Exception:  # noqa: BLE001 — 恢复出错不拖垮 doctor
                         pass
-                h = diagnose_outbox(autopilot_dir, bot, now=now(), stale_sec=stale_sec)
+                h = diagnose_outbox(state_dir, bot, now=now(), stale_sec=stale_sec)
                 if h["status"] != "stuck":
                     stuck_rounds[bot] = 0
                     continue
@@ -104,7 +104,7 @@ def main():
     print("-" * 72)
     icons = {"ok": "✅", "draining": "🔄", "stuck": "❌"}
     for b in bots:
-        h = diagnose_outbox(str(AUTOPILOT), b, now=now, stale_sec=a.stale_sec)
+        h = diagnose_outbox(str(STATE_DIR), b, now=now, stale_sec=a.stale_sec)
         print(f"  {icons.get(h['status'], '?')} {b:<10} status={h['status']:<9} "
               f"backlog={h['backlog']}B offset={h['hwm_offset']} hwm_age={h['hwm_age_sec']}s")
 

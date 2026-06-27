@@ -14,7 +14,7 @@
   **start 为 bridge-bots.json 里每个 bot 各起一个 `run --bot <name>` 隐藏进程**（管理仍是一套命令）。
 
 斜杠命令：/clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（看/切登录账号 cc/ccp/ccw/ccw2/ccw3/cx/cxp·关旧会话用新号重起）· /screen 看现场 · /stop 打断 · /close 关会话
-per-bot 会话注册表：_autopilot/bridge-session-<bot>.json（各进程自写自读 · 无多进程 race）
+per-bot 会话注册表：feishu/_state/bridge-session-<bot>.json（各进程自写自读 · 无多进程 race）
 配置：orchestrator/bridge-bots.json（每 bot {name, app_id_env, app_secret_env, at_name, cwd}）
 子命令：start（默认·裸跑 `python feishu_bridge.py` 即把所有 bot 各起一隐藏进程） / run [--bot X]（前台调试单 bot） / stop（停全部） / status / workspaces
 安全：ALLOWED_OPEN_IDS 白名单（全 bot 共享）。
@@ -39,9 +39,9 @@ PROJECT = Path(__file__).resolve().parent.parent          # 仓库根
 WMUX_RPC = resolve_wmux_rpc(PROJECT)                      # ~/wmux-rpc.js 优先·兜底仓库副本 orchestrator/wmux-rpc.js·不写死(WMUX_RPC_PATH 可 override)
 BOTS_CONFIG = PROJECT / "feishu" / "bridge-bots.json"  # committed 共享名册(default)·实际用 bots_config_path() 选本地 overlay · link16: orchestrator→feishu
 CD_BOOKMARKS = PROJECT / "feishu" / "bridge-cd-bookmarks.json"
-AUTOPILOT = PROJECT / "_autopilot"
+STATE_DIR = PROJECT / "feishu" / "_state"   # 桥运行态(hooks/会话/outbox/收据/inbox)·link16 通用名(xhs 里曾借住 _autopilot=巡航目录·搬出后正名)
 LOG_DIR = PROJECT / "feishu" / "_logs"
-INBOX_ROOT = AUTOPILOT / "inbox"   # 入站附件落地（你发飞书的图/文件）· 按 bot/日期分目录 · scratch（agent 收下后移到目标资产目录）
+INBOX_ROOT = STATE_DIR / "inbox"   # 入站附件落地（你发飞书的图/文件）· 按 bot/日期分目录 · scratch（agent 收下后移到目标资产目录）
 
 REPLY_POLL_SEC = 2
 READY_TIMEOUT_SEC = 30            # 等 spawn 出的 worker 起好最多 30 秒（spawn 探就绪保送达后 claude/codex ~10-15s 出提示符）
@@ -300,7 +300,7 @@ def current_cwd(bot):
 
 # ---------- /cd 编号待选态（无参/多命中列编号清单 → 你回数字即切目录起会话·手机零打字）----------
 def _cd_pending_file(bot_name):
-    return AUTOPILOT / f"bridge-cd-pending-{bot_name}.json"
+    return STATE_DIR / f"bridge-cd-pending-{bot_name}.json"
 
 
 def save_cd_pending(bot_name, paths):
@@ -338,7 +338,7 @@ def clear_cd_pending(bot_name):
 
 # ---------- per-bot 会话注册表（每 bot 一个文件 · 多进程无 race）----------
 def _session_file(bot_name):
-    return AUTOPILOT / f"bridge-session-{bot_name}.json"
+    return STATE_DIR / f"bridge-session-{bot_name}.json"
 
 
 def load_session(bot_name):
@@ -352,7 +352,7 @@ def load_session(bot_name):
 
 
 def save_session(bot_name, rec):
-    AUTOPILOT.mkdir(exist_ok=True)
+    STATE_DIR.mkdir(exist_ok=True)
     f = _session_file(bot_name)
     tmp = f.with_name(f.name + ".tmp")
     tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -372,9 +372,9 @@ def receipt(bot_name, rec):
     """送达回执：每发一条往 _autopilot/bridge-receipts-<bot>.jsonl 追加一行
     （机器可读 · 终端会话 Read 尾巴即知「上一条送达没 / 走第几级」）。绝不抛。"""
     try:
-        AUTOPILOT.mkdir(exist_ok=True)
+        STATE_DIR.mkdir(exist_ok=True)
         rec.setdefault("ts", int(time.time()))
-        with open(AUTOPILOT / f"bridge-receipts-{bot_name}.jsonl", "a", encoding="utf-8") as fh:
+        with open(STATE_DIR / f"bridge-receipts-{bot_name}.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 — 回执失败绝不影响发送主流程
         pass
@@ -388,7 +388,7 @@ def clear_session(bot_name):
 
 # ---------- 镜像器高水位（HWM·单独文件·只镜像器一个写者·与会话注册表零争用）----------
 def _mirror_file(bot_name):
-    return AUTOPILOT / f"bridge-mirror-{bot_name}.json"
+    return STATE_DIR / f"bridge-mirror-{bot_name}.json"
 
 
 def load_mirror(bot_name):
@@ -402,7 +402,7 @@ def load_mirror(bot_name):
 
 
 def save_mirror(bot_name, rec):
-    AUTOPILOT.mkdir(exist_ok=True)
+    STATE_DIR.mkdir(exist_ok=True)
     f = _mirror_file(bot_name)
     tmp = f.with_name(f.name + ".tmp")
     tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
@@ -411,7 +411,7 @@ def save_mirror(bot_name, rec):
 
 # ---------- 主人(owner)：自动认 · 免手维护白名单 ----------
 def _owner_file(bot_name):
-    return AUTOPILOT / f"bridge-owner-{bot_name}.json"
+    return STATE_DIR / f"bridge-owner-{bot_name}.json"
 
 
 def load_owner(bot_name):
@@ -425,7 +425,7 @@ def load_owner(bot_name):
 
 
 def save_owner(bot_name, open_id):
-    AUTOPILOT.mkdir(exist_ok=True)
+    STATE_DIR.mkdir(exist_ok=True)
     _owner_file(bot_name).write_text(json.dumps({"open_id": open_id}, ensure_ascii=False), encoding="utf-8")
 
 
@@ -576,7 +576,7 @@ def _resolve_jsonl(bot, marker, pinned, inject_wall, pre=None):
 # ---------- 会话生命周期 ----------
 def _worker_cmd(bot, cwd=None):
     """起 worker 的命令。CLI/runtime 差异集中在 agent_runtime.py，桥只关心 outbox 合约。"""
-    return agent_runtime.worker_cmd(bot, PROJECT, AUTOPILOT, cwd=cwd)
+    return agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd)
 
 
 def _reuse_check(bot, rec):
@@ -1246,7 +1246,7 @@ def run(bot_name=None):
                     # raw_content_type 都空 = SDK 没认出类型 → 抓【原始飞书事件 payload】落盘，离线看真实
                     # message_type/content（搞清「转发卡片到底是什么」的唯一线索·2026-06-16）。
                     try:
-                        with open(AUTOPILOT / f"_bridge_unparsed_{bot['name']}.jsonl", "a", encoding="utf-8") as _f:
+                        with open(STATE_DIR / f"_bridge_unparsed_{bot['name']}.jsonl", "a", encoding="utf-8") as _f:
                             _f.write(json.dumps({
                                 "id": msg.id, "rct": rct, "ts": int(time.time()),
                                 "content_cls": type(getattr(msg, "content", None)).__name__,
@@ -1333,14 +1333,14 @@ def run(bot_name=None):
                         text = caption        # 纯文本：占位剥离对普通文本是 no-op·行为不变
                     # 会话停在交互 picker？→ 不读屏：读 PreToolUse 写的结构化状态(drainer 落的 bridge-picker-<bot>.json)，
                     # 把回复解析成「每问选哪项/打什么字」→ 开环驱动按键(不当普通消息注入·不钉 jsonl)·ARCH-101 §2.10。
-                    _pk = bridge_outbox.picker_load(str(AUTOPILOT), bot["name"])
+                    _pk = bridge_outbox.picker_load(str(STATE_DIR), bot["name"])
                     # Y1 死会话残留 picker 闸（2026-06-22 catvpn 实证·ARCH-101 §2.10 B-1.5）：created=True =
                     # 旧会话已失效·上面刚重生新会话（1215 已告知你「会话已失效·起新的」）→ 这个 picker 必是
                     # 【已死会话】留下的（新会话刚生·啥都没跑过·不可能写过 picker）。绝不能驱动进新会话，否则你这条
                     # 新消息会被当成对那道【废题】的答案、被打成「选项 K+1·自己打字」劫持注入（catvpn 实证）。
                     # 作废它·本条按普通新消息处理。会话活着复用(created=False)时此闸不触发 → 正常答题路径一行不变·零回归。
                     if _pk and created:
-                        bridge_outbox.picker_clear(str(AUTOPILOT), bot["name"])
+                        bridge_outbox.picker_clear(str(STATE_DIR), bot["name"])
                         blog(bot["name"], f"[{tid}] 🗑 丢弃死会话残留 picker（旧会话已失效·已重生）·本条按新消息处理")
                         _pk = None
                     if _pk:
@@ -1362,8 +1362,8 @@ def run(bot_name=None):
                     # 原样（实测 3 TAB→0·对 cookie 致命）。其余绝不转文件（2026-06-23 干净重测推翻"长会截断"）。
                     if text and "\t" in text:
                         try:
-                            AUTOPILOT.mkdir(exist_ok=True)
-                            inbox = AUTOPILOT / f"bridge-inbox-{bot['name']}-{tid}.txt"
+                            STATE_DIR.mkdir(exist_ok=True)
+                            inbox = STATE_DIR / f"bridge-inbox-{bot['name']}-{tid}.txt"
                             inbox.write_text(text, encoding="utf-8")
                             _hint = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")[:50]
                             blog(bot["name"], f"[{tid}] 📄 含 TAB 落盘转 Read {inbox.name}")
@@ -1380,9 +1380,9 @@ def run(bot_name=None):
                     await asyncio.to_thread(_inject, pty, ws, marker)
                     # 投递保证：记 pending（撞 auto-compact 被吃 → 零 outbox 活动+超时 → doctor 重投/通知·§2.13）
                     try:
-                        _obx = bridge_outbox.outbox_path(str(AUTOPILOT), bot["name"])
+                        _obx = bridge_outbox.outbox_path(str(STATE_DIR), bot["name"])
                         _sz0 = os.path.getsize(_obx) if os.path.exists(_obx) else 0
-                        bridge_outbox.pending_write(str(AUTOPILOT), bot["name"], text=marker, size0=_sz0)
+                        bridge_outbox.pending_write(str(STATE_DIR), bot["name"], text=marker, size0=_sz0)
                     except Exception:  # noqa: BLE001 — 记账失败不致命
                         pass
                     blog(bot["name"], f"[{tid}] 已注入 pty={pty} pinned={'有' if pinned else '无(将探测)'}")
@@ -1415,7 +1415,7 @@ def run(bot_name=None):
     async def runner():
         # v8：hook→outbox→drainer 取代 mirror_tailer 轮询。drainer=唯一发送引擎 + doctor=机械自愈。
         bname = bot["name"]
-        ad = str(AUTOPILOT)
+        ad = str(STATE_DIR)
         bridge_outbox.write_hooks_settings(ad, str(PROJECT / "feishu" / "hooks"))  # 生成 bridge-hooks.json · link16: orchestrator→feishu（回传 hook 路径）
 
         def _rit(t):
@@ -1738,7 +1738,7 @@ def cmd_doctor():
         pin = "✅" if rec.get("jsonl") else "—(v8 不依赖·仅/screen·doctor)"
         dm = "✅" if (rec.get("chat_id") or rec.get("open_id") or load_owner(name)) else "❌无目标(先@一次)"
         last = "—"
-        rf = AUTOPILOT / f"bridge-receipts-{name}.jsonl"
+        rf = STATE_DIR / f"bridge-receipts-{name}.jsonl"
         if rf.exists():
             try:
                 lines = [ln for ln in rf.read_text(encoding="utf-8").splitlines() if ln.strip()]

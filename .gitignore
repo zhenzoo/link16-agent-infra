@@ -3,7 +3,7 @@ feishu/bridge-bots.local.json
 feishu/bridge-cd-bookmarks.local.json
 
 # 桥运行态（会话/outbox/收据/锚点/收件箱·都是 runtime scratch）
-_autopilot/
+feishu/_state/
 feishu/_logs/
 feishu/_tmp/
 feishu/bridge-session-*.json

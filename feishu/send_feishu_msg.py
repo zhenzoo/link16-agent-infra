@@ -71,7 +71,7 @@ def _bot_creds(bot):
 
 
 def _session_chat(bot):
-    f = PROJECT / "_autopilot" / f"bridge-session-{bot}.json"
+    f = PROJECT / "feishu" / "_state" / f"bridge-session-{bot}.json"
     if f.exists():
         try:
             return json.loads(f.read_text(encoding="utf-8")).get("chat_id")

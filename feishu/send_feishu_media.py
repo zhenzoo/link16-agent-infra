@@ -64,7 +64,7 @@ def _bot_creds(bot):
 
 
 def _session(bot):
-    f = PROJECT / "_autopilot" / f"bridge-session-{bot}.json"
+    f = PROJECT / "feishu" / "_state" / f"bridge-session-{bot}.json"
     if f.exists():
         try:
             return json.loads(f.read_text(encoding="utf-8"))
