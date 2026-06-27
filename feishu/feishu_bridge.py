@@ -1502,7 +1502,7 @@ def run(bot_name=None):
         # AskUserQuestion 检测已移到 PreToolUse hook(写 kind:"ask")→ drainer 不再需要读屏闭包(_read_screen 退役)。
         def _start_drainer():
             holder["d"] = asyncio.create_task(bridge_outbox.outbox_drainer(
-                bname, autopilot_dir=ad, new_card=_new_card, edit_card=_edit_card,
+                bname, state_dir=ad, new_card=_new_card, edit_card=_edit_card,
                 send_plain=_send_plain, asleep=asyncio.sleep, coalesce_sec=10.0))
 
         _start_drainer()
