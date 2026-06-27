@@ -1749,7 +1749,7 @@ def cmd_doctor():
             except Exception:  # noqa: BLE001
                 last = "(读回执失败)"
         print(f"  {name:<8} 进程{proc} 会话{sess} jsonl{pin} DM{dm}\n           最近发送: {last}")
-    print("  回执: _autopilot/bridge-receipts-<bot>.jsonl · 日志: orchestrator/_logs/bridge-<bot>.log")
+    print("  回执: feishu/_state/bridge-receipts-<bot>.jsonl · 日志: feishu/_logs/bridge-<bot>.log")
 
 
 def main():
