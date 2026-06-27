@@ -24,10 +24,11 @@
 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) | **ARCH** · wmux 怎么驱动面板（daemon RPC / split-here / 守卫）+ **§8 确切信号**（probe/kickoff·判面板死活靠探针不靠读屏） |
 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) | **ARCH** · 飞书桥怎么搭（@bot→注入 / 回传 v8 hook→outbox→drainer / 多 bot 模型 / 自愈） |
 | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md) | **SOP** · 怎么一步步注册一个飞书 bot（扫码 OAuth → 设名/头像 → 开权限 → 加名册 → 重启桥）+ **bot↔仓库↔职责 名册表** |
+| [`docs/SOP-130-cutover.md`](docs/SOP-130-cutover.md) | **SOP** · 飞书桥从 xhs 旧桥切到 link16 新桥（precondition + 两步切 + 验收 + 30 秒回退·Owner 手动） |
 
 ## 状态
 
-🚧 **抽离进行中**。完整迁移计划 SSOT 暂在 `../xhs-card-gen/docs/STRATEGY-infra-extraction.md`（迁完归位本仓）。
-- ✅ 代码搬入（feishu/ + wmux/）· 文档搬入 · 本仓 CLAUDE/TOOLS/CHANGELOG 建好。
-- 🔨 待办：改本仓副本的锚（wmux-rpc 路径 / 名册 / state 目录）· 清理文档内部旧引用。
-- ⏸️ **Phase 2B 切流**（停旧桥 / 起新桥 / 改全局路由索引）= 与 owner 协同。**未切流前，生产仍跑 `../xhs-card-gen/orchestrator/` 的旧桥。**
+🚧 **建好待切流**。完整迁移计划 SSOT 暂在 `../xhs-card-gen/docs/STRATEGY-infra-extraction.md`（迁完归位本仓）。
+- ✅ 代码 + 文档搬入 · CLAUDE/TOOLS/CHANGELOG 建好 · **改锚全完成**（所有 `orchestrator/` 运行时路径→`feishu/`、wmux-rpc→`wmux/`·零残留·import-test 过）· 本机名册 cwd 锚好 · **GitHub 远端建好**（`github.com/zhenzoo/link16-agent-infra`·私有·main）。
+- ⏸️ **Phase 2B 切流** = Owner 手动（停旧桥→起新桥·会断对话）· 照 [`docs/SOP-130-cutover.md`](docs/SOP-130-cutover.md) 走。**未切流前，生产仍跑 `../xhs-card-gen/orchestrator/` 旧桥。**
+- 🔨 小尾巴：清文档/usage 里残留的 `orchestrator/` 文字（cosmetic·不影响功能）。
