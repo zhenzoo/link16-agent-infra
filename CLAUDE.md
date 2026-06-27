@@ -25,6 +25,7 @@
 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) | **ARCH** · 飞书桥怎么搭（@bot→注入 / 回传 v8 hook→outbox→drainer / 多 bot 模型 / 自愈） |
 | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md) | **SOP** · 怎么一步步注册一个飞书 bot（扫码 OAuth → 设名/头像 → 开权限 → 加名册 → 重启桥）+ **bot↔仓库↔职责 名册表** |
 | [`docs/SOP-130-cutover.md`](docs/SOP-130-cutover.md) | **SOP** · 飞书桥从 xhs 旧桥切到 link16 新桥（precondition + 两步切 + 验收 + 30 秒回退·Owner 手动） |
+| [`docs/STRATEGY-900-agent-memory-architecture.md`](docs/STRATEGY-900-agent-memory-architecture.md) | **STRATEGY** · agent 三分法(智能/工具/记忆)调研 + gBrain 借鉴 + 改造方向（每个论断带溯源链接） |
 
 ## 状态
 
