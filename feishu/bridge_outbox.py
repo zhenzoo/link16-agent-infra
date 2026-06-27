@@ -286,6 +286,7 @@ def write_hooks_settings(autopilot_dir, hooks_dir):
         "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [
             {"type": "command", "command": f'python "{pre}"', "timeout": 10, "async": True}]}],
     }}
+    Path(autopilot_dir).mkdir(parents=True, exist_ok=True)   # fresh repo(link16/新机 clone)首跑 _autopilot 还不存在·先建（xhs 早有此目录·故旧桥从没暴露这个缺口）
     p = Path(autopilot_dir) / "bridge-hooks.json"
     payload = json.dumps(cfg, ensure_ascii=False, indent=2)
     # 多 bot 并发启动会同时写这同一份（内容恒等）→ 内容已一致就别动，绕开 race
