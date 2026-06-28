@@ -2,7 +2,7 @@
 
 > **职责**：「怎么**注册**一个飞书智能体、要开**哪些权限**、怎么**配置名册**、怎么让它进群跟**另一台电脑上的 agent 自主协作**」的唯一真相源。建 / 配 / 授权一个 bot 之前先读本文按清单走。
 >
-> **分工**：本文 = **静态**（建一个 bot 要做哪些一次性动作 + 开哪些权限）。**运行时**机制（桥怎么 spawn 会话 / 收发 / 回传 / 自愈）= [`ARCH-101`](ARCH-101-feishu-bridge.md)。一键建应用脚本 = [`orchestrator/register_feishu_app.py`](../orchestrator/register_feishu_app.py)。
+> **分工**：本文 = **静态**（建一个 bot 要做哪些一次性动作 + 开哪些权限）。**运行时**机制（桥怎么 spawn 会话 / 收发 / 回传 / 自愈）= [`ARCH-101`](ARCH-101-feishu-bridge.md)。一键建应用脚本 = [`feishu/register_feishu_app.py`](../feishu/register_feishu_app.py)。
 >
 > **为什么有这篇（2026-06-20）**：注册/权限/a2a 一直散在 `register_feishu_app.py` + `bridge-bots.json` + `ARCH-101` + `send_feishu_msg.py` 脚本头 + `CHANGELOG v8.2.0`，**没有统一描述**；尤其「让 bot 能在群里收别的 agent 消息」要的那个群消息 scope **全仓库从没写下来**——只活在手动点开的开发者后台里，建新 bot 总漏开。本文收口。
 
@@ -12,15 +12,15 @@
 
 ```bash
 # 1. 一键建应用（官方扫码 · 自动写 .env）
-python orchestrator/register_feishu_app.py --name "<显示名>" --bot <key>
-# 2. 名册加一行 → orchestrator/bridge-bots.json（见 §1）
+python feishu/register_feishu_app.py --name "<显示名>" --bot <key>
+# 2. 名册加一行 → feishu/bridge-bots.json（见 §1）
 # 3. 开权限（一键预置不含的，手动·见 §2）：
 #    ② drive:drive（在线查看 send --doc）   ③ 群消息接收 scope（a2a 关键！）
 #    每个都要：开发者后台勾选 → 创建版本 → 发布 才生效
 # 4. 把 bot 拉进群；各 bot 互报 open_id（跨机靠 bot/v3/info · 群成员 API 不列 bot · 见 §3）
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
 # 6. 重启桥生效
-python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.py start
+python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 ```
 
 ---
@@ -31,7 +31,7 @@ python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.p
 - 默认 bot：`FEISHU_BRIDGE_APP_ID` / `FEISHU_BRIDGE_APP_SECRET`
 - 第 N 个：`--bot <key>` → `FEISHU_BRIDGE_<KEY>_APP_ID` / `_SECRET`
 
-**名册** = `orchestrator/bridge-bots.json`（committed · 当前 7 bot：default/arch/explore/twitter/config/social_media/podcast）。每 bot 一行：`name` + `app_id_env` + `app_secret_env` + `at_name`（+ 可选 `cwd`）。**密钥不在这里**（在 `.env`，这里只存键名）。
+**名册** = `feishu/bridge-bots.json`（committed · 当前 7 bot：default/arch/explore/twitter/config/social_media/podcast）。每 bot 一行：`name` + `app_id_env` + `app_secret_env` + `at_name`（+ 可选 `cwd`）。**密钥不在这里**（在 `.env`，这里只存键名）。
 - ⚠️ **cwd 机器无关铁律**：仓库类 bot **不写 cwd**（自动落本仓库根，任何机/盘自适应）；只有非本仓库目录的 bot 才写 `cwd`，且用 `~/...`（各机自己 home，绝不写死盘符/用户名）。
 - 改名册后 **重启桥**（stop→start）生效。
 
@@ -80,7 +80,7 @@ python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.p
 
 ### § 2.2 · 能力 → scope 映射 + 每 bot 实测权限（★分享仓库时：要哪个功能开哪个权限）
 
-> **`python orchestrator/bridge_scope_audit.py`** 随时重查每个 bot 实际开了什么（直连官方 `GET /application/v6/scopes`·任意 bot 用自己 token 即可·无需特殊权限）→ 下面这张表的自动更新来源。`--bot X --raw` 列某 bot 全部已授权 scope。
+> **`python feishu/bridge_scope_audit.py`** 随时重查每个 bot 实际开了什么（直连官方 `GET /application/v6/scopes`·任意 bot 用自己 token 即可·无需特殊权限）→ 下面这张表的自动更新来源。`--bot X --raw` 列某 bot 全部已授权 scope。
 
 **能力 → 需要的 scope**（别人 fork 本仓库，不想要某能力就别开对应权限）：
 
@@ -140,9 +140,9 @@ python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.p
 
 **唯一通路 = 一个共享群**（飞书群成员 API 不列 bot → 群是 bot 之间唯一能互相寻址的空间）。已跨机跑通（本机 explore ↔ 另一台 TB25-speech 互发消息/文件 · `CHANGELOG v8.2.0` · 2026-06-18）。**2026-06-20 端到端复测通**：explore → 「交流水吧」群 @ twitter → twitter 收到 → 注入会话 → 回 `group_text` 到群（全 5 bot 已在群）。
 
-**主动喊话（agent 发起）** = [`orchestrator/send_feishu_msg.py`](../orchestrator/send_feishu_msg.py)：
+**主动喊话（agent 发起）** = [`feishu/send_feishu_msg.py`](../feishu/send_feishu_msg.py)：
 ```bash
-python orchestrator/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
+python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
     --text "请把 docs/X.md 发到本群" --at <对方 bot 的 open_id>
 ```
 - **必须纯文字 `msg_type=text` + `<at user_id="ou_…">`**：飞书把【收到的卡片】渲成占位 `[interactive]`，对端 bot **读不到正文**（2026-06-18 实证）。卡片只给【人】看。
@@ -171,7 +171,7 @@ python orchestrator/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 - [ ] **两台机** 各配 `.env`（§5）
 - [ ] **重启桥** stop→start
 - [ ] 验：群里 `@新bot` 一句能回 + 让它 `send_feishu_msg` @ 另一台的 bot 能送达
-- [ ] 🔄 **回写登记（每次 register / 每次开关权限都必做·登记协议）**：跑 `python orchestrator/bridge_scope_audit.py --all-env` 刷新 **§2.2 能力矩阵** + 改 **§2.1 登记表**（新 bot 一行：open_id / 在群否 / 负责内容）
+- [ ] 🔄 **回写登记（每次 register / 每次开关权限都必做·登记协议）**：跑 `python feishu/bridge_scope_audit.py --all-env` 刷新 **§2.2 能力矩阵** + 改 **§2.1 登记表**（新 bot 一行：open_id / 在群否 / 负责内容）
 
 ---
 
@@ -194,8 +194,8 @@ python orchestrator/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 ## 关联
 
 - [`ARCH-101`](ARCH-101-feishu-bridge.md) · 运行时桥（spawn/收发/回传/自愈）· 本文的运行时对侧
-- `orchestrator/register_feishu_app.py` · 一键建应用
-- `orchestrator/bridge-bots.json` · 名册（+ `.local` 整盘覆盖）
-- `orchestrator/send_feishu_msg.py` / `send_feishu_file.py` · a2a 主动喊话 / 发文件原语
-- `orchestrator/bridge_feishu_probe.py` · 飞书 API 探针（读群/DM 真实记录·验真送达）
+- `feishu/register_feishu_app.py` · 一键建应用
+- `feishu/bridge-bots.json` · 名册（+ `.local` 整盘覆盖）
+- `feishu/send_feishu_msg.py` / `send_feishu_file.py` · a2a 主动喊话 / 发文件原语
+- `feishu/bridge_feishu_probe.py` · 飞书 API 探针（读群/DM 真实记录·验真送达）
 - `CHANGELOG v8.2.0` · 群内 agent↔agent 跨机通讯首次跑通的决策追溯

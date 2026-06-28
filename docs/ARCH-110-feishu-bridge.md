@@ -4,7 +4,7 @@
 > **取代**：[`ARCH-100-orchestrator.md`](ARCH-100-orchestrator.md)（Telegram · 需代理 · superseded）。
 > **本文档涵盖**（飞书相关问题先来这里找）：① bot 怎么收你的话、怎么把活交给电脑上的 Claude（§2）② **回复怎么回到飞书（v8 · hook→outbox→drainer · 2026-06-16 重构）**（§2.5）③ **回复用什么格式发给你**——飞书互动卡片 / 进度合并 / 长文分条 / 必达兜底（§2.6）④ **怎么监控、出问题去哪查日志**（§2.7）⑤ 自愈/配置/验收（§3-§5）⑥ bot 的自助能力（§7）⑦ **多媒体通道：你发图/文件 ↔ 我发图（§2.9）** ⑧ **在线查看：本地 md/HTML → 飞书云文档链接（§2.11）**。
 > **状态（v8 · 2026-06-16 已部署 + 真机验证）**：回传从「轮询 jsonl + 单线程发送」重构为 **hook→outbox→drainer 事件驱动 push + doctor 机械自愈**（§2.5）——根治长 turn 队头阻塞 / 10min 卡片死 / autopilot 永不结束 / background-shell 唤醒轮丢失 / 补发淹没。早前（2026-06-15 P140）：**owned-session 多 bot 已实现跑通**（每 bot 一进程一飞书长连接 · 会话死自动重生 · 桥重启自恢复）。本轮（P140）补齐并上线三件生产级能力：**① 回复用飞书「互动卡片」流式发**（实时进度 + 最终答案 + 过程小结·§2.6）**② jsonl 钉死防串台**（多会话同目录不再读错文件·§2.5）**③ 必达发送 + trace 日志监控**（四级降级绝不丢 + 每道闸有痕迹·§2.6/§2.7）。
-> **启动**：`python orchestrator/feishu_bridge.py`（裸跑即把所有 bot 各起一隐藏进程后台常驻 · `stop`/`status` 管理 · 不开机自启 · 当前 6 bot：`default`=总控桥 / `arch`=架构师 / `explore`=探索者 / `twitter`=Twitter随笔 / `config`=ccp配置 / `social_media`=社媒分发）。
+> **启动**：`python feishu/feishu_bridge.py`（裸跑即把所有 bot 各起一隐藏进程后台常驻 · `stop`/`status` 管理 · 不开机自启 · 当前 6 bot：`default`=总控桥 / `arch`=架构师 / `explore`=探索者 / `twitter`=Twitter随笔 / `config`=ccp配置 / `social_media`=社媒分发）。
 
 ---
 
@@ -15,7 +15,7 @@
 ├ 机器人「xhs-card」  = scripts/notify.py(webhook) · 单向播报 · 纯脚本「又笨又稳」
 │    瘦身后只发: 真告警(卡死/限流自愈/桥挂/escape) + 关键里程碑(ready/发布页铺好/已入库)
 │    砍掉: 每小时巡检 + 逐条进度  →  想知道进度就「@ 智能体问」
-└ 智能体「xhs总控桥」(可 N 个) = orchestrator/feishu_bridge.py · 飞书 SDK · 双向对话
+└ 智能体「xhs总控桥」(可 N 个) = feishu/feishu_bridge.py · 飞书 SDK · 双向对话
      每个 bot 托管一个「桥自己开的」wmux 会话(下面 §2)
 ```
 
@@ -39,7 +39,7 @@
 - **彻底删掉**：`supervisor.pty` 认领、`register_supervisor.py`、wsid8 pty 文件、「🛌 没人认领总控不在岗」那套——owned-session 下不需要。
 - **斜杠命令**：桥**只拦截下面这 6 个自己的命令**；**其余任何 `/xxx` 一律 verbatim 透传进会话**（当 Claude Code 自己的 slash command·见末条）：
   - `/clear` → 给会话发 `/clear` 清空上下文（面板留着）
-  - `/cd` → **像文件浏览器一样在目录树里走**（2026-06-18 重构 · 配置 `orchestrator/bridge-cd-bookmarks.json`）：
+  - `/cd` → **像文件浏览器一样在目录树里走**（2026-06-18 重构 · 配置 `feishu/bridge-cd-bookmarks.json`）：
     - **无参 `/cd`** = 列【bot 当前所在目录】的全部直接子目录 + 编号 → **你回一个数字就【选中】那个目录**（手机零打字 · 不过滤 · dotfolder/归档全列）。**⚠️ 懒启动（2026-06-26）：回数字只是【选中目录·不立刻起会话】**（`_do_cd` 关旧会话 + 把目录暂存进注册表 `cwd`、清掉 runtime 字段、**不 spawn**），真正起会话推迟到你发【下一条正式消息】时由 `on_message→ensure_session` 在该目录冷启。「当前目录」= 会话注册表 `bridge-session-<bot>.json` 的 `cwd`（每次 spawn / `/cd` 都写）· 没有则 bot 默认 cwd（仓库类 bot = 本仓库根 · config 类 = 其配的 cwd）。回数字的消费在 `on_message`：上条 `/cd` 把「编号→路径」存进 `bridge-cd-pending-<bot>.json`（15min 有效），下条纯数字命中即【选中暂存】；回非数字 = 改主意，清待选照常处理。
     - **`/cd ..`** = 回上一级。
     - **`/cd <名字 或 路径>`** = 跳转。解析优先级：当前目录的直接子目录（`/cd compass` 从 Yoach 直进 `Yoach/compass`）→ 书签（`post`/`xhs`/`yoach`/`lab`/`personal` · 大小写不敏感）→ `search_roots` 全局模糊搜（唯一命中直进 · 多个列编号回数字）→ 绝对路径。
@@ -55,7 +55,7 @@
 
 ## § 2.4 · 桥起会话的 spawn 命令 = 给 bot「戴装备」（解码 · 2026-06-17）
 
-> 2026-06-18 更新：桥已支持 **runtime registry**（`orchestrator/agent_runtime.py`）作为 CLI 差异的单一真相源。bot 配置 `agent` / `runtime` 省略时默认 `claude`，加 `"agent":"codex"` 则起 Codex；以后 Kimi/Gemini/Antigravity 也应按同一 registry + outbox 合约接入，不在桥主流程里散落硬编码。
+> 2026-06-18 更新：桥已支持 **runtime registry**（`feishu/agent_runtime.py`）作为 CLI 差异的单一真相源。bot 配置 `agent` / `runtime` 省略时默认 `claude`，加 `"agent":"codex"` 则起 Codex；以后 Kimi/Gemini/Antigravity 也应按同一 registry + outbox 合约接入，不在桥主流程里散落硬编码。
 
 > 一句话：桥起一个 bot 会话**不是裸 `ccp`**，而是 `cd <cwd>` 后敲一条「带 env + flag」的长命令（`_worker_cmd`，在 `feishu_bridge.py`）——给这个 claude 会话戴上「记录仪 + 对讲机」（hook 回传）并告诉它「中转文件放哪」。**看到终端飞一长串 = 正常，不是 bug。**
 
@@ -83,7 +83,7 @@ FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR=".../_autopilot" CLAUDE_CO
 
 **为什么 outbox 放 `_autopilot/`**：`_autopilot/` 是本项目「**后台系统的运行时状态 + 草稿**」总目录——巡航(autopilot)、看门狗、桥 都把临时状态 / 中转文件丢这（`_` 前缀 = scratch，不进正式产物、不是源码也不是成品帖）。桥的回传中转(outbox)正属此类。典型住户：`bridge-outbox-<bot>.jsonl`（回传中转·hook 写 / drainer 读）· `bridge-outbox-hwm-<bot>.json`（读到哪的高水位）· `bridge-session-<bot>.json`（会话登记）· `bridge-hooks.json`（本规矩单）· watchdog 状态。
 
-> ⚠️ hook 找它依赖的解析脚本 `jsonl_reply_extract.py` 用**自身相对路径**（`Path(__file__).parents[1]` = `orchestrator/`），**不靠 `CLAUDE_PROJECT_DIR`/cwd**——否则 cwd≠xhs 仓库的 bot（如 config，cwd=`~/.claude-personal`）会 import 失败 → 进度退 `🔧Bash`、Stop hook 静默 return 致该 bot **失声**（2026-06-17 实证修复 commit `3ee02ed`）。
+> ⚠️ hook 找它依赖的解析脚本 `jsonl_reply_extract.py` 用**自身相对路径**（`Path(__file__).parents[1]` = `feishu/`），**不靠 `CLAUDE_PROJECT_DIR`/cwd**——否则 cwd≠xhs 仓库的 bot（如 config，cwd=`~/.claude-personal`）会 import 失败 → 进度退 `🔧Bash`、Stop hook 静默 return 致该 bot **失声**（2026-06-17 实证修复 commit `3ee02ed`）。
 
 ---
 
@@ -93,11 +93,11 @@ FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR=".../_autopilot" CLAUDE_CO
 
 | 层 | SSOT | 说明 |
 |---|---|---|
-| bot 选择哪个 CLI | `orchestrator/bridge-bots*.json` 的 `agent` / `runtime` 字段 | 默认 `claude`；Codex 写 `"agent":"codex"`；本机私有 bot 仍放 `bridge-bots.local.json` |
-| CLI 启动命令 / ready / live / transcript 策略 | `orchestrator/agent_runtime.py` | Claude、Codex、future/custom 的唯一分叉点 |
+| bot 选择哪个 CLI | `feishu/bridge-bots*.json` 的 `agent` / `runtime` 字段 | 默认 `claude`；Codex 写 `"agent":"codex"`；本机私有 bot 仍放 `bridge-bots.local.json` |
+| CLI 启动命令 / ready / live / transcript 策略 | `feishu/agent_runtime.py` | Claude、Codex、future/custom 的唯一分叉点 |
 | 回传格式 | `_autopilot/bridge-outbox-<bot>.jsonl` | `answer/progress/ask` 记录是跨 CLI 合约；飞书发送层不关心来源 |
-| Claude hook | `_autopilot/bridge-hooks.json` + `orchestrator/hooks/bridge_*.py` | Claude 支持 per-session `--settings`，所以桥 spawn 时临时挂 hook |
-| Codex hook | `CODEX_HOME/hooks.json` + `orchestrator/hooks/codex_bridge_*.py` | Codex 从 CODEX_HOME / project `.codex` 发现 hook；用 `install_codex_bridge_hooks.py --write` 合并安装 |
+| Claude hook | `_autopilot/bridge-hooks.json` + `feishu/hooks/bridge_*.py` | Claude 支持 per-session `--settings`，所以桥 spawn 时临时挂 hook |
+| Codex hook | `CODEX_HOME/hooks.json` + `feishu/hooks/codex_bridge_*.py` | Codex 从 CODEX_HOME / project `.codex` 发现 hook；用 `install_codex_bridge_hooks.py --write` 合并安装 |
 
 **Codex 启动命令**（由 `agent_runtime.py` 生成，不手写到多处）：
 
@@ -112,8 +112,8 @@ FEISHU_BRIDGE_SESSION=<bot> FEISHU_BRIDGE_OUTBOX_DIR="<repo>/_autopilot" CODEX_H
 **安装 Codex hooks**（默认 dry-run，`--write` 才写全局 Codex 配置）：
 
 ```bash
-python orchestrator/install_codex_bridge_hooks.py
-python orchestrator/install_codex_bridge_hooks.py --write
+python feishu/install_codex_bridge_hooks.py
+python feishu/install_codex_bridge_hooks.py --write
 ```
 
 该脚本合并到 `CODEX_HOME/hooks.json`，按 command 去重并保留已有 hook（例如个人 Stop 声音提醒）。Codex hook 脚本自身仍用 `FEISHU_BRIDGE_SESSION` 守门，所以即使全局安装，也只对桥 spawn 的 Codex 会话写 outbox；普通 Codex 会话 env 不命中即 no-op。
@@ -131,7 +131,7 @@ python orchestrator/install_codex_bridge_hooks.py --write
 - **为什么换掉旧轮询**（v7 的 `mirror_tailer` 轮询已退役·实证根因见 `_autopilot/_BRIDGE-HARDENING-LOG.md`）：旧法靠后台 tailer 轮询钉死的 jsonl + 等「带文字的 end_turn」+ **单线程发送**，三个结构性病：① 单发送引擎被一个长 turn **队头阻塞**（`REPLY_TIMEOUT=24h`）② 流式进度卡飞书侧 ~10min 强关后**不再刷** ③ 持续运行的 autopilot turn **永不干净 end_turn** → 永远等不到。且**只认 `promptSource=typed` 的真人键入当锚点** → **background-shell 完成唤醒的那一轮**（系统注入·非 typed）**结构上必丢**。
 - **v8 怎么做（4 件）**：
   1. **作用域**：桥 spawn worker 时带 `--settings <_autopilot/bridge-hooks.json>`（运行时生成·绝对路径·跨 repo 安全）+ env `FEISHU_BRIDGE_SESSION=<bot>` / `FEISHU_BRIDGE_OUTBOX_DIR`。hook **只作用桥起的会话**（env 不命中即 `exit 0`）→ **永不进你日常 ccp / 不写项目 `.claude/settings.json` / 零额外开销**。
-  2. **Stop hook**（`orchestrator/hooks/bridge_stop.py`）：一轮结束 → 读 transcript，**只取 anchor(末条真用户消息)之后【终结态消息】(`stop_reason ∈ {end_turn, max_tokens, stop_sequence, refusal}`)的 assistant 文本拼接**（结构上排除 `tool_use`/`pause_turn` 的过渡话）→ 追 `{"kind":"answer",…}` 到 `_autopilot/bridge-outbox-<bot>.jsonl`。⚠️ **竞态防护（2026-06-18 · 详见 `_BRIDGE-HARDENING-LOG.md §9`）**：hook 开火与「最终答案落盘」几乎同刻，为防读在写前、抓到上一块过渡文本（实证：tb25-speech 把调工具前的「Now let me publish…」当答案发），**在 15s timeout 内短轮询（~200ms/次）直到终结态文本出现再写**；到点仍空 → 不发（宁缺勿错）。**每轮都触发**：首轮 / autopilot 每轮 / **background-shell 唤醒轮** —— 全覆盖（旧轮询漏掉的就是这些）。
+  2. **Stop hook**（`feishu/hooks/bridge_stop.py`）：一轮结束 → 读 transcript，**只取 anchor(末条真用户消息)之后【终结态消息】(`stop_reason ∈ {end_turn, max_tokens, stop_sequence, refusal}`)的 assistant 文本拼接**（结构上排除 `tool_use`/`pause_turn` 的过渡话）→ 追 `{"kind":"answer",…}` 到 `_autopilot/bridge-outbox-<bot>.jsonl`。⚠️ **竞态防护（2026-06-18 · 详见 `_BRIDGE-HARDENING-LOG.md §9`）**：hook 开火与「最终答案落盘」几乎同刻，为防读在写前、抓到上一块过渡文本（实证：tb25-speech 把调工具前的「Now let me publish…」当答案发），**在 15s timeout 内短轮询（~200ms/次）直到终结态文本出现再写**；到点仍空 → 不发（宁缺勿错）。**每轮都触发**：首轮 / autopilot 每轮 / **background-shell 唤醒轮** —— 全覆盖（旧轮询漏掉的就是这些）。
   3. **PostToolUse hook**（`bridge_posttool.py`·matcher 收窄到实质动作 Bash/Edit/Write/Task/… 跳过高频 Read/Glob）：每个工具完成 → 追 `{"kind":"progress","label":…}`。**取代会过期的流式进度卡**（每条独立·永不 10min 死）。
   4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox（重启不重放）→ answer 立即 `card_send` / progress 限流合并（`coalesce_sec`）发 → 去重集防双发。**不再等 turn、不被任何长 turn 阻塞**。
 - **SSOT / 隔离**：hook 只写 outbox 文件（**不碰飞书凭据**）；唯一持飞书 WS + 凭据的是桥进程；outbox **单写（hook）单读（drainer）**。
@@ -158,7 +158,7 @@ python orchestrator/install_codex_bridge_hooks.py --write
 
 > 目标：任何一条消息从「飞书进」到「回复出」，每一道关卡都留痕，出问题能回溯卡在哪一环。
 
-- **日志在哪**：每个 bot 一个文件 `orchestrator/_logs/bridge-<bot>.log`（**追加不覆盖**·重启不清空·能查历史·每次重启有 `===== restart 时间 =====` 分隔）。
+- **日志在哪**：每个 bot 一个文件 `feishu/_logs/bridge-<bot>.log`（**追加不覆盖**·重启不清空·能查历史·每次重启有 `===== restart 时间 =====` 分隔）。
 - **trace id 贯穿全链路**：每条消息分一个 6 位短码，一条消息从进到出按顺序打这几行——
 
   | 日志行 | 含义（这道闸过了） |
@@ -174,9 +174,9 @@ python orchestrator/install_codex_bridge_hooks.py --write
   - `via=markdown` / `via=text` = 卡片那级出问题但**已降级送达**（你手机仍收到）⚠️ 可观察
   - `via=webhook` = 前三级全失败、走了喇叭兜底（该查飞书应用权限 / 网络）🔴
   - 只看到「收到 + 已注入」却**迟迟没有「回复」那行** = 这轮还没答完（长任务正常）或卡在解析（配合 `status` + `/screen` 看现场）。
-- **进程 / 会话活性**：`python orchestrator/feishu_bridge.py status`（看每 bot 进程在不在、会话活没活）。
-- **outbox 投递健康（v8）**：`python orchestrator/bridge_doctor.py`（每 bot outbox backlog / 是否 stuck·doctor_loop 已在桥内自愈·这是手动巡检版）。
-- 🔑 **飞书 API 探针（调试别只看日志！）**：`python orchestrator/bridge_feishu_probe.py --all --recent 3` 直读**各 bot 聊天真实消息历史**（飞书官方记录·非 SDK 自报 success）→ 核对「桥说发了用户到底收没收到」。`--bot arch --verify "片段"` 验某条是否真落到 DM。**怀疑「发了不回 / 卡到没到」时，日志 + 这个 API 探针双管齐下**（注：流式卡片正文 API 读到的是「请升级客户端」占位·只能确认到没到+时机·正文在 App 看）。详见 `docs/TOOLS.md §14`。
+- **进程 / 会话活性**：`python feishu/feishu_bridge.py status`（看每 bot 进程在不在、会话活没活）。
+- **outbox 投递健康（v8）**：`python feishu/bridge_doctor.py`（每 bot outbox backlog / 是否 stuck·doctor_loop 已在桥内自愈·这是手动巡检版）。
+- 🔑 **飞书 API 探针（调试别只看日志！）**：`python feishu/bridge_feishu_probe.py --all --recent 3` 直读**各 bot 聊天真实消息历史**（飞书官方记录·非 SDK 自报 success）→ 核对「桥说发了用户到底收没收到」。`--bot arch --verify "片段"` 验某条是否真落到 DM。**怀疑「发了不回 / 卡到没到」时，日志 + 这个 API 探针双管齐下**（注：流式卡片正文 API 读到的是「请升级客户端」占位·只能确认到没到+时机·正文在 App 看）。详见 `docs/TOOLS.md §14`。
 
 ---
 
@@ -203,7 +203,7 @@ python orchestrator/install_codex_bridge_hooks.py --write
 
 **配套 · 主动推送 CLI**（解决「我在终端让你发到飞书」· 走 DM 不走群喇叭）：
 ```
-python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/open_id>] --json
+python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/open_id>] --json
 ```
 → 独立短进程重建 `FeishuChannel`（REST · 不依赖常驻桥）→ 推到持久化的 `chat_id` / owner open_id → 复用 `guaranteed_send` 四级兜底 → 打印 `{delivered, via, to}`。**这是 Claude 在终端会话里主动发飞书的唯一正道**（`scripts/notify.py` 是群喇叭 · 只用于机械告警 · 绝不用于对话回复）。
 
@@ -211,7 +211,7 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 
 **已知边界**：① tailer 只发**钉死的那个会话**——从没 @ 过的独立终端会话需先 @ bot 一次建立钉定（`doctor` 会显示 `jsonl❌未钉`）。② 没人 @ 过该 bot 则无 DM 目标 → tailer 空转（首个 @ 后即激活）。③ @ 轮回复统一发 **owner DM**（优先私聊·群里 @ 也回 DM）。④ 重启正在跑的轮：tailer 从 HWM 幂等续 → **不丢回复**（B 主赢）。**监控**：`feishu_bridge.py doctor` 一眼每 bot 健康（进程/会话/jsonl 钉没钉/DM/最近 receipt）；每次发送落 `_autopilot/bridge-receipts-<bot>.jsonl`（机械闸·单一真相源）。
 
-**激活**：改完需 `python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.py start` 重启桥（常驻进程不会热加载新代码）。
+**激活**：改完需 `python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start` 重启桥（常驻进程不会热加载新代码）。
 
 ---
 
@@ -227,12 +227,12 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 - **会话拿到后**：路径在手 → `Read` 看图 / 移到目标资产目录（如某 note 的 assets）/ 继续处理。桥只负责「收下 + 给路径」，**不猜该归到哪篇**（归属是会话的 taste 决策）。
 
 **出站（会话主动发图 → 你手机 DM）**
-- `python orchestrator/feishu_bridge.py send --bot <name> --image <图路径> [--text "说明"]`（`--image` 可与 `--text` 同用）。
+- `python feishu/feishu_bridge.py send --bot <name> --image <图路径> [--text "说明"]`（`--image` 可与 `--text` 同用）。
 - 走 SDK `OutboundImage(source=MediaSource(kind="file", path=…))` + `ch.send`（底层 `im/v1/images` 出站上传·与 `scripts/send_card_feishu.py` 同款能力）。封面 / 截图 / 图表 / 架构图直达手机。
 - 实测：`send --bot explore --image …` → `{"delivered": true, "image_ok": true}`。
 
 **出站（会话主动发语音 → 你手机 DM · 可拖动进度条 · 2026-06-18）**
-- `python orchestrator/send_feishu_voice.py --bot <name> --audio <音频> [--to oc_/ou_] [--text "说明"]`（任意格式·默认 ffmpeg 转 Ogg/Opus）。
+- `python feishu/send_feishu_voice.py --bot <name> --audio <音频> [--to oc_/ou_] [--text "说明"]`（任意格式·默认 ffmpeg 转 Ogg/Opus）。
 - 🚨 **根因（为什么不能直接用 SDK `OutboundAudio`）**：飞书语音进度条要能拖动，**上传 opus 时必须带 `duration`（毫秒·与实际一致）**——飞书官方 Audio 文档：「指定音频时长，否则**播放进度展示不准确**」；Upload File API：「duration… **If this field is not specified, no specific duration is displayed.**」。而 lark-channel SDK 的 `driver.upload_file()` 只传 `file_type`/`file_name`、**从不传 duration**（`parse_opus_duration` 被导出却从没被调用）→ 飞书拿不到时长 → **点播放直接跳结尾、进度条不可拖动**（2026-06-18 [飞书-explore] 实证·**这不是飞书组件 bug，是 SDK 漏了 duration**）。
 - **怎么修**：`send_feishu_voice.py` 绕开 SDK、直接走 REST：ffmpeg 转单声道 48k Ogg/Opus（飞书语音唯一认的编码）→ **读末页 OggS granule 算真实 duration（零依赖·本机无 ffprobe·granule/48 = ms）** → `im/v1/files` 上传带 `file_type=opus + duration` → `msg_type=audio` 发。复用 `send_card_feishu.api/tenant_token/send_msg`（REST SSOT）。
 - 实测：`--bot explore --audio …` → `{"voice_ok": true, "duration_ms": 6006}`·进度条可拖动显示 0:06。
@@ -255,10 +255,10 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 
 **关键事实（2026-06-17 实测纠正 v1 假设）**：pending AskUserQuestion 的整条 assistant 消息（分析正文+问题+选项）在你回答前**不落盘 jsonl**、Stop/PostToolUse 也不开火——但 **PreToolUse 对 AskUserQuestion 会开火，且 payload 带完整结构化 `tool_input`**：`{questions:[{header,question,options:[{label,description}],multiSelect}]}`。这是**零读屏、零正则**的真源。（v1 的「读屏 + find_ask_picker 正则」检测已退役——正文含编号列表/ASCII 时会把正文当选项串台，见 git 史 2026-06-17 修。）
 
-**A · 发现 + 转发（PreToolUse 结构化 · 检测端）**：`hooks/bridge_pretool.py`（PreToolUse · matcher `AskUserQuestion` · `FEISHU_BRIDGE_SESSION` env 守门 · import 走 `parents[1]` 自身 orchestrator/）→ 读 `tool_input.questions` → 写 `{kind:"ask", questions:[...], context}` 进 outbox（**弹窗瞬间·无延迟**）。drainer 的 `kind:"ask"` 分支用 `render_ask_card(questions, context)` 从结构化数据渲卡（题面 + 编号选项 1..N + 每选项 description + 多 question 都渲）→ 发飞书；`_ask_key` 指纹去抖。**结构化数据天生免疫**：正文里的有序/无序列表、ASCII 画图、emoji、奇符号、多段长文——一概不污染选项（它是工具原始入参·不是猜屏）。2026-06-17 高保真 fixture 验过：乱正文 + 多 question + emoji/箭头 → 抓到的结构化全干净。
+**A · 发现 + 转发（PreToolUse 结构化 · 检测端）**：`hooks/bridge_pretool.py`（PreToolUse · matcher `AskUserQuestion` · `FEISHU_BRIDGE_SESSION` env 守门 · import 走 `parents[1]` 自身 feishu/）→ 读 `tool_input.questions` → 写 `{kind:"ask", questions:[...], context}` 进 outbox（**弹窗瞬间·无延迟**）。drainer 的 `kind:"ask"` 分支用 `render_ask_card(questions, context)` 从结构化数据渲卡（题面 + 编号选项 1..N + 每选项 description + 多 question 都渲）→ 发飞书；`_ask_key` 指纹去抖。**结构化数据天生免疫**：正文里的有序/无序列表、ASCII 画图、emoji、奇符号、多段长文——一概不污染选项（它是工具原始入参·不是猜屏）。2026-06-17 高保真 fixture 验过：乱正文 + 多 question + emoji/箭头 → 抓到的结构化全干净。
 > _**ask 卡只发问题本身（`context` 恒空）**：问之前的「实时思考 / 自言自语旁白」属【进度卡】(PostToolUse·实时刷)，不混进问题卡（Publisher 2026-06-18 实证：有 Ask 时卡上带一堆英文自言自语旁白，没 Ask 的普通回复反而干净——根因 = `bridge_pretool` 旧版抓 `progress().texts` = 本轮【全部】文本含旁白）。真正的「收尾结论」(紧贴问题前那段·**回答前不落盘 jsonl**·实证 9188 字/10 段、AskUserQuestion 那条消息无 text 兄弟块·PreToolUse 结构上抓不到) 由 **Stop hook 在 turn 结束时干净补发**（`_final_turn_reply` 的 `_asst_has_ask` 只取「问前结论 + 终结 wrap-up」·排除「文本→普通工具」的中途旁白）。2026-06-18 演进：先删旧 `[-1800:]` 截断 + `_clean_screen_text`（毁 markdown 表格），再去掉 `progress().texts` 抓取本身（旁白污染根治）。_
 
-**B · 你回答 → 桥驱动（结构化状态机 + 开环确定性驱动 · 零读屏 · 2026-06-18 根治中 · living plan `orchestrator/_PLAN-askq-answer-robust.md`）**
+**B · 你回答 → 桥驱动（结构化状态机 + 开环确定性驱动 · 零读屏 · 2026-06-18 根治中 · living plan `feishu/_PLAN-askq-answer-robust.md`）**
 
 > ⚠️ **病根（2026-06-18 explore 实证）**：旧 B 段「`on_message` 注入前读屏 → `find_ask_picker` 认 picker → `_answer_picker` 移光标后**再读屏回读确认 `cursor_num==target`**」对**高(多问题 / 长描述 / 上方有大表)的 picker 失效**——光标移到末项「Type something」时，页脚特征串(`Enter to select / to navigate / Esc to cancel`)被挤出读窗(实测 tail=250 都没有)→ 回读返 None → 在按 enter/打字前就放弃 → 回「没确认选到你要的项」。**读屏回读这条链是最脆的，整段退役。**
 
@@ -292,9 +292,9 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 
 > 一句话：会话把本地 `.md`/`.html` 文件**转成飞书在线云文档**，发一条**文档链接**到你 DM——你在飞书 App 里直接看（格式完整、可滚动、**可复制、可编辑保存**），不用回电脑、不用隧道、不用 Tailscale。最 Feishu-native 的「在线查看」。
 
-**入口**：`python orchestrator/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`。
+**入口**：`python feishu/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`。
 
-**链路（全 `tenant_access_token` · bot 身份 · 封装在旁挂小工具 `orchestrator/feishu_docs.py`·不塞桥主回路）**：
+**链路（全 `tenant_access_token` · bot 身份 · 封装在旁挂小工具 `feishu/feishu_docs.py`·不塞桥主回路）**：
 1. **上传素材** `POST /drive/v1/medias/upload_all`（multipart · `parent_type=ccm_import_open` · `extra={"obj_type":"docx","file_extension":ext}`）→ `data.file_token`。
 2. **建导入任务** `POST /drive/v1/import_tasks`（`type=docx` · `point={mount_type:1, mount_key:""}`=bot 云空间根目录）→ `data.ticket`。
 3. **轮询** `GET /drive/v1/import_tasks/{ticket}`（间隔 2s·上限 ~30 次）→ **成功判据 = `job_status==0` 且 `token` 非空**（坑：status=0 但 token 空 = 仍处理中·别当成功）→ 取 `data.result.{token,url}`。
@@ -308,7 +308,7 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 > - 等价可选（更细粒度·explore 验过）：`docs:document.media:upload` + `docs:document:import` + `docs:permission.member:create` 三个。改用哪组 = 改 `CLOUD_DOC_SCOPES` 一处。
 > - **为什么必须单独开**：一键创建 SDK（`lark_oapi.register_app`）的 `app_preset` **只支持 `name`/`avatar`/`desc`**（源码 `scene/registration/__init__._apply_app_preset` + 单测确认）、archetype 硬编码 `PersonalAgent`——**无法在创建时预置 scope**；且没有「应用给自己授权」的 API（安全红线）→ scope 只能管理员后台开。
 > - **怎么开**：`register_feishu_app.py` 建完会打印**一键开通链**（`feishu_docs.auth_url(app_id)`），**Claude 把它发给 Publisher** → 点开 → 开通（**务必选「应用身份/tenant_access_token」·不是用户身份**！2026-06-17 podcast/social_media 实证：只开用户身份仍全拒）→ **创建版本并发布**才生效。铺老 bot 同理（各 app_id 一条链）。
-> - 判定够没够：`python orchestrator/_tmp/_probe_scopes.py <bot>`（4 步都不报 `99991672` = 通）。一键预置建的 app **不含**这权限·必走此步。
+> - 判定够没够：`python feishu/_tmp/_probe_scopes.py <bot>`（4 步都不报 `99991672` = 通）。一键预置建的 app **不含**这权限·必走此步。
 
 **边界（诚实）**：① 你在飞书里改了文档，**改动留在飞书云那篇·不会自动回灌本地 `.md`**——回灌要再加一步（`GET /docs/v1/content` 把文档拉回 markdown 覆盖本地）·是 v2。② 它**会在飞书云存一份文档**（导入到 bot 云空间根目录·可后续归到专用文件夹/定期清）——Publisher 已知此 tradeoff 并接受。③ `type=docx` 与 public 分享 enum 有「不确定」项·首篇先测（见 plan）。
 
@@ -318,7 +318,7 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 
 > 一句话：会话把本地**图片 / 视频 / pdf / 任意媒体**塞进一篇飞书在线文档，发**一条文档链接**到你 DM——你点链接在飞书里**看图、放视频、预览文件**，**不点就不下载、不占手机内存**。「图片在线 / 视频在线」都走它。
 
-**入口**：`python orchestrator/send_feishu_media.py --bot <name> --media <图/视频/文件> [--media <更多> …] [--caption "说明"] [--title "标题"] [--text "前言"] [--to oc_/ou_]`（`--media` 可重复 → 一篇里混排多个）。引擎 = `feishu_docs.publish_media_as_doc`。
+**入口**：`python feishu/send_feishu_media.py --bot <name> --media <图/视频/文件> [--media <更多> …] [--caption "说明"] [--title "标题"] [--text "前言"] [--to oc_/ou_]`（`--media` 可重复 → 一篇里混排多个）。引擎 = `feishu_docs.publish_media_as_doc`。
 
 **为什么不能照搬 §2.11 的 import**：import 只吃 md/html/txt/docx、**吃不下图/视频**；也不能「图当独立网盘文件传上去拿链接」——**bot 是应用身份、没有个人「我的空间」根目录**（`drive/v1/files/root_folder_meta` 对 tenant token 返 **404**·2026-06-18 实证）。唯一通路 = **docx 块 API**。
 
@@ -419,8 +419,8 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 
 ## § 4 · 配置与凭证（多 bot = 多飞书应用）
 
-- **配置表** `orchestrator/bridge-bots.json`：每个 bot 一行 `{name, app_id_env, app_secret_env, at_name, cwd?}`（密钥不入表，只存 `.env` 键名；**不再有 pty_file**——pty 由桥 spawn 得到）。
-- **每个 bot = 一个飞书自建应用**（一条长连接）：`python orchestrator/register_feishu_app.py --name "xhs-botN" --bot botN`（OAuth 扫码 · 预置权限+事件+长连接 · 凭据写 `.env` 各自键名）。**扫码只有你能做。**
+- **配置表** `feishu/bridge-bots.json`：每个 bot 一行 `{name, app_id_env, app_secret_env, at_name, cwd?}`（密钥不入表，只存 `.env` 键名；**不再有 pty_file**——pty 由桥 spawn 得到）。
+- **每个 bot = 一个飞书自建应用**（一条长连接）：`python feishu/register_feishu_app.py --name "xhs-botN" --bot botN`（OAuth 扫码 · 预置权限+事件+长连接 · 凭据写 `.env` 各自键名）。**扫码只有你能做。**
 - **白名单**：`.env` `FEISHU_BRIDGE_ALLOWED_OPEN_IDS`（你的 open_id · 全 bot 共享）。
 - N 个 bot 都加进同一个群，群里 `@对应 bot` 说话。
 
@@ -428,23 +428,23 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 
 ## § 4.1 · 跨机可移植（多台电脑各跑各的桥 · 2026-06-16 · 方案 A）
 
-> 📖 **装到新机器的完整 runbook**（requirements.txt / 怎么拿 wmux handler / 为什么之前拿不到 / 排错速查）→ [`orchestrator/SETUP-new-machine.md`](../orchestrator/SETUP-new-machine.md)。下面只讲可移植机制本身。
+> 📖 **装到新机器的完整 runbook**（requirements.txt / 怎么拿 wmux handler / 为什么之前拿不到 / 排错速查）→ [`feishu/SETUP-new-machine.md`](../feishu/SETUP-new-machine.md)。下面只讲可移植机制本身。
 
 > 一句话：桥本来把 `.env` 路径和 bot 名册都写死成**一台机**的绝对路径（`E:\…\.env` + committed `bridge-bots.json` 里全是 `E:`/`zhuzhen`）。换台机（盘符/用户名不同）就读不到凭据、改名册又跟另一台机 git 打架。现在两处都改成「**不写死盘符 + 机器本地优先**」，每台电脑能各跑各的桥、各管各的 bot，互不冲突。
 
-**① `.env` 路径跨机解析**（`orchestrator/bridge_env.py:resolve_env_path` · 桥/register/probe 三个入口共用）：
+**① `.env` 路径跨机解析**（`feishu/bridge_env.py:resolve_env_path` · 桥/register/probe 三个入口共用）：
 优先级 `XHS_ENV_FILE`（显式全路径）→ `VIBECODING_ROOT/.env`（每台机一次性设·权威位置）→ 从仓库逐级上溯找到的第一个 `.env`（无需任何 env var·兼容 `Post/xhs-card-gen` 与 `Post/tools/xhs-card-gen` 两种布局）→ legacy `E:\410_VibeCoding\.env` 兜底（绝不破坏老机器）。**不再写死盘符**（符合用户 CLAUDE.md 跨机铁律）。
 
-**② 机器本地 bot 名册**（`orchestrator/bridge-bots.local.json` · gitignore · `bridge_env.bots_config_path`）：
+**② 机器本地 bot 名册**（`feishu/bridge-bots.local.json` · gitignore · `bridge_env.bots_config_path`）：
 - 该文件**存在 = 整盘接管**——桥**只跑**它列的 bot，整盘覆盖 committed `bridge-bots.json`（**不合并**）。理由：同一飞书应用两台机各连一条 WS 会撞，所以本机必须只连自己的 bot；且本机不碰入了 git 的共享文件 → **跨机零冲突**。
 - 该文件**不存在 = 行为零变化**——用 committed `bridge-bots.json`（另一台机/CI 永远走这条·不受影响）。
-- 模板：`orchestrator/bridge-bots.local.example.json`（committed）。
+- 模板：`feishu/bridge-bots.local.example.json`（committed）。
 
 **这台机挂个本地 bot 的完整步骤**（不需要把桥拆成独立仓库）：
-1. `cp orchestrator/bridge-bots.local.example.json orchestrator/bridge-bots.local.json`
-2. `python orchestrator/register_feishu_app.py --name 本机助手 --bot local1` → **你扫码**（凭据写进本机 `.env` 的 `FEISHU_BRIDGE_LOCAL1_APP_ID/SECRET`）
+1. `cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json`
+2. `python feishu/register_feishu_app.py --name 本机助手 --bot local1` → **你扫码**（凭据写进本机 `.env` 的 `FEISHU_BRIDGE_LOCAL1_APP_ID/SECRET`）
 3. 编辑 `bridge-bots.local.json`：`cwd` 指向本机要驱动的仓库绝对路径（驱动哪个本地仓库就填哪个·不限 xhs）
-4. `python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.py start` 重启桥
+4. `python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start` 重启桥
 5. 群里 `@本机助手` 说话 → 桥在本机 `workspace.new` + 起 ccp 落在该 cwd → 驱动本机仓库
 
 > **注**：`/cd` 书签（`bridge-cd-bookmarks.json`）暂仍 committed 指另一台机；本机要本地化它，同样放 `bridge-cd-bookmarks.local.json`（已 gitignore·目前桥未读 local 版·需要时再补一行解析）。挂本地 bot 不依赖 `/cd` 书签——cwd 在 bot 名册里直接指定。
@@ -472,11 +472,11 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 | `cx` / `cxp` | codex | `~/.codex{,-personal}` | Codex（改默认用 `codex_home` 字段） |
 
 **改一个 bot 的默认账号**（例：让 `tb25-yoach` 永远走公司号 work2）：
-1. 编辑 `orchestrator/bridge-bots.local.json`，给该 bot 条目加一行（路径用 `~` · 绝不写死盘符/用户名 · 跨机铁律）：
+1. 编辑 `feishu/bridge-bots.local.json`，给该 bot 条目加一行（路径用 `~` · 绝不写死盘符/用户名 · 跨机铁律）：
    ```json
    { "name": "tb25-yoach", "...": "...", "cwd": "...", "claude_config_dir": "~/.claude-work2" }
    ```
-2. `python orchestrator/feishu_bridge.py stop && python orchestrator/feishu_bridge.py start` 重启桥（**必须**——名册只在桥启动时载入内存，不热加载）。
+2. `python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start` 重启桥（**必须**——名册只在桥启动时载入内存，不热加载）。
 3. 之后 @ 该 bot 起的每个会话默认就走新账号，**无需再敲 `/account`**。
 
 **`/account` 是运行时临时覆盖**（≠ 改默认）：群里 `/account ccw2` 会**就地关旧会话、把账号【选好暂存】**（懒启动·见下条），只对当前会话有效，`/close` 或桥重启后切回名册默认。它通过 `apply_account()` 直接硬写内存 dict、**绕过名册** —— 所以名册字段失效时它仍好使（见下方坑）。
@@ -511,7 +511,7 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 - **已删旧物**：`supervisor.pty` 单指针 / `register_supervisor.py` / 认领 / wsid8 全删；`bridge-bots.json` 去 pty_file 加 cwd。**v8 又删**：`mirror_tailer`/`_deliver_turn`/`_drive_turn`/进度卡渲染 + 5 常量（−190 行·feishu_bridge.py 1132→942）。
 - **斜杠命令**：桥自己认 `/clear /cd /screen /stop /close /help`；**其余 `/xxx` verbatim 透传进 ccp**（`/resume`/`/rename`/`/model`…·不缀 `[飞书]` 标记）。普通消息的 `[飞书-<bot>]` 标记移到**末尾**（不挡 slash·v8 回传不依赖它·仅人读 + 总控 notify 抑制 + vestigial pin 子串匹配）。
 - **回复管线（v8）**：**Stop hook 写 outbox（答案）+ PostToolUse hook 写 outbox（进度）→ `outbox_drainer` 唯一发送引擎读 outbox 发**（§2.5）+ **飞书互动卡片**（§2.6）+ **必达四级降级**（§2.6）+ **`doctor_loop` 机械自愈**（§3）+ trace id 日志（§2.7）。覆盖首轮 / 长 turn / autopilot 永不结束 / **background-shell 唤醒轮** / 补发不淹没（旧轮询全挂的 5 场景·v8 测试台实证）。
-- **新增文件**：`orchestrator/hooks/{bridge_stop,bridge_posttool}.py` · `orchestrator/bridge_outbox.py`（drainer）· `orchestrator/bridge_doctor.py`（自愈）· `orchestrator/bridge_feishu_probe.py`（验真送达 tool）· `jsonl_reply_extract.last_turn_reply()`。运行时生成 `_autopilot/bridge-hooks.json`。
+- **新增文件**：`feishu/hooks/{bridge_stop,bridge_posttool}.py` · `feishu/bridge_outbox.py`（drainer）· `feishu/bridge_doctor.py`（自愈）· `feishu/bridge_feishu_probe.py`（验真送达 tool）· `jsonl_reply_extract.last_turn_reply()`。运行时生成 `_autopilot/bridge-hooks.json`。
 - **消息串行锁** + **owner 自动信任**（§7）。
 - **多媒体通道（§2.9 · 2026-06-16）**：入站 `on_message` 用 SDK `download_resource_to_file`（带 `message_id` 走 message-resource 端点）真下载你发的图/文件到 `_autopilot/inbox/<bot>/<日期>/` → 注入【本地路径】（修「`!` 占位触发 bash 模式」bug）；出站 `send --image` 用 `OutboundImage` 把本地图直达手机 DM（实测 delivered/image_ok 双绿）。全 SDK 原生 API。
 - **配套**：喇叭瘦身（`scripts/notify.py` 只发告警+里程碑）+ 看门狗 v0.10（ARCH-310）+ SOP-005（起总控流程不再手写 supervisor.pty）。
@@ -523,11 +523,11 @@ python orchestrator/feishu_bridge.py send --bot <name> --file reply.md [--to <ch
 > 你（`feishu_bridge.py` 在 wmux 里 spawn 出来的 Claude）= 某个飞书 bot 的后端会话。除了干活，你天生还能：
 
 - **自查「我是谁 / 在哪个群 / 谁是 owner」**：用 `.env` 里本 bot 的 `FEISHU_BRIDGE_<BOT>_APP_ID/SECRET` 调飞书 open-apis（`https://open.feishu.cn/open-apis`，绕代理 `NO_PROXY=feishu.cn`）—— 拿 tenant_access_token → 查 bot 显示名 / 所在群(chat list) / owner。**这是你本来就能做的，别绕半天**（2026-06-15 实证：default bot 被问「在哪个群叫什么」时绕了半天才想到调 API）。封装见 ROADMAP「飞书 API 工具」。
-- **自助建 bot**：`python orchestrator/register_feishu_app.py --name X --bot Y`（扫码建新智能体应用）。删 / 改名 / 改头像 = 待 ROADMAP 调研（飞书 API 或手机端）。
+- **自助建 bot**：`python feishu/register_feishu_app.py --name X --bot Y`（扫码建新智能体应用）。删 / 改名 / 改头像 = 待 ROADMAP 调研（飞书 API 或手机端）。
 - **消息串行**：同一 bot 同时收多条消息 → per-bot `asyncio.Lock` 串行处理（Zara 式「运行中消息排队下一轮」· 防并发注入交错丢回复 · 2026-06-15 修）。
 - **owner 自动信任**：每个 bot **首个 @ 它的人自动成 owner**（之后只认它 · 免手维护白名单 · open_id 是 per-app 的故必须如此 · 保留 `.env` 全局白名单兼容）。
 - **消息样式**：回复走**飞书互动卡片流式发**（实时进度 + 最终答案 + 过程小结），超长自动转分条普通消息，详见 §2.6——你（bot 会话）不用自己管发送格式，桥统一处理；你只管把答案写好（markdown 写法即可）。
-- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python orchestrator/feishu_bridge.py send --bot <bot> --file reply.md --json`（独立 REST · 绕卡片超时 · 走 bot 自己的 DM 通道 · **绝不用 `scripts/notify.py` 群喇叭**）。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python orchestrator/feishu_bridge.py doctor`。
+- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python feishu/feishu_bridge.py send --bot <bot> --file reply.md --json`（独立 REST · 绕卡片超时 · 走 bot 自己的 DM 通道 · **绝不用 `scripts/notify.py` 群喇叭**）。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python feishu/feishu_bridge.py doctor`。
 
 ---
 

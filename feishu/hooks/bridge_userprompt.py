@@ -44,7 +44,8 @@ def main():
     except (OSError, ValueError, json.JSONDecodeError):
         flag = None
 
-    is_feishu = (f"[飞书-{bot}]" in prompt)                # 桥注入的消息末尾缀 [飞书-<bot>]·terminal 直敲没有
+    # 桥注入标记 [飞书_from_<发>_to_<bot>]（2026-06-28 新格式·点名谁→谁）·兼容旧 [飞书-<bot>]·terminal 直敲都没有
+    is_feishu = (f"[飞书-{bot}]" in prompt) or ("[飞书_from_" in prompt and f"_to_{bot}]" in prompt)
     if is_feishu and flag and flag.get("dest"):
         route = {"kind": "a2a", "dest": flag["dest"], "at": flag.get("at")}
     else:

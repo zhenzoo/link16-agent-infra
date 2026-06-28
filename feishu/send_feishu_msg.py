@@ -21,8 +21,13 @@
 (跨 app @ 实测生效)；跨机 bot 让它在自己那台跑 `bot/v3/info` 报过来(飞书群成员 API 只列真人·不列 bot)。
 
 用法：
-  python orchestrator/send_feishu_msg.py --bot explore --to oc_xxx --text "请把 docs/X.md 发到本群" --at ou_aaa
-  python orchestrator/send_feishu_msg.py --bot explore --text "给你提个醒：P150 ready"   # --to 缺省=该 bot 会话 chat_id
+  # 【推荐·按名字喊】不用知道 open_id / 群 id：自动解析 + 找共享群 + @ 醒它，可等回复
+  #   名字来源 = .env 的 FEISHU_BRIDGE_<名字>_APP_ID/SECRET（含 envsync 从别机同步来的）→ 不用名册/不用 commit
+  python feishu/send_feishu_msg.py --bot tb25-cartoonMV --to-agent tb25-lab --text "在跑啥？" --wait 90
+  python feishu/send_feishu_msg.py --list-agents          # 看 .env 里有哪些智能体可按名字喊
+  # 【原始用法仍在】手填 open_id / 群 id：
+  python feishu/send_feishu_msg.py --bot explore --to oc_xxx --text "请把 docs/X.md 发到本群" --at ou_aaa
+  python feishu/send_feishu_msg.py --bot explore --text "给你提个醒：P150 ready"   # --to 缺省=该 bot 会话 chat_id
 """
 import argparse
 import json
@@ -113,25 +118,241 @@ def send_msg(bot, target, text, ats):
         return False, f"http={e.code} {e.read().decode('utf-8', 'ignore')[:200]}"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 按【名字】喊智能体（agent-by-name）—— 不用再手填 open_id / chat_id
+#
+# 单一来源 = .env（你用 envsync 跨机同步的那份）。.env 里每个 bot 是一对
+#   FEISHU_BRIDGE_<SLUG>_APP_ID / _APP_SECRET，<SLUG> 即 bot 名（大小写/`-`↔`_` 不敏感）。
+# 凭据 .env 已有 → open_id 用 bot/v3/info 现查（.env 不存 open_id，但能现场换出来）；
+# 群 id 用 im/v1/chats 现查。所以【不需要】单独的名册文件、不需要 --refresh-dir、不需要 commit：
+#   · 本机在跑的 bot、别的电脑的 bot —— 只要它的凭据在你 .env 里，就能直接按名字 @、零预配。
+#   · 前提就一条：那台 bot 的凭据在你 .env 里（envsync 同步即满足）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _roster():
+    cfg = bots_config_path(PROJECT)
+    return json.loads(cfg.read_text(encoding="utf-8")).get("bots", []) if cfg.exists() else []
+
+
+def _norm(name):
+    return (name or "").lower().replace("_", "-")
+
+
+def _is_local(name):
+    return any(_norm(s.get("name")) == _norm(name) for s in _roster())
+
+
+def _env_text():
+    return ENV_PATH.read_text(encoding="utf-8", errors="ignore") if ENV_PATH.exists() else ""
+
+
+def _env_bots():
+    """.env 里所有 FEISHU_BRIDGE_<SLUG>_APP_ID → {归一化名: SLUG}。"""
+    out = {}
+    for m in re.finditer(r"^FEISHU_BRIDGE_([A-Z0-9_]+)_APP_ID=", _env_text(), re.M):
+        out[_norm(m.group(1))] = m.group(1)
+    return out
+
+
+def _slug_for(name):
+    """智能体名字 → .env 里的 <SLUG>（本机名册按 app_id_env 反推；否则 .env 直查）。"""
+    key = _norm(name)
+    for s in _roster():
+        if _norm(s.get("name")) == key:
+            m = re.match(r"FEISHU_BRIDGE_(.+)_APP_ID$", s.get("app_id_env", "") or "")
+            if m:
+                return m.group(1)
+    return _env_bots().get(key)
+
+
+def _creds_for(name):
+    """智能体名字 → (app_id, app_secret)。① 本机名册精确名（大小写不敏感）② .env 里按 SLUG。找不到→None。"""
+    key = _norm(name)
+    for s in _roster():                       # ① 名册（本机在跑的）
+        if _norm(s.get("name")) == key:
+            return _bot_creds(s["name"])
+    slug = _env_bots().get(key)               # ② .env（含别机同步过来的凭据）
+    if slug:
+        e = _env(f"FEISHU_BRIDGE_{slug}_APP_ID", f"FEISHU_BRIDGE_{slug}_APP_SECRET")
+        aid, asec = e.get(f"FEISHU_BRIDGE_{slug}_APP_ID"), e.get(f"FEISHU_BRIDGE_{slug}_APP_SECRET")
+        if aid and asec:
+            return aid, asec
+    return None
+
+
+def _bot_self(app_id, app_secret):
+    """bot/v3/info → (open_id, feishu_app_name)。"""
+    tok = _tenant_token(app_id, app_secret)
+    req = urllib.request.Request(f"{BASE}/bot/v3/info", headers={"Authorization": f"Bearer {tok}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        b = json.loads(r.read().decode("utf-8")).get("bot", {}) or {}
+    return b.get("open_id"), b.get("app_name")
+
+
+def _bot_groups(app_id, app_secret):
+    """该 bot 所在的所有群（飞书 im/v1/chats 只返回群·不含人↔bot 单聊）。"""
+    tok = _tenant_token(app_id, app_secret)
+    out, page = [], None
+    while True:
+        url = f"{BASE}/im/v1/chats?page_size=100" + (f"&page_token={page}" if page else "")
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8")).get("data", {})
+        out += [{"chat_id": c.get("chat_id"), "name": c.get("name")} for c in d.get("items", [])]
+        if d.get("has_more") and d.get("page_token"):
+            page = d["page_token"]
+        else:
+            break
+    return out
+
+
+def resolve_open_id(name):
+    """智能体名字 → open_id。① 已是 ou_ 直接用 ② .env 登记的 _OPEN_ID（门牌号固定·秒回·跨机随 envsync）
+    ③ 兜底：用凭据现查 bot/v3/info（没登记/新 bot 也能自愈）。找不到抛错。"""
+    if name.startswith("ou_"):
+        return name
+    slug = _slug_for(name)
+    if slug:
+        oid = _env(f"FEISHU_BRIDGE_{slug}_OPEN_ID").get(f"FEISHU_BRIDGE_{slug}_OPEN_ID")
+        if oid:
+            return oid
+    creds = _creds_for(name)
+    if creds:
+        oid, _ = _bot_self(*creds)
+        if oid:
+            return oid
+    known = ", ".join(sorted(set(_env_bots()) | {_norm(s.get("name")) for s in _roster()}))
+    raise SystemExit(f"❌ 找不到智能体 '{name}'（.env 里没有它的 FEISHU_BRIDGE_*_APP_ID/SECRET）。"
+                     f"已知：{known or '(空)'}")
+
+
+def resolve_app_id(name):
+    creds = _creds_for(name)
+    return creds[0] if creds else None
+
+
+def _groups_of(name):
+    creds = _creds_for(name)
+    return [g["chat_id"] for g in _bot_groups(*creds)] if creds else []
+
+
+def shared_group(sender, target, override=None):
+    """找发送方与目标都在的群：交集 → 发送方唯一群 → 否则报错让 --in 指定。"""
+    if override:
+        return override
+    tg = set(_groups_of(target))
+    sender_groups = _groups_of(sender)
+    inter = [g for g in sender_groups if g in tg]  # 保序
+    if inter:
+        return inter[0]
+    if len(set(sender_groups)) == 1:
+        return sender_groups[0]
+    raise SystemExit(f"❌ {sender} 与 {target} 无共享群（或 {sender} 在多个群）。用 --in <oc_群id> 指定。")
+
+
+def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
+    """发完轮询该群，等 target 在我们这条之后发的新消息。返回 (ok, 文本|说明)。
+    群消息 sender 是 app_id；目标回复多为互动卡片(API 只给占位)→ 本机目标读其 outbox 拿真文本。"""
+    import time
+    aid, asec = _bot_creds(sender_bot)
+    target_app = resolve_app_id(target_name)
+
+    def recent(n=8):
+        tok = _tenant_token(aid, asec)
+        url = (f"{BASE}/im/v1/messages?container_id_type=chat&container_id={chat_id}"
+               f"&sort_type=ByCreateTimeDesc&page_size={n}")
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8")).get("data", {}).get("items", [])
+
+    base_ct = None
+    for m in recent():
+        if m.get("message_id") == after_mid:
+            base_ct = int(m.get("create_time", "0"))
+            break
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for m in recent():
+            sid = (m.get("sender") or {}).get("id")
+            ct = int(m.get("create_time", "0"))
+            if sid == target_app and (base_ct is None or ct > base_ct):
+                if m.get("msg_type") == "text":
+                    try:
+                        return True, json.loads(m.get("body", {}).get("content", "{}")).get("text", "")
+                    except (json.JSONDecodeError, TypeError):
+                        return True, "(已回·文本解析失败)"
+                ob = PROJECT / "feishu" / "_state" / f"bridge-outbox-{target_name}.jsonl"
+                if ob.exists():
+                    for ln in reversed(ob.read_text(encoding="utf-8", errors="ignore").splitlines()):
+                        try:
+                            o = json.loads(ln)
+                            if o.get("kind") == "answer":
+                                return True, str(o.get("text", ""))[:1000]
+                        except json.JSONDecodeError:
+                            continue
+                return True, "(对端已回·内容是互动卡片·手机飞书可见)"
+        time.sleep(8)
+    return False, "(超时·对端未在窗口内回复)"
+
+
 def main():
-    ap = argparse.ArgumentParser(description="主动往飞书会话(群/DM)发纯文字消息·可 @ 人/@ 智能体")
-    ap.add_argument("--bot", required=True, help="用哪个 bot 的飞书应用凭据发")
-    ap.add_argument("--text", required=True, help="正文")
-    ap.add_argument("--to", default=None, help="目标 chat_id(oc_)/open_id(ou_)；不给=该 bot 会话 chat_id")
+    ap = argparse.ArgumentParser(description="主动往飞书会话发文字 + @ —— 可【按名字】喊别的智能体(--to-agent)")
+    ap.add_argument("--bot", help="发送方 bot（用它的飞书应用凭据发）")
+    ap.add_argument("--text", help="正文")
+    ap.add_argument("--to", default=None, help="原始目标 chat_id(oc_)/open_id(ou_)；不给=该 bot 会话 chat_id")
+    ap.add_argument("--to-agent", dest="to_agent", default=None,
+                    help="按【名字】喊另一个智能体：自动解析它的 open_id + 找共享群 + @ 醒它（零 open_id/群 id）")
     ap.add_argument("--at", action="append", default=[], help="被 @ 的 open_id(ou_…)·可多次")
+    ap.add_argument("--at-agent", dest="at_agent", action="append", default=[],
+                    help="按名字 @（可多次·自动解析 open_id；可与 --to 共用）")
+    ap.add_argument("--in", dest="in_chat", default=None, help="发到哪个群 chat_id（配 --to-agent/--at-agent 用）")
+    ap.add_argument("--wait", type=int, default=0, help="发完轮询 N 秒等对端回复并打印（配 --to-agent）")
+    ap.add_argument("--list-agents", dest="list_agents", action="store_true",
+                    help="列出 .env 里所有可按名字喊的智能体（名字大小写/-↔_ 不敏感）")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     a = ap.parse_args()
-    target = a.to or _session_chat(a.bot)
+
+    if a.list_agents:
+        roster = {_norm(s.get("name")) for s in _roster()}
+        for h in sorted(_env_bots()):
+            print(f"{h:26} {'本机在跑' if h in roster else '别处(凭据已在你 .env)'}")
+        return
+
+    if not a.bot:
+        raise SystemExit("❌ 需要 --bot <发送方>")
+    if not a.text:
+        raise SystemExit("❌ 需要 --text <正文>")
+
+    ats = list(a.at) + [resolve_open_id(nm) for nm in a.at_agent]
+    target = a.to
+    if a.to_agent:
+        ats.append(resolve_open_id(a.to_agent))
+        target = shared_group(a.bot, a.to_agent, a.in_chat)
     if not target:
-        raise SystemExit(f"❌ 没有可发目标（--to 没给，且 bridge-session-{a.bot}.json 无 chat_id）")
-    ok, info = send_msg(a.bot, target, a.text, a.at)
-    out = {"ok": ok, "bot": a.bot, "to": target, "at": a.at,
+        target = a.in_chat or _session_chat(a.bot)
+    if not target:
+        raise SystemExit(f"❌ 没有可发目标（给 --to/--to-agent/--in，或 bridge-session-{a.bot}.json 要有 chat_id）")
+    ats = list(dict.fromkeys(ats))  # 去重保序
+
+    # a2a 标记盖章(2026-06-28)：发信方自己盖 [飞书_from_<我>_to_<对方>]——open_id 按 app 隔离·接收方反查不出
+    # 发信人，必须发信方盖。接收桥见已有此标记就不重复加(p2a 才补 host 标记·见 feishu_bridge on_message)。
+    send_text = f"{a.text} [飞书_from_{a.bot}_to_{a.to_agent}]" if a.to_agent else a.text
+
+    ok, info = send_msg(a.bot, target, send_text, ats)
+    out = {"ok": ok, "bot": a.bot, "to": target, "to_agent": a.to_agent, "at": ats,
            "message_id": info if ok else None, "err": None if ok else info}
+    if ok and a.wait and a.to_agent:
+        rok, rtext = wait_for_reply(a.bot, target, a.to_agent, info, a.wait)
+        out["reply"] = {"ok": rok, "text": rtext}
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
-        print(f"{'✅ 已发' if ok else '❌ 失败'} → {target}"
-              + (f" @{len(a.at)}人" if a.at else "") + (f" · {info}" if not ok else ""))
+        tgt = f"{a.to_agent}（{target}）" if a.to_agent else target
+        print(f"{'✅ 已发' if ok else '❌ 失败'} → {tgt}"
+              + (f" @{len(ats)}个" if ats else "") + (f" · {info}" if not ok else ""))
+        if out.get("reply"):
+            print(f"↩ {a.to_agent} 回复：{out['reply']['text']}")
     sys.exit(0 if ok else 1)
 
 

@@ -1467,9 +1467,14 @@ def run(bot_name=None):
                                     f"——请 Read 它拿完整原文。首行：{_hint}…")
                         except Exception as _e:  # noqa: BLE001 — 落盘失败退回直接注入(至少别更糟)
                             blog(bot["name"], f"[{tid}] ⚠️ 落盘失败(退直接注入)：{str(_e)[:120]}")
-                    # 标记移到【末尾】：你的输入打头(verbatim 观感·不挡 slash command) · 标记仍在文内
-                    # → 总控 notify 抑制 + 人读 + vestigial _resolve_jsonl 子串匹配全照常（v8 回传不依赖它）。
-                    marker = f"{text} {bot['marker']}"
+                    # 标记移到【末尾】：你的输入打头(verbatim 观感·不挡 slash command) · 标记仍在文内。
+                    # 标记格式(2026-06-28)：[飞书_from_<发>_to_<收>]·写清谁→谁、让接收 agent/人一眼分清来源。
+                    # a2a(send_feishu_msg --to-agent)发信方已盖章(open_id 按 app 隔离·接收方反查不出发信人，必须发信方盖)
+                    # → 原样用；其余(p2a 飞书DM / 群内人@)→ 补 from_host。hook is_feishu 认 [飞书_from_..._to_<bot>]。
+                    if "[飞书_from_" in text and f"_to_{bot['name']}]" in text:
+                        marker = text
+                    else:
+                        marker = f"{text} [飞书_from_host_to_{bot['name']}]"
                     if is_group:    # a2a：注入前落 next-route 旗标（UserPromptSubmit 那轮消费 → turn-route=a2a·回群+@发信人）
                         await asyncio.to_thread(_write_next_route, bot["name"], msg.chat_id, sender)
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
