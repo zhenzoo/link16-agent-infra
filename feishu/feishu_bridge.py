@@ -1331,7 +1331,8 @@ def run(bot_name=None):
             blog(bot["name"], f"[{tid}] 收到 {sender}: {text[:80]!r}")
             # 持久化 DM 坐标（给主动推送 send CLI + 镜像器目标用 · _merge 不覆盖 pty/jsonl/mirror）
             _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender, "chat_updated": int(time.time()),
-                                         # 本轮回信目标：群消息→回【群】+机械@发信人；私聊→清(回 owner DM)。ts 给 5min 新鲜窗(防 autopilot/终端轮误用陈旧群目标)
+                                         # 本轮回信目标(结构信号·2026-06-28)：a2a(群)→回【群】+机械@发信人；p2a(私聊/terminal)→清 reply_dest(回 owner DM)
+                                         "chat_kind": ("a2a" if is_group else "p2a"),
                                          "reply_dest": (msg.chat_id if is_group else None),
                                          "reply_at": (sender if is_group else None),
                                          "reply_dest_ts": int(time.time())})
@@ -1502,11 +1503,14 @@ def run(bot_name=None):
             return "chat_id" if t.startswith("oc_") else "open_id"
 
         def _reply_dest():
-            """本轮回信目标：群消息→(群 chat_id, @发信人 open_id)；否则→(owner DM, None)。
-            群目标(oc_)的回复在卡内机械 @ 回发信人 + 尾缀隐形哨兵(防回环)。5min 新鲜窗外退回 DM(防陈旧群目标)。"""
+            """本轮回信目标(结构信号 chat_kind·无时钟 TTL·2026-06-28)：
+            a2a(群)→(群 chat_id, @发信人 open_id)·永不退 DM；p2a(私聊/terminal 镜像)→(owner DM, None)。
+            群回复在纯文字/卡内机械 @ 回发信人 + 尾哨兵(防回环)。删旧 300s 墙钟窗——长 turn(>5min)会误判群
+            目标过期→错退 owner DM→跨机发信人不在本 app 可用范围(230013)→兜底乱投写帖通知群(2026-06-28 实证)。"""
             sess = load_session(bname) or {}
             rd = sess.get("reply_dest")
-            if rd and (int(time.time()) - int(sess.get("reply_dest_ts") or 0) < 300):
+            kind = sess.get("chat_kind") or ("a2a" if rd else "p2a")   # 兼容无 chat_kind 的旧会话
+            if kind == "a2a" and rd:
                 return rd, sess.get("reply_at")
             return mirror_target(bname), None
 
