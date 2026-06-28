@@ -47,11 +47,12 @@ REPLY_POLL_SEC = 2
 READY_TIMEOUT_SEC = 30            # 等 spawn 出的 worker 起好最多 30 秒（spawn 探就绪保送达后 claude/codex ~10-15s 出提示符）
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
 CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_send 单卡 / 超了 SDK 自动分条
-# 注入策略（2026-06-23 干净实测定·见 _inject + on_message）：
-#   长消息【不会】截断——直接 send 实测 4199字/40行(无 TAB) 完整到达、作为一条消息（早前"吞吐速率截断"
-#   的结论是测试被 warmup 污染的假象，已推翻）。唯一真问题 = 含 TAB 的数据（cookies/TSV）：Claude 输入框把
-#   TAB 当 Tab 键 / 转成空格（实测 3 TAB→0），内联无法 byte-exact → 只此一类落盘转 Read。其余一律直接 send。
-SEND_MAX_CHARS = 16000   # 单条 send 安全上限（Windows CreateProcess 命令行 ~32767 字·留余量）；超此才走 paste 分块(仍内联·不落盘)
+# 注入策略（2026-06-28 修正）：
+#   入站消息一律走 paste（限速分块·bracketed-paste）注入，不再用裸 send。原因：CC 输入框是 TUI·有吞吐上限，
+#   裸 send 把多千字一次性灌进去会丢字 → 截断（2026-06-28 实证：几千字真实消息走 send 被截。早前"send 4199字
+#   OK / 吞吐截断是 warmup 假象"的结论是错的·已被真实截断推翻——别再据此放行裸 send）。
+#   含 TAB 的数据（cookies/TSV）另在 on_message 上游落盘转 Read（send/paste 都救不了 TAB→空格）。
+SEND_MAX_CHARS = 16000   # marker 作 node 命令行参传递的天花板(~Windows CreateProcess 32767 留余量·send/paste 共用·与截断无关)
 SEND_RETRY_BACKOFF = (0, 2, 5)    # channel.send 失败重试等待秒（retryable 错误码才重试）
 # 单次发卡硬超时（2026-06-18 实证根因）：SDK 默认 max_attempts=5 × httpx 每阶段 30s → 单次卡死最坏 ~150s，
 # 而 drainer 是【单协程顺序 await】→ 一次卡死冻结整条回传、后续 answer/progress 全队头阻塞，靠 doctor
@@ -672,14 +673,11 @@ def ensure_session(bot):
 
 def _inject(pty, workspace_id, marker):
     """把带标记的消息发进 bot 会话并回车（同步 · 给 to_thread 用）。
-    正常一律【直接 send】——实测长消息(4000+字/40行 无 TAB)不截断、作为一条消息到达。仅超 SEND_MAX_CHARS
-    的病态超长才走 paste 分块（仍内联·避开 Windows 命令行上限）。含 TAB 的数据已在 on_message 拦去落盘
+    一律走 paste（限速分块·bracketed-paste）：CC 输入框是 TUI·有吞吐上限，裸 send 把多千字一次性灌入会丢字→
+    截断（2026-06-28 实证）。paste 对短消息也无害（≤100字=1 个 chunk）。含 TAB 的数据已在 on_message 拦去落盘
     （send/paste 都救不了 TAB→空格），到这儿的 marker 不含 TAB。"""
     allow = ["--allow-ws", workspace_id]
-    if len(marker) > SEND_MAX_CHARS:
-        wmux("paste", pty, marker, *allow)
-    else:
-        wmux("send", pty, marker, *allow)
+    wmux("paste", pty, marker, *allow)
     time.sleep(0.3)
     wmux("enter", pty, *allow)
 
@@ -1057,7 +1055,7 @@ def run(bot_name=None):
 
     try:
         import asyncio
-        from lark_channel import FeishuChannel
+        from lark_channel import FeishuChannel, SafetyConfig, TextBatchConfig, ChatQueueConfig
     except ImportError:
         print("❌ 缺依赖: pip install lark-channel-sdk", file=sys.stderr)
         sys.exit(2)
@@ -1478,7 +1476,19 @@ def run(bot_name=None):
                         await reply(msg.chat_id, f"❌ bridge 错误: {err[:500]}")
         return on_message
 
-    ch = FeishuChannel(app_id=bot["app_id"], app_secret=bot["app_secret"])
+    # 关掉 SDK 的「文字防抖合并」(2026-06-28)：lark_channel 默认 text_batch.delay_ms=600 +
+    # chat_queue.merge_while_busy=True，会把同一会话短时间内/忙时进来的多条 merge 成一条；而它的
+    # merge_batch() 重建消息时漏填 content_text/safe_content_text → 桥读到空 → 误判「未知类型」、
+    # 把对端真·回复整条丢掉（bot↔bot 又快又多、群里多 bot 同刷最常踩）。我们本就不需要合并(注入已由
+    # msg_lock 串行；且它按 chat_id 合并会把不同发送方的消息也并一起=语义错)。设成「一条一派发、永不合并」：
+    # 每批恒为 1 → merge_batch 走 len==1 原样返回 → content_text 不再丢。仍保留 chat_queue 串行(防竞态)。
+    ch = FeishuChannel(
+        app_id=bot["app_id"], app_secret=bot["app_secret"],
+        safety=SafetyConfig(
+            text_batch=TextBatchConfig(delay_ms=0, max_messages=1, max_chars=10**9),
+            chat_queue=ChatQueueConfig(enabled=True, merge_while_busy=False),
+        ),
+    )
     ch.on("message", make_handler(bot, ch))
 
     async def runner():
