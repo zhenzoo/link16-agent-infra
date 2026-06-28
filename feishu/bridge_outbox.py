@@ -268,6 +268,7 @@ def write_hooks_settings(state_dir, hooks_dir):
     stop = (Path(hooks_dir) / "bridge_stop.py").as_posix()
     post = (Path(hooks_dir) / "bridge_posttool.py").as_posix()
     pre = (Path(hooks_dir) / "bridge_pretool.py").as_posix()
+    ups = (Path(hooks_dir) / "bridge_userprompt.py").as_posix()
     cfg = {
         # 🚫 飞书桥【禁用 AskUserQuestion】（2026-06-22 用户决议·根治）：裸工具名 deny = 把它从模型上下文整个拿掉，
         # 模型压根看不到、不会调 → 自然改用「普通文字 + 编号选项」(用户回数字即可)。一刀砍掉 picker 整条问题链：
@@ -277,6 +278,9 @@ def write_hooks_settings(state_dir, hooks_dir):
         # 想恢复 = 删本 deny 行重启桥即可(PreToolUse hook 仍在·会重新写 kind:ask)。
         "permissions": {"deny": ["AskUserQuestion"]},
         "hooks": {
+        # UserPromptSubmit：每轮开头写 bridge-turn-route（a2a 消费 next-route 旗标 / 否则 p2a）→ per-turn 路由(2026-06-28)
+        "UserPromptSubmit": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f'python "{ups}"', "timeout": 10, "async": True}]}],
         "Stop": [{"matcher": "*", "hooks": [
             {"type": "command", "command": f'python "{stop}"', "timeout": 15, "async": True}]}],
         "PostToolUse": [{"matcher": PROGRESS_TOOLS, "hooks": [
@@ -429,10 +433,11 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["cur_mid"] = None                        # 进度卡封口·答案另起
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
+            route = r.get("route")                         # 本轮回信路由（bridge_stop 在 Stop 时钉进记录·防异步 drain 撞下一轮覆盖）
             for ch in _ans_chunks(text):                   # 回复拆 ≤BUDGET 连续多卡
-                mid = await new_card(ch)
+                mid = await new_card(ch, route=route)
                 if mid is None:                            # 发卡彻底失败 → 最终 fallback
-                    await send_plain(ch)
+                    await send_plain(ch, route=route)
                 n += 1
             state["sent"].add(key)
             if len(state["sent"]) > SENT_CAP:

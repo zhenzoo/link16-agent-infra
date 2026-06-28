@@ -182,12 +182,19 @@ def main():
     anchor = r.get("anchor_line")
     outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
     outbox = outdir / f"bridge-outbox-{bot}.jsonl"
+    # per-turn 路由(2026-06-28)：Stop 时读 turn-route 钉进 answer 记录——此刻 turn-route = 本轮路由
+    # （Claude 串行·下一轮 UserPromptSubmit 还没开火覆盖它）→ drainer 异步 drain answer 时按记录里钉死的 route
+    # 投递·不受下一轮覆盖（防 p2a 答案漏进 a2a 群）。progress 走 _reply_dest(turn 内·无竞态)·此处只管 answer。
+    try:
+        route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        route = None
     try:
         outbox.parent.mkdir(exist_ok=True)
         with open(outbox, "a", encoding="utf-8") as f:
             for c in cards:
                 rec = {"kind": "answer", "ts": int(time.time()), "session": sid,
-                       "anchor": anchor, "text": c}
+                       "anchor": anchor, "text": c, "route": route}
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
         pass

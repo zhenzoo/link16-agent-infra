@@ -443,6 +443,38 @@ def save_owner(bot_name, open_id):
     _owner_file(bot_name).write_text(json.dumps({"open_id": open_id}, ensure_ascii=False), encoding="utf-8")
 
 
+# ---------- per-turn 路由（旁路文件·out-of-band·不靠 in-prompt marker 承担路由·2026-06-28）----------
+#   bridge-next-route-<bot>.json = {dest, at}        ← on_message 注入【群消息】前写（a2a 旗标）
+#   bridge-turn-route-<bot>.json = {kind, dest?, at?} ← UserPromptSubmit hook 每轮写（a2a 消费旗标 / 否则 p2a）
+# _reply_dest / bridge_stop 读 turn-route 路由本轮回复。每轮重写 → 长 turn 交错不再串台（取代 session 级 reply_dest）。
+def _next_route_path(bot_name):
+    return STATE_DIR / f"bridge-next-route-{bot_name}.json"
+
+
+def _turn_route_path(bot_name):
+    return STATE_DIR / f"bridge-turn-route-{bot_name}.json"
+
+
+def _write_next_route(bot_name, dest, at):
+    """on_message 注入群消息前落 a2a 旗标（UserPromptSubmit 那一轮消费）。原子写·失败不致命。"""
+    try:
+        STATE_DIR.mkdir(exist_ok=True)
+        p = _next_route_path(bot_name)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"dest": dest, "at": at}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _load_turn_route(bot_name):
+    """读本轮 turn-route → {kind, dest?, at?} 或 None。"""
+    try:
+        return json.loads(_turn_route_path(bot_name).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def is_allowed(bot, sender):
     """放行规则：全局白名单（.env·兼容）OR 本 bot 的 owner。
     owner 未定 → 第一个 @ 它的人自动成 owner（bot 刚建只有你知道、你会先 @ → 就是你；之后只认你）。
@@ -1330,12 +1362,8 @@ def run(bot_name=None):
             tid = (msg.id or "")[-6:] or str(int(time.time()))[-6:]   # 贯穿本条消息全链路的 trace id
             blog(bot["name"], f"[{tid}] 收到 {sender}: {text[:80]!r}")
             # 持久化 DM 坐标（给主动推送 send CLI + 镜像器目标用 · _merge 不覆盖 pty/jsonl/mirror）
-            _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender, "chat_updated": int(time.time()),
-                                         # 本轮回信目标(结构信号·2026-06-28)：a2a(群)→回【群】+机械@发信人；p2a(私聊/terminal)→清 reply_dest(回 owner DM)
-                                         "chat_kind": ("a2a" if is_group else "p2a"),
-                                         "reply_dest": (msg.chat_id if is_group else None),
-                                         "reply_at": (sender if is_group else None),
-                                         "reply_dest_ts": int(time.time())})
+            _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender, "chat_updated": int(time.time())})
+            # 回信路由改 per-turn（注入群消息前落 next-route 旗标 + UserPromptSubmit→turn-route）·不再存 session 级 reply_dest（长 turn 交错会串台·2026-06-28·见 _write_next_route）
             try:
                 await channel.add_reaction(msg.id, "THUMBSUP")
             except Exception:  # noqa: BLE001
@@ -1442,6 +1470,8 @@ def run(bot_name=None):
                     # 标记移到【末尾】：你的输入打头(verbatim 观感·不挡 slash command) · 标记仍在文内
                     # → 总控 notify 抑制 + 人读 + vestigial _resolve_jsonl 子串匹配全照常（v8 回传不依赖它）。
                     marker = f"{text} {bot['marker']}"
+                    if is_group:    # a2a：注入前落 next-route 旗标（UserPromptSubmit 那轮消费 → turn-route=a2a·回群+@发信人）
+                        await asyncio.to_thread(_write_next_route, bot["name"], msg.chat_id, sender)
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
                     pre = {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)}
                     inject_wall = time.time()
@@ -1502,17 +1532,20 @@ def run(bot_name=None):
             t = str(t or "")
             return "chat_id" if t.startswith("oc_") else "open_id"
 
+        def _route_to_dest(route):
+            """route dict {kind,dest,at} → (tgt, at)。a2a→群+@发信人；p2a/None→owner DM
+            （owner 文件 / 会话 open_id / .env ALLOWED 首个·都没有→None=drainer 跳过）。"""
+            if route and route.get("kind") == "a2a" and route.get("dest"):
+                return route["dest"], route.get("at")
+            owner = mirror_target(bname) or (ALLOWED_OPEN_IDS[0] if ALLOWED_OPEN_IDS else None)
+            return owner, None
+
         def _reply_dest():
-            """本轮回信目标(结构信号 chat_kind·无时钟 TTL·2026-06-28)：
-            a2a(群)→(群 chat_id, @发信人 open_id)·永不退 DM；p2a(私聊/terminal 镜像)→(owner DM, None)。
-            群回复在纯文字/卡内机械 @ 回发信人 + 尾哨兵(防回环)。删旧 300s 墙钟窗——长 turn(>5min)会误判群
-            目标过期→错退 owner DM→跨机发信人不在本 app 可用范围(230013)→兜底乱投写帖通知群(2026-06-28 实证)。"""
-            sess = load_session(bname) or {}
-            rd = sess.get("reply_dest")
-            kind = sess.get("chat_kind") or ("a2a" if rd else "p2a")   # 兼容无 chat_kind 的旧会话
-            if kind == "a2a" and rd:
-                return rd, sess.get("reply_at")
-            return mirror_target(bname), None
+            """本轮回信目标(per-turn·读 UserPromptSubmit 每轮写的 turn-route·2026-06-28)：
+            a2a(群)→(群 chat_id, @发信人)；p2a(飞书DM/terminal)→(owner DM, None)。取代 session 级 reply_dest
+            （长 turn 交错会串台）。progress 用它(turn 内 drain·无竞态)；answer 由 drainer 传【记录里钉死的 route】
+            (bridge_stop 在 Stop 时读 turn-route 写进记录·不受下一轮 UserPromptSubmit 覆盖·防泄漏)。"""
+            return _route_to_dest(_load_turn_route(bname))
 
         def _card_payload(text, at=None, mark=False):     # 2.0 schema markdown 卡（非流式·可 update_card 原地改）
             content = text
@@ -1523,8 +1556,8 @@ def run(bot_name=None):
             return {"schema": "2.0", "config": {"streaming_mode": False, "wide_screen_mode": True},
                     "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]}}
 
-        async def _new_card(text):                        # 发一张新卡·返回 message_id（失败 None）
-            tgt, at = _reply_dest()
+        async def _new_card(text, route=None):            # 发一张新卡·返回 message_id（失败 None）·route 给定=用记录里钉死的本轮路由
+            tgt, at = _route_to_dest(route) if route else _reply_dest()
             if not tgt:
                 receipt(bname, {"tid": "drain", "kind": "new_card", "delivered": False, "via": None, "err": "no_target", "len": len(text or "")})
                 return None
@@ -1567,8 +1600,8 @@ def run(bot_name=None):
                 receipt(bname, {"tid": "drain", "kind": "edit_card", "delivered": False, "via": "edit-fail", "err": (str(e)[:120] or type(e).__name__)})
                 return False
 
-        async def _send_plain(text):                      # 最终 fallback
-            tgt, at = _reply_dest()
+        async def _send_plain(text, route=None):          # 最终 fallback·route 同 _new_card
+            tgt, at = _route_to_dest(route) if route else _reply_dest()
             if not tgt:
                 return
             if str(tgt).startswith("oc_"):                 # 群 → 纯文字(+真@+哨兵)
