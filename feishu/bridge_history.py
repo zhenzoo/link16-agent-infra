@@ -101,39 +101,43 @@ def _inbound_from_jsonl(bot):
 
 
 def _outbound_from_outbox(bot, include_progress):
-    """出站(bot→你)：outbox 的 answer(完整正文) + ask；progress 仅 --progress 时含。ts = hook 写时(≈发出时)。"""
-    p = STATE_DIR / f"bridge-outbox-{bot}.jsonl"
-    evs = []
-    if not p.exists():
-        return evs
-    try:
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    r = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                k, ts = r.get("kind"), r.get("ts")
-                if ts is None:
-                    continue
-                if k == "answer":
-                    t = (r.get("text") or "").strip()
-                    if t:
-                        evs.append({"ts": float(ts), "dir": "out", "kind": "answer", "text": t})
-                elif k == "ask":
-                    qs = r.get("questions") or []
-                    heads = " / ".join(str(q.get("header") or "?") for q in qs if isinstance(q, dict))
-                    evs.append({"ts": float(ts), "dir": "out", "kind": "ask", "text": f"[问你] {heads}".strip()})
-                elif k == "progress" and include_progress:
-                    steps = r.get("steps") or []
-                    lbl = (steps[-1].get("label") if steps else r.get("label")) or ""
-                    if lbl:
-                        evs.append({"ts": float(ts), "dir": "out", "kind": "progress", "text": lbl})
-    except OSError:
-        pass
+    """出站(bot→你)：outbox 的 answer(完整正文) + ask；progress 仅 --progress 时含。ts = hook 写时(≈发出时)。
+    读 live + 切流前归档(_pre-cutover-archive·2026-06-28 从老 orchestrator/_autopilot 复制·只读·drainer 不碰子目录·零重发)。"""
+    def _parse(p):
+        out = []
+        if not p.exists():
+            return out
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    k, ts = r.get("kind"), r.get("ts")
+                    if ts is None:
+                        continue
+                    if k == "answer":
+                        t = (r.get("text") or "").strip()
+                        if t:
+                            out.append({"ts": float(ts), "dir": "out", "kind": "answer", "text": t})
+                    elif k == "ask":
+                        qs = r.get("questions") or []
+                        heads = " / ".join(str(q.get("header") or "?") for q in qs if isinstance(q, dict))
+                        out.append({"ts": float(ts), "dir": "out", "kind": "ask", "text": f"[问你] {heads}".strip()})
+                    elif k == "progress" and include_progress:
+                        steps = r.get("steps") or []
+                        lbl = (steps[-1].get("label") if steps else r.get("label")) or ""
+                        if lbl:
+                            out.append({"ts": float(ts), "dir": "out", "kind": "progress", "text": lbl})
+        except OSError:
+            pass
+        return out
+    evs = _parse(STATE_DIR / f"bridge-outbox-{bot}.jsonl")
+    evs += _parse(STATE_DIR / "_pre-cutover-archive" / f"bridge-outbox-{bot}.jsonl")
     return evs
 
 
