@@ -865,6 +865,20 @@ def _link_one(m):
     return f"[{url}]({url}){trail}" if url else m.group(0)
 
 
+# 纯-URL 的行内反引号 `url` / 代码围栏 ```url``` → 在 linkify 前拆成裸 URL（2026-06-29 用户实证根因）：
+# 模型给链接套了反引号 → 下面 _linkify 按「代码区原样留」跳过 → 飞书渲成不可点等宽码。这里只拆
+# 【反引号内容整体就是一个 http(s) URL】的，拆后照常 linkify 成可点链接；真代码(`npm i`)/多 token/
+# 非 URL 一律不动。= 把「发飞书链接别套反引号」这条规则做成代码强制执行（不靠模型记得·一处改全 bot 生效）。
+_CODE_URL_ONLY_RE = re.compile(r"```[ \t\r\n]*(https?://[^\s`]+)[ \t\r\n]*```|`[ \t]*(https?://[^\s`]+)[ \t]*`")
+
+
+def _unwrap_url_code(text):
+    """把【整体就是一个 URL】的行内反引号/代码围栏拆成裸 URL（让它能被 linkify 成可点链接）。非 URL 代码不动。"""
+    if not text:
+        return text or ""
+    return _CODE_URL_ONLY_RE.sub(lambda m: m.group(1) or m.group(2), text)
+
+
 def _linkify(text):
     """出站【内容清洗 + 裸 URL linkify】（飞书卡片不自动 linkify 裸 URL·`[文字](url)` 才可点）。
     已在 `[..](..)` 里的（前面是 `(`/`]`/`/`）不动·防双包。（2026-06-15 Publisher「链接点不了」根因）
@@ -877,6 +891,7 @@ def _linkify(text):
     URL 整行【消失】·2026-06-16 social_media 实证；代码块里讲 `![..]()` 语法也该原样）。"""
     if not text:
         return text or ""
+    text = _unwrap_url_code(text)                     # 先拆纯-URL 反引号→裸 URL（否则下面按代码区跳过→飞书不可点·2026-06-29）
     parts = _CODE_REGION_RE.split(text)
     for i in range(0, len(parts), 2):                 # 偶数下标=非代码区；奇数=代码区原样留
         seg = _IMG_MD_RE.sub(lambda m: f"「图:{m.group(1).strip()}」" if m.group(1).strip() else "「图」", parts[i])

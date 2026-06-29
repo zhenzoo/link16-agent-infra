@@ -17,6 +17,13 @@
 
 依赖方向单向：`feishu/ → wmux/`；内容仓 → 依赖本仓。
 
+## 发飞书链接规则（已代码强制 · 不靠模型记得）
+
+经桥发往飞书的链接：**裸写 URL 或 `[标签](url)`，绝不套反引号 / ``` 代码块 ```**——否则 `feishu/feishu_bridge.py` 的 `_linkify` 按「代码区原样留」跳过，飞书把它渲成**不可点等宽码**（2026-06-29 用户实证）。
+- **已做成代码强制**：`_linkify` 开头调 `_unwrap_url_code()`，把【整体就是一个 http(s) URL】的行内反引号/代码围栏先拆成裸 URL 再 linkify；真代码（`` `npm i` ``）/多 token/非 URL 一律不动。一处改、**全 bot 生效、不管哪个 config_dir**。⚠️ 改 `_linkify` 后需**重启桥进程**（跑着的进程持旧码）才生效。
+- **飞书云文档**：飞书会把自家 `my.feishu.cn/docx/` 链接自动渲染成「带文档标题的可点卡片」→ 发文档只需**裸发 docx URL + 建文档时设好标题**（`feishu_docs.publish_*` 的 `name=`），无需特殊排版。
+- `file://` 本地路径飞书**不可点**（安全限制 + 手机无 PC 文件系统）；在线文档链接才是唯一可点入口。
+
 ## 文档（按全局命名规范 `TYPE-NNN-slug` · 0xx=wmux底层 / 1xx=feishu桥）
 
 | 文档 | 类型 · 内容 |
@@ -34,5 +41,5 @@
 
 🚧 **建好待切流**。完整迁移计划 SSOT 暂在 `../xhs-card-gen/docs/STRATEGY-infra-extraction.md`（迁完归位本仓）。
 - ✅ 代码 + 文档搬入 · CLAUDE/TOOLS/CHANGELOG 建好 · **改锚全完成**（所有 `orchestrator/` 运行时路径→`feishu/`、wmux-rpc→`wmux/`·零残留·import-test 过）· 本机名册 cwd 锚好 · **GitHub 远端建好**（`github.com/zhenzoo/link16-agent-infra`·私有·main）。
-- ⏸️ **Phase 2B 切流** = Owner 手动（停旧桥→起新桥·会断对话）· 照 [`docs/SOP-130-cutover.md`](docs/SOP-130-cutover.md) 走。**未切流前，生产仍跑 `../xhs-card-gen/orchestrator/` 旧桥。**
+- ✅ **Phase 2B 切流已完成**（2026-06-29 核验：18 个 bot 进程全部跑本仓 `feishu/feishu_bridge.py run --bot …`，含 tb25-lab-3 PID 41332；xhs-card-gen orchestrator 的 `_state` 已无 session 文件）→ **生产现已是本仓 link16 桥**，旧桥不再跑。步骤见 [`docs/SOP-130-cutover.md`](docs/SOP-130-cutover.md)。
 - 🔨 小尾巴：清文档/usage 里残留的 `orchestrator/` 文字（cosmetic·不影响功能）。
