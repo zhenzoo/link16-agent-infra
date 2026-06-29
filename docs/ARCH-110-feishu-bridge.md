@@ -147,9 +147,10 @@ python feishu/install_codex_bridge_hooks.py --write
 - **信封格式**（桥 `on_message` 注入时缀在消息末尾·人读 + 机读合一）：
   - DM（p2a）：`[飞书 from=host to=<bot> via=DM · route=p2a]`
   - 群 a2a：`[飞书 from=<发信open_id> to=<bot> via=群 · route=a2a dest=<群chat_id> at=<发信open_id>]`
-- **hook**（`bridge_userprompt.py`）每轮用正则从本条 prompt 解析 `route=/dest=/at=` → 写 `bridge-turn-route-<bot>.json`（schema 不变 `{kind,dest?,at?}`）→ drainer / `bridge_stop` 照旧读它发。回复 = 把信封「倒过来」（from↔to、原 via）。
+- **hook**（`bridge_userprompt.py`）每轮用 `re.findall(...)[-1]` 取本条 prompt 里**最末**一个信封解析 `route=/dest=/at=` → 写 `bridge-turn-route-<bot>.json`（schema 不变 `{kind,dest?,at?}`）→ drainer / `bridge_stop` 照旧读它发。回复 = 把信封「倒过来」（from↔to、原 via）。
 - **根因（实证 2026-06-29）**：旧机制把「回哪」写在**单独的 `bridge-next-route-<bot>.json` 便签**（per-bot 旁路文件），靠「下一轮 hook 消费即删」。但群消息那轮若没干净跑 hook（回信失败 / 会话冷重启 / env 丢），**便签不被消费就成地雷**——一张 23:18 tb25-ccp 在群 @arch 写的便签躺了 ~21h，被次日 20:46 主人的「注册 bot」DM 踩中 → arch 的 DM 回复漏进群 + @错 bot（哨兵挡住没成回环）。信封把回址跟消息绑死 → **按消息原子化，跨会话 / 交错 / 冷重启都不串、不过期**。
-- **兼容窗口**：hook 解析不到信封（桥重启前的旧标记 / 旧 `send` 路径）→ 退回旧 `is_feishu + 便签` 兜底；桥重启后每条注入都带信封 → 便签转 vestigial（`_write_next_route` 暂留兜底）。隔离测试 8 场景全过（含「旧群便签 + DM 信封 → 仍回 DM」「撞名 + 信封 → 仍回 DM」）。
+- **防 spoof = 取【最末】（2026-06-30 · TB25-link16 review 复现）**：必须 `re.findall(...)[-1]` 取最末、不能 `re.search` 取最左。否则正文里**先**出现的假信封（如智能体之间**转引 / 讨论这套协议**时写的 `route=a2a dest=oc_X`）会盖过末尾真信封、**劫持路由**（实测：正文塞假 a2a + 末尾真 p2a → 旧码回错地方）。a2a bot 本就会互相转引此格式 → **无意碰撞也中招，非必恶意**。
+- **没信封 → 安全默认 p2a**：terminal 直敲 / 末尾信封被截断 → 解析为空 → 回 owner DM。**旧 `bridge-next-route` 便签 + `_write_next_route` 已连根删**（不再「盖住地雷」而是拔掉·避免截断回退时旧 bug 复活）。隔离测试 8 场景全过（含两个 spoof：假信封被忽略、取末真信封 / 旧便签存在也不再被读）。
 - **自查身份**：bot 不确定「我是谁」→ `python feishu/whoami.py`（读 `FEISHU_BRIDGE_SESSION` env + 名册 + 会话记录）。信封里的 `to=<bot>` 就是桥按这个身份钉的。
 
 ---

@@ -443,28 +443,12 @@ def save_owner(bot_name, open_id):
     _owner_file(bot_name).write_text(json.dumps({"open_id": open_id}, ensure_ascii=False), encoding="utf-8")
 
 
-# ---------- per-turn 路由（旁路文件·out-of-band·不靠 in-prompt marker 承担路由·2026-06-28）----------
-#   bridge-next-route-<bot>.json = {dest, at}        ← on_message 注入【群消息】前写（a2a 旗标）
-#   bridge-turn-route-<bot>.json = {kind, dest?, at?} ← UserPromptSubmit hook 每轮写（a2a 消费旗标 / 否则 p2a）
-# _reply_dest / bridge_stop 读 turn-route 路由本轮回复。每轮重写 → 长 turn 交错不再串台（取代 session 级 reply_dest）。
-def _next_route_path(bot_name):
-    return STATE_DIR / f"bridge-next-route-{bot_name}.json"
-
-
+# ---------- per-turn 路由（回址焊进消息本体的信封·hook 从本条消息取【最末】信封解析·2026-06-30 删旁路便签）----------
+#   bridge-turn-route-<bot>.json = {kind, dest?, at?} ← UserPromptSubmit hook 每轮从信封写。
+# _reply_dest / bridge_stop 读 turn-route 路由本轮回复。每轮重写 → 长 turn 交错不串台。
+# （旧 bridge-next-route 旁路便签已删：群消息那轮没消费就被后来的 DM 误吃·实证 21h 串台 bug → 连根拔。见 ARCH-110 §2.5.1。）
 def _turn_route_path(bot_name):
     return STATE_DIR / f"bridge-turn-route-{bot_name}.json"
-
-
-def _write_next_route(bot_name, dest, at):
-    """on_message 注入群消息前落 a2a 旗标（UserPromptSubmit 那一轮消费）。原子写·失败不致命。"""
-    try:
-        STATE_DIR.mkdir(exist_ok=True)
-        p = _next_route_path(bot_name)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"dest": dest, "at": at}, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, p)
-    except OSError:
-        pass
 
 
 def _load_turn_route(bot_name):
@@ -1363,7 +1347,7 @@ def run(bot_name=None):
             blog(bot["name"], f"[{tid}] 收到 {sender}: {text[:80]!r}")
             # 持久化 DM 坐标（给主动推送 send CLI + 镜像器目标用 · _merge 不覆盖 pty/jsonl/mirror）
             _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender, "chat_updated": int(time.time())})
-            # 回信路由改 per-turn（注入群消息前落 next-route 旗标 + UserPromptSubmit→turn-route）·不再存 session 级 reply_dest（长 turn 交错会串台·2026-06-28·见 _write_next_route）
+            # 回信路由 per-turn：回址焊进消息末尾信封 + UserPromptSubmit hook 取【最末】信封→turn-route·不存 session 级 reply_dest（长 turn 交错会串台·见 ARCH-110 §2.5.1）
             try:
                 await channel.add_reaction(msg.id, "THUMBSUP")
             except Exception:  # noqa: BLE001
@@ -1480,8 +1464,6 @@ def run(bot_name=None):
                         env_route = "route=p2a"
                         from_disp, via_disp = "host", "DM"
                     marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route}]"
-                    if is_group:    # 兼容窗口：桥重启前的旧 hook 仍读这张便签；重启后 hook 改读信封 → 便签转 vestigial 兜底
-                        await asyncio.to_thread(_write_next_route, bot["name"], msg.chat_id, sender)
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
                     pre = {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)}
                     inject_wall = time.time()
