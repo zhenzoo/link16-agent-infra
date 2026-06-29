@@ -71,6 +71,8 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 | **tb25-cartoonMV-3** | @tb25-cartoonMV-3 | `ou_00000000000000000000000000000029` | ✅（2026-06-22 开通发布·39 scope 全开）| ❌ | cartoon-musical-mv 第三实例（cwd …\Post\tools\cartoon-musical-mv · 新建 2026-06-21）|
 | **tb25-lab-2** | @tb25-lab-2 | `ou_00000000000000000000000000000064` | ✅（2026-06-22 建+开通发布·39 scope 全开）| ❌ | Lab 实验区第二实例（cwd D:\410_VibeCoding\Lab · 新建 2026-06-22）|
 | **tb25-lab-3** | @tb25-lab-3 | `ou_00000000000000000000000000000002` | ✅（2026-06-23 建+开通发布·39 scope 全开）| ❌ | Lab 实验区第三实例（App ID cli_0000000000000003 · cwd D:\410_VibeCoding\Lab · **claude_config_dir ~/.claude-work2** · 新建 2026-06-23）|
+| **tb25-link16** | @tb25-link16 | `ou_00000000000000000000000000000025` | ✅（开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra 桥/编排基建仓 agent（cwd …\Post\tools\link16-agent-infra · 切流时新建 2026-06-28）|
+| **tb25-link16-2** | @tb25-link16-2 | `ou_00000000000000000000000000000043` | ✅（2026-06-29 建+开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra 第二实例（App ID cli_0000000000000005 · cwd …\Post\tools\link16-agent-infra · 新建 2026-06-29）|
 
 > **⚠️ 权限开 ≠ 在群里**（2026-06-20 实测）：arch/twitter/podcast `im:chat` 都开了，但**实际只有 explore + TB25-speech 真被拉进群**。开权限是「能进群」，还得真把 bot 拉进群才算进。
 > **🔒 拉 bot 进群只能在飞书 App 手动**（群设置 → 添加成员/群机器人 → 搜 bot 名如 `@xhs架构师` → 加）。**API 加不了**（实测）：别的 app 的 bot 去加它报 `99992361 open_id cross app`；bot 加自己报 `232011 Operator can NOT be out of the chat`（没进群就没权操作群）。→ 建新 bot 的 §4 清单「拉进共享群」这步**必须人工**。
@@ -119,7 +121,11 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 | tb25_api_doc | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 | tb25_ccp | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 | tb25_tennis_post | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
+| tb25_link16 | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
+| tb25_link16_2 | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 
+> **2026-06-29 更新**：新增 **tb25-link16**（切流时建·App `cli_…`）+ **tb25-link16-2**（本日建·App `cli_0000000000000005`），均 `--bot ... --raw` 审计 39 scope 全绿（drive/im:chat/group_msg/收群@ 齐）→ 现 **24 应用**。两者 cwd 均 `…\Post\tools\link16-agent-infra`（同仓多实例）。
+>
 > **2026-06-26 更新（全绿里程碑）**：Publisher 一次性把所有缺权限 bot 全开发布——**22 个应用现在 im:chat（群读写）+ group_msg（听全群）+ drive/docx + 收群@ 全部齐全 ✅**（`bridge_scope_audit.py --all-env` 复核：本机 default/config/social_media 从 36→39、tb25_codex 38→40、tb25_xhs_card_gen_2 39→40，以及 cartoonmv(-1)/yoach/teno/api_doc/ccp/tennis_post/xhs_card_gen/lab 八个工具 bot 全部补齐 im:chat）。**自此无缺权限 bot**；再有变动跑 `--all-env` 即知。
 
 > **🔑 实测厘清（2026-06-20）**：
