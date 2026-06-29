@@ -49,6 +49,9 @@ os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 
 BASE = "https://open.feishu.cn/open-apis"
 ENV_PATH = resolve_env_path()
+# 群 agent↔agent 防回环哨兵（U+2063×3·对人不可见）：桥发到群的回复尾缀它。对端【真回复】本身就带它
+# → reply-wait 捕获后 strip 掉、绝不因它跳过（跳了就丢真回复）。同步自 feishu_bridge.PEER_LOOP_MARK。
+PEER_LOOP_MARK = "⁣⁣⁣"
 
 
 def _env(*keys):
@@ -251,49 +254,94 @@ def shared_group(sender, target, override=None):
     raise SystemExit(f"❌ {sender} 与 {target} 无共享群（或 {sender} 在多个群）。用 --in <oc_群id> 指定。")
 
 
-def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
-    """发完轮询该群，等 target 在我们这条之后发的新消息。返回 (ok, 文本|说明)。
-    群消息 sender 是 app_id；目标回复多为互动卡片(API 只给占位)→ 本机目标读其 outbox 拿真文本。"""
-    import time
+def _recent_chat(sender_bot, chat_id, n=15):
+    """一步读【群】recent n 条（按 create_time 降序）。群消息 sender.id = 发送方 app_id。"""
     aid, asec = _bot_creds(sender_bot)
-    target_app = resolve_app_id(target_name)
+    tok = _tenant_token(aid, asec)
+    url = (f"{BASE}/im/v1/messages?container_id_type=chat&container_id={chat_id}"
+           f"&sort_type=ByCreateTimeDesc&page_size={n}")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read().decode("utf-8")).get("data", {}).get("items", [])
 
-    def recent(n=8):
-        tok = _tenant_token(aid, asec)
+
+def _msg_text(m):
+    """从消息取纯文本（仅 text 类有；解析失败给空串）。"""
+    try:
+        return json.loads(m.get("body", {}).get("content", "{}")).get("text", "") or ""
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+
+def _chat_after(sender_bot, chat_id, after_ct, page=20, max_pages=25):
+    """翻页读群里 create_time > after_ct 的【所有】消息（从最新往回·覆盖到 baseline 为止）。
+    不靠固定「最近 N 条」窗口 → 多 agent 并发也不漏、不写死窗口大小。after_ct=None（没找到 baseline）
+    → 只取最新一页。max_pages 仅作失控保险（正常翻到过 baseline 即停）。返回 [item,...]（飞书 item·降序）。"""
+    aid, asec = _bot_creds(sender_bot)
+    tok = _tenant_token(aid, asec)
+    out, token = [], None
+    for _ in range(max_pages):
         url = (f"{BASE}/im/v1/messages?container_id_type=chat&container_id={chat_id}"
-               f"&sort_type=ByCreateTimeDesc&page_size={n}")
+               f"&sort_type=ByCreateTimeDesc&page_size={page}" + (f"&page_token={token}" if token else ""))
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
         with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read().decode("utf-8")).get("data", {}).get("items", [])
+            d = json.loads(r.read().decode("utf-8")).get("data", {})
+        items = d.get("items", [])
+        out += items
+        if after_ct is None:                                       # 无基线 → 只取最新一页
+            break
+        if items and int(items[-1].get("create_time", "0")) <= int(after_ct):
+            break                                                  # 本页最旧的已 <= baseline → 更旧不用再翻
+        if not (d.get("has_more") and d.get("page_token")):
+            break
+        token = d["page_token"]
+    return out
 
-    base_ct = None
-    for m in recent():
+
+def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
+    """发完【翻页读群】守望 target 的回复 —— 见 ARCH-140 §5。返回 (ok, 文本|说明)。
+
+    要点：
+      · 认 target 靠 **app_id**（群消息 sender.id = 全局 app_id·精准识别·不靠按 app 隔离的 open_id）。
+      · 读群**翻页到 baseline 为止**（不读固定「最近 N 条」）→ 多 agent 并发也不漏、不写死窗口。
+      · 只认 `msg_type==text` 为实质回复；**跳 interactive 启动/进度卡**（冷启动先吐卡、真回复是后来的文字·§2）；
+        窗口内只有卡就继续等（容冷启动）。**收这轮全部文字**（join）·哨兵 PEER_LOOP_MARK 只 strip 不跳。
+      · 多 agent 群里优先取「指名回我」(`_to_<我>` 标记)的文字；没有就全收（lenient）。
+      · 永远读群（群=共享真相源）；不读对端 outbox / 不读 DM（§6）。
+    """
+    import time
+    target_app = resolve_app_id(target_name)
+    to_me = f"to_{sender_bot}".lower()  # B→A 回我的 a2a 标记尾段 `..._to_<sender_bot>]`
+
+    base_ct = None  # baseline = 我那条的 create_time（隔离上一轮）
+    for m in _recent_chat(sender_bot, chat_id):
         if m.get("message_id") == after_mid:
             base_ct = int(m.get("create_time", "0"))
             break
+
+    saw_card = False
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for m in recent():
-            sid = (m.get("sender") or {}).get("id")
-            ct = int(m.get("create_time", "0"))
-            if sid == target_app and (base_ct is None or ct > base_ct):
-                if m.get("msg_type") == "text":
-                    try:
-                        return True, json.loads(m.get("body", {}).get("content", "{}")).get("text", "")
-                    except (json.JSONDecodeError, TypeError):
-                        return True, "(已回·文本解析失败)"
-                ob = PROJECT / "feishu" / "_state" / f"bridge-outbox-{target_name}.jsonl"
-                if ob.exists():
-                    for ln in reversed(ob.read_text(encoding="utf-8", errors="ignore").splitlines()):
-                        try:
-                            o = json.loads(ln)
-                            if o.get("kind") == "answer":
-                                return True, str(o.get("text", ""))[:1000]
-                        except json.JSONDecodeError:
-                            continue
-                return True, "(对端已回·内容是互动卡片·手机飞书可见)"
-        time.sleep(8)
-    return False, "(超时·对端未在窗口内回复)"
+        mine = [m for m in _chat_after(sender_bot, chat_id, base_ct)
+                if (m.get("sender") or {}).get("id") == target_app
+                and (base_ct is None or int(m.get("create_time", "0")) > base_ct)]
+        mine.sort(key=lambda m: int(m.get("create_time", "0")))  # 升序＝这轮原始顺序
+        texts, cards = [], 0
+        for m in mine:
+            if m.get("msg_type") == "text":
+                t = _msg_text(m).replace(PEER_LOOP_MARK, "").strip()  # strip 隐形哨兵
+                if t:
+                    texts.append(t)
+            elif m.get("msg_type") == "interactive":
+                cards += 1
+        if texts:
+            marked = [t for t in texts if to_me in t.lower()]  # 优先指名回我的；没有就全收
+            return True, "\n".join(marked or texts)
+        if cards:
+            saw_card = True  # 对端在启动/执行中 → 继续等
+        time.sleep(6)
+    hint = "·已见启动卡(对端仍在启动/执行)" if saw_card else "·对端无任何动静"
+    return False, f"(超时 {int(timeout)}s·对端未在窗口内给出文字回复{hint}·可 bridge_feishu_probe.py --group 读群人工核)"
 
 
 def main():

@@ -163,13 +163,40 @@ def all_recent(n=3):
     return out
 
 
+def bot_groups(bot):
+    """该 bot 所在的所有群（im/v1/chats·只返回群·不含人↔bot 单聊）。返回 [{chat_id, name}]。"""
+    token = tenant_token(bot)
+    out, page = [], None
+    while True:
+        url = f"{BASE}/im/v1/chats?page_size=100" + (f"&page_token={page}" if page else "")
+        d = _get(url, {"Authorization": f"Bearer {token}"}).get("data", {})
+        out += [{"chat_id": c.get("chat_id"), "name": c.get("name")} for c in d.get("items", [])]
+        if d.get("has_more") and d.get("page_token"):
+            page = d["page_token"]
+        else:
+            break
+    return out
+
+
+def resolve_group(bot, name_hint=None):
+    """解析该 bot 的 a2a 群 chat_id：名片段命中唯一 → 它；该 bot 只在一个群 → 它；否则 (None, 全群列表)。"""
+    gs = bot_groups(bot)
+    cands = [g for g in gs if name_hint in (g.get("name") or "")] if name_hint else gs
+    if len(cands) == 1:
+        return cands[0]["chat_id"], gs
+    return None, gs
+
+
 def main():
-    ap = argparse.ArgumentParser(description="飞书 API 调试探针：读各 bot 聊天记录 / 验真送达")
+    ap = argparse.ArgumentParser(description="飞书 API 调试探针：读各 bot 聊天记录 / 验真送达 / 一步读 a2a 群")
     ap.add_argument("--bot", help="bot 名（--all 时可省）")
     ap.add_argument("--all", action="store_true", help="所有 bot 各列近 N 条")
     ap.add_argument("--token", action="store_true", help="只验取 token（无副作用）")
     ap.add_argument("--recent", type=int, metavar="N", default=5, help="列近 N 条（默认 5）")
     ap.add_argument("--verify", metavar="FRAG", help="验近期是否含片段")
+    ap.add_argument("--chat", metavar="oc_", help="直接读这个 chat_id（一步到位·读群不绕 DM）")
+    ap.add_argument("--group", nargs="?", const="", metavar="名片段",
+                    help="读该 bot 的 a2a【群】(唯一群自动选·多群用名片段筛或改 --chat)；不给则探针默认读 bot 的 DM 会话")
     a = ap.parse_args()
     if a.all:
         print(json.dumps(all_recent(a.recent), ensure_ascii=False, indent=2)); return
@@ -177,11 +204,21 @@ def main():
         ap.error("需要 --bot 或 --all")
     if a.token:
         t = tenant_token(a.bot)
-        print(f"✅ tenant_access_token 取到（{a.bot}）: {t[:12]}…（len={len(t)}）")
-    elif a.verify:
-        print(f"{'✅含' if verify_delivered(a.bot, a.verify) else '❌不含'} 「{a.verify}」")
+        print(f"✅ tenant_access_token 取到（{a.bot}）: {t[:12]}…（len={len(t)}）"); return
+
+    chat = a.chat
+    if not chat and a.group is not None:                       # 给了 --group（含空串）
+        chat, gs = resolve_group(a.bot, a.group or None)
+        if not chat:
+            print("该 bot 所在的群（用 --chat <oc_> 选一个，或 --group <名片段> 筛）:")
+            for g in gs:
+                print(f"  {g['chat_id']}  {g.get('name')}")
+            return
+
+    if a.verify:
+        print(f"{'✅含' if verify_delivered(a.bot, a.verify, chat_id=chat) else '❌不含'} 「{a.verify}」")
     else:
-        print(json.dumps(recent_messages(a.bot, a.recent), ensure_ascii=False, indent=2))
+        print(json.dumps(recent_messages(a.bot, a.recent, chat_id=chat), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

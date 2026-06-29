@@ -15,9 +15,9 @@
 | `feishu/jsonl_reply_extract.py` | 从 transcript 提回复（`last_turn_reply` / `extract` / `progress`） | （Stop hook 用） |
 | `feishu/register_feishu_app.py` | **一键建飞书 bot**（扫码 OAuth + 预置 40+ 权限 + WS）· 末步打印开全权限链 | `python feishu/register_feishu_app.py --name X --bot wsN` |
 | `feishu/bridge_scope_audit.py` ⭐ | **查 bot 权限矩阵 + 缺权限授权链**（官方 `/scopes`）· **查权限唯一入口** | `python feishu/bridge_scope_audit.py --all-env` |
-| `feishu/bridge_feishu_probe.py` ⭐ | **飞书 API 调试探针**：读各 bot 真实消息历史 / 验真送达 | `python feishu/bridge_feishu_probe.py --all --recent 3` / `--bot X --verify "片段"` |
+| `feishu/bridge_feishu_probe.py` ⭐ | **飞书 API 调试探针**：读各 bot 真实消息历史 / 验真送达 / **一步读 a2a 群**（`--group`/`--chat`·不绕 DM·ARCH-140 §4 兜底读） | `python feishu/bridge_feishu_probe.py --all --recent 3` / `--bot X --verify "片段"` / `--bot X --group --recent 5` |
 | `feishu/feishu_docs.py` | 本地 md/HTML → 飞书云在线文档（`send --doc` 底层） | `python feishu/feishu_bridge.py send --bot X --doc <file>` |
-| `feishu/send_feishu_msg.py` ⭐ | 主动发**纯文字 + @人/@bot**（agent↔agent 喊话原语） | `python feishu/send_feishu_msg.py --bot X --to oc_群 --text "..." --at ou_对方` |
+| `feishu/send_feishu_msg.py` ⭐ | 主动发**纯文字 + @人/@bot**（agent↔agent 喊话原语）· **`--to-agent <名> --wait <秒>` = a2a-reply-wait**（守望对端文字回复·跳启动卡·收全这轮·ARCH-140 §5） | `python feishu/send_feishu_msg.py --bot X --to-agent Y --text "..." --wait 120` |
 | `feishu/send_feishu_file.py` ⭐ | 发**文件本体**附件 | `python feishu/send_feishu_file.py --bot X --to oc_群 --file <f>` |
 | `feishu/send_feishu_voice.py` ⭐ | 发**可拖进度条语音**（带 duration） | `python feishu/send_feishu_voice.py --bot X --audio <a> --text "说明"` |
 | `feishu/send_feishu_media.py` ⭐ | 发**图/视频/媒体在线看**链接（嵌 docx） | `python feishu/send_feishu_media.py --bot X --media <m> --title "..."` |
