@@ -1,8 +1,8 @@
 # PLAN-910 · a2a-reply-wait 改造（活计划）
 
 > **类型**：PLAN（临时·做完归档）· 绑 `PROPOSAL-910`（方案）· 走 living-plan + validate-then-scale
-> **状态**：**第一块积木✅ 完成（最简方案）** · `plan_version: 5` · 下一块 = 状态表/管家(后续 stage)
-> **本次结果(2026-06-29)**：reply-wait = `_chat_after`（翻页读群到 baseline·认全局 app_id·跳启动卡·收全文字·strip 哨兵）+ `--group` 兜底读。**零桥改动**（收件箱方案评估后删除·过度工程）。三异构 + e2e 重测全过。详见 [`ARCH-140 §5b/§7`](ARCH-140-a2a-comm-protocol.md)。
+> **状态**：**第一块积木✅ 完成并交付·里程碑收口（2026-06-29）** · `plan_version: 7` · **后续（状态表 + 管家 `tb25-ncs` + verify-gate）= 按需再做（demand-driven·主人 2026-06-29 定）**——核心能力已够用，等真有「多步跨 agent 流水线手动跑很烦」或「需查表知道该 call 谁」时再拉起，不空转预建。
+> **交付物**：`send_feishu_msg.py --to-agent --wait`（翻页读群认全局 app_id·跳启动卡·**等结构化完成裁决 done/blocked/failed 才算完**·verdict 枚举非裸 bool·自适应延长·超时诚实带回）+ `bridge_feishu_probe.py --group` 兜底读 + `ARCH-140` 协议。**零桥改动**（收件箱方案评估后删除·过度工程）。经 config 两轮代码级复审 + 多次真跨机 e2e。守望默认挂后台。
 > **一句话**：把「派活方发 a2a → robust 等到对端结构化文字回复」做扎实。这是跨 agent 队列（PROPOSAL-910）的**第一块积木**——上面所有东西（任务板状态流转、verify-gate、管家守望）都依赖「派活方能可靠拿到对端的 done/blocked/failed」。
 > **架构 SSOT**：[`ARCH-140-a2a-comm-protocol.md`](ARCH-140-a2a-comm-protocol.md)（本计划按它实现）。
 
