@@ -14,6 +14,7 @@ env-scope：只对桥 spawn 的会话生效（FEISHU_BRIDGE_SESSION 未设=普�
 """
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,18 +39,27 @@ def main():
     nextp = sd / f"bridge-next-route-{bot}.json"
     turnp = sd / f"bridge-turn-route-{bot}.json"
 
-    flag = None
-    try:
-        flag = json.loads(nextp.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        flag = None
-
-    # 桥注入标记 [飞书_from_<发>_to_<bot>]（2026-06-28 新格式·点名谁→谁）·兼容旧 [飞书-<bot>]·terminal 直敲都没有
-    is_feishu = (f"[飞书-{bot}]" in prompt) or ("[飞书_from_" in prompt and f"_to_{bot}]" in prompt)
-    if is_feishu and flag and flag.get("dest"):
-        route = {"kind": "a2a", "dest": flag["dest"], "at": flag.get("at")}
+    # 路由真相源(2026-06-29)：桥把回址焊进【本条消息】的结构化信封 [飞书 … route=<p2a|a2a> dest=.. at=..]。
+    # 先从信封解析 → 每条消息自带回址、按消息原子化、绝不过期/串台。根治：旧 next-route 便签是 per-bot 旁路文件，
+    # 群消息那轮没消费就被后来的 DM 误吃（实证 2026-06-29：一张 21h 旧群便签被注册 DM 踩中→回复漏进群+@错 bot）。
+    m = re.search(r"\[飞书 [^\]]*?route=(p2a|a2a)(?:\s+dest=([^\]\s]+))?(?:\s+at=([^\]\s]+))?", prompt)
+    if m:
+        if m.group(1) == "a2a" and m.group(2):
+            route = {"kind": "a2a", "dest": m.group(2), "at": m.group(3)}
+        else:
+            route = {"kind": "p2a"}
     else:
-        route = {"kind": "p2a"}
+        # 兼容兜底（桥重启前的旧标记 / 旧 send 路径）：旧 is_feishu 标记 + next-route 便签
+        flag = None
+        try:
+            flag = json.loads(nextp.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            flag = None
+        is_feishu = (f"[飞书-{bot}]" in prompt) or ("[飞书_from_" in prompt and f"_to_{bot}]" in prompt)
+        if is_feishu and flag and flag.get("dest"):
+            route = {"kind": "a2a", "dest": flag["dest"], "at": flag.get("at")}
+        else:
+            route = {"kind": "p2a"}
 
     try:
         sd.mkdir(parents=True, exist_ok=True)

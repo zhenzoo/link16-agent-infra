@@ -140,6 +140,18 @@ python feishu/install_codex_bridge_hooks.py --write
 - **⚠️ 过渡铁律**：hook 只在会话 **spawn 那一刻**（`--settings`）挂上 → **重启桥不会给已在跑的旧会话补 hook**。新会话自动带 v8；已在跑的会话（旧桥裸 ccp 起的）要 **respawn**（`/close`+re-@ 或自然重启）才获 v8 auto-mirror（总控下次巡航自动获得）。
 - _(jsonl 钉死 / 唤醒判别那套是 v7 防串台机制·v8 outbound 已不依赖 jsonl·现仅 `/screen`、`cmd_doctor` 显示用·`on_message` 里 re-pin 循环标 vestigial·下轮清理删)_
 
+### § 2.5.1 · 回信送哪（路由元数据信封 · 2026-06-29 根治「旧便签串台」）
+
+> **一句话**：「这条回复该回 DM 还是回某群+@谁」= 焊在【消息本体】的结构化信封里、跟消息绑死；hook 直接从本条消息解析，**不再靠会过期的旁路便签**。
+
+- **信封格式**（桥 `on_message` 注入时缀在消息末尾·人读 + 机读合一）：
+  - DM（p2a）：`[飞书 from=host to=<bot> via=DM · route=p2a]`
+  - 群 a2a：`[飞书 from=<发信open_id> to=<bot> via=群 · route=a2a dest=<群chat_id> at=<发信open_id>]`
+- **hook**（`bridge_userprompt.py`）每轮用正则从本条 prompt 解析 `route=/dest=/at=` → 写 `bridge-turn-route-<bot>.json`（schema 不变 `{kind,dest?,at?}`）→ drainer / `bridge_stop` 照旧读它发。回复 = 把信封「倒过来」（from↔to、原 via）。
+- **根因（实证 2026-06-29）**：旧机制把「回哪」写在**单独的 `bridge-next-route-<bot>.json` 便签**（per-bot 旁路文件），靠「下一轮 hook 消费即删」。但群消息那轮若没干净跑 hook（回信失败 / 会话冷重启 / env 丢），**便签不被消费就成地雷**——一张 23:18 tb25-ccp 在群 @arch 写的便签躺了 ~21h，被次日 20:46 主人的「注册 bot」DM 踩中 → arch 的 DM 回复漏进群 + @错 bot（哨兵挡住没成回环）。信封把回址跟消息绑死 → **按消息原子化，跨会话 / 交错 / 冷重启都不串、不过期**。
+- **兼容窗口**：hook 解析不到信封（桥重启前的旧标记 / 旧 `send` 路径）→ 退回旧 `is_feishu + 便签` 兜底；桥重启后每条注入都带信封 → 便签转 vestigial（`_write_next_route` 暂留兜底）。隔离测试 8 场景全过（含「旧群便签 + DM 信封 → 仍回 DM」「撞名 + 信封 → 仍回 DM」）。
+- **自查身份**：bot 不确定「我是谁」→ `python feishu/whoami.py`（读 `FEISHU_BRIDGE_SESSION` env + 名册 + 会话记录）。信封里的 `to=<bot>` 就是桥按这个身份钉的。
+
 ---
 
 ## § 2.6 · 回复用什么格式发给你（统一卡片流 · v8.1 · 2026-06-16）

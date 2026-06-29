@@ -1467,15 +1467,20 @@ def run(bot_name=None):
                                     f"——请 Read 它拿完整原文。首行：{_hint}…")
                         except Exception as _e:  # noqa: BLE001 — 落盘失败退回直接注入(至少别更糟)
                             blog(bot["name"], f"[{tid}] ⚠️ 落盘失败(退直接注入)：{str(_e)[:120]}")
-                    # 标记移到【末尾】：你的输入打头(verbatim 观感·不挡 slash command) · 标记仍在文内。
-                    # 标记格式(2026-06-28)：[飞书_from_<发>_to_<收>]·写清谁→谁、让接收 agent/人一眼分清来源。
-                    # a2a(send_feishu_msg --to-agent)发信方已盖章(open_id 按 app 隔离·接收方反查不出发信人，必须发信方盖)
-                    # → 原样用；其余(p2a 飞书DM / 群内人@)→ 补 from_host。hook is_feishu 认 [飞书_from_..._to_<bot>]。
-                    if "[飞书_from_" in text and f"_to_{bot['name']}]" in text:
-                        marker = text
+                    # 标记 = 结构化元数据信封（2026-06-29 重构·把「回址」焊进消息本体，根治会过期的旁路便签）。
+                    #   人读：from=<谁> to=<本bot> via=<DM|群>  ·  机器路由：route=<p2a|a2a>[ dest=<chat_id> at=<open_id>]
+                    # hook(bridge_userprompt) 直接从【本条消息】解析 route → 每条消息自带回址、按消息原子化，
+                    # 绝不再串台/过期。根因(实证 2026-06-29)：旧 next-route 便签是 per-bot 旁路文件，群消息那轮没消费
+                    # 就被后来的 DM 误吃——一张 21h 前的群便签被注册 DM 踩中→回复漏进群+@错 bot。信封把回址跟消息绑死。
+                    # 旧 [飞书_from_X_to_Y] 若已在 text（send_feishu_msg a2a 发信方盖章）保留它给人读，再补信封承担路由。
+                    if is_group:
+                        env_route = f"route=a2a dest={msg.chat_id} at={sender}"
+                        from_disp, via_disp = (sender or "agent"), "群"
                     else:
-                        marker = f"{text} [飞书_from_host_to_{bot['name']}]"
-                    if is_group:    # a2a：注入前落 next-route 旗标（UserPromptSubmit 那轮消费 → turn-route=a2a·回群+@发信人）
+                        env_route = "route=p2a"
+                        from_disp, via_disp = "host", "DM"
+                    marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route}]"
+                    if is_group:    # 兼容窗口：桥重启前的旧 hook 仍读这张便签；重启后 hook 改读信封 → 便签转 vestigial 兜底
                         await asyncio.to_thread(_write_next_route, bot["name"], msg.chat_id, sender)
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
                     pre = {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)}
