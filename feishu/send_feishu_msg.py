@@ -356,10 +356,10 @@ def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
             elif m.get("msg_type") == "interactive":
                 cards += 1
         last_texts = texts or last_texts
-        v = next((vv for vv in (_verdict(t) for t in reversed(texts)) if vv), None)  # 取最新那条裁决
-        if v:  # 见结构化完成裁决(done/blocked/failed) → 任务终局·返回 verdict + 这轮全部文字
-            marked = [t for t in texts if to_me in t.lower()]  # 优先指名回我的；没有就全收
-            return v, "\n".join(marked or texts)
+        final = [t for t in texts if to_me in t.lower()] or texts  # 最终要返回的同一集合(优先指名回我的)
+        v = next((vv for vv in (_verdict(t) for t in reversed(final)) if vv), None)  # 裁决只在【返回集合】上判→verdict 与返回文本严格一致(config nit)
+        if v:  # 见结构化完成裁决(done/blocked/failed) → 任务终局
+            return v, "\n".join(final)
         if cards:
             saw_card = True
         if (cards or texts) and deadline - time.time() < 30 and deadline < hard_cap:
