@@ -73,6 +73,7 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 | **tb25-lab-3** | @tb25-lab-3 | `ou_00000000000000000000000000000002` | ✅（2026-06-23 建+开通发布·39 scope 全开）| ❌ | Lab 实验区第三实例（App ID cli_0000000000000003 · cwd D:\410_VibeCoding\Lab · **claude_config_dir ~/.claude-work2** · 新建 2026-06-23）|
 | **tb25-link16** | @tb25-link16 | `ou_00000000000000000000000000000025` | ✅（开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra 桥/编排基建仓 agent（cwd …\Post\tools\link16-agent-infra · 切流时新建 2026-06-28）|
 | **tb25-link16-2** | @tb25-link16-2 | `ou_00000000000000000000000000000043` | ✅（2026-06-29 建+开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra 第二实例（App ID cli_0000000000000005 · cwd …\Post\tools\link16-agent-infra · 新建 2026-06-29）|
+| **tb24-link16** | @tb24-link16 | `ou_00000000000000000000000000000028` | ✅（2026-06-30 建+开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra **本机(tb24/zhuzhen E:)实例**（App ID cli_0000000000000004 · cwd …\Post\link16-agent-infra·**无 tools/** · 新建 2026-06-30）|
 
 > **⚠️ 权限开 ≠ 在群里**（2026-06-20 实测）：arch/twitter/podcast `im:chat` 都开了，但**实际只有 explore + TB25-speech 真被拉进群**。开权限是「能进群」，还得真把 bot 拉进群才算进。
 > **🔒 拉 bot 进群只能在飞书 App 手动**（群设置 → 添加成员/群机器人 → 搜 bot 名如 `@xhs架构师` → 加）。**API 加不了**（实测）：别的 app 的 bot 去加它报 `99992361 open_id cross app`；bot 加自己报 `232011 Operator can NOT be out of the chat`（没进群就没权操作群）。→ 建新 bot 的 §4 清单「拉进共享群」这步**必须人工**。
