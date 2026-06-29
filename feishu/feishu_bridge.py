@@ -1610,18 +1610,18 @@ def run(bot_name=None):
                 receipt(bname, {"tid": "drain", "kind": "edit_card", "delivered": False, "via": "edit-fail", "err": (str(e)[:120] or type(e).__name__)})
                 return False
 
-        async def _send_plain(text, route=None):          # 最终 fallback·route 同 _new_card
+        async def _send_plain(text, route=None):          # 最终 fallback·route 同 _new_card·返回送达布尔(给 drainer 判要不要重试·at-least-once)
             tgt, at = _route_to_dest(route) if route else _reply_dest()
             if not tgt:
-                return
+                return False
             if str(tgt).startswith("oc_"):                 # 群 → 纯文字(+真@+哨兵)
                 try:
                     await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
                                             tgt, (text or "") + PEER_LOOP_MARK, at)
-                    return
+                    return True
                 except Exception:  # noqa: BLE001
-                    pass
-            await card_send(ch, tgt, text, bname)
+                    return False
+            return await card_send(ch, tgt, text, bname) != "failed"
 
         holder = {}
 

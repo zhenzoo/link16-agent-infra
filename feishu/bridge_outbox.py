@@ -382,6 +382,14 @@ def _ans_chunks(text, budget=CARD_BUDGET):
     return chunks or [text]
 
 
+class RetrySend(Exception):
+    """answer/ask 送达失败(网络/DNS 等可重试错) → outbox_drainer 不推 HWM·下轮重发。
+    progress 不抛(临时进度·可丢)。配 state['partial'] 记已发块数 → 重发不重复。"""
+
+
+GIVE_UP_SEC = 600   # 同一条卡这么久还发不出(多为永久错·如无目标/被拒,非网络) → 放弃推进·别永堵队列
+
+
 async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_sec, clock,
                       force_flush=False, on_ask=None, on_resume=None):
     """统一卡片流：progress 当前卡 edit_card 原地长大 → 满 CARD_BUDGET 或 edit 失败 → 冻结开新卡接着写(不截断)；
@@ -415,6 +423,22 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         state["flushed"] = len(full)
         state["last_flush"] = clock()
 
+    async def _deliver(chunks, key, route=None):
+        """逐块发(从已发数 partial 续发·防重复)。任一块失败 → 记进度 + 抛 RetrySend
+        (外层 outbox_drainer 不推 HWM·下轮重发)。全发成 → 清 partial。"""
+        nonlocal n
+        start = state.setdefault("partial", {}).get(key, 0)
+        for i in range(start, len(chunks)):
+            mid = await new_card(chunks[i], route=route)
+            ok = bool(mid) and mid != "skip-progress"
+            if not ok:                                     # 发卡失败 → 退 send_plain·看它送达没
+                ok = bool(await send_plain(chunks[i], route=route))
+            n += 1
+            if not ok:
+                state["partial"][key] = i                  # 第 i 块没发出去·下轮从这接着(前面的不重发)
+                raise RetrySend()
+        state["partial"].pop(key, None)
+
     for r in recs:
         kind = r.get("kind")
         if kind in ("answer", "progress") and state.get("picker_active"):
@@ -434,11 +458,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
             route = r.get("route")                         # 本轮回信路由（bridge_stop 在 Stop 时钉进记录·防异步 drain 撞下一轮覆盖）
-            for ch in _ans_chunks(text):                   # 回复拆 ≤BUDGET 连续多卡
-                mid = await new_card(ch, route=route)
-                if mid is None:                            # 发卡彻底失败 → 最终 fallback
-                    await send_plain(ch, route=route)
-                n += 1
+            await _deliver(_ans_chunks(text), key, route)  # 送达失败→抛 RetrySend·下轮重发(不丢·去重)
             state["sent"].add(key)
             if len(state["sent"]) > SENT_CAP:
                 state["sent"].clear()
@@ -456,11 +476,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
             from jsonl_reply_extract import render_ask_card
-            for ch in _ans_chunks(render_ask_card(questions, r.get("context") or "")):
-                mid = await new_card(ch)
-                if mid is None:
-                    await send_plain(ch)
-                n += 1
+            await _deliver(_ans_chunks(render_ask_card(questions, r.get("context") or "")), key)
             state["sent"].add(key)
             if len(state["sent"]) > SENT_CAP:
                 state["sent"].clear()
@@ -503,6 +519,7 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
     offset = hwm_load()
     state = {"turn": None, "steps": [], "usage": {}, "seg_start": 0, "cur_mid": None,
              "flushed": 0, "last_flush": clock(), "sent": set(), "picker_active": False}
+    stuck = {"off": None, "since": 0.0}                   # 某 offset 卡多久(送达重试·防永堵)
     deps = dict(new_card=new_card, edit_card=edit_card, send_plain=send_plain)
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
     on_ask = lambda qs, key, sess: picker_write(state_dir, bot, qs, session=sess, key=key)   # noqa: E731
@@ -512,10 +529,20 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
         try:
             recs, new_off = read_new_records(path, offset)
             if recs:
-                await drain_batch(recs, state=state, coalesce_sec=coalesce_sec, clock=clock,
-                                  on_ask=on_ask, on_resume=on_resume, **deps)
-                offset = new_off
-                hwm_save(offset)
+                try:
+                    await drain_batch(recs, state=state, coalesce_sec=coalesce_sec, clock=clock,
+                                      on_ask=on_ask, on_resume=on_resume, **deps)
+                except RetrySend:                          # 送达失败(网络抽) → 不推 HWM·下轮重发(去重不重复)
+                    if stuck["off"] != offset:
+                        stuck["off"], stuck["since"] = offset, clock()
+                    if clock() - stuck["since"] >= GIVE_UP_SEC:   # 久发不出(多为永久错) → 放弃·推进解堵
+                        offset = new_off
+                        hwm_save(offset)
+                        stuck["off"] = None
+                else:
+                    offset = new_off
+                    hwm_save(offset)
+                    stuck["off"] = None
             elif _has_pending(state) and clock() - state["last_flush"] >= coalesce_sec:
                 await drain_batch([], state=state, coalesce_sec=coalesce_sec, clock=clock,
                                   on_ask=on_ask, on_resume=on_resume, **deps)
