@@ -39,10 +39,14 @@
 |---|---|---|---|
 | **send** | 派活方 A | A→B 发到共享群、@B、盖 `[飞书_from_A_to_B]` | `send_feishu_msg.py --to-agent B`（已有） |
 | **reply**（协议·必做） | 对端 B | 干完/受阻/失败 → **用工具回一条文字** `done/blocked:<因>/failed:<因> + 一句结论` 到群、@A | `send_feishu_msg.py --to-agent A --text "done: ..."`（已有·自动盖标记+文字+@） |
-| **reply-wait** | 派活方 A | 发完守望：**一步读群** → 收对端这轮**全部文字** → 跳启动/进度卡 → 返回 | `send_feishu_msg.py --to-agent B --wait <秒>`（**待夯实·见 §5**） |
-| **read**（兜底） | 任何人 | **一步到位读【群】** recent 消息、抽 a2a 回合（from/to + 文字）。**永远读群**，不读 DM、不读对端 outbox | `bridge_feishu_probe.py --group`（**待加·见 §5**） |
+| **reply-wait** | 派活方 A | 发完守望：翻页读群 → 等到**结构化完成裁决** → 返回 **verdict(done/blocked/failed/timeout)+文字** | `send_feishu_msg.py --to-agent B --wait <秒>`（✅·见 §5） |
+| **read**（兜底） | 任何人 | **一步到位读【群】** recent 消息、抽 a2a 回合（from/to + 文字）。**永远读群**，不读 DM、不读对端 outbox | `bridge_feishu_probe.py --group`（✅·见 §5） |
 
 > **为什么 reply 必须发文字**：桥的卡片回传飞书 API 只给占位「请升级客户端」，对端读不到、跨机更读不到。**文字**才能在群里被任何人/任何机一步读到。这条（§1.5「必回文字」）正是让「读群」足够用、不必绕 outbox 的前提。
+>
+> **完成裁决三词 reserved（硬规则·2026-06-29）**：`done:` / `blocked:` / `failed:` **行首专用于「终局裁决」**——progress/ack 行**绝不**拿这三词开头（否则「done: 子任务1」会被误判为整任务完结）。reply-wait 据此判完结。
+>
+> **verdict 不是 bool（config 点1·防 foot-gun）**：reply-wait 返回 `verdict` 枚举，`blocked`/`failed` ≠ 成功 —— 编排方按 verdict 判（`ok` 只在 `done` 为真；CLI 退出码 0=done/2=blocked/3=failed/4=timeout）。
 
 ## §5 · reply-wait 算法（夯实后·简洁版）
 

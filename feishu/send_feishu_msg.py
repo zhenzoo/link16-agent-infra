@@ -273,14 +273,19 @@ def _msg_text(m):
         return ""
 
 
-# 结构化完成信号：对端按 §1.5 协议回的 done:/blocked:/failed:（行首·可前缀 @某人）= 任务真完结。
-# 只认它为「完成」→ 不撞第一条 ack/进度文字就返回（这才保证「任务彻底完结」而非"收到一条就结束"）。
-_COMPLETE_RE = re.compile(r"(?im)^\s*(?:@\S+\s+)*(?:done|blocked|failed)\s*[:：]")
+# 结构化完成【裁决】：对端按 §1.5 协议回的 done:/blocked:/failed:（行首·可前缀 @某人）= 任务终局。
+# 只认它为「完结」→ 不撞第一条 ack/进度文字就返回。这三词 reserved 给【终局裁决】专用，progress 行别拿它们开头。
+_COMPLETE_RE = re.compile(r"(?im)^\s*(?:@\S+\s+)*(done|blocked|failed)\s*[:：]")
+
+
+def _verdict(text):
+    """文本里的结构化完成裁决 → 'done'/'blocked'/'failed'，没有 → None。"""
+    m = _COMPLETE_RE.search(text or "")
+    return m.group(1).lower() if m else None
 
 
 def _is_complete(text):
-    """文本是否带结构化完成信号 done:/blocked:/failed:（行首·允许前缀 @某人）。"""
-    return bool(_COMPLETE_RE.search(text or ""))
+    return _verdict(text) is not None
 
 
 def _chat_after(sender_bot, chat_id, after_ct, page=20, max_pages=25):
@@ -309,7 +314,9 @@ def _chat_after(sender_bot, chat_id, after_ct, page=20, max_pages=25):
 
 
 def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
-    """发完【翻页读群】守望 target，**等到结构化完成信号才算完** —— 见 ARCH-140 §5。返回 (ok, 文本|说明)。
+    """发完【翻页读群】守望 target，**等到结构化完成裁决才算完** —— 见 ARCH-140 §5。
+    返回 **(verdict, 文本)**：verdict ∈ {done, blocked, failed, timeout}（前三＝对端终局裁决·timeout＝没等到）。
+    ⚠️ blocked/failed ≠ 成功 → 调用方按 verdict 判，别拿「拿到了文字」当成功（config 点1·防 foot-gun）。
 
     要点：
       · 认 target 靠 **app_id**（群消息 sender.id = 全局 app_id·精准识别·不靠按 app 隔离的 open_id）。
@@ -318,7 +325,7 @@ def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
         （先 ack 后干活半天再回真结论的，会等到带完成信号那条）。跳 interactive 启动卡·收这轮全部文字·strip 哨兵。
       · **自适应延长**：见对端在动（启动卡/ack 文字）又快到点 → deadline 往后续（封顶 2×timeout·少误报·config 点4）。
       · 多 agent 群里优先取「指名回我」(`_to_<我>` 标记)的文字；没有就全收（lenient）。
-      · 超时仍无完成信号 → ok=False，但把已收到文字一并带回 + 明确标注「未确认完成」（绝不假装完成）。
+      · 超时仍无完成裁决 → verdict=timeout，但把已收到文字一并带回 + 明确标注「未确认完成」（绝不假装完成）。
       · 永远读群（群=共享真相源）；不读对端 outbox / 不读 DM（§6）。
     """
     import time
@@ -349,21 +356,22 @@ def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
             elif m.get("msg_type") == "interactive":
                 cards += 1
         last_texts = texts or last_texts
-        if any(_is_complete(t) for t in texts):  # 见结构化完成信号 → 任务真完结·返回这轮全部文字
+        v = next((vv for vv in (_verdict(t) for t in reversed(texts)) if vv), None)  # 取最新那条裁决
+        if v:  # 见结构化完成裁决(done/blocked/failed) → 任务终局·返回 verdict + 这轮全部文字
             marked = [t for t in texts if to_me in t.lower()]  # 优先指名回我的；没有就全收
-            return True, "\n".join(marked or texts)
+            return v, "\n".join(marked or texts)
         if cards:
             saw_card = True
         if (cards or texts) and deadline - time.time() < 30 and deadline < hard_cap:
             deadline = min(hard_cap, deadline + base)  # 对端仍在动 → 自适应延长（封顶）
         time.sleep(6)
 
-    if last_texts:  # 超时但收到过文字（无完成信号）→ 带回 + 明确标注未确认完成
+    if last_texts:  # 超时但收到过文字（无完成裁决）→ verdict=timeout·带回 + 明确标注未确认
         marked = [t for t in last_texts if to_me in t.lower()]
-        return False, ("\n".join(marked or last_texts)
-                       + "\n[⚠️ 未见结构化完成信号(done:/blocked:/failed:)·对端可能仍在执行·以上为已收到文字]")
+        return "timeout", ("\n".join(marked or last_texts)
+                           + "\n[⚠️ 未见结构化完成信号(done:/blocked:/failed:)·对端可能仍在执行·以上为已收到文字]")
     hint = "·已见启动卡(对端仍在启动/执行)" if saw_card else "·对端无任何动静"
-    return False, f"(超时·对端未给出结构化完成回复{hint}·可 bridge_feishu_probe.py --group 读群人工核)"
+    return "timeout", f"(超时·对端未给出结构化完成裁决{hint}·可 bridge_feishu_probe.py --group 读群人工核)"
 
 
 def main():
@@ -413,8 +421,9 @@ def main():
     out = {"ok": ok, "bot": a.bot, "to": target, "to_agent": a.to_agent, "at": ats,
            "message_id": info if ok else None, "err": None if ok else info}
     if ok and a.wait and a.to_agent:
-        rok, rtext = wait_for_reply(a.bot, target, a.to_agent, info, a.wait)
-        out["reply"] = {"ok": rok, "text": rtext}
+        verdict, rtext = wait_for_reply(a.bot, target, a.to_agent, info, a.wait)
+        # verdict 枚举(done/blocked/failed/timeout)·ok 只在 done 为真 → 编排方别拿 ok 把 blocked/failed 当成功(config 点1)
+        out["reply"] = {"verdict": verdict, "ok": verdict == "done", "text": rtext}
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
@@ -422,7 +431,9 @@ def main():
         print(f"{'✅ 已发' if ok else '❌ 失败'} → {tgt}"
               + (f" @{len(ats)}个" if ats else "") + (f" · {info}" if not ok else ""))
         if out.get("reply"):
-            print(f"↩ {a.to_agent} 回复：{out['reply']['text']}")
+            print(f"↩ {a.to_agent} [{out['reply']['verdict']}]：{out['reply']['text']}")
+    if a.wait and a.to_agent and out.get("reply"):  # 退出码=裁决 → 后台 shell 看 exit code 即知结果
+        sys.exit({"done": 0, "blocked": 2, "failed": 3}.get(out["reply"]["verdict"], 4))
     sys.exit(0 if ok else 1)
 
 
