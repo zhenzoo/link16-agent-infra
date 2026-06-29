@@ -273,6 +273,16 @@ def _msg_text(m):
         return ""
 
 
+# 结构化完成信号：对端按 §1.5 协议回的 done:/blocked:/failed:（行首·可前缀 @某人）= 任务真完结。
+# 只认它为「完成」→ 不撞第一条 ack/进度文字就返回（这才保证「任务彻底完结」而非"收到一条就结束"）。
+_COMPLETE_RE = re.compile(r"(?im)^\s*(?:@\S+\s+)*(?:done|blocked|failed)\s*[:：]")
+
+
+def _is_complete(text):
+    """文本是否带结构化完成信号 done:/blocked:/failed:（行首·允许前缀 @某人）。"""
+    return bool(_COMPLETE_RE.search(text or ""))
+
+
 def _chat_after(sender_bot, chat_id, after_ct, page=20, max_pages=25):
     """翻页读群里 create_time > after_ct 的【所有】消息（从最新往回·覆盖到 baseline 为止）。
     不靠固定「最近 N 条」窗口 → 多 agent 并发也不漏、不写死窗口大小。after_ct=None（没找到 baseline）
@@ -299,14 +309,16 @@ def _chat_after(sender_bot, chat_id, after_ct, page=20, max_pages=25):
 
 
 def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
-    """发完【翻页读群】守望 target 的回复 —— 见 ARCH-140 §5。返回 (ok, 文本|说明)。
+    """发完【翻页读群】守望 target，**等到结构化完成信号才算完** —— 见 ARCH-140 §5。返回 (ok, 文本|说明)。
 
     要点：
       · 认 target 靠 **app_id**（群消息 sender.id = 全局 app_id·精准识别·不靠按 app 隔离的 open_id）。
       · 读群**翻页到 baseline 为止**（不读固定「最近 N 条」）→ 多 agent 并发也不漏、不写死窗口。
-      · 只认 `msg_type==text` 为实质回复；**跳 interactive 启动/进度卡**（冷启动先吐卡、真回复是后来的文字·§2）；
-        窗口内只有卡就继续等（容冷启动）。**收这轮全部文字**（join）·哨兵 PEER_LOOP_MARK 只 strip 不跳。
+      · **只认结构化完成信号 `done:/blocked:/failed:` 为「任务真完结」**——不撞第一条 ack/进度/启动卡就返回
+        （先 ack 后干活半天再回真结论的，会等到带完成信号那条）。跳 interactive 启动卡·收这轮全部文字·strip 哨兵。
+      · **自适应延长**：见对端在动（启动卡/ack 文字）又快到点 → deadline 往后续（封顶 2×timeout·少误报·config 点4）。
       · 多 agent 群里优先取「指名回我」(`_to_<我>` 标记)的文字；没有就全收（lenient）。
+      · 超时仍无完成信号 → ok=False，但把已收到文字一并带回 + 明确标注「未确认完成」（绝不假装完成）。
       · 永远读群（群=共享真相源）；不读对端 outbox / 不读 DM（§6）。
     """
     import time
@@ -319,8 +331,10 @@ def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
             base_ct = int(m.get("create_time", "0"))
             break
 
-    saw_card = False
-    deadline = time.time() + timeout
+    base = max(1, int(timeout))
+    saw_card, last_texts = False, []
+    deadline = time.time() + base
+    hard_cap = time.time() + base * 2  # 自适应延长的绝对上限（防无限等）
     while time.time() < deadline:
         mine = [m for m in _chat_after(sender_bot, chat_id, base_ct)
                 if (m.get("sender") or {}).get("id") == target_app
@@ -334,14 +348,22 @@ def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
                     texts.append(t)
             elif m.get("msg_type") == "interactive":
                 cards += 1
-        if texts:
+        last_texts = texts or last_texts
+        if any(_is_complete(t) for t in texts):  # 见结构化完成信号 → 任务真完结·返回这轮全部文字
             marked = [t for t in texts if to_me in t.lower()]  # 优先指名回我的；没有就全收
             return True, "\n".join(marked or texts)
         if cards:
-            saw_card = True  # 对端在启动/执行中 → 继续等
+            saw_card = True
+        if (cards or texts) and deadline - time.time() < 30 and deadline < hard_cap:
+            deadline = min(hard_cap, deadline + base)  # 对端仍在动 → 自适应延长（封顶）
         time.sleep(6)
+
+    if last_texts:  # 超时但收到过文字（无完成信号）→ 带回 + 明确标注未确认完成
+        marked = [t for t in last_texts if to_me in t.lower()]
+        return False, ("\n".join(marked or last_texts)
+                       + "\n[⚠️ 未见结构化完成信号(done:/blocked:/failed:)·对端可能仍在执行·以上为已收到文字]")
     hint = "·已见启动卡(对端仍在启动/执行)" if saw_card else "·对端无任何动静"
-    return False, f"(超时 {int(timeout)}s·对端未在窗口内给出文字回复{hint}·可 bridge_feishu_probe.py --group 读群人工核)"
+    return False, f"(超时·对端未给出结构化完成回复{hint}·可 bridge_feishu_probe.py --group 读群人工核)"
 
 
 def main():

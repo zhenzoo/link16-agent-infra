@@ -48,20 +48,26 @@
 
 ```
 A 发 (→B, 群 g) ⇒ 拿到 my_mid → 在群里查到它的 create_time = baseline
-循环到 deadline（默认窗口给足·容冷启动）:
-    msgs = 一步读群 g 的 recent N 条          # 不读 DM、不读对端 outbox
-    B这轮 = [m for m in msgs if m.sender==B_app_id and m.ts>baseline]   # 升序＝原始顺序
+deadline = now + timeout ; hard_cap = now + 2*timeout      # 自适应延长上限
+循环到 deadline:
+    msgs = 翻页读群 g 到 baseline 为止（_chat_after·不读固定「最近 N 条」·并发不漏）
+    B这轮 = [m for m in msgs if m.sender==B_的全局app_id and m.ts>baseline]   # 升序＝原始顺序
     文字 = [strip(m.text, 哨兵) for m in B这轮 if m.msg_type=="text"]    # 哨兵只 strip·绝不当跳过条件！
     文字 = 优先含「_to_<我>」标记的；没有就全收            # 多 agent 群里防误配（lenient 兜底）
-    if 文字: return ok, "\n".join(文字)        # 收【这轮全部文字】，不是第一条
-    # 目前只有卡片 ⇒ B 还在启动/执行 ⇒ 继续等（不返回）
+    if 文字里有【完成信号 done:/blocked:/failed:】:        # ★只认结构化完成才算完·不撞 ack/进度就返回
+        return ok=True, "\n".join(文字)                   # 收【这轮全部文字】（含 ack）
+    if 见启动卡/ack 且快到点 且 deadline<hard_cap:
+        deadline += timeout                               # 对端仍在动 → 自适应延长（封顶·少误报·config 点4）
     sleep(poll)
-return timeout, "B 未在窗口内给出文字回复（可能仍在启动/执行·可 --group read 群人工核）"
+# 超时：收到过文字但无完成信号 → return ok=False, 已收文字 + "[⚠️未见完成信号·可能仍在执行]"（不假装完成）
+# 啥都没收到 → return ok=False, "(超时·对端无动静/仍在启动)"
 ```
 
 > **哨兵 PEER_LOOP_MARK（U+2063×3·桥给群回复尾缀·防 A↔B 桥回环）**：对端**真回复经桥回传时本身就带它** → reply-wait **strip 掉、绝不拿它当跳过条件**（跳了就丢真回复·2026-06-29 实测沉淀）。它只服务于桥的 inbound 防环，不服务于 reply-wait 的过滤。
 
-**和旧实现的差**（`send_feishu_msg.py:254-296`）：① 旧的**撞到第一条新消息（含卡片）就返回** → 改成**只认 text、跳 interactive、收全这轮文字** ② **删掉读对端本地 outbox 的兜底**（跨机本就读不到·绕路）③ 窗口给足容冷启动。**净减**（去掉 outbox 分支）+ 逻辑收紧。
+**演进**（`send_feishu_msg.py:wait_for_reply`）：① 旧的撞第一条新消息就返回 → 跳 interactive 卡、收全这轮文字、strip 哨兵 ② 删读对端 outbox 绕路 ③ 翻页到 baseline（认全局 app_id·见 §5b）④ **只认结构化完成信号 `done:/blocked:/failed:` 才算完**（撞 ack/进度不返回·支持「先 ack 后干活半天再回真结论」·这同时把 §1.5「必回 done:/blocked:/failed:」从约定变成 reply-wait 的硬判据）⑤ 见对端在动**自适应延长 deadline**（封顶 2×·少误报）⑥ 超时无完成信号 → `ok=False` 但带回已收文字 + 标注未确认（绝不假装完成）。
+
+> **守望默认挂后台**：a2a 派活 + `--wait` 由调用方挂后台跑（`run_in_background`）→ 守望完成时通知，**前台不被阻塞、可同时干别的**。「等真完成」可能很久（对端先 ack 再长跑），后台正是它的天然容器。
 
 ## §5b · 精准读对端回复（认 app_id + 翻页到 baseline·2026-06-29）
 
