@@ -1303,7 +1303,11 @@ def run(bot_name=None):
                     text = text.replace(getattr(m, "key", "") or "", "")
                 text = text.replace(bot["at_name"], "").strip()
                 if PEER_LOOP_MARK in raw_ct or PEER_LOOP_MARK in text:   # 防回环：另一个 bot 的桥回复·不是给我的新指令
-                    blog(bot["name"], f"[{(msg.id or '')[-6:]}] 🔁 群内收到带哨兵的桥回复 → 跳过(防 A↔B 回环)")
+                    try:                                                  # 点 👀(GLANCE) 回执 → 让人看到「收到了·只是按防回环规则不自动回」。点表情≠发消息·不触发对端 → 零回环风险(2026-06-30)
+                        await channel.add_reaction(msg.id, "GLANCE")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    blog(bot["name"], f"[{(msg.id or '')[-6:]}] 🔁 群内收到带哨兵的桥回复 → 👀 回执 + 跳过(防 A↔B 回环)")
                     return
             resources = list(getattr(msg, "resources", []) or [])   # 入站附件（图/文件/音视频）· SDK 给 file_key+type
             # 鉴权：群 = 你建的可信空间 → 群内(你 / 同群 peer bot)放行·且【绝不】在群消息里 auto-claim owner

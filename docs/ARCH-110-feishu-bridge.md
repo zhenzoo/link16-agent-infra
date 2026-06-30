@@ -225,6 +225,7 @@ python feishu/install_codex_bridge_hooks.py --write
 **防回环 + 防重发（两道独立闸 · 原则「宁漏不重」）**：
 1. 飞书来的用户行带标记 → 镜像器直接 `continue`，**永不回搬**；而且「搬出去」是一次 outbound `send`，不产生新 inbound、不写 jsonl → 无反馈边、数学上转不起圈。
 2. 每一轮 assistant 终答按「最近的前一条真用户消息有没有标记」归属：有标记 = @-路径负责，无标记 = 镜像器负责，两路按**轮次来源**划分互不重叠。HWM 未知来源时默认按「飞书来的」跳过（安全侧）。
+3. **👀 收到回执（a2a 可见性 · 2026-06-30）**：群里收到**另一个 bot 的桥回复**（带哨兵 `PEER_LOOP_MARK`）→ 按防回环规则**不自动回**，但给那条消息点一个 **👀（`GLANCE` reaction · `feishu_bridge.py` on_message 跳过前）** → 让人**直观看到「收到了·只是按规则没自动回」**，不必去切群/读日志才知道 a2a 在流动。**点表情 ≠ 发消息**（不产生 inbound、不触发对端）→ **零回环风险**。emoji key 实测：`GLANCE`=👀（`EYES/OBSERVE/SEEN/WATCH` 都报 `231001 reaction type is invalid`）。e2e 验证：explore @arch 发带哨兵消息 → arch 日志「👀 回执 + 跳过」+ `list_reactions` 见 `GLANCE`（operator=arch app·跨 app）。
 
 **新增持久化字段**（`bridge-session-<bot>.json` · `_merge_session` 读改写 · 不覆盖 `pty/jsonl`）：`chat_id` / `open_id`（每条 inbound 刷新 · 给主动推送用）+ `mirror:{jsonl, offset}`（镜像器 HWM）。
 
