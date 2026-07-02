@@ -43,7 +43,8 @@ def whoami():
         "is_bridge": bool(slug),
         "bot": slug or None,
         "pty": os.environ.get("WMUX_PTY_ID"),
-        "at_name": None, "cwd": None, "open_id": None, "chat_id": None, "roster_file": None,
+        "at_name": None, "feishu_display_name": None, "cwd": None,
+        "open_id": None, "chat_id": None, "roster_file": None,
     }
     if not slug:
         return info
@@ -63,6 +64,18 @@ def whoami():
             info["cwd"] = info["cwd"] or s.get("cwd")
         except (OSError, ValueError):
             pass
+    # 当场去飞书问【真实显示名】(bot/v3/info 的 app_name)——名册/session 可能是旧名
+    # (你在飞书后台改了显示名不会同步回名册·tb24-note 自我认知错乱的根因)。best-effort·失败不崩。
+    try:
+        sys.path.insert(0, str(HERE))
+        import send_feishu_msg as sfm  # 复用凭据解析 + bot/v3/info(不重复造轮子)
+        creds = sfm._creds_for(slug)
+        if creds:
+            oid, app_name = sfm._bot_self(*creds)
+            info["feishu_display_name"] = app_name
+            info["open_id"] = info["open_id"] or oid
+    except Exception:  # noqa: BLE001 — 网络/凭据缺/import 失败都不该让自查崩
+        pass
     return info
 
 
@@ -76,12 +89,18 @@ def main():
               "没有对应的飞书 bot 身份。")
         return
     print("🪪 你这个会话对应的飞书智能体身份：")
-    print(f"   · 内部代号(bot)   = {info['bot']}")
-    print(f"   · 飞书显示名       = {info['at_name'] or '(名册里没查到·可能本机没这条)'}")
-    print(f"   · 工作目录(cwd)    = {info['cwd'] or '(本仓库根)'}")
-    print(f"   · 我的 open_id     = {info['open_id'] or '(尚未拉到·桥起会话后写)'}")
-    print(f"   · wmux pty         = {info['pty']}")
-    print(f"   · 名册文件         = {info['roster_file']}")
+    print(f"   · 代号(内部·机器认它)     = {info['bot']}")
+    print(f"   · 飞书显示名(人看·当场查) = {info['feishu_display_name'] or '(查不到·凭据缺/网络·非本机 bot)'}")
+    print(f"   · @名(群里 @ 它)          = {info['at_name'] or '(名册里没查到·可能本机没这条)'}")
+    print(f"   · 工作目录(cwd)           = {info['cwd'] or '(本仓库根)'}")
+    print(f"   · 我的 open_id            = {info['open_id'] or '(尚未拉到·桥起会话后写)'}")
+    print(f"   · wmux pty                = {info['pty']}")
+    print(f"   · 名册文件                = {info['roster_file']}")
+    # 三名不一致 → 提示跑 doctor（就是 tb24-note 那种「显示名改了、代号/@名没跟上」）
+    dn, at = info.get("feishu_display_name"), (info.get("at_name") or "").lstrip("@")
+    if dn and ((at and dn != at) or dn != info["bot"]):
+        print(f"   ⚠️ 三名不一致（代号={info['bot']} / 显示名={dn} / @名={info['at_name']}）"
+              f"→ 跑 `python feishu/bridge_doctor.py --roster` 看全名册")
 
 
 if __name__ == "__main__":

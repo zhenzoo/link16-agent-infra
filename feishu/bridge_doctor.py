@@ -93,11 +93,92 @@ async def doctor_loop(state_dir, get_bots, *, asleep, now=time.time,
             await asleep(5)
 
 
+def _roster_slug(name):
+    """代号 → .env 键约定的 <SLUG>（FEISHU_BRIDGE_<SLUG>_APP_ID）。"""
+    return (name or "").upper().replace("-", "_")
+
+
+def diagnose_roster(bots, *, live_names=None):
+    """名册命名一致性（静态·纯读名册 + 可选 live 显示名）。逐 bot 判：
+      · **用户可见三名一致**（代号 == @名去@ == 飞书显示名）—— 这是【重要】检查（防 bot 认错自己/派错活）。
+      · .env 键守习惯（`FEISHU_BRIDGE_<SLUG>_APP_ID`·SLUG 由代号推）—— 这是【次要】内部约定（不一致也能 work）。
+    bots=名册条目 list；live_names={代号: 飞书显示名} 可选（--live 时现拉·没拉到的 bot 跳过显示名核）。
+    返回 [{name, at, exp_at, disp, key, exp_key, name_drift:[...], key_ok}]。"""
+    rows = []
+    for b in bots:
+        name = b.get("name") or ""
+        at = b.get("at_name") or ""
+        at_bare = at.lstrip("@")
+        disp = (live_names or {}).get(name)
+        key = b.get("app_id_env") or ""
+        exp_key = f"FEISHU_BRIDGE_{_roster_slug(name)}_APP_ID"
+        drift = []
+        if at_bare != name:
+            drift.append(f"@名={at}≠@{name}")
+        if disp and disp != name:
+            drift.append(f"飞书显示名={disp}≠{name}")
+        rows.append({"name": name, "at": at, "exp_at": "@" + name, "disp": disp,
+                     "key": key, "exp_key": exp_key, "name_drift": drift, "key_ok": key == exp_key})
+    return rows
+
+
+def _live_display_names(bots):
+    """现拉每个 bot 的飞书显示名(bot/v3/info 的 app_name)。复用 send_feishu_msg 的凭据解析·best-effort。"""
+    out = {}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import send_feishu_msg as sfm  # noqa: E402
+    except Exception:  # noqa: BLE001
+        return out
+    for b in bots:
+        nm = b.get("name")
+        try:
+            creds = sfm._creds_for(nm)
+            if creds:
+                _, app_name = sfm._bot_self(*creds)
+                if app_name:
+                    out[nm] = app_name
+        except Exception:  # noqa: BLE001 — 单个 bot 拉不到不影响其余
+            pass
+    return out
+
+
+def _print_roster(live):
+    try:
+        bots = json.loads(BOTS_CONFIG.read_text(encoding="utf-8")).get("bots", [])
+    except (OSError, json.JSONDecodeError, KeyError):
+        print("❌ 读不到名册"); return
+    live_names = _live_display_names(bots) if live else None
+    rows = diagnose_roster(bots, live_names=live_names)
+    print(f"飞书桥 名册命名一致性 @ {time.strftime('%H:%M:%S')}"
+          + ("  (--live 已拉飞书显示名)" if live else "  (静态·加 --live 拉飞书真实显示名对照)"))
+    print("-" * 72)
+    n_drift = n_keynit = 0
+    for r in rows:
+        if r["name_drift"]:
+            n_drift += 1
+            print(f"  ⚠️ {r['name']:<20} 三名漂移：{'；'.join(r['name_drift'])}")
+        else:
+            disp = f" 显示名={r['disp']}" if r["disp"] else ""
+            print(f"  ✅ {r['name']:<20} 代号=@名{('=' + '显示名' if r['disp'] else '')} 一致{disp}")
+        if not r["key_ok"]:
+            n_keynit += 1
+            print(f"     ℹ️ .env 键 {r['key']} 未守习惯 {r['exp_key']}（内部约定·不影响 work）")
+    print("-" * 72)
+    print(f"总计 {len(rows)} bot · ⚠️ 三名漂移 {n_drift} · ℹ️ 键名习惯 {n_keynit}"
+          + ("" if live else " · 未拉飞书显示名(加 --live 才核显示名)"))
+
+
 def main():
-    ap = argparse.ArgumentParser(description="飞书桥投递健康巡检")
-    ap.add_argument("--bot", help="只看某个 bot")
+    ap = argparse.ArgumentParser(description="飞书桥巡检：outbox 投递健康 + 名册命名一致性")
+    ap.add_argument("--bot", help="只看某个 bot（outbox 模式）")
     ap.add_argument("--stale-sec", type=int, default=60)
+    ap.add_argument("--roster", action="store_true", help="改查【名册命名一致性】（代号/@名/飞书显示名）")
+    ap.add_argument("--live", action="store_true", help="配 --roster：现拉每个 bot 的飞书真实显示名对照")
     a = ap.parse_args()
+    if a.roster:
+        _print_roster(a.live)
+        return
     bots = [a.bot] if a.bot else list_bots()
     now = time.time()
     print(f"飞书桥 outbox 投递健康 @ {time.strftime('%H:%M:%S')}  (stale={a.stale_sec}s)")
