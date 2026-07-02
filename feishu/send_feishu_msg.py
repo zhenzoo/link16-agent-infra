@@ -3,7 +3,8 @@
 """send_feishu_msg.py — agent 主动往某飞书会话(群/DM)发一条【纯文字】消息·可 @ 人 / @ 别的智能体。
 
 **这是 agent↔agent / agent→你「主动喊话」的原语**：在群里 @ 另一个 bot 让它干活、或给你发条提醒。
-(被动的"对方@我→我回"由桥的 drainer 自动处理·见 ARCH-101；本工具是【主动】发起。)
+**新模型（2026-07-02·见 ARCH-140）：a2a = 普通消息**——发完即返回，对端的回信**由桥自动投进【发起方会话】**
+(对方@你→桥注入你会话→你当普通消息处理)，不再需要 `--wait` 守望/轮询。发就完了，回信自然会来。
 
 **为什么纯文字、不发卡片**：飞书把【收到的卡片】渲成占位 `[interactive]` → 对端 bot **读不到正文**
 (2026-06-18 实证)。要让对端(人或 bot)读得到、且 @ 真生效(mentions 数组真填、触发对端 mentioned 事件)，
@@ -21,9 +22,9 @@
 (跨 app @ 实测生效)；跨机 bot 让它在自己那台跑 `bot/v3/info` 报过来(飞书群成员 API 只列真人·不列 bot)。
 
 用法：
-  # 【推荐·按名字喊】不用知道 open_id / 群 id：自动解析 + 找共享群 + @ 醒它，可等回复
+  # 【推荐·按名字喊】不用知道 open_id / 群 id：自动解析 + 找共享群 + @ 醒它（回信桥自动投回你会话）
   #   名字来源 = .env 的 FEISHU_BRIDGE_<名字>_APP_ID/SECRET（含 envsync 从别机同步来的）→ 不用名册/不用 commit
-  python feishu/send_feishu_msg.py --bot tb25-cartoonMV --to-agent tb25-lab --text "在跑啥？" --wait 90
+  python feishu/send_feishu_msg.py --bot tb25-cartoonMV --to-agent tb25-lab --text "在跑啥？"
   python feishu/send_feishu_msg.py --list-agents          # 看 .env 里有哪些智能体可按名字喊
   # 【原始用法仍在】手填 open_id / 群 id：
   python feishu/send_feishu_msg.py --bot explore --to oc_xxx --text "请把 docs/X.md 发到本群" --at ou_aaa
@@ -49,9 +50,6 @@ os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 
 BASE = "https://open.feishu.cn/open-apis"
 ENV_PATH = resolve_env_path()
-# 群 agent↔agent 防回环哨兵（U+2063×3·对人不可见）：桥发到群的回复尾缀它。对端【真回复】本身就带它
-# → reply-wait 捕获后 strip 掉、绝不因它跳过（跳了就丢真回复）。同步自 feishu_bridge.PEER_LOOP_MARK。
-PEER_LOOP_MARK = "⁣⁣⁣"
 
 
 def _env(*keys):
@@ -254,126 +252,6 @@ def shared_group(sender, target, override=None):
     raise SystemExit(f"❌ {sender} 与 {target} 无共享群（或 {sender} 在多个群）。用 --in <oc_群id> 指定。")
 
 
-def _recent_chat(sender_bot, chat_id, n=15):
-    """一步读【群】recent n 条（按 create_time 降序）。群消息 sender.id = 发送方 app_id。"""
-    aid, asec = _bot_creds(sender_bot)
-    tok = _tenant_token(aid, asec)
-    url = (f"{BASE}/im/v1/messages?container_id_type=chat&container_id={chat_id}"
-           f"&sort_type=ByCreateTimeDesc&page_size={n}")
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read().decode("utf-8")).get("data", {}).get("items", [])
-
-
-def _msg_text(m):
-    """从消息取纯文本（仅 text 类有；解析失败给空串）。"""
-    try:
-        return json.loads(m.get("body", {}).get("content", "{}")).get("text", "") or ""
-    except (json.JSONDecodeError, TypeError):
-        return ""
-
-
-# 结构化完成【裁决】：对端按 §1.5 协议回的 done:/blocked:/failed:（行首·可前缀 @某人）= 任务终局。
-# 只认它为「完结」→ 不撞第一条 ack/进度文字就返回。这三词 reserved 给【终局裁决】专用，progress 行别拿它们开头。
-_COMPLETE_RE = re.compile(r"(?im)^\s*(?:@\S+\s+)*(done|blocked|failed)\s*[:：]")
-
-
-def _verdict(text):
-    """文本里的结构化完成裁决 → 'done'/'blocked'/'failed'，没有 → None。"""
-    m = _COMPLETE_RE.search(text or "")
-    return m.group(1).lower() if m else None
-
-
-def _is_complete(text):
-    return _verdict(text) is not None
-
-
-def _chat_after(sender_bot, chat_id, after_ct, page=20, max_pages=25):
-    """翻页读群里 create_time > after_ct 的【所有】消息（从最新往回·覆盖到 baseline 为止）。
-    不靠固定「最近 N 条」窗口 → 多 agent 并发也不漏、不写死窗口大小。after_ct=None（没找到 baseline）
-    → 只取最新一页。max_pages 仅作失控保险（正常翻到过 baseline 即停）。返回 [item,...]（飞书 item·降序）。"""
-    aid, asec = _bot_creds(sender_bot)
-    tok = _tenant_token(aid, asec)
-    out, token = [], None
-    for _ in range(max_pages):
-        url = (f"{BASE}/im/v1/messages?container_id_type=chat&container_id={chat_id}"
-               f"&sort_type=ByCreateTimeDesc&page_size={page}" + (f"&page_token={token}" if token else ""))
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            d = json.loads(r.read().decode("utf-8")).get("data", {})
-        items = d.get("items", [])
-        out += items
-        if after_ct is None:                                       # 无基线 → 只取最新一页
-            break
-        if items and int(items[-1].get("create_time", "0")) <= int(after_ct):
-            break                                                  # 本页最旧的已 <= baseline → 更旧不用再翻
-        if not (d.get("has_more") and d.get("page_token")):
-            break
-        token = d["page_token"]
-    return out
-
-
-def wait_for_reply(sender_bot, chat_id, target_name, after_mid, timeout):
-    """发完【翻页读群】守望 target，**等到结构化完成裁决才算完** —— 见 ARCH-140 §5。
-    返回 **(verdict, 文本)**：verdict ∈ {done, blocked, failed, timeout}（前三＝对端终局裁决·timeout＝没等到）。
-    ⚠️ blocked/failed ≠ 成功 → 调用方按 verdict 判，别拿「拿到了文字」当成功（config 点1·防 foot-gun）。
-
-    要点：
-      · 认 target 靠 **app_id**（群消息 sender.id = 全局 app_id·精准识别·不靠按 app 隔离的 open_id）。
-      · 读群**翻页到 baseline 为止**（不读固定「最近 N 条」）→ 多 agent 并发也不漏、不写死窗口。
-      · **只认结构化完成信号 `done:/blocked:/failed:` 为「任务真完结」**——不撞第一条 ack/进度/启动卡就返回
-        （先 ack 后干活半天再回真结论的，会等到带完成信号那条）。跳 interactive 启动卡·收这轮全部文字·strip 哨兵。
-      · **自适应延长**：见对端在动（启动卡/ack 文字）又快到点 → deadline 往后续（封顶 2×timeout·少误报·config 点4）。
-      · 多 agent 群里优先取「指名回我」(`_to_<我>` 标记)的文字；没有就全收（lenient）。
-      · 超时仍无完成裁决 → verdict=timeout，但把已收到文字一并带回 + 明确标注「未确认完成」（绝不假装完成）。
-      · 永远读群（群=共享真相源）；不读对端 outbox / 不读 DM（§6）。
-    """
-    import time
-    target_app = resolve_app_id(target_name)
-    to_me = f"to_{sender_bot}".lower()  # B→A 回我的 a2a 标记尾段 `..._to_<sender_bot>]`
-
-    base_ct = None  # baseline = 我那条的 create_time（隔离上一轮）
-    for m in _recent_chat(sender_bot, chat_id):
-        if m.get("message_id") == after_mid:
-            base_ct = int(m.get("create_time", "0"))
-            break
-
-    base = max(1, int(timeout))
-    saw_card, last_texts = False, []
-    deadline = time.time() + base
-    hard_cap = time.time() + base * 2  # 自适应延长的绝对上限（防无限等）
-    while time.time() < deadline:
-        mine = [m for m in _chat_after(sender_bot, chat_id, base_ct)
-                if (m.get("sender") or {}).get("id") == target_app
-                and (base_ct is None or int(m.get("create_time", "0")) > base_ct)]
-        mine.sort(key=lambda m: int(m.get("create_time", "0")))  # 升序＝这轮原始顺序
-        texts, cards = [], 0
-        for m in mine:
-            if m.get("msg_type") == "text":
-                t = _msg_text(m).replace(PEER_LOOP_MARK, "").strip()  # strip 隐形哨兵
-                if t:
-                    texts.append(t)
-            elif m.get("msg_type") == "interactive":
-                cards += 1
-        last_texts = texts or last_texts
-        final = [t for t in texts if to_me in t.lower()] or texts  # 最终要返回的同一集合(优先指名回我的)
-        v = next((vv for vv in (_verdict(t) for t in reversed(final)) if vv), None)  # 裁决只在【返回集合】上判→verdict 与返回文本严格一致(config nit)
-        if v:  # 见结构化完成裁决(done/blocked/failed) → 任务终局
-            return v, "\n".join(final)
-        if cards:
-            saw_card = True
-        if (cards or texts) and deadline - time.time() < 30 and deadline < hard_cap:
-            deadline = min(hard_cap, deadline + base)  # 对端仍在动 → 自适应延长（封顶）
-        time.sleep(6)
-
-    if last_texts:  # 超时但收到过文字（无完成裁决）→ verdict=timeout·带回 + 明确标注未确认
-        marked = [t for t in last_texts if to_me in t.lower()]
-        return "timeout", ("\n".join(marked or last_texts)
-                           + "\n[⚠️ 未见结构化完成信号(done:/blocked:/failed:)·对端可能仍在执行·以上为已收到文字]")
-    hint = "·已见启动卡(对端仍在启动/执行)" if saw_card else "·对端无任何动静"
-    return "timeout", f"(超时·对端未给出结构化完成裁决{hint}·可 bridge_feishu_probe.py --group 读群人工核)"
-
-
 def main():
     ap = argparse.ArgumentParser(description="主动往飞书会话发文字 + @ —— 可【按名字】喊别的智能体(--to-agent)")
     ap.add_argument("--bot", help="发送方 bot（用它的飞书应用凭据发）")
@@ -385,7 +263,6 @@ def main():
     ap.add_argument("--at-agent", dest="at_agent", action="append", default=[],
                     help="按名字 @（可多次·自动解析 open_id；可与 --to 共用）")
     ap.add_argument("--in", dest="in_chat", default=None, help="发到哪个群 chat_id（配 --to-agent/--at-agent 用）")
-    ap.add_argument("--wait", type=int, default=0, help="发完轮询 N 秒等对端回复并打印（配 --to-agent）")
     ap.add_argument("--list-agents", dest="list_agents", action="store_true",
                     help="列出 .env 里所有可按名字喊的智能体（名字大小写/-↔_ 不敏感）")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
@@ -417,23 +294,16 @@ def main():
     # 发信人，必须发信方盖。接收桥见已有此标记就不重复加(p2a 才补 host 标记·见 feishu_bridge on_message)。
     send_text = f"{a.text} [飞书_from_{a.bot}_to_{a.to_agent}]" if a.to_agent else a.text
 
+    # 发完即返回：a2a 回信由【桥自动投进发起方会话】(见 ARCH-140 新模型)，不再守望/轮询/--wait。
     ok, info = send_msg(a.bot, target, send_text, ats)
     out = {"ok": ok, "bot": a.bot, "to": target, "to_agent": a.to_agent, "at": ats,
            "message_id": info if ok else None, "err": None if ok else info}
-    if ok and a.wait and a.to_agent:
-        verdict, rtext = wait_for_reply(a.bot, target, a.to_agent, info, a.wait)
-        # verdict 枚举(done/blocked/failed/timeout)·ok 只在 done 为真 → 编排方别拿 ok 把 blocked/failed 当成功(config 点1)
-        out["reply"] = {"verdict": verdict, "ok": verdict == "done", "text": rtext}
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
         tgt = f"{a.to_agent}（{target}）" if a.to_agent else target
         print(f"{'✅ 已发' if ok else '❌ 失败'} → {tgt}"
               + (f" @{len(ats)}个" if ats else "") + (f" · {info}" if not ok else ""))
-        if out.get("reply"):
-            print(f"↩ {a.to_agent} [{out['reply']['verdict']}]：{out['reply']['text']}")
-    if a.wait and a.to_agent and out.get("reply"):  # 退出码=裁决 → 后台 shell 看 exit code 即知结果
-        sys.exit({"done": 0, "blocked": 2, "failed": 3}.get(out["reply"]["verdict"], 4))
     sys.exit(0 if ok else 1)
 
 

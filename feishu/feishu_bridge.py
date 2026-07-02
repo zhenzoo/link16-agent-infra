@@ -63,10 +63,6 @@ CARD_SEND_TIMEOUT = 15
 # (典型撞 auto-compact·上下文满时提交被压缩吃掉) → doctor 必达重投+通知。取 120s：远超正常轮（含纯思考），
 # 又远早于"用户干等到放弃"。doctor 每 30s 巡一次 → 实际恢复在 ~timeout+30s 内。
 PENDING_TIMEOUT_SEC = 120
-# 群 agent↔agent 防回环哨兵：桥发到【群】的回复尾缀这串隐形分隔符(U+2063·对人不可见)；
-# 收到带它的群消息 = 另一个 bot 的桥回复(不是给我的新指令) → 不自动处理（否则 A@B→B@A→… 死循环）。
-PEER_LOOP_MARK = "⁣⁣⁣"
-
 # 单 bot 回退默认（无 bridge-bots.json 时）
 DEFAULT_BOT = {
     "name": "default",
@@ -103,6 +99,17 @@ def _ts():
 def blog(name, msg):
     """带时间戳的桥日志（flush · 给 bridge-<bot>.log）。"""
     print(f"[{_ts()}][{name}] {msg}", flush=True)
+
+
+# a2a 消息里发信方自盖的戳 [飞书_from_<发>_to_<收>]（send_feishu_msg 盖·用【名字】非 open_id）。
+# 桥事件侧 msg.sender.open_id 按 app 隔离、跨 app 认不出名字 → 这个戳才是「谁发的」的 SSOT。
+_A2A_FROM_RE = re.compile(r"\[飞书_from_(.+?)_to_.+?\]")
+
+
+def a2a_from_name(text, fallback):
+    """从 [飞书_from_<X>_to_<Y>] 戳解出友好发信名 X；无戳（如真人在群里 @）退 fallback。"""
+    m = _A2A_FROM_RE.search(text or "")
+    return m.group(1) if m else fallback
 
 
 # ---------- .env / 配置 ----------
@@ -1313,17 +1320,13 @@ def run(bot_name=None):
             if is_group:
                 if not getattr(msg, "mentioned_bot", False):
                     return
-                raw_ct = msg.content_text or ""
                 for m in (msg.mentions or []):
                     text = text.replace(getattr(m, "key", "") or "", "")
                 text = text.replace(bot["at_name"], "").strip()
-                if PEER_LOOP_MARK in raw_ct or PEER_LOOP_MARK in text:   # 防回环：另一个 bot 的桥回复·不是给我的新指令
-                    try:                                                  # 点 👀(GLANCE) 回执 → 让人看到「收到了·只是按防回环规则不自动回」。点表情≠发消息·不触发对端 → 零回环风险(2026-06-30)
-                        await channel.add_reaction(msg.id, "GLANCE")
-                    except Exception:  # noqa: BLE001
-                        pass
-                    blog(bot["name"], f"[{(msg.id or '')[-6:]}] 🔁 群内收到带哨兵的桥回复 → 👀 回执 + 跳过(防 A↔B 回环)")
-                    return
+                # a2a 新模型（2026-07-02·ARCH-140）：群内 @我 的消息（含对端 bot 的回信）一律【当普通消息处理】
+                #   → 注入我的会话、我自己判断要不要接着聊。删掉了旧「哨兵→跳过丢弃」（那正是「收不到对端回信」的根因）。
+                #   不再防回环（主人定：极少真跑飞·agent 能自识别该不该继续；真撞上再加保险丝）。
+                #   （注：旧 5cab4c9「peer 回复点 👀GLANCE 回执」也随之取消——新模型直接注入处理，无"收到但不处理"这个态。）
             resources = list(getattr(msg, "resources", []) or [])   # 入站附件（图/文件/音视频）· SDK 给 file_key+type
             # 鉴权：群 = 你建的可信空间 → 群内(你 / 同群 peer bot)放行·且【绝不】在群消息里 auto-claim owner
             #   （否则 peer @ 会夺 owner 并把回信目标改成 bot → 不可达·2026-06-18 实证 bug）；私聊 = 老规矩白名单/owner。
@@ -1478,7 +1481,8 @@ def run(bot_name=None):
                     # 旧 [飞书_from_X_to_Y] 若已在 text（send_feishu_msg a2a 发信方盖章）保留它给人读，再补信封承担路由。
                     if is_group:
                         env_route = f"route=a2a dest={msg.chat_id} at={sender}"
-                        from_disp, via_disp = (sender or "agent"), "群"
+                        # from 显示【名字】：解发信方自盖的戳（SSOT）·而非裸 open_id（按 app 隔离·认不出名）
+                        from_disp, via_disp = a2a_from_name(text, sender or "agent"), "群"
                     else:
                         env_route = "route=p2a"
                         from_disp, via_disp = "host", "DM"
@@ -1562,8 +1566,7 @@ def run(bot_name=None):
             content = text
             if at:                                         # 群回复：机械 @ 回发信人（卡内 <at id=…>·LLM 不参与=必准）
                 content = f"<at id={at}></at> " + content
-            if mark:                                        # 群回复尾缀隐形哨兵 → 对端识别为「桥回复」不再自动回（防回环）
-                content = content + PEER_LOOP_MARK
+            # mark 参数保留兼容(旧防回环哨兵已废·a2a 新模型不再加哨兵·见 ARCH-140)
             return {"schema": "2.0", "config": {"streaming_mode": False, "wide_screen_mode": True},
                     "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]}}
 
@@ -1574,12 +1577,12 @@ def run(bot_name=None):
                 return None
             grp = str(tgt).startswith("oc_")
             if grp:
-                # 群 → 纯文字(+真@+哨兵)·对端 bot 读得到正文(卡片只给"[interactive]")。进度卡(🤖开头)不往群里刷·只发答案。
+                # 群 → 纯文字(+真@)·对端 bot 读得到正文(卡片只给"[interactive]")。进度卡(🤖开头)不往群里刷·只发答案。
                 if (text or "").lstrip().startswith("🤖"):
                     return "skip-progress"
                 try:
                     mid = await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
-                                                  tgt, (text or "") + PEER_LOOP_MARK, at)
+                                                  tgt, (text or ""), at)
                     receipt(bname, {"tid": "drain", "kind": "group_text", "delivered": bool(mid), "via": "group_text", "mid": mid, "len": len(text or "")})
                     return mid
                 except Exception as e:  # noqa: BLE001
@@ -1615,10 +1618,10 @@ def run(bot_name=None):
             tgt, at = _route_to_dest(route) if route else _reply_dest()
             if not tgt:
                 return False
-            if str(tgt).startswith("oc_"):                 # 群 → 纯文字(+真@+哨兵)
+            if str(tgt).startswith("oc_"):                 # 群 → 纯文字(+真@)
                 try:
                     await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
-                                            tgt, (text or "") + PEER_LOOP_MARK, at)
+                                            tgt, (text or ""), at)
                     return True
                 except Exception:  # noqa: BLE001
                     return False
