@@ -1,8 +1,8 @@
-# ARCH-102 · 飞书智能体（bot）注册 + 权限 + 跨机 a2a 协作（SSOT）
+# SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
-> **职责**：「怎么**注册**一个飞书智能体、要开**哪些权限**、怎么**配置名册**、怎么让它进群跟**另一台电脑上的 agent 自主协作**」的唯一真相源。建 / 配 / 授权一个 bot 之前先读本文按清单走。
+> **职责**：「怎么**注册**一个飞书智能体、要开**哪些权限**、怎么**配置名册**、bot 有**哪几个名**、怎么让它进群跟**另一台电脑上的 agent 自主协作**」的唯一真相源。建 / 配 / 授权 / 改名一个 bot 之前先读本文按清单走。
 >
-> **分工**：本文 = **静态**（建一个 bot 要做哪些一次性动作 + 开哪些权限）。**运行时**机制（桥怎么 spawn 会话 / 收发 / 回传 / 自愈）= [`ARCH-101`](ARCH-101-feishu-bridge.md)。一键建应用脚本 = [`feishu/register_feishu_app.py`](../feishu/register_feishu_app.py)。
+> **分工**：本文 = **静态**（建一个 bot 要做哪些一次性动作 + 开哪些权限 + 名册登记）。**运行时**机制（桥怎么 spawn 会话 / 收发 / 回传 / 自愈）= [`ARCH-110`](ARCH-110-feishu-bridge.md)。一键建应用脚本 = [`feishu/register_feishu_app.py`](../feishu/register_feishu_app.py)。自查身份 = `feishu/whoami.py`；名册一致性体检 = `feishu/bridge_doctor.py --roster --live`。
 >
 > **为什么有这篇（2026-06-20）**：注册/权限/a2a 一直散在 `register_feishu_app.py` + `bridge-bots.json` + `ARCH-101` + `send_feishu_msg.py` 脚本头 + `CHANGELOG v8.2.0`，**没有统一描述**；尤其「让 bot 能在群里收别的 agent 消息」要的那个群消息 scope **全仓库从没写下来**——只活在手动点开的开发者后台里，建新 bot 总漏开。本文收口。
 
@@ -52,34 +52,64 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 - 开通入口：开发者后台「权限管理」勾 `im:chat` → **创建版本 + 发布**（光勾不发版 = 没开）。
 - 一键开通链格式：`https://open.feishu.cn/app/<app_id>/auth?q=im:chat&op_from=openapi&token_type=tenant`
 
-#### § 2.1 · `im:chat` 开通登记表（★ 唯一真相源 · 杜绝「忘了哪个开了」）
+#### § 2.1 · 一个 bot 的【三个名】+ 全员名册登记表（★ 唯一真相源）
 
-**交流水吧群 chat_id = `oc_00000000000000000000000000000001`**（「tb24-25交流水吧」· 2026-06-20 实测）。open_id 由 `bot/v3/info` 实测得（不在 .env，用各 bot 凭据现拉）。
+**每个 bot 有 3 个名，存在 3 个地方，改一个不会自动改另俩 —— 哪个是「机器认的」？**
 
-| bot | at_name | open_id | `im:chat` | 在交流水吧群 | 负责内容 |
-|---|---|---|---|---|---|
-| **arch** | @xhs架构师 | `ou_00000000000000000000000000000020` | ✅ | ❌ **未拉入**（只在「写帖通知」群）| 架构维护（= 你现在对话的）|
-| **explore** | @xhs探索者 | `ou_00000000000000000000000000000015` | ✅ | ✅ 在 | 选题探索 |
-| **twitter** | @Twitter随笔 | `ou_00000000000000000000000000000035` | ✅ | ❌ **未拉入**（不在任何群）| 发 notes（随笔 / 快速分享）|
-| **podcast** | @solo单口相声 | `ou_00000000000000000000000000000040` | ✅ | ❌ **未拉入**（不在任何群）| 单口播客脚本 |
-| **TB25-speech** | （TB25 那台）| `ou_00000000000000000000000000000007` | ✅ | ✅ 在 | 跨机 a2a 对端 |
-| default | @xhs总控桥 | — | ✅（2026-06-26 全开）| ❌ | 总控 |
-| config | @ccp配置 | — | ✅（2026-06-26 全开）| ❌ | ccp 配置 |
-| social_media | @sm社媒分发 | — | ✅（2026-06-26 全开）| ❌ | 社媒分发 |
-| **tb25-lab** | @tb25-lab | `ou_00000000000000000000000000000046` | ✅（2026-06-26 开通发布·39 scope 全开）| ❌ | Lab 实验区通用 agent（cwd D:\410_VibeCoding\Lab · 新建 2026-06-20）|
-| **tb25-cartoonMV-2** | @tb25-cartoonMV-2 | `ou_00000000000000000000000000000032` | ✅（2026-06-22 开通发布·39 scope 全开）| ❌ | cartoon-musical-mv 第二实例（cwd …\Post\tools\cartoon-musical-mv · 新建 2026-06-20）|
-| **tb25-cartoonMV-3** | @tb25-cartoonMV-3 | `ou_00000000000000000000000000000029` | ✅（2026-06-22 开通发布·39 scope 全开）| ❌ | cartoon-musical-mv 第三实例（cwd …\Post\tools\cartoon-musical-mv · 新建 2026-06-21）|
-| **tb25-lab-2** | @tb25-lab-2 | `ou_00000000000000000000000000000064` | ✅（2026-06-22 建+开通发布·39 scope 全开）| ❌ | Lab 实验区第二实例（cwd D:\410_VibeCoding\Lab · 新建 2026-06-22）|
-| **tb25-lab-3** | @tb25-lab-3 | `ou_00000000000000000000000000000002` | ✅（2026-06-23 建+开通发布·39 scope 全开）| ❌ | Lab 实验区第三实例（App ID cli_0000000000000003 · cwd D:\410_VibeCoding\Lab · **claude_config_dir ~/.claude-work2** · 新建 2026-06-23）|
-| **tb25-link16** | @tb25-link16 | `ou_00000000000000000000000000000025` | ✅（开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra 桥/编排基建仓 agent（cwd …\Post\tools\link16-agent-infra · 切流时新建 2026-06-28）|
-| **tb25-link16-2** | @tb25-link16-2 | `ou_00000000000000000000000000000043` | ✅（2026-06-29 建+开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra 第二实例（App ID cli_0000000000000005 · cwd …\Post\tools\link16-agent-infra · 新建 2026-06-29）|
-| **tb24-link16** | @tb24-link16 | `ou_00000000000000000000000000000028` | ✅（2026-06-30 建+开通发布·39 scope 全开）| ✅ 在 | link16-agent-infra **本机(tb24/zhuzhen E:)实例**（App ID cli_0000000000000004 · cwd …\Post\link16-agent-infra·**无 tools/** · 新建 2026-06-30）|
+| 名 | 是什么 · 存哪 | 机器认它吗 |
+|---|---|---|
+| **代号**（roster `name` + `.env` 键 `FEISHU_BRIDGE_<代号>_APP_ID`）| **机器内部名 = SSOT**：代码全靠它（`--to-agent` / `--bot` / 存档文件名 / 凭据键 / whoami）| ✅ **这个才是机器认的** |
+| **@名**（roster `at_name`）| 群里 @ 它时打的·惯例 = `@`+代号（@ 实际靠 open_id 解析·at_name 主要给人读 + strip mention）| 半 |
+| **飞书显示名**（Feishu `app_name`·`bot/v3/info` 现拉·飞书后台改）| 你在飞书 App 里看到的那个（头像旁）| ❌ 纯给人看·机器不认 |
 
-> **⚠️ 权限开 ≠ 在群里**（2026-06-20 实测）：arch/twitter/podcast `im:chat` 都开了，但**实际只有 explore + TB25-speech 真被拉进群**。开权限是「能进群」，还得真把 bot 拉进群才算进。
-> **🔒 拉 bot 进群只能在飞书 App 手动**（群设置 → 添加成员/群机器人 → 搜 bot 名如 `@xhs架构师` → 加）。**API 加不了**（实测）：别的 app 的 bot 去加它报 `99992361 open_id cross app`；bot 加自己报 `232011 Operator can NOT be out of the chat`（没进群就没权操作群）。→ 建新 bot 的 §4 清单「拉进共享群」这步**必须人工**。
->
-> **「能不能开个权限让 bot 自己拉别的 bot 进群」官方答（chat-member/create 文档 · 2026-06-20 查证）**：理论上 bot 能拉人/拉机器人进群，但前提 ① **调用 bot 必须已在群里** ② 群若设「仅群主/管理员可加人」，还需 bot 是群主/管理员、或「**创建该群 + 有 `im:chat:operate`（更新应用所创建群的群信息）权限**」。**但 `99992361 cross app` 不是缺权限**——是**跨应用 open_id 命名空间**问题：每个 bot 是独立飞书应用，explore 眼里 arch 的 open_id ≠ arch 自报的那个（实测 twitter 日志里 explore 显示成 `ou_083f…`，非自报 `ou_3531…`）。成员管理严格要「本应用命名空间的 open_id」，跨应用拿不到 → **没有一个「开了就能拉别 app 机器人进群」的权限**。`im:chat:operate` 只解「群限管理员加人」那个设置，解不了跨应用 open_id。**结论：拉 bot 进群保持人工**（一次性·可接受）。
-> **维护铁律：以后每开/关 `im:chat` 或把 bot 拉进/移出群，就回来改这张表。** 这张表 = 唯一真相源。
+> **🔒 命名铁律（2026-07-02 定）：三名保持一致 —— 代号 == @名去掉@ == 飞书显示名。** 你在飞书后台改了显示名后，**必回来把代号(roster name + .env 键) + @名 也改齐**。跑 **`python feishu/bridge_doctor.py --roster --live`** 一眼看出谁没跟上（⚠️ 三名漂移）。根因案例：把 bot 飞书显示名改成 `tb24-notes` 但代号还是 `twitter` → 那个 bot `whoami` 查名册老本子 → 自我认知错乱「我是 twitter 还是 notes？」。whoami 现在**当场拉飞书真实显示名**，不再错。
+
+**交流水吧群 chat_id = `oc_00000000000000000000000000000001`**（「tb24-25交流水吧」）。open_id / 显示名由 `bot/v3/info` 现拉（`gather_bots` / whoami·不写死）。
+
+**全员权限 + 在群 状态（2026-07-02 全量实测）：所有 26 应用【权限全齐】(在线文档+群读写+收群@+听全群·39~47 scope) ✅ · 【全部在交流水吧群】✅** —— 无缺权限、无掉群的。故下表不再逐列权限/在群（全 ✅）。
+
+**① 本机 D:（tb25 · zhenz · 在名册 `bridge-bots.local.json` · 19 bot · 三名已全部对齐 ✅）**
+
+| 代号(=@名去@=显示名) | open_id | 分管仓 / cwd | 备注 |
+|---|---|---|---|
+| tb25-speech | `ou_00000000000000000000000000000007` | Post/tools/solo-podcast-video | |
+| tb25-speech-codex | `ou_00000000000000000000000000000003` | Post/tools/solo-podcast-video | codex runtime · **2026-07-02 由 `tb25-codex` rename**（三名合一）|
+| tb25-cartoonMV | `ou_00000000000000000000000000000031` | Post/tools/cartoon-musical-mv | |
+| tb25-cartoonMV-2 | `ou_00000000000000000000000000000032` | Post/tools/cartoon-musical-mv | |
+| tb25-cartoonMV-3 | `ou_00000000000000000000000000000029` | Post/tools/cartoon-musical-mv | |
+| tb25-cartoonMV-codex | `ou_00000000000000000000000000000036` | Post/tools/cartoon-musical-mv | codex |
+| tb25-xhs-card-gen | `ou_00000000000000000000000000000058` | Post/tools/xhs-card-gen | |
+| tb25-xhs-card-gen-2 | `ou_00000000000000000000000000000061` | Post/tools/xhs-card-gen | |
+| tb25-lab | `ou_00000000000000000000000000000046` | Lab | |
+| tb25-lab-2 | `ou_00000000000000000000000000000064` | Lab | |
+| tb25-lab-3 | `ou_00000000000000000000000000000002` | Lab | ccw2(~/.claude-work2) |
+| tb25-yoach | `ou_00000000000000000000000000000033` | Yoach | ccw3 |
+| tb25-teno | `ou_00000000000000000000000000000054` | Teno | |
+| tb25-api-doc | `ou_00000000000000000000000000000004` | _api-doc | |
+| tb25-ccp | `ou_00000000000000000000000000000011` | .claude-personal | |
+| tb25-tennis-post | `ou_00000000000000000000000000000018` | Post/tools/tennis-plan-post | |
+| tb25-link16 | `ou_00000000000000000000000000000025` | Post/tools/link16-agent-infra | 基建/编排 |
+| tb25-link16-2 | `ou_00000000000000000000000000000043` | Post/tools/link16-agent-infra | |
+| tb25-coacho | `ou_00000000000000000000000000000051` | Coacho | ccw3 · **2026-07-02 .env 键 `COACHO`→`TB25_COACHO`**（对齐命名习惯）|
+
+**② 另一台 E:（tb24 · zhuzhen · 凭据在本机 .env 但 bot 跑在 E: · 7 bot · ⚠️ 代号↔显示名 漂移·待 tb24-link16 对齐 E: 名册）**
+
+> E: bot 的飞书显示名已改成 `tb24-*`，但 `.env` 键（= 旧代号）还是老 xhs 名 → 三名不一致。**E: 的 roster 在 E: 机·D: 改不到 → 由 `tb24-link16` agent 在 E: 对齐**（代号/@名 → 对应新显示名）。
+
+| .env 键（旧代号） | 飞书显示名（新·应对齐到的） | open_id |
+|---|---|---|
+| `ARCH` | tb24-xhs架构师 | `ou_00000000000000000000000000000020` |
+| `CONFIG` | tb24-ccp-config | `ou_00000000000000000000000000000057` |
+| `EXPLORE` | tb24-xhs-explore | `ou_00000000000000000000000000000015` |
+| `LINK16` | tb24-link16 | `ou_00000000000000000000000000000028` |
+| `PODCAST` | tb24-notes-2 | `ou_00000000000000000000000000000040` |
+| `SOCIAL_MEDIA` | tb24-xhs-xcom | `ou_00000000000000000000000000000048` |
+| `TWITTER` | **tb24-notes** | `ou_00000000000000000000000000000035` |
+
+> （另有 legacy fallback 应用 `default`·`FEISHU_BRIDGE_APP_ID`·无独立 open_id·不参与 a2a·保留兜底。）
+
+> **🔒 拉 bot 进群只能在飞书 App 手动**（群设置 → 添加成员/群机器人 → 搜 bot 名 → 加）。**API 加不了**（实测）：别的 app 的 bot 去加报 `99992361 open_id cross app`；bot 加自己报 `232011 Operator can NOT be out of the chat`。→ 建新 bot 的 §4 清单「拉进共享群」这步**必须人工**。（跨应用 open_id 命名空间隔离 → 没有「开了就能拉别 app 机器人进群」的权限·`im:chat:operate` 只解「群限管理员加人」设置。）
+> **维护铁律：以后每 ① 建/改/rename bot ② 开/关权限 ③ 拉进/移出群 ④ 在飞书改显示名 —— 都回来改这张表 + 跑 `bridge_doctor.py --roster --live` 复核。** 这张表 = 唯一真相源。
 
 ### § 2.2 · 能力 → scope 映射 + 每 bot 实测权限（★分享仓库时：要哪个功能开哪个权限）
 
@@ -125,6 +155,7 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 | tb25_link16 | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 | tb25_link16_2 | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 
+> **2026-07-02 更新（全量复核 + rename）**：`bridge_scope_audit.py --all-env` 全跑 —— **26 应用（本机 19 + 跨机 7）权限全齐 ✅**（在线文档+群读写+收群@+听全群·39~47 scope），**无缺权限 bot**；且 §2.1 gather 实测 **全部在交流水吧群 ✅**。本次 rename：`tb25-codex`→`tb25-speech-codex`（三名合一）、`.env` 键 `COACHO`→`TB25_COACHO`（对齐习惯）——上面矩阵里的 `tb25_codex`/`coacho` 行名随之作废。**本矩阵 = 历史快照·以 `--all-env` 现跑 + §2.1 登记表为准。**
 > **2026-06-29 更新**：新增 **tb25-link16**（切流时建·App `cli_…`）+ **tb25-link16-2**（本日建·App `cli_0000000000000005`），均 `--bot ... --raw` 审计 39 scope 全绿（drive/im:chat/group_msg/收群@ 齐）→ 现 **24 应用**。两者 cwd 均 `…\Post\tools\link16-agent-infra`（同仓多实例）。
 >
 > **2026-06-26 更新（全绿里程碑）**：Publisher 一次性把所有缺权限 bot 全开发布——**22 个应用现在 im:chat（群读写）+ group_msg（听全群）+ drive/docx + 收群@ 全部齐全 ✅**（`bridge_scope_audit.py --all-env` 复核：本机 default/config/social_media 从 36→39、tb25_codex 38→40、tb25_xhs_card_gen_2 39→40，以及 cartoonmv(-1)/yoach/teno/api_doc/ccp/tennis_post/xhs_card_gen/lab 八个工具 bot 全部补齐 im:chat）。**自此无缺权限 bot**；再有变动跑 `--all-env` 即知。
