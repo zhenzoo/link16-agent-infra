@@ -30,7 +30,7 @@ cd E:\410_VibeCoding\Post\link16-agent-infra
 python feishu/feishu_bridge.py start
 ```
 
-> ⚠️ **第一次切会断对话**：第 1 步停的正是承载当前飞书对话的进程 → 你会下线。第 2 步起来后，在新桥 `@tb24-xhs总控桥` 发条消息，新桥里的 Claude 就接上了。
+> ⚠️ **第一次切会断对话**：第 1 步停的正是承载当前飞书对话的进程 → 你会下线。第 2 步起来后，在新桥 `@tb24-xhs-autopilot` 发条消息，新桥里的 Claude 就接上了。
 
 ---
 
@@ -39,7 +39,7 @@ python feishu/feishu_bridge.py start
 | 验什么 | 怎么验 | 期望 |
 |---|---|---|
 | 桥起来了 | `python feishu/feishu_bridge.py status` | 7 bot 全 connected |
-| **入站+回传全链路** | 飞书 `@tb24-xhs总控桥` 发「在吗」 | 收到回复 |
+| **入站+回传全链路** | 飞书 `@tb24-xhs-autopilot` 发「在吗」 | 收到回复 |
 | **cwd 锚对** | `@tb24-notes` 发消息 | 它在 `Post/notes` 仓起会话回复（不是 link16） |
 | 在线文档 | `python feishu/feishu_bridge.py send --bot explore --doc docs/SOP-130-cutover.md` | 收到云文档链接 |
 | a2a（可选） | 让一个 bot 在群 @ 另一个 bot | 对端收到 |

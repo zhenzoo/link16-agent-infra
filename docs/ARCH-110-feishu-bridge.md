@@ -1,4 +1,4 @@
-# ARCH-101 · 飞书智能体桥（xhs总控桥 · owned-session 多智能体）
+# ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
 > **职责**：Publisher 手机/飞书 ↔ 电脑上 Claude 会话的**双向对话**。每个智能体（bot）= 飞书群里一个**常驻身份** + 桥**自己托管的一个 wmux 会话**。你在手机上 @ 它，它就把活交给它在电脑上专属的那个 Claude。
 > **取代**：[`ARCH-100-orchestrator.md`](ARCH-100-orchestrator.md)（Telegram · 需代理 · superseded）。
@@ -17,7 +17,7 @@
 ├ 机器人「xhs-card」  = scripts/notify.py(webhook) · 单向播报 · 纯脚本「又笨又稳」
 │    瘦身后只发: 真告警(卡死/限流自愈/桥挂/escape) + 关键里程碑(ready/发布页铺好/已入库)
 │    砍掉: 每小时巡检 + 逐条进度  →  想知道进度就「@ 智能体问」
-└ 智能体「xhs总控桥」(可 N 个) = feishu/feishu_bridge.py · 飞书 SDK · 双向对话
+└ 智能体「tb24-xhs-autopilot」等(可 N 个) = feishu/feishu_bridge.py · 飞书 SDK · 双向对话
      每个 bot 托管一个「桥自己开的」wmux 会话(下面 §2)
 ```
 

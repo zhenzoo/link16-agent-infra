@@ -92,7 +92,7 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 | tb25-link16-2 | `ou_00000000000000000000000000000043` | Post/tools/link16-agent-infra | |
 | tb25-coacho | `ou_00000000000000000000000000000051` | Coacho | ccw3 · **2026-07-02 .env 键 `COACHO`→`TB25_COACHO`**（对齐命名习惯）|
 
-**② 另一台 E:（tb24 · zhuzhen · 凭据在本机 .env 但 bot 跑在 E: · 7 bot · ⚠️ 代号↔显示名 漂移·待 tb24-link16 对齐 E: 名册）**
+**② 另一台 E:（tb24 · zhuzhen · 凭据在本机 .env 但 bot 跑在 E: · 8 bot · ✅ 代号/@名已对齐 2026-07-03 default→tb24-xhs-autopilot 收尾·.env 键按设计解耦保持不改）**
 
 > E: bot 的飞书显示名已改成 `tb24-*`，但 `.env` 键（= 旧代号）还是老 xhs 名 → 三名不一致。**E: 的 roster 在 E: 机·D: 改不到 → 由 `tb24-link16` agent 在 E: 对齐**（代号/@名 → 对应新显示名）。
 
@@ -106,7 +106,7 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 | `SOCIAL_MEDIA` | tb24-xhs-xcom | `ou_00000000000000000000000000000048` |
 | `TWITTER` | **tb24-notes** | `ou_00000000000000000000000000000035` |
 
-> （另有 legacy fallback 应用 `default`·`FEISHU_BRIDGE_APP_ID`·无独立 open_id·不参与 a2a·保留兜底。）
+> （原 `default` 兜底应用·`FEISHU_BRIDGE_APP_ID`·**2026-07-03 三名合一正名为 `tb24-xhs-autopilot`**·open_id `ou_00000000000000000000000000000022`·cwd `Post/xhs-card-gen`·xhs 巡航总控·已是一等 bot 参与 a2a。）
 
 > **🔒 拉 bot 进群只能在飞书 App 手动**（群设置 → 添加成员/群机器人 → 搜 bot 名 → 加）。**API 加不了**（实测）：别的 app 的 bot 去加报 `99992361 open_id cross app`；bot 加自己报 `232011 Operator can NOT be out of the chat`。→ 建新 bot 的 §4 清单「拉进共享群」这步**必须人工**。（跨应用 open_id 命名空间隔离 → 没有「开了就能拉别 app 机器人进群」的权限·`im:chat:operate` 只解「群限管理员加人」设置。）
 > **维护铁律：以后每 ① 建/改/rename bot ② 开/关权限 ③ 拉进/移出群 ④ 在飞书改显示名 —— 都回来改这张表 + 跑 `bridge_doctor.py --roster --live` 复核。** 这张表 = 唯一真相源。
@@ -130,7 +130,7 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 
 | bot | 机器 | 在线文档(drive) | 群信息读写(im:chat) | 群信息只读 | 收群@ | 听全群(group_msg) | 总 scope |
 |---|---|---|---|---|---|---|---|
-| default | 本机 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
+| tb24-xhs-autopilot (原 default) | 本机 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 | arch | 本机 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 | explore | 本机 | ✅ | ✅ | ✅ | ✅ | ✅ | 47 |
 | twitter | 本机 | ✅ | ✅ | ✅ | ✅ | ✅ | 40 |
