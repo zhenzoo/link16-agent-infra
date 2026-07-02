@@ -1,6 +1,31 @@
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
+> **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.4.0 — a2a 通讯大简化「就是普通消息」+ 三名合一名册体检 + feishu 总入口 skill（2026-07-02）
+
+**WHY**：旧 a2a「桥收到对端回信(带哨兵)就扔·靠发起方 `--wait` 守望才收得到」有洞——**不守望就收不到**回信（实测 tb24-link16 回信 @tb25-link16 漏接）。主人定：a2a 当普通消息，删整套守望+防回环。附带：bot 三名（代号/@名/飞书显示名）漂移致自我认知错乱；`send_feishu_msg` 埋在 link16 别仓发现不了。
+
+**WHAT**
+- **a2a = 普通消息（架构重构）**：桥 on_message 删「哨兵→跳过丢弃」→ @我的群消息（含对端回信）一律【注入我会话】当普通消息处理；「必达」从「发起方记得守望」搬到「桥自动投递（永远在线）」。`send_feishu_msg` 删 `wait_for_reply`/轮询/超时/退出码裁决/哨兵（净减 ~120 行）；drainer 删哨兵尾缀 + `PEER_LOOP_MARK` 常量。**不再机械防回环**（靠 agent 自识别·真跑飞再加保险丝）。旧 v0.3.3 的 GLANCE 回执随之取消。
+- **信封 from 显示名字**：`a2a_from_name()` 解 `[飞书_from_X_to_Y]` 戳 → 信封 `from=<名>` 非裸 open_id。
+- **三名合一 + 体检**：`whoami` 当场拉飞书真实显示名 + 分行报「代号/显示名/@名」；`bridge_doctor --roster[--live]` 核三名一致性。本机 rename `tb25-codex`→`tb25-speech-codex` + `.env` 键 `COACHO`→`TB25_COACHO`（19 bot·0 漂移）。
+- **feishu 总入口 skill**（`~/.claude-personal`·全环境）：description 触发任何飞书意图 → 领到 link16 `TOOLS.md` 全套（治「软规则被长 CLAUDE.md 淹忘」）。
+- docs：`ARCH-140` 重写为新模型；`SOP-120` 三名定义 + 全量 26 bot 登记表（全权限齐✅全在群✅）；`PLAN-911` 活计划。
+- **⚠️ 桥改动需重启桥（stop→start）生效。回退基线 = `v0.3.4`（旧守望模型）。**
+
+---
+
+## v0.3.4 — 发往飞书的链接套反引号→不可点：`_linkify` 前置拆纯-URL 反引号（2026-06-30）
+
+**WHY**：经桥发往飞书的链接若被套反引号/代码块，`_linkify` 按「代码区原样留」跳过 → 飞书渲成不可点等宽码（owner 实证）。
+
+**WHAT**
+- `feishu_bridge.py` `_linkify` 开头调 `_unwrap_url_code()`：把【整体是一个 http(s) URL】的行内反引号/代码围栏先拆成裸 URL 再 linkify；真代码/多 token/非 URL 不动。一处改全 bot 生效。
+- **= v0.4.0 大简化之前的最后一个稳定点·回退基线**。
+
+---
 
 ## v0.3.3 — a2a 收到回执 👀：peer bot 群回复点 GLANCE（防回环不自动回·但让人看到收到了）（2026-06-30）
 
