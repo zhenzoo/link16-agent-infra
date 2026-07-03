@@ -14,19 +14,24 @@ import os
 import re
 import time
 
-SPIN_N = 4           # 连续空转到此 → 熔断
+SPIN_N = 3           # 连续「低内容」a2a 消息到此 → 熔断（2026-07-03：4→3·含短消息触发）
 RECENT_K = 3         # 判重复：与该 peer 最近 K 条正文比
+SHORT_MAX = 50       # 剥壳后正文 ≤ 此长度 = 短消息 = 低内容（抓「客气环」·见下 is_short 说明）
 
 # footer = Stop hook（bridge_stop.py）缀在末卡的过程小结：`\n\n---\n✅ 已完成 · 🔧.. 💭.. · 🪙..`
 _FOOTER_RE = re.compile(r"\n-{3,}\n✅.*$", re.S)
+# a2a 发信方自盖的戳 [飞书_from_X_to_Y]（send_feishu_msg 追加在文末）——是桥元数据、非正文内容，
+# 判「长度/重复」前先剥掉（否则 30 字左右的戳会把短消息撑过阈值、也让整条比较不准·2026-07-03）。
+_STAMP_RE = re.compile(r"\[飞书_from_.+?_to_.+?\]")
 _WS_RE = re.compile(r"\s+")
 _WORD_RE = re.compile(r"\w", re.UNICODE)   # 词字符（字母/数字/CJK·Unicode-aware）；纯标点/emoji 无词字符
 _PUNCT_EDGE_RE = re.compile(r"^[\W_]+|[\W_]+$", re.UNICODE)   # 首尾标点/符号
 
 
 def strip_body(text):
-    """剥掉 footer（过程小结）→ 返回 a2a 正文核心。@mention 桥入站已剥·此处只管 footer。绝不抛。"""
-    return _FOOTER_RE.sub("", (text or "")).strip()
+    """剥掉 footer（过程小结）+ from 戳 → 返回 a2a 正文核心。@mention 桥入站已剥。绝不抛。"""
+    t = _FOOTER_RE.sub("", (text or ""))
+    return _STAMP_RE.sub("", t).strip()
 
 
 def _norm(s):
@@ -56,20 +61,24 @@ class SpinTracker:
     observe(peer, text) → tripped(bool)：True 仅在【首次达到连续 N 空转】那条返回（避免重复 DM）。
     有营养的消息（有词字符 + 不与近 K 条重复）→ 计数清零 = 有效对话永不误伤（含简短对话）。"""
 
-    def __init__(self, n=SPIN_N, recent_k=RECENT_K):
+    def __init__(self, n=SPIN_N, recent_k=RECENT_K, short_max=SHORT_MAX):
         self.n = n
         self.recent_k = recent_k
-        self._count = {}       # peer_open_id -> 连续空转数
+        self.short_max = short_max
+        self._count = {}       # peer_open_id -> 连续低内容数
         self._recent = {}      # peer_open_id -> 最近 K 条正文 list（判重复）
         self._tripped = set()  # 已熔断过的 peer（避免重复 DM）
 
     def observe(self, peer, text):
         body = strip_body(text)
         recent = self._recent.get(peer, [])
-        low = is_low_signal(body, recent)
+        # 「低内容」= 无词字符 / 与近 K 条重复 / 【短】(≤short_max)。第三条抓「客气环」——一堆有内容但没意义
+        #   的短往返(🤝对齐/🫡待命/…)，empty/dup 抓不住(带词、不逐字重复)、轮数也抓不住(有效活比它更长)；
+        #   唯一干净分界是长度(有效活全是长消息·2026-07-03 群日志实证 12 轮有效 vs 4 轮客气环)。仅 a2a·真人不计。
+        low = is_low_signal(body, recent) or len(body) <= self.short_max
         self._recent[peer] = (recent + [body])[-self.recent_k:]   # 滚动保留最近 K 条
         if not low:
-            self._count[peer] = 0            # 有营养 → 清零（有效对话永不误伤）
+            self._count[peer] = 0            # 有营养的【长】消息 → 清零（长对话/有效协作永不误伤）
             return False
         c = self._count.get(peer, 0) + 1
         self._count[peer] = c

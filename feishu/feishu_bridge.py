@@ -1348,15 +1348,15 @@ def run(bot_name=None):
                     if a2a_guard.mute_has(str(STATE_DIR), bot["name"], sender):               # ① 已静音（结束工具/熔断）→ 不注入·loop 断
                         blog(bot["name"], f"🔇 a2a 静音中·跳过 {_peer_nm or ('…'+sender[-6:])} 的群消息（不唤醒会话）")
                         return
-                    if _spin.observe(sender, text):                                           # ② 连续 N 条空转 → 熔断
+                    if _spin.observe(sender, text):                                           # ② 连续 N 条低内容(空/重复/短) → 熔断
                         a2a_guard.mute_add(str(STATE_DIR), bot["name"], sender, name=_peer_nm, by="fuse")
-                        blog(bot["name"], f"🚨 a2a 空转熔断：与 {_peer_nm or ('…'+sender[-6:])} 连续 {_spin.n} 条空转 → 已静音（永久·/a2a-unmute 复位）")
+                        blog(bot["name"], f"🚨 a2a 熔断：与 {_peer_nm or ('…'+sender[-6:])} 连续 {_spin.n} 条低内容(空/重复/短) → 已静音")
                         _own = mirror_target(bot["name"])
                         if _own:
                             await reply(_own, (f"⚠️ **a2a 自动熔断**\n你的 `{bot['name']}` 和 "
-                                               f"`{_peer_nm or ('…'+sender[-6:])}` 在群里连续 {_spin.n} 条**空转**"
-                                               f"（`.` / `Standing by` 这类没内容的往返）→ 已自动【静音】这对、停止互投，两面板现在闲置。\n"
-                                               f"要重开对话：发 `/a2a-unmute` 给我。"))
+                                               f"`{_peer_nm or ('…'+sender[-6:])}` 在群里连续 {_spin.n} 条**低内容往返**"
+                                               f"（空转 `.` / 重复刷屏 / 一堆短客气话 🤝🫡）→ 已自动【静音】这对、停止互投，两面板闲置。\n"
+                                               f"**你搭句话就自动恢复**（不必手动 `/a2a-unmute`）。"))
                         return
             resources = list(getattr(msg, "resources", []) or [])   # 入站附件（图/文件/音视频）· SDK 给 file_key+type
             # 鉴权：群 = 你建的可信空间 → 群内(你 / 同群 peer bot)放行·且【绝不】在群消息里 auto-claim owner
@@ -1400,6 +1400,15 @@ def run(bot_name=None):
             blog(bot["name"], f"[{tid}] 收到 {sender}: {text[:80]!r}")
             # 持久化 DM 坐标（给主动推送 send CLI + 镜像器目标用 · _merge 不覆盖 pty/jsonl/mirror）
             _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender, "chat_updated": int(time.time())})
+            # 主人 p2a 搭话（非 bridge 斜杠命令）→ 自动 re-arm a2a：解除本 bot 全部 a2a 静音 + 归零 spin。
+            #   主人 2026-07-03 定：熔断只是「停 + idle」，主人重新搭话就该恢复互通，【不必手动 /a2a-unmute】。
+            #   （/a2a-unmute 保留为显式兜底；斜杠命令如 /a2a-status 不触发·免自己把要查的清了。）
+            if not is_group and text and not text.startswith("/"):
+                _rearmed = a2a_guard.mute_remove(str(STATE_DIR), bot["name"], None)
+                for _oid in _rearmed:
+                    _spin.forget(_oid)
+                if _rearmed:
+                    blog(bot["name"], f"[{tid}] 🔊 主人搭话 → 自动 re-arm a2a（解除 {len(_rearmed)} 个静音·无需 /a2a-unmute）")
             # 回信路由 per-turn：回址焊进消息末尾信封 + UserPromptSubmit hook 取【最末】信封→turn-route·不存 session 级 reply_dest（长 turn 交错会串台·见 ARCH-110 §2.5.1）
             try:
                 await channel.add_reaction(msg.id, "THUMBSUP")
