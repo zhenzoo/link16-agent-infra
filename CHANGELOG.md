@@ -3,6 +3,18 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.5.2 — 桥 start/stop 支持 `--bot` 单开关 + 修 PID 匹配误杀兄弟 bot（2026-07-03）
+
+**WHY**：改公共代码 `feishu_bridge.py` 得全队重启才生效，但「单个 bot 挂了」（如今早 notes-2）只需单独拉起——缺个「只开/关一个 bot」的口子。且旧 `_bridge_pids` 的 `--bot` 匹配有 bug：`stop --bot tb24-notes` 会**连 `tb24-notes-2` 一起误杀**（子串匹配 → status 里 notes 还显示双 PID）。
+
+**WHAT**（tb24-link16 加·rebase 于 v0.5.1）
+- `cmd_start`/`cmd_stop` 支持 `--bot X`：裸命令 `--bot X`=只起/刷新它、`stop --bot X`=只停它，其余 bot PID/会话纹丝不动。**不加新命令、不搞 restart**——只在熟的两条上缀 `--bot`。
+- 修 `_bridge_pids` PID 匹配：`--bot tb24-notes` 不再误杀 `tb24-notes-2`（收紧到精确边界匹配·`--bot X\b`）。
+- 真机验过：tb24-notes 整轮 关→查→开只动它、旁 7 个不变；status 双 PID 误计数消失。`TOOLS.md` 登记。
+- **CLI 每次新进程读最新码 → 无需全队重启即生效**（运行中的 daemon 不跑 `cmd_*`）。与 v0.5.1 的 `on_message`（re-arm/短触发）分处不同函数·rebase 干净无冲突。
+
+---
+
 ## v0.5.1 — a2a 熔断实战加固：搭话自动 re-arm + 短消息触发治「客气环」（2026-07-03）
 
 **WHY**：v0.5.0 上线当天与 tb24-link16 真机联调，暴露两个问题——① **熔断＝永久静音、要手动 `/a2a-unmute`** 太别扭（主人：熔断只是「停+idle」，我重新搭话就该恢复）；② 两 agent 活干完后互道「🤝对齐 / 🫡待命 / 收工」**空转 ~7 轮低信号熔断没抓住**（客气话带词、不逐字重复 → `is_low_signal` 判 False）。读群日志实证：**有效部署联调连续 12 轮 > 客气环 4 轮**，故「数轮数」的闸原理上不成立（低了砍有效活、高了漏环）。
