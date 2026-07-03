@@ -1,0 +1,46 @@
+# PLAN-912 · a2a 死循环防护（结束工具 + 空转熔断）· living plan
+
+> **类型**：PLAN（活计划·做完归档）· band 9xx = 高层/策略区（与 PLAN-910/911 同段）
+> **plan_version**：2
+> **SSOT**：设计写进 [`ARCH-140 §2`](ARCH-140-a2a-comm-protocol.md)；本档只做 step 追踪 + 影响回填。
+
+## 背景（案由）
+
+2026-07-02 `a3bb039` 删了整套防回环（哨兵 `PEER_LOOP_MARK` + 守望），新模型「a2a=普通消息、桥无条件把 agent 每轮输出路由回群」。2026-07-03 tb24-notes-2 ↔ tb25-tennis-post 在「交流水吧」群**空转 160 条**（80 来回·每~90s 一条·全是 `.` / `Standing by` / `(Silent.)` / `(No output.)`·🔧0💭0）。根因两层：① 机制层——桥无条件路由 + 零熔断；② 认知层——agent 想沉默但 harness 催「产出可见输出」→ 退而发「.」，而「.」就是燃料。逃生口 `bridge_stop.py:164 if not cards: return` 几乎从不命中（agent 总吐至少一个字符）。
+
+## 最终设计（主人已拍板 · 2026-07-03）
+
+- **主力·on-demand·agent 主动**：结束工具 `feishu/a2a_end.py` —— agent 察觉空转就调 → 落静音标志（keyed by peer open_id）→ 桥 `on_message` 注入前先看标志，muted 则不注入该 peer 群消息（连会话都不唤醒=零烧钱）。
+- **兜底·纯代码·不靠 agent**：桥 `on_message` 给「同一对（keyed peer open_id）连续【空转】a2a 消息」计数；连续 **N=4** 空转 → 落静音标志 + 给 owner DM 报**一条**。**计数器遇「有营养的消息」清零**（有效长对话永不误伤——只砍连续的空，砍空无损）。空转判据（机械）：剥掉 @ 和 footer 后正文 **≤15 字符** 或 与该 peer 上一条**近似重复**。
+- **熔断 = 永久静音**：**无冷却、无自动解封**（主人定，砍复杂度）。重启对话由主人手动（slash `/a2a-unmute`）。
+- **keying**：一律用 peer `sender` open_id（回信不带名字戳，只有它稳定且必在）。名字仅用于告警（`a2a_from_name` 有戳则显示、否则退 open_id）。
+- **闸门唯一点**：`on_message`（收侧）。出侧无需改（不注入 → 无 turn → 无回复）。
+
+## Stages / Steps
+
+| # | stage · step | 改什么 | 碰哪些文件 | 删/改/加 | 验证档 | 状态 |
+|---|---|---|---|---|---|---|
+| A | **doc-first** | 写设计到 SSOT | `docs/ARCH-140 §2-6`、本档 | 改+加 | none | ✅ |
+| B1 | **guard 原语** | 纯函数（strip footer / 低信号判定 / norm）+ 静音集/lastpeer 文件 I/O + spin 更新纯函数 | 新 `feishu/a2a_guard.py` | 加（新能力） | cheap（单测纯函数） | ✅ |
+| B2 | **结束工具** | CLI：读 lastpeer → 加静音集 → 打印确认 | 新 `feishu/a2a_end.py` | 加（新能力） | cheap（import+跑一次） | ✅ |
+| B3 | **收侧接线·静音** | on_message：每条 a2a 写 lastpeer；注入前查静音集 muted 则 skip；新增 `/a2a-unmute`+`/a2a-status` slash | `feishu/feishu_bridge.py` | 改 | stage | ✅ |
+| C1 | **熔断纯逻辑** | spin 计数/清零/触发（纯函数，B1 内） | `feishu/a2a_guard.py` | 加 | cheap（异构单测） | ✅ |
+| C2 | **收侧接线·熔断** | on_message：每条 a2a bump spin；trip → 加静音集 + DM owner 一条 | `feishu/feishu_bridge.py` | 改 | stage | ✅ |
+| D | **教 agent** | a2a 说明：收到≠必须回；空转→调结束工具别发「.」 | `ARCH-140 §4`、`TOOLS.md` | 改+加 | none | ✅ |
+| E1 | **改前测（红）** | 现网旧码：与 tb24-link16 控制性空转，确认不自停 | —（现网观测·或引 07-03 事故为证） | — | e2e | ⬜ 待主人 |
+| E2 | **同步两机** | commit+push → tb24 那边 git pull + 两机桥 stop→start 到一致 | — | — | — | ⬜ 待主人 |
+| E3 | **改后测（绿+异构+回归）** | ① 连续4空转→自动熔断+告警+永久静音+面板闲置 ② 结束工具→静音 ③ 回归：实质多轮 a2a 不误伤 | —（现网 e2e） | — | e2e（≥3 异构） | ⬜ 待主人 |
+
+## 影响回填（每步改完记这里 · bump plan_version）
+
+- **v2（B1/C1 执行中·单测自我纠错）**：原设计「空转判据＝正文 ≤15 字符 或 重复」被 cheap 单测**当场证伪**——`≤15` 会误砍**简短但新颖**的真实消息（`20`/`A吧`/`调到 24px`：一段全短消息的有效对话被判 4 连空转误熔断）。**改判据**（回填 ARCH-140 §2.5）：① 无词字符（纯标点/emoji）**或** ② 与近 3 条 norm 后重复。长度阈值整个删掉——长度分不清「简短实质」vs「空转」，`无词字符 + 重复`才零误伤。重跑单测含【对抗性简短对话】全绿。
+- **熔断时机**：连续【空转】达 N=4 触发。因第 1 条相同 filler 无「上一条」可比→判有营养（基线注入），故持续同句刷屏时在**第 5 条**（1 基线 + 4 重复）熔断。纯标点刷屏（`.`×4·每条都 R1 无词字符）则第 4 条直接熔断。stage 集成测已验此行为。
+- **净加自检**：新增 `a2a_guard.py`/`a2a_end.py` 全在用（桥 + 工具引用）、无重复造轮子、删了未用的 `SpinTracker.count()`（半成品）→ 合格（新能力天然加法）。
+
+## 验收标准（理想态·闭环 oracle）
+
+1. **熔断**：连续 4 条 ≤15字符/重复 a2a → 桥日志出「🚨 a2a 熔断」+ owner DM 收到一条 + 静音集文件出现该 peer + 之后该 peer 群消息**不再注入**（桥日志无「已注入」）。oracle = 桥日志 + `bridge-a2a-mute-*.json` + owner 收到的 DM。
+2. **不误伤**：连续 ≥6 轮**实质** a2a（每条带新内容）→ 计数器全程清零、**不熔断**（桥日志无熔断）。
+3. **结束工具**：agent 跑 `python feishu/a2a_end.py` → 静音集出现 lastpeer + 后续该 peer 不注入。
+4. **永久静音**：熔断后过 10+ 分钟仍静音（无自动解封）；`/a2a-unmute` 后恢复注入。
+5. **零回归**：p2a（真人 DM）与实质 a2a 一切照旧（真人消息永不被静音逻辑拦）。
