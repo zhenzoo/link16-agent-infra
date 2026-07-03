@@ -1047,7 +1047,9 @@ def _bridge_pids(exclude_self=True, bot=None):
     编辑器等（它们命令行含 "feishu_bridge" 但没有 run 子命令）→ stop/单实例锁不会顺手杀掉无辜进程。"""
     me = os.getpid()
     ex = (" -and $_.ProcessId -ne " + str(me)) if exclude_self else ""
-    bf = (" -and $_.CommandLine -match '--bot " + bot + "\\b'") if bot else ""
+    # 收尾用 (?![\w-]) 而非 \b：\b 在连字符处也成立 → `--bot tb24-notes` 会误配 `--bot tb24-notes-2`
+    # （2026-07-03 单 bot start/stop 落地时发现·会让 stop --bot tb24-notes 连 notes-2 一起杀）。
+    bf = (" -and $_.CommandLine -match '--bot " + bot + "(?![\\w-])'") if bot else ""
     ps = (
         "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
         "Where-Object { $_.CommandLine -match 'feishu_bridge\\.py.*\\brun\\b'" + ex + bf + " } | "
@@ -1740,11 +1742,17 @@ def run(bot_name=None):
 
 
 # ---------- 子命令 ----------
-def cmd_start():
+def cmd_start(bot_filter=None):
     """为每个 bot 各起一个脱离终端的后台进程 run --bot <name>（各自日志 · 各自单实例锁）。
     用 subprocess.Popen + DETACHED_PROCESS 直接起 —— 比 powershell Start-Process 可靠
-    （后者实测会 hang 住不返回、卡住后续 bot · 2026-06-15）。"""
+    （后者实测会 hang 住不返回、卡住后续 bot · 2026-06-15）。
+    bot_filter 给定（裸命令 + `--bot X`）→ 只起这一个 bot；已在跑则 run 的单实例锁自动顶替=刷新它。"""
     bots = load_bots()
+    if bot_filter:
+        bots = [b for b in bots if b["name"] == bot_filter]
+        if not bots:
+            print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
+            sys.exit(2)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     script = str(Path(__file__).resolve())
     detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
@@ -1762,17 +1770,23 @@ def cmd_start():
         )
         started.append(nm)
         time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地
+    _stop_hint = f"`stop --bot {bot_filter}` 停它" if bot_filter else "`stop` 停全部"
     print(f"已后台启动 {len(started)} 个 bot 进程：{', '.join(started)}（脱离终端·关终端不死）"
-          f"\n日志：{LOG_DIR}\\bridge-<bot>.log · 用 `status` 查 · `stop` 停全部。")
+          f"\n日志：{LOG_DIR}\\bridge-<bot>.log · 用 `status` 查 · {_stop_hint}。")
 
 
-def cmd_stop():
-    pids = _bridge_pids(exclude_self=True)
+def cmd_stop(bot_filter=None):
+    """停 bot 进程。bot_filter 给定（`stop --bot X`）→ 只停这一个；不给=停全部。"""
+    if bot_filter and bot_filter not in {b["name"] for b in load_bots()}:
+        print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
+        sys.exit(2)
+    pids = _bridge_pids(exclude_self=True, bot=bot_filter)
     if not pids:
-        print("没有在跑的 bot 进程。")
+        print(f"bot '{bot_filter}' 没在跑。" if bot_filter else "没有在跑的 bot 进程。")
         return
     _kill(pids)
-    print(f"已停全部 bot 进程 PID={','.join(pids)}")
+    print(f"已停 bot '{bot_filter}' 进程 PID={','.join(pids)}" if bot_filter
+          else f"已停全部 bot 进程 PID={','.join(pids)}")
 
 
 def cmd_status():
@@ -1927,7 +1941,7 @@ def main():
     ap.add_argument("cmd", nargs="?", default="start",
                     choices=["run", "start", "stop", "status", "workspaces", "send", "doctor"],
                     help="(默认)start / run[--bot X] / stop / status / workspaces / send=主动推DM / doctor=一眼健康")
-    ap.add_argument("--bot", default=None, help="run/send 时指定哪个 bot（不给=配置第一个）")
+    ap.add_argument("--bot", default=None, help="指定单个 bot：start/stop/run/send 都认它（裸命令 --bot X=只起它·stop --bot X=只停它·不给=全部）")
     ap.add_argument("--text", default=None, help="send：要推送的文本")
     ap.add_argument("--file", default=None, help="send：从文件读内容（长/多行用这个免 shell 转义）")
     ap.add_argument("--image", default=None, help="send：把本地图片发到 DM（可与 --text 同用·封面/截图/图表直达手机）")
@@ -1939,9 +1953,9 @@ def main():
     if args.cmd == "run":
         run(args.bot)
     elif args.cmd == "start":
-        cmd_start()
+        cmd_start(args.bot)
     elif args.cmd == "stop":
-        cmd_stop()
+        cmd_stop(args.bot)
     elif args.cmd == "status":
         cmd_status()
     elif args.cmd == "workspaces":

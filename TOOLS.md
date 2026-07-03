@@ -7,7 +7,7 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
-| `feishu/feishu_bridge.py` | **双向桥主进程**：N 个 bot 长连接，@bot→注入对应 wmux 会话 / 回传 v8（hook→outbox→drainer）· `send`/`status`/`stop`/`doctor` | `python feishu/feishu_bridge.py start`（`stop`/`status`） |
+| `feishu/feishu_bridge.py` | **双向桥主进程**：N 个 bot 长连接，@bot→注入对应 wmux 会话 / 回传 v8（hook→outbox→drainer）· `send`/`status`/`stop`/`doctor` | `python feishu/feishu_bridge.py`（=start 全部）/ `stop`（停全部）· **单个 bot 加 `--bot X`**：裸命令 `--bot X`=只起/刷新它、`stop --bot X`=只停它（不碰别的 bot·2026-07-03） |
 | `feishu/wmux_session.py` | 桥的 wmux 会话原语：spawn 新 workspace 起 ccp / pty_alive 探活 / close | （库 · 桥内部用） |
 | `feishu/bridge_outbox.py` | **v8 回传唯一发送引擎 drainer**：增量读 outbox → 发卡片 / 进度限流合并 / 去重 | （桥 runner 起的后台 task） |
 | `feishu/bridge_doctor.py` | 机械自愈：outbox 三态诊断 + 卡→自动重启 drainer | `python feishu/bridge_doctor.py [--bot X]` |
