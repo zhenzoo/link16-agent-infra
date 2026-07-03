@@ -1,5 +1,9 @@
 # PLAN-912 · a2a 死循环防护（结束工具 + 空转熔断）· living plan
 
+> ⚠️ **已被 v0.6 取代并全删（2026-07-03 深夜）**：本档记的「结束工具 + 空转熔断（N 数轮/短消息触发）」被主人判定「靠 N 兜底不简洁、烧 token、抓不住客气环」。**真解＝改路由**（agent 普通回复默认回主人、发 peer 只靠主动带戳 `send_feishu_msg` → 循环结构上没了）——见重写的 [`ARCH-140`](ARCH-140-a2a-comm-protocol.md) v0.6 + `CHANGELOG v0.6.0`。`a2a_guard.py`/`a2a_end.py`/熔断代码**已删**。本档留作**历史记录**（试过什么、为什么不行）。
+
+---
+
 > **类型**：PLAN（活计划·做完归档）· band 9xx = 高层/策略区（与 PLAN-910/911 同段）
 > **plan_version**：3
 > **SSOT**：设计写进 [`ARCH-140 §2`](ARCH-140-a2a-comm-protocol.md)；本档只做 step 追踪 + 影响回填。

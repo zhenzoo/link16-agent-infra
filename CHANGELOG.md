@@ -3,6 +3,19 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.6.0 — a2a 死循环【结构性根治】：默认回主人·发 peer 靠主动带戳（删掉整套熔断）（2026-07-03）
+
+**WHY**：v0.5.x 靠「连续 N 条低内容→熔断+静音」兜底,主人判定**不简洁、烧 token、且抓不住「客气环」**(🤝对齐/🫡待命 有内容不重复)。根本矛盾:**只要一轮的 route 焊死 a2a,agent terminal 输出任何字都被桥推回群**——实证 agent 说「我不发了」照样被推群、又循环。软办法(agent 自觉)结构上不可能 work,能干预的只有桥。
+
+**WHAT（改路由·净删一大坨）**
+- **核心一处**：`feishu_bridge.py on_message` 群消息信封 `route=a2a dest=.. at=..` → **`route=p2a`**。⇒ **agent 的普通回复恒回主人 DM、不回 peer**;`from=<peer名>` 仍带上让 agent 知道谁派的活。
+- **发 peer 唯一路 = 主动 `send_feishu_msg`（带戳）**：派活/回结果/续轮都靠它。**反射性回复到不了 peer → 死循环【结构上】不可能**(「B 回我→我反射回 B」第一步就断,我那句回了主人)。续轮 = 刻意再 send(反射性「谢谢/🫡」永远误触发不了)。顺带白得「子 agent 回信自动汇报进主人 DM」(A2A→P2A 可见性)。
+- **删除(净减)**：`feishu/a2a_guard.py`+`feishu/a2a_end.py`(2 文件)、on_message 的静音检查/空转计数/熔断/DM 块、re-arm 块、`/a2a-unmute`+`/a2a-status` slash、`SpinTracker`、`import a2a_guard`、`bridge-a2a-mute/lastpeer-*` 状态文件。TOOLS.md 去 a2a_end/a2a_guard。**v0.5.0/.1/.2 那套熔断全退役。**
+- **必守规矩(教 agent·ARCH-140 §4)**：被 peer 派活干完,**结果要主动 `send_feishu_msg` 发回去**(否则普通输出进了自己主人 DM、派活方收不到);忘发主人 DM 也看得到、补发即可。一般**一发一收**就够,没工作必要不再 send。
+- SSOT = 重写的 `ARCH-140`(v0.6)。**⚠️ 改桥需 stop→start 重启生效。** 回退基线 = `v0.5.2`。
+
+---
+
 ## v0.5.2 — 桥 start/stop 支持 `--bot` 单开关 + 修 PID 匹配误杀兄弟 bot（2026-07-03）
 
 **WHY**：改公共代码 `feishu_bridge.py` 得全队重启才生效，但「单个 bot 挂了」（如今早 notes-2）只需单独拉起——缺个「只开/关一个 bot」的口子。且旧 `_bridge_pids` 的 `--bot` 匹配有 bug：`stop --bot tb24-notes` 会**连 `tb24-notes-2` 一起误杀**（子串匹配 → status 里 notes 还显示双 PID）。

@@ -85,7 +85,6 @@ import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
-import a2a_guard  # noqa: E402  (a2a 死循环防护：静音集 + 空转熔断·ARCH-140 §2.5)
 
 try:
     import notify as _notify  # scripts/notify.py · 纯标库 webhook（绕代理 3 重试）· 必达最后一道兜底
@@ -1102,7 +1101,6 @@ def run(bot_name=None):
         sys.exit(2)
 
     msg_lock = asyncio.Lock()   # 本 bot 进程内消息串行（防并发注入交错 / ensure_session race · 见 on_message）
-    _spin = a2a_guard.SpinTracker()   # 本 bot 进程内 a2a 空转计数（per peer·内存态·重启即重置·ARCH-140 §2.5）
 
     def make_handler(bot, channel):
         account_default = agent_runtime.account_snapshot(bot)   # 名册默认账号快照（/account 临时切·/close 切回这个）
@@ -1154,21 +1152,6 @@ def run(bot_name=None):
                 await asyncio.to_thread(wmux, "send", rec["pty"], "/clear", "--allow-ws", rec["workspace_id"])
                 await asyncio.to_thread(wmux, "enter", rec["pty"], "--allow-ws", rec["workspace_id"])
                 await reply(chat_id, "🧹 已重置会话上下文（/clear）"); return
-            if cmd in ("/a2a-unmute", "/a2a-resume"):      # 解除 a2a 静音·重开对话（ARCH-140 §2.5·熔断永久·靠这个手动复位）
-                _arg = arg.strip()
-                removed = a2a_guard.mute_remove(str(STATE_DIR), bot["name"], _arg or None)
-                for _oid in removed:
-                    _spin.forget(_oid)                     # 清空转计数·下次从头数
-                await reply(chat_id, (f"🔊 已解除 {len(removed)} 个 a2a 静音——桥恢复接收它们的群消息（可重开对话）。"
-                                      if removed else "🔊 当前没有被静音的 a2a 对手（无需复位）。")); return
-            if cmd == "/a2a-status":                       # 看现在静音了谁
-                _muted = a2a_guard.mute_load(str(STATE_DIR), bot["name"])
-                if _muted:
-                    _ls = "\n".join(f"· {m.get('name') or k[-6:]}（by={m.get('by')}）" for k, m in _muted.items())
-                    await reply(chat_id, f"🔇 已静音 {len(_muted)} 个 a2a 对手：\n{_ls}\n\n`/a2a-unmute` 解除全部。")
-                else:
-                    await reply(chat_id, "🔊 当前没有被静音的 a2a 对手。")
-                return
             if cmd == "/stop":
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可打断"); return
@@ -1342,24 +1325,9 @@ def run(bot_name=None):
                 for m in (msg.mentions or []):
                     text = text.replace(getattr(m, "key", "") or "", "")
                 text = text.replace(bot["at_name"], "").strip()
-                # a2a（2026-07-02·ARCH-140）：群内 @我 的消息（含对端 bot 回信）当普通消息注入我会话·我自己判断要不要接着聊。
-                # a2a 防回环（ARCH-140 §2.5·2026-07-03）：注入【前】两道闸（仅对【非主人】的群消息）——① 已静音则不注入 ② 连续空转则熔断。
-                if sender and sender != load_owner(bot["name"]):
-                    _peer_nm = a2a_from_name(text, "") or None
-                    a2a_guard.lastpeer_write(str(STATE_DIR), bot["name"], sender, _peer_nm)   # 记当前对手（给零参 a2a_end 用）
-                    if a2a_guard.mute_has(str(STATE_DIR), bot["name"], sender):               # ① 已静音（结束工具/熔断）→ 不注入·loop 断
-                        blog(bot["name"], f"🔇 a2a 静音中·跳过 {_peer_nm or ('…'+sender[-6:])} 的群消息（不唤醒会话）")
-                        return
-                    if _spin.observe(sender, text):                                           # ② 连续 N 条低内容(空/重复/短) → 熔断
-                        a2a_guard.mute_add(str(STATE_DIR), bot["name"], sender, name=_peer_nm, by="fuse")
-                        blog(bot["name"], f"🚨 a2a 熔断：与 {_peer_nm or ('…'+sender[-6:])} 连续 {_spin.n} 条低内容(空/重复/短) → 已静音")
-                        _own = mirror_target(bot["name"])
-                        if _own:
-                            await reply(_own, (f"⚠️ **a2a 自动熔断**\n你的 `{bot['name']}` 和 "
-                                               f"`{_peer_nm or ('…'+sender[-6:])}` 在群里连续 {_spin.n} 条**低内容往返**"
-                                               f"（空转 `.` / 重复刷屏 / 一堆短客气话 🤝🫡）→ 已自动【静音】这对、停止互投，两面板闲置。\n"
-                                               f"**你搭句话就自动恢复**（不必手动 `/a2a-unmute`）。"))
-                        return
+                # a2a v0.6（2026-07-03·ARCH-140）：peer 派活/回信【照常注入我会话·我读到】，但下面信封写 route=p2a →
+                #   我的【普通回复默认回主人 DM、不回 peer】。要回 peer 只能主动 send_feishu_msg（带戳）。
+                #   ⇒ 反射性回复到不了 peer → 死循环【结构上】没了。删掉了整套熔断/静音/结束工具（不需要兜底）。
             resources = list(getattr(msg, "resources", []) or [])   # 入站附件（图/文件/音视频）· SDK 给 file_key+type
             # 鉴权：群 = 你建的可信空间 → 群内(你 / 同群 peer bot)放行·且【绝不】在群消息里 auto-claim owner
             #   （否则 peer @ 会夺 owner 并把回信目标改成 bot → 不可达·2026-06-18 实证 bug）；私聊 = 老规矩白名单/owner。
@@ -1402,15 +1370,6 @@ def run(bot_name=None):
             blog(bot["name"], f"[{tid}] 收到 {sender}: {text[:80]!r}")
             # 持久化 DM 坐标（给主动推送 send CLI + 镜像器目标用 · _merge 不覆盖 pty/jsonl/mirror）
             _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender, "chat_updated": int(time.time())})
-            # 主人 p2a 搭话（非 bridge 斜杠命令）→ 自动 re-arm a2a：解除本 bot 全部 a2a 静音 + 归零 spin。
-            #   主人 2026-07-03 定：熔断只是「停 + idle」，主人重新搭话就该恢复互通，【不必手动 /a2a-unmute】。
-            #   （/a2a-unmute 保留为显式兜底；斜杠命令如 /a2a-status 不触发·免自己把要查的清了。）
-            if not is_group and text and not text.startswith("/"):
-                _rearmed = a2a_guard.mute_remove(str(STATE_DIR), bot["name"], None)
-                for _oid in _rearmed:
-                    _spin.forget(_oid)
-                if _rearmed:
-                    blog(bot["name"], f"[{tid}] 🔊 主人搭话 → 自动 re-arm a2a（解除 {len(_rearmed)} 个静音·无需 /a2a-unmute）")
             # 回信路由 per-turn：回址焊进消息末尾信封 + UserPromptSubmit hook 取【最末】信封→turn-route·不存 session 级 reply_dest（长 turn 交错会串台·见 ARCH-110 §2.5.1）
             try:
                 await channel.add_reaction(msg.id, "THUMBSUP")
@@ -1521,12 +1480,13 @@ def run(bot_name=None):
                     # 绝不再串台/过期。根因(实证 2026-06-29)：旧 next-route 便签是 per-bot 旁路文件，群消息那轮没消费
                     # 就被后来的 DM 误吃——一张 21h 前的群便签被注册 DM 踩中→回复漏进群+@错 bot。信封把回址跟消息绑死。
                     # 旧 [飞书_from_X_to_Y] 若已在 text（send_feishu_msg a2a 发信方盖章）保留它给人读，再补信封承担路由。
+                    # a2a v0.6（2026-07-03·ARCH-140）：群消息信封也写 route=p2a → 我的【普通回复恒回主人 DM、不回 peer】。
+                    #   from=<peer名> 仍带上，让我知道谁派的活、好主动 send_feishu_msg 回去。发 peer 只有 send_feishu_msg 一条路。
+                    #   ⇒ 反射性回复到不了 peer，死循环结构上没了。（对照旧版：群→route=a2a 把回复焊回群→无限循环。）
+                    env_route = "route=p2a"
                     if is_group:
-                        env_route = f"route=a2a dest={msg.chat_id} at={sender}"
-                        # from 显示【名字】：解发信方自盖的戳（SSOT）·而非裸 open_id（按 app 隔离·认不出名）
                         from_disp, via_disp = a2a_from_name(text, sender or "agent"), "群"
                     else:
-                        env_route = "route=p2a"
                         from_disp, via_disp = "host", "DM"
                     marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route}]"
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
