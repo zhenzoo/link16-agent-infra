@@ -52,7 +52,7 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 - 开通入口：开发者后台「权限管理」勾 `im:chat` → **创建版本 + 发布**（光勾不发版 = 没开）。
 - 一键开通链格式：`https://open.feishu.cn/app/<app_id>/auth?q=im:chat&op_from=openapi&token_type=tenant`
 
-#### § 2.1 · 一个 bot 的【三个名】+ 全员名册登记表（★ 唯一真相源）
+#### § 2.1 · 一个 bot 的【三个名】+ 全员名册（★ 名单 SSOT = `feishu/agent-registry.json` · 本节只讲概念，名单查工具）
 
 **每个 bot 有 3 个名，存在 3 个地方，改一个不会自动改另俩 —— 哪个是「机器认的」？**
 
@@ -68,48 +68,20 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 
 **全员权限 + 在群 状态（2026-07-02 全量实测）：所有 26 应用【权限全齐】(在线文档+群读写+收群@+听全群·39~47 scope) ✅ · 【全部在交流水吧群】✅** —— 无缺权限、无掉群的。故下表不再逐列权限/在群（全 ✅）。
 
-**① 本机 D:（tb25 · zhenz · 在名册 `bridge-bots.local.json` · 19 bot · 三名已全部对齐 ✅）**
+**全员名单（27 agent · 两机）= 机器可读 SSOT [`feishu/agent-registry.json`](../feishu/agent-registry.json)** —— 别再在这儿手抄一份（2026-07-04 收口·根治「文档表 vs 名册文件」双写漂移）。名字 / 机器 / 分管仓 / open_id / 发送键 / verified 全在里面，查它用查名册工具，别手 grep：
 
-| 代号(=@名去@=显示名) | open_id | 分管仓 / cwd | 备注 |
-|---|---|---|---|
-| tb25-speech | `ou_00000000000000000000000000000007` | Post/tools/solo-podcast-video | |
-| tb25-speech-codex | `ou_00000000000000000000000000000003` | Post/tools/solo-podcast-video | codex runtime · **2026-07-02 由 `tb25-codex` rename**（三名合一）|
-| tb25-cartoonMV | `ou_00000000000000000000000000000031` | Post/tools/cartoon-musical-mv | |
-| tb25-cartoonMV-2 | `ou_00000000000000000000000000000032` | Post/tools/cartoon-musical-mv | |
-| tb25-cartoonMV-3 | `ou_00000000000000000000000000000029` | Post/tools/cartoon-musical-mv | |
-| tb25-cartoonMV-codex | `ou_00000000000000000000000000000036` | Post/tools/cartoon-musical-mv | codex |
-| tb25-xhs-card-gen | `ou_00000000000000000000000000000058` | Post/tools/xhs-card-gen | |
-| tb25-xhs-card-gen-2 | `ou_00000000000000000000000000000061` | Post/tools/xhs-card-gen | |
-| tb25-lab | `ou_00000000000000000000000000000046` | Lab | |
-| tb25-lab-2 | `ou_00000000000000000000000000000064` | Lab | |
-| tb25-lab-3 | `ou_00000000000000000000000000000002` | Lab | ccw2(~/.claude-work2) |
-| tb25-yoach | `ou_00000000000000000000000000000033` | Yoach | ccw3 |
-| tb25-teno | `ou_00000000000000000000000000000054` | Teno | |
-| tb25-api-doc | `ou_00000000000000000000000000000004` | _api-doc | |
-| tb25-ccp | `ou_00000000000000000000000000000011` | .claude-personal | |
-| tb25-tennis-post | `ou_00000000000000000000000000000018` | Post/tools/tennis-plan-post | |
-| tb25-link16 | `ou_00000000000000000000000000000025` | Post/tools/link16-agent-infra | 基建/编排 |
-| tb25-link16-2 | `ou_00000000000000000000000000000043` | Post/tools/link16-agent-infra | |
-| tb25-coacho | `ou_00000000000000000000000000000051` | Coacho | ccw3 · **2026-07-02 .env 键 `COACHO`→`TB25_COACHO`**（对齐命名习惯）|
+```bash
+python feishu/registry.py                     # 全量（名字/机器/仓/open_id/发送键/verified）
+python feishu/registry.py list --machine tb24 # 只看另一台
+python feishu/registry.py whois tb24-link16   # 查一条
+python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某共享仓对面谁管（repo-sync 路由）
+```
 
-**② 另一台 E:（tb24 · zhuzhen · 凭据在本机 .env 但 bot 跑在 E: · 8 bot · ✅ 代号/@名已对齐 2026-07-03 default→tb24-xhs-autopilot 收尾·.env 键按设计解耦保持不改）**
-
-> E: bot 的飞书显示名已改成 `tb24-*`，但 `.env` 键（= 旧代号）还是老 xhs 名 → 三名不一致。**E: 的 roster 在 E: 机·D: 改不到 → 由 `tb24-link16` agent 在 E: 对齐**（代号/@名 → 对应新显示名）。
-
-| .env 键（旧代号） | 飞书显示名（新·应对齐到的） | open_id |
-|---|---|---|
-| `ARCH` | tb24-xhs架构师 | `ou_00000000000000000000000000000020` |
-| `CONFIG` | tb24-ccp-config | `ou_00000000000000000000000000000057` |
-| `EXPLORE` | tb24-xhs-explore | `ou_00000000000000000000000000000015` |
-| `LINK16` | tb24-link16 | `ou_00000000000000000000000000000028` |
-| `PODCAST` | tb24-notes-2 | `ou_00000000000000000000000000000040` |
-| `SOCIAL_MEDIA` | tb24-xhs-xcom | `ou_00000000000000000000000000000048` |
-| `TWITTER` | **tb24-notes** | `ou_00000000000000000000000000000035` |
-
-> （原 `default` 兜底应用·`FEISHU_BRIDGE_APP_ID`·**2026-07-03 三名合一正名为 `tb24-xhs-autopilot`**·open_id `ou_00000000000000000000000000000022`·cwd `Post/xhs-card-gen`·xhs 巡航总控·已是一等 bot 参与 a2a。）
+- 本机 D:（tb25 · zhenz · 19 bot · verified ✅）+ 另一台 E:（tb24 · zhuzhen · 8 bot · verified ✅）。**各机只改自己那半**（`machine` 字段 == 本机的记录）· git 同步 · 两机改不同记录天然不冲突（详见 `agent-registry.json` 的 `_README` + [`PROPOSAL-911`](PROPOSAL-911-repo-sync-notify.md)）。
+- **send_key**（=.env slug·`send_feishu_msg --to-agent` 认它·方案B 让你只用显示名喊）：tb25 段 == 显示名；tb24 段 = 旧 xhs slug（`link16`/`config`/…·plan B 已让它对用户隐身）；`tb24-xhs-autopilot` 已加别名 slug `TB24_XHS_AUTOPILOT`（2026-07-04·原裸 `FEISHU_BRIDGE_APP_ID`·旧「xhs总控桥」正名来）。
 
 > **🔒 拉 bot 进群只能在飞书 App 手动**（群设置 → 添加成员/群机器人 → 搜 bot 名 → 加）。**API 加不了**（实测）：别的 app 的 bot 去加报 `99992361 open_id cross app`；bot 加自己报 `232011 Operator can NOT be out of the chat`。→ 建新 bot 的 §4 清单「拉进共享群」这步**必须人工**。（跨应用 open_id 命名空间隔离 → 没有「开了就能拉别 app 机器人进群」的权限·`im:chat:operate` 只解「群限管理员加人」设置。）
-> **维护铁律：以后每 ① 建/改/rename bot ② 开/关权限 ③ 拉进/移出群 ④ 在飞书改显示名 —— 都回来改这张表 + 跑 `bridge_doctor.py --roster --live` 复核。** 这张表 = 唯一真相源。
+> **维护铁律：以后每 ① 建/改/rename bot ② 开/关权限 ③ 拉进/移出群 ④ 在飞书改显示名 —— 都回来改 [`feishu/agent-registry.json`](../feishu/agent-registry.json)（自己那半）+ 跑 `registry.py` / `bridge_doctor.py --roster --live` 复核。** 名单 SSOT = `agent-registry.json`（本节已收口为它的指针·不再手抄）。
 
 ### § 2.2 · 能力 → scope 映射 + 每 bot 实测权限（★分享仓库时：要哪个功能开哪个权限）
 
