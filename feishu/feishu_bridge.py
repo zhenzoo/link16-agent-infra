@@ -107,9 +107,22 @@ _A2A_FROM_RE = re.compile(r"\[飞书_from_(.+?)_to_.+?\]")
 
 
 def a2a_from_name(text, fallback):
-    """从 [飞书_from_<X>_to_<Y>] 戳解出友好发信名 X；无戳（如真人在群里 @）退 fallback。"""
+    """从 [飞书_from_<X>_to_<Y>] 戳解出友好发信名 X；无戳（如真人在群里 @）退 fallback。
+    fallback 多半是 open_id（SDK 事件 sender·跨 app 认不出名）→ 查名册换回友好名，
+    根治信封『from=ou_...』（2026-07-04·registry.name_for_open_id）。查不到才退原样 fallback。"""
     m = _A2A_FROM_RE.search(text or "")
-    return m.group(1) if m else fallback
+    if m:
+        return m.group(1)
+    if fallback and str(fallback).startswith("ou_"):
+        try:                                   # 守卫：名册不可用则退回原 fallback（绝不比以前更糟）
+            try:
+                from registry import name_for_open_id
+            except ImportError:
+                from feishu.registry import name_for_open_id
+            return name_for_open_id(fallback, default=fallback)
+        except Exception:  # noqa: BLE001
+            pass
+    return fallback
 
 
 # ---------- .env / 配置 ----------
