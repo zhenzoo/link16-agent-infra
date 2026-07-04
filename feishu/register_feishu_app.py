@@ -7,7 +7,7 @@
 
   默认（建第一个 / 单 bot）：
     python orchestrator/register_feishu_app.py
-    → 应用名「xhs总控桥」· 写 FEISHU_BRIDGE_APP_ID / FEISHU_BRIDGE_APP_SECRET
+    → 应用名「tb24-xhs-autopilot」· 写 FEISHU_BRIDGE_APP_ID / FEISHU_BRIDGE_APP_SECRET
   建第 N 个 bot（多 bot · ARCH-101 §4）：
     python orchestrator/register_feishu_app.py --name "xhs总控-ws2" --bot ws2
     → 写 FEISHU_BRIDGE_WS2_APP_ID / FEISHU_BRIDGE_WS2_APP_SECRET（bridge-bots.json 的 app_id_env 指它）
@@ -66,7 +66,7 @@ def write_env(app_id, secret, id_key, sec_key):
 
 def main():
     ap = argparse.ArgumentParser(description="一键创建飞书智能体应用并写凭据进 .env")
-    ap.add_argument("--name", default="xhs总控桥", help="应用显示名（默认 xhs总控桥）")
+    ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
     ap.add_argument("--bot", default=None,
                     help="bot 标识（如 ws2）→ 写 FEISHU_BRIDGE_<BOT>_APP_ID/SECRET；不给 = 默认键")
     args = ap.parse_args()

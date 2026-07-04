@@ -68,7 +68,7 @@ DEFAULT_BOT = {
     "name": "default",
     "app_id_env": "FEISHU_BRIDGE_APP_ID",
     "app_secret_env": "FEISHU_BRIDGE_APP_SECRET",
-    "at_name": "@xhs总控桥",
+    "at_name": "@tb24-xhs-autopilot",
     "cwd": str(PROJECT),
     "agent": "claude",
 }
@@ -172,7 +172,7 @@ def load_bots():
             "app_secret": creds.get(sec_env),
             "app_id_env": id_env,
             "app_secret_env": sec_env,
-            "at_name": s.get("at_name", "@xhs总控桥"),
+            "at_name": s.get("at_name", f"@{name}"),
             "marker": f"[飞书-{name}]",
             "cwd": cwd,
             "agent": s.get("agent") or s.get("runtime") or "claude",
