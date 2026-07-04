@@ -1499,6 +1499,14 @@ def run(bot_name=None):
                     env_route = "route=p2a"
                     if is_group:
                         from_disp, via_disp = a2a_from_name(text, sender or "agent"), "群"
+                        # 第三极 p2a-ext（2026-07-05·ARCH-140）：群消息 + 无 a2a 戳(=不是 peer bot) + 发信人≠owner
+                        #   = 【外部真人】→ 信封写回【原群】+ @他 → 出站复用 _route_to_dest 的「群+@」路径回原群。
+                        #   无死循环：环只发生在 bot↔bot(peer 有戳→仍 route=p2a 回主人 DM)；真人不会无限自动回复。
+                        #   owner 群内 @ 仍走 p2a 回 DM（保内部编排 A2A→P2A 可见性不变）。
+                        if (not _A2A_FROM_RE.search(text or "")) and sender and sender != load_owner(bot["name"]):
+                            _gid = getattr(msg, "chat_id", "") or ""
+                            if _gid:
+                                env_route, via_disp = f"route=p2a-ext dest={_gid} at={sender}", "群·外部人"
                     else:
                         from_disp, via_disp = "host", "DM"
                     marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route}]"
@@ -1563,10 +1571,10 @@ def run(bot_name=None):
             return "chat_id" if t.startswith("oc_") else "open_id"
 
         def _route_to_dest(route):
-            """route dict {kind,dest,at} → (tgt, at)。a2a→群+@发信人；p2a/None→owner DM
+            """route dict {kind,dest,at} → (tgt, at)。a2a(peer bot)/p2a-ext(外部真人)→原群+@发信人；p2a/None→owner DM
             （owner 文件 / 会话 open_id / .env ALLOWED 首个·都没有→None=drainer 跳过）。"""
-            if route and route.get("kind") == "a2a" and route.get("dest"):
-                return route["dest"], route.get("at")
+            if route and route.get("kind") in ("a2a", "p2a-ext") and route.get("dest"):
+                return route["dest"], route.get("at")   # 都是「回原群 + @发信人」·区别只在语义(bot vs 真人)
             owner = mirror_target(bname) or (ALLOWED_OPEN_IDS[0] if ALLOWED_OPEN_IDS else None)
             return owner, None
 

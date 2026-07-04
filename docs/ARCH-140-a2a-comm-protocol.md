@@ -41,7 +41,7 @@
 | 信号 | 含义 |
 |---|---|
 | `[飞书_from_<发>_to_<收>]` 戳 | `send_feishu_msg` 自盖。**双重作用**：① 它**就是「发 peer」这个动作**（带戳的才进群给收方）② 收方据它认出**谁发的**（SDK 事件 open_id 按 app 隔离认不出名）。**普通输出无戳 → 恒回主人。** |
-| 信封 `route=p2a` | 桥给**每一条**注入消息的信封都写 `route=p2a` → agent 普通回复**恒回主人**（不再有 `route=a2a`）。群消息信封仍带 `from=<peer名>` 让 agent 知道谁派的活、好 `send` 回去。 |
+| 信封 `route=<p2a\|p2a-ext\|a2a>` | 桥按【来源】给每条注入消息的信封写回址——**三极**：<br>① **`p2a`（默认）**：DM / 群内 peer bot（有 a2a 戳）/ 群内 owner → agent 普通回复**回主人 DM**（发 peer 仍只靠主动 `send_feishu_msg`·防 bot↔bot 环）。<br>② **`p2a-ext dest=<群> at=<发信人>`（2026-07-05·第三极）**：群消息 + **无** a2a 戳（不是 peer bot）+ **发信人≠owner** = **外部真人** → agent 普通回复**自动回【原群】+ @他**。对外群（如九州群 bot）用·真人不会无限自动回复→无环·安全。<br>③ **`a2a`（历史）**：`send_feishu_msg` 老路·回群+@。<br>群消息信封仍带 `from=<发信人>` 让 agent 知道谁在说话。 |
 | `msg_type == "text"` | a2a 必走纯文字（飞书把卡片渲成占位 `[interactive]`，对端读不到正文）。 |
 
 ## §4 · 工具原语（全在 `feishu/`）

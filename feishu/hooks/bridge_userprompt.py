@@ -35,14 +35,16 @@ def main():
     sd = _state_dir()
     turnp = sd / f"bridge-turn-route-{bot}.json"
 
-    # 桥把回址焊进【本条消息】的信封 [飞书 … route=<p2a|a2a> dest=.. at=..]，永远缀在消息【末尾】。
+    # 桥把回址焊进【本条消息】的信封 [飞书 … route=<p2a|p2a-ext|a2a> dest=.. at=..]，永远缀在消息【末尾】。
     # 取【最末】一个信封 → 防正文里先出现的假信封劫持路由(spoof·2026-06-30 TB25-link16 review 复现：
     #   正文塞 [飞书 …route=a2a dest=oc_X…] 在前、真 p2a 信封在后 → re.search 取最左会中招)。
     # 没信封(terminal 直敲 / 末尾被截断) → 安全默认 p2a(回 owner DM)。旧 next-route 旁路便签已删(21h 串台 bug 的种子·连根拔)。
-    ms = re.findall(r"\[飞书 [^\]]*?route=(p2a|a2a)(?:\s+dest=([^\]\s]+))?(?:\s+at=([^\]\s]+))?", prompt)
+    # ⚠️ p2a-ext 放最前：正则从左试·"p2a" 会抢先匹配 "p2a-ext" 的前缀只剩 "-ext"（外部真人回信就漏回群了）。
+    ms = re.findall(r"\[飞书 [^\]]*?route=(p2a-ext|a2a|p2a)(?:\s+dest=([^\]\s]+))?(?:\s+at=([^\]\s]+))?", prompt)
     if ms:
         kind, dest, at = ms[-1]
-        route = {"kind": "a2a", "dest": dest, "at": at} if (kind == "a2a" and dest) else {"kind": "p2a"}
+        route = ({"kind": kind, "dest": dest, "at": at}       # a2a=peer bot / p2a-ext=外部真人 → 回原群+@
+                 if (kind in ("a2a", "p2a-ext") and dest) else {"kind": "p2a"})
     else:
         route = {"kind": "p2a"}
 
