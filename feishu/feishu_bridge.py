@@ -1808,6 +1808,13 @@ def cmd_start(bot_filter=None):
     _stop_hint = f"`stop --bot {bot_filter}` 停它" if bot_filter else "`stop` 停全部"
     print(f"已后台启动 {len(started)} 个 bot 进程：{', '.join(started)}（脱离终端·关终端不死）"
           f"\n日志：{LOG_DIR}\\bridge-<bot>.log · 用 `status` 查 · {_stop_hint}。")
+    # 通用 CRON 守护进程随「整体 start」一起起（单 bot start --bot X 不带它 · 它是全局定时器不属某个 bot）。
+    if not bot_filter:
+        try:
+            subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "bridge_cron.py"), "start"],
+                           cwd=str(PROJECT), timeout=30)
+        except (OSError, subprocess.SubprocessError) as _e:  # noqa: BLE001
+            print(f"（cron 守护进程没起来·可手动 `python feishu/bridge_cron.py start`：{_e}）")
 
 
 def cmd_stop(bot_filter=None):
@@ -1815,6 +1822,13 @@ def cmd_stop(bot_filter=None):
     if bot_filter and bot_filter not in {b["name"] for b in load_bots()}:
         print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
         sys.exit(2)
+    # 整体 stop 也停通用 CRON 守护进程（单 bot stop --bot X 不动它）。
+    if not bot_filter:
+        try:
+            subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "bridge_cron.py"), "stop"],
+                           cwd=str(PROJECT), timeout=30)
+        except (OSError, subprocess.SubprocessError):  # noqa: BLE001
+            pass
     pids = _bridge_pids(exclude_self=True, bot=bot_filter)
     if not pids:
         print(f"bot '{bot_filter}' 没在跑。" if bot_filter else "没有在跑的 bot 进程。")
