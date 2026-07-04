@@ -64,6 +64,62 @@ def write_env(app_id, secret, id_key, sec_key):
     ENV_PATH.write_text(text, encoding="utf-8")
 
 
+def _bot_identity(app_id, app_secret):
+    """现查 bot/v3/info → (open_id, 飞书显示名)。强制绕代理直连(飞书国内端点)。拿不到回 (None, None)。"""
+    import json
+    import urllib.request
+    base = "https://open.feishu.cn/open-apis"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 强制不走代理
+    try:
+        r = opener.open(urllib.request.Request(
+            f"{base}/auth/v3/tenant_access_token/internal",
+            data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode(),
+            method="POST", headers={"Content-Type": "application/json"}), timeout=8)
+        tok = json.loads(r.read()).get("tenant_access_token")
+        r2 = opener.open(urllib.request.Request(
+            f"{base}/bot/v3/info", headers={"Authorization": f"Bearer {tok}"}), timeout=8)
+        b = json.loads(r2.read()).get("bot", {}) or {}
+        return b.get("open_id"), b.get("app_name")
+    except Exception:  # noqa: BLE001 — 现查失败不挡注册·open_id 留空待补
+        return None, None
+
+
+def append_registry_stub(app_id, app_secret, bot_arg, cli_name):
+    """建完【自动】往 agent-registry.json 补一条 stub —— 把「登记协议」从『靠人记得回写』变成『脚本自动做』。
+    open_id/显示名现查·verified 按是否查到·幂等(已有同名跳过)。repo/machine 让运行的 agent 核对补全(脚本不知道它管哪个仓)。"""
+    import json
+    reg = Path(__file__).resolve().parent / "agent-registry.json"
+    if not reg.exists():
+        print("\n⚠️ 没找到 agent-registry.json → 跳过自动登记（请手动加一条）", flush=True)
+        return
+    oid, disp = _bot_identity(app_id, app_secret)
+    name = disp or cli_name
+    slug = (bot_arg or "").upper().replace("-", "_")
+    send_key = slug.lower().replace("_", "-") if slug else (name or "")
+    machine = "tb24" if (slug.startswith("TB24") or name.startswith("tb24")) else "tb25"
+    try:
+        data = json.loads(reg.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"\n⚠️ agent-registry.json 解析失败({e}) → 跳过自动登记（手动加）", flush=True)
+        return
+    if any(a.get("name") == name for a in data.get("agents", [])):
+        print(f"\n✅ agent-registry.json 已有 '{name}' → 跳过（幂等·没重复加）", flush=True)
+        return
+    stub = {"name": name, "machine": machine, "send_key": send_key, "open_id": oid or "",
+            "at_name": f"@{name}", "repo": "", "shared": False, "runtime": "claude",
+            "role": "", "verified": bool(oid)}
+    text = reg.read_text(encoding="utf-8")
+    idx = text.rfind("\n  ]")                 # agents 数组闭合行 → 在它前插一条(保原格式·不整文件 reformat)
+    if idx < 0:
+        print("\n⚠️ agent-registry.json 结构异常(找不到 agents 闭合) → 跳过（手动加）", flush=True)
+        return
+    text = text[:idx].rstrip() + ",\n    " + json.dumps(stub, ensure_ascii=False) + text[idx:]
+    reg.write_text(text, encoding="utf-8")
+    print(f"\n✅ 已【自动】登记进 agent-registry.json：{name}"
+          f"（machine={machine} · send_key={send_key} · open_id={oid or '❌现查失败·待补'} · verified={bool(oid)}）", flush=True)
+    print("   ⚠️ 运行本脚本的 agent 请核对/补两字段：**repo**(它分管哪个仓·脚本不知道) + 必要时 **machine**；是共享仓则改 shared:true。", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="一键创建飞书智能体应用并写凭据进 .env")
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
@@ -90,6 +146,9 @@ def main():
     write_env(app_id, secret, id_key, sec_key)
     print(f"\n✅ 应用「{args.name}」创建成功 · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
 
+    # 自动登记进 agent-registry.json（登记协议自动化·不靠人记得回写）
+    append_registry_stub(app_id, secret, args.bot, args.name)
+
     # 一键预置(40+)【不含】的【应用身份/tenant】权限——注册后【一条链全开】，免事后逐个手动补
     # (SSOT: feishu_docs.APP_IDENTITY_MANUAL_SCOPES = 云文档在线查看 drive:drive+docx:document(:create) + 群a2a im:chat + 收群@ + 听全群)。
     try:
@@ -108,14 +167,15 @@ def main():
           "   开完仍需【人工】把 bot 拉进共享群（API 加不了·见 ARCH-102 §2.1）。",
           flush=True)
 
-    # 🔒 登记协议（Publisher 2026-06-20 定规）：建完 / 开完权限必须回写文档，否则下次没人知道谁开了什么
-    print("\n📋 建完 / 改完权限【必做登记·登记协议】（别忘·完整见 docs/ARCH-102 §4）：\n"
-          "   ① bridge-bots.json 加一行（name / app_id_env / app_secret_env / at_name）\n"
+    # 🔒 登记协议：建完必回写。§4 见 docs/SOP-120。agent-registry stub 上面已【自动】补·其余照单核对。
+    print("\n📋 建完【必做登记】（④ 已自动 · 完整见 docs/SOP-120 §4）：\n"
+          "   ① bridge-bots.local.json 加一行（name / app_id_env / at_name·仓库bot不写cwd）—— 运行时 roster·桥靠它 spawn\n"
           "   ② 上面那【一条】链一次开齐 drive:drive + docx:document(:create) + im:chat + 群listen → 创版本并发布\n"
-          "   ③ 人工把 bot 拉进共享群（API 加不了）\n"
-          "   ④ 跑  python orchestrator/bridge_scope_audit.py --all-env  → 刷新 docs/ARCH-102 §2.2 能力矩阵\n"
-          "   ⑤ 改 docs/ARCH-102 §2.1 登记表（新 bot 一行：open_id / 在群否 / 负责内容）\n"
-          "   —— 每次 register 或开/关新权限都要走 ④⑤，保证那张表永远是真相源。",
+          "   ③ 人工把 bot 拉进共享群「交流水吧」（API 加不了·a2a 唯一人工闸）\n"
+          "   ④ ✅ agent-registry.json 已【自动】补 stub（谁是谁·跨机目录）→ 你只需核对/补 repo + machine（脚本不知道它管哪个仓）\n"
+          "   ⑤ 跑  python feishu/bridge_scope_audit.py --all-env  → 刷新 SOP-120 §2.2 能力矩阵\n"
+          "   ⑥ 重启桥 stop→start → 验：群里 @它能回 + 它 send_feishu_msg 喊别的 bot 能达\n"
+          "   —— 两个名册各司其职：bridge-bots(运行时·跑哪些) + agent-registry(目录·谁是谁·本步已自动)。",
           flush=True)
 
 

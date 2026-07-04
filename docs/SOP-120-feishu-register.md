@@ -170,10 +170,11 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 
 > 你的要求：「以后凡是注册新 registry 的智能体，都要默认开通这些能力。」固化成清单。
 >
-> **🔒 登记协议（Publisher 2026-06-20 定规 · 硬规则）**：每次用 `register_feishu_app.py` 建新 bot、**或**给任何 bot 开/关任何权限之后，都【**必须**】回写本文档——**跑 auditor 刷新 §2.2 能力矩阵 + 改 §2.1 登记表**。否则下次没人知道谁开了什么（这正是当初的痛点）。`register_feishu_app.py` 跑完会打印这份清单提醒。
+> **🔒 登记协议（Publisher 2026-06-20 定规 · 硬规则 · 2026-07-04 大部分已自动化）**：每次用 `register_feishu_app.py` 建新 bot、**或**给任何 bot 开/关权限之后都要回写登记。**register 现在【自动】把新 bot 补进 [`agent-registry.json`](../feishu/agent-registry.json)（目录名单·open_id 现查填好）** → 运行的 agent 只需**核对/补 `repo`**；开/关权限后再跑 auditor 刷新 §2.2 能力矩阵。§2.1 名单已收口为 `agent-registry.json` 的指针·**不再手抄**。`register_feishu_app.py` 跑完会打印这份清单提醒。
 
 - [ ] **注册** `register_feishu_app.py --name X --bot key`
-- [ ] **名册** `bridge-bots.json` 加行（仓库类不写 cwd）
+- [ ] **运行时名册** `bridge-bots.local.json`（+ committed `bridge-bots.json`）加行（name / app_id_env / at_name·仓库类不写 cwd）—— 桥靠它 spawn（决定跑哪些 bot）
+- [ ] **跨机目录名册** `agent-registry.json` —— ✅ **`register_feishu_app.py` 已【自动】补 stub**（name/machine/send_key/open_id/at_name/verified 现查填好）→ 你只需**核对/补 `repo`**（分管哪个仓·脚本不知道）+ 必要时 machine，共享仓则 `shared:true`。查名册 tool / repo-sync 路由 / 方案B 按名喊全靠它
 - [ ] **默认账号**（可选）：该 bot 要默认走**非个人号**（如公司号 work2）才需做——名册条目加 `"claude_config_dir": "~/.claude-work2"`（codex bot 用 `"codex_home"`）。`register_feishu_app.py` **不会自动写**这字段，不写 = 默认 `~/.claude-personal`。机制 + 别名表见 [`ARCH-101 §4.2`](ARCH-101-feishu-bridge.md)。
 - [ ] **②** 开 `drive:drive`（register 末尾的链）→ 创版本 → 发布
 - [ ] **③** 开 `im:chat`（获取与更新群组信息）→ 创版本 → 发布 ★**默认必开**（群 a2a 关键）
@@ -181,7 +182,7 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 - [ ] **两台机** 各配 `.env`（§5）
 - [ ] **重启桥** stop→start
 - [ ] 验：群里 `@新bot` 一句能回 + 让它 `send_feishu_msg` @ 另一台的 bot 能送达
-- [ ] 🔄 **回写登记（每次 register / 每次开关权限都必做·登记协议）**：跑 `python feishu/bridge_scope_audit.py --all-env` 刷新 **§2.2 能力矩阵** + 改 **§2.1 登记表**（新 bot 一行：open_id / 在群否 / 负责内容）
+- [ ] 🔄 **回写登记**：`agent-registry.json` 目录条目上一步 register 已**自动补**（核对 `repo`/machine 即可，别忘）；开/关权限后跑 `python feishu/bridge_scope_audit.py --all-env` 刷新 **§2.2 能力矩阵**。（§2.1 名单已是 `agent-registry.json` 的指针·不再手抄）
 
 ---
 
