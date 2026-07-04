@@ -80,6 +80,13 @@ def is_shared(repo: str) -> bool:
     return repo in shared_repos()
 
 
+def send_key_for(name: str) -> str | None:
+    """友好名(name/at_name/open_id) → send_key（.env slug）。send_feishu_msg 方案B用：
+    让 --to-agent 只用【显示名】就喊到 tb24-*（它 .env slug 是旧 xhs 名·≠显示名）。查不到回 None。"""
+    a = find(name)
+    return (a or {}).get("send_key")
+
+
 # ---------- CLI 渲染 ----------
 
 def _fmt_rows(agents: list[dict]) -> str:

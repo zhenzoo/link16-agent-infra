@@ -157,23 +157,35 @@ def _env_bots():
 
 
 def _slug_for(name):
-    """智能体名字 → .env 里的 <SLUG>（本机名册按 app_id_env 反推；否则 .env 直查）。"""
+    """智能体名字 → .env 里的 <SLUG>（本机名册按 app_id_env 反推；.env 直查；名册 send_key 兜底=方案B）。"""
     key = _norm(name)
     for s in _roster():
         if _norm(s.get("name")) == key:
             m = re.match(r"FEISHU_BRIDGE_(.+)_APP_ID$", s.get("app_id_env", "") or "")
             if m:
                 return m.group(1)
-    return _env_bots().get(key)
+    slug = _env_bots().get(key)
+    if slug:
+        return slug
+    # 方案B(2026-07-04)：友好名(名册 name/at_name)→ 名册 send_key → .env 原始 SLUG。
+    # 让 --to-agent 只用【显示名】就喊到 tb24-*（它 .env slug 是旧 xhs 名·≠显示名·见 agent-registry.json）。
+    try:
+        from registry import send_key_for
+        sk = send_key_for(name)
+        if sk:
+            return _env_bots().get(_norm(sk))
+    except Exception:  # noqa: BLE001 — 名册不可用则退回原行为
+        pass
+    return None
 
 
 def _creds_for(name):
-    """智能体名字 → (app_id, app_secret)。① 本机名册精确名（大小写不敏感）② .env 里按 SLUG。找不到→None。"""
+    """智能体名字 → (app_id, app_secret)。① 本机名册精确名（大小写不敏感）② .env 里按 SLUG（含名册 send_key 兜底·方案B）。找不到→None。"""
     key = _norm(name)
     for s in _roster():                       # ① 名册（本机在跑的）
         if _norm(s.get("name")) == key:
             return _bot_creds(s["name"])
-    slug = _env_bots().get(key)               # ② .env（含别机同步过来的凭据）
+    slug = _slug_for(name)                     # ② .env（含别机同步凭据 + 名册 send_key 兜底·方案B）
     if slug:
         e = _env(f"FEISHU_BRIDGE_{slug}_APP_ID", f"FEISHU_BRIDGE_{slug}_APP_SECRET")
         aid, asec = e.get(f"FEISHU_BRIDGE_{slug}_APP_ID"), e.get(f"FEISHU_BRIDGE_{slug}_APP_SECRET")
@@ -223,7 +235,12 @@ def resolve_open_id(name):
         oid, _ = _bot_self(*creds)
         if oid:
             return oid
-    known = ", ".join(sorted(set(_env_bots()) | {_norm(s.get("name")) for s in _roster()}))
+    try:                                       # 方案B：报错也列名册友好名（你可只用显示名喊 tb24-*）
+        from registry import load_agents
+        reg = {_norm(x.get("name")) for x in load_agents()}
+    except Exception:  # noqa: BLE001
+        reg = set()
+    known = ", ".join(sorted(set(_env_bots()) | {_norm(s.get("name")) for s in _roster()} | reg))
     raise SystemExit(f"❌ 找不到智能体 '{name}'（.env 里没有它的 FEISHU_BRIDGE_*_APP_ID/SECRET）。"
                      f"已知：{known or '(空)'}")
 
