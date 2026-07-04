@@ -85,11 +85,12 @@ def is_shared(repo: str) -> bool:
 def _fmt_rows(agents: list[dict]) -> str:
     if not agents:
         return "（无匹配）"
-    headers = ["名字", "机", "仓", "shared", "✓", "open_id", "备注"]
+    headers = ["名字", "发送键", "机", "仓", "shared", "✓", "open_id", "备注"]
     rows = []
     for a in agents:
         rows.append([
             a.get("name", ""),
+            a.get("send_key") or "—",
             a.get("machine", ""),
             a.get("repo") or "—",
             "★" if a.get("shared") else "",
