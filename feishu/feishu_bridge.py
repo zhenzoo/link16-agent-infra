@@ -1557,10 +1557,10 @@ def run(bot_name=None):
                         # 真人（无 a2a 戳 = 不是 peer bot）→ from= 用群成员 API 查真名（owner+外部人都 API 源头·不硬编码·§7.1）
                         if (not _A2A_FROM_RE.search(text or "")) and sender and _gid:
                             from_disp = (await asyncio.to_thread(_resolve_person, sender, _gid, bot)) or sender
-                            # 第三极 p2a-ext（§7）：只有【非 owner】外部真人 → 回原群 + @他；owner 群内@ 仍 p2a 回 DM(保编排可见性)。
-                            #   无死循环：环只 bot↔bot(peer 有戳→仍 p2a)；真人不会无限自动回复。
-                            if sender != load_owner(bot["name"]):
-                                env_route, via_disp = f"route=p2a-ext dest={_gid} at={sender}", f"{via_disp}·外部人"
+                            # p2a-ext（主人拍板 2026-07-05·撤掉旧「≠owner」排除）：群里【任何真人·含 owner 本人】@ bot
+                            #   → 回【原群】+ @他，不回 DM。主人原话：「只要是群，我在群里 @ 你，你就该在群里回我 + @ 我」。
+                            #   无死循环：环只 bot↔bot(peer 有戳→仍 p2a 回 DM)；真人不会无限自动回复 → 回群安全。owner 也走这条。
+                            env_route = f"route=p2a-ext dest={_gid} at={sender}"
                     else:
                         from_disp, via_disp = "host", "DM"
                     marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route}]"

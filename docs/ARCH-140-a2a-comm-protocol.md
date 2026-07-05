@@ -41,7 +41,7 @@
 | 信号 | 含义 |
 |---|---|
 | `[飞书_from_<发>_to_<收>]` 戳 | `send_feishu_msg` 自盖。**双重作用**：① 它**就是「发 peer」这个动作**（带戳的才进群给收方）② 收方据它认出**谁发的**（SDK 事件 open_id 按 app 隔离认不出名）。**普通输出无戳 → 恒回主人。** |
-| 信封 `route=<p2a\|p2a-ext\|a2a>` | 桥按【来源】给每条注入消息的信封写回址——**三极**：<br>① **`p2a`（默认）**：DM / 群内 peer bot（有 a2a 戳）/ 群内 owner → agent 普通回复**回主人 DM**（发 peer 仍只靠主动 `send_feishu_msg`·防 bot↔bot 环）。<br>② **`p2a-ext dest=<群> at=<发信人>`（2026-07-05·第三极）**：群消息 + **无** a2a 戳（不是 peer bot）+ **发信人≠owner** = **外部真人** → agent 普通回复**自动回【原群】+ @他**。对外群（如九州群 bot）用·真人不会无限自动回复→无环·安全。<br>③ **`a2a`（历史）**：`send_feishu_msg` 老路·回群+@。<br>群消息信封仍带 `from=<发信人>` 让 agent 知道谁在说话。 |
+| 信封 `route=<p2a\|p2a-ext\|a2a>` | 桥按【来源】给每条注入消息的信封写回址——**三极**：<br>① **`p2a`（默认）**：DM / 群内 **peer bot（有 a2a 戳）** → agent 普通回复**回主人 DM**（发 peer 仍只靠主动 `send_feishu_msg`·防 bot↔bot 环）。<br>② **`p2a-ext dest=<群> at=<发信人>`（第三极·2026-07-05 主人拍板扩到含 owner）**：群消息 + **无** a2a 戳（=不是 peer bot·**任何真人·含 owner 本人**）→ agent 普通回复**自动回【原群】+ @发信人**。主人原话：「只要是群，我在群里 @ 你，你就该在群里回我 + @ 我」——**owner 也不例外**（撤掉旧的「≠owner」排除）。真人不会无限自动回复→无环·安全。<br>③ **`a2a`（历史）**：`send_feishu_msg` 老路·回群+@。<br>群消息信封仍带 `from=<发信人真名>`（群成员 API 查·§7）让 agent 知道谁在说话。 |
 | `msg_type == "text"` | a2a 必走纯文字（飞书把卡片渲成占位 `[interactive]`，对端读不到正文）。 |
 
 ## §4 · 工具原语（全在 `feishu/`）
@@ -70,7 +70,7 @@
 
 ## §7 · 外部通道（对外群 · 外部真人）—— 定义在这里，任何 session 读它就懂
 
-> **场景**：某 bot 进了**对外群**（如 `tb25-jiuzhouMV` 在「对外群A」），群里**外部真人**（黄滟、朱镇…）@ 它。这套怎么走、名字哪来、用哪些工具——**全定义在本节 + 代码，不靠某个 agent 记着**（session 关了、换人、换群，下个 session 读这节就全懂）。
+> **场景**：某 bot 进了**群**（对外群如 `tb25-jiuzhouMV` 在「对外群A」，或内部编排群），群里**真人**（外部人如黄滟，**或 owner 本人**）@ 它 → agent 回复回【该群】+ @他（2026-07-05 主人拍板：只要是群、不区分内外，owner 也回群不回 DM）。这套怎么走、名字哪来、用哪些工具——**全定义在本节 + 代码，不靠某个 agent 记着**（session 关了、换人、换群，下个 session 读这节就全懂）。
 
 ### §7.1 · 铁律：一切名字【有源头·API 查·绝不硬编码/凭记忆】
 群名、人名**都不准硬编码、不准凭记忆猜**——必须是**飞书 API 现查**到的（就像 bot 的 open_id/显示名一样有源头）。落成文件（名册/缓存）只是 API 结果的落盘，源头永远是 API。反例教训（2026-07-05）：把 `ou_f8dd…` 凭「听来的」当成「朱健」，API 一查其实是「朱镇」——所以名字只信 API。
@@ -78,7 +78,7 @@
 ### §7.2 · 三件事怎么运转
 | 环节 | 怎么走 | 源头（API）| 落哪 |
 |---|---|---|---|
-| **回信路由** | 外部真人（群 + 无 a2a 戳 + 发信人≠owner）→ 信封 `route=p2a-ext dest=<群> at=<发信人>` → 回**原群 + @他**（见 §3） | —（结构判定）| 代码 `feishu_bridge.py` on_message + `_route_to_dest` |
+| **回信路由** | 群里【任何真人·含 owner 本人】（群 + 无 a2a 戳 = 不是 peer bot）→ 信封 `route=p2a-ext dest=<群> at=<发信人>` → 回**原群 + @他**（见 §3·2026-07-05 主人拍板：owner 群内 @ 也回群、不回 DM·撤掉旧「≠owner」排除） | —（结构判定）| 代码 `feishu_bridge.py` on_message + `_route_to_dest` |
 | **`via=<群名>`** | chat_id → 群名 | `im/v1/chats`（群列表·`send_feishu_msg._bot_groups`）| **`agent-registry.json` 的 `groups` 段**（committed SSOT·`registry.py sync-groups` 拉）|
 | **`from=<人名>`** | 发信人 open_id → 人名 | **`im/v1/chats/{chat_id}/members`（群成员·用 bot 自己 `im:chat` 权限读群·不碰 owner 账号）** | **本地缓存** `feishu/_state/people-cache.local.json`（gitignore·桥遇新外部人自动查+缓存）|
 | **@ 那个人** | 回信里 `<at id=<open_id>>` | 飞书**自动把 open_id 渲染成他的名字** + 通知他 | —（不落盘·飞书现渲·所以 @ 永不硬编码名字）|
