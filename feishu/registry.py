@@ -20,6 +20,7 @@ CLI:
 from __future__ import annotations
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -87,6 +88,77 @@ def send_key_for(name: str) -> str | None:
     return (a or {}).get("send_key")
 
 
+# ---------- 外部通道：群名（committed groups 段）+ 人名（本地缓存）· ARCH-140 §7 ----------
+
+def groups() -> list[dict]:
+    return load_registry().get("groups", [])
+
+
+def group_name(chat_id: str) -> str | None:
+    """chat_id → 群名（`via=<群名>` 的源头·来自 groups 段·API 拉的）。查不到回 None。"""
+    for g in groups():
+        if g.get("chat_id") == chat_id:
+            return g.get("name")
+    return None
+
+
+PEOPLE_CACHE = Path(__file__).resolve().parent / "_state" / "people-cache.local.json"
+
+
+def _load_people() -> dict:
+    if PEOPLE_CACHE.exists():
+        try:
+            return json.loads(PEOPLE_CACHE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+    return {}
+
+
+def person_name(open_id: str) -> str | None:
+    """外部真人 open_id → 名字（`from=<人名>` 的源头·本地缓存·桥从群成员 API 查来的）。查不到回 None。"""
+    return _load_people().get(open_id)
+
+
+def cache_person(open_id: str, name: str) -> None:
+    """桥从群成员 API 查到外部人名字后回填本地缓存（API 源头·绝非硬编码·ARCH-140 §7.1）。"""
+    if not open_id or not name:
+        return
+    d = _load_people()
+    if d.get(open_id) == name:
+        return
+    d[open_id] = name
+    PEOPLE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    PEOPLE_CACHE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def sync_groups(bot: str) -> list[dict]:
+    """从飞书群列表 API 拉某 bot 所在群 → 更新 registry 的 groups 段（群名=API 源头·非手写）。
+    保原文件格式（只替换 groups 数组·不整文件 reformat）。新群 external 留 null 待人核。"""
+    import send_feishu_msg as S            # 复用 creds + _bot_groups
+    creds = S._creds_for(bot)
+    if not creds:
+        raise SystemExit(f"❌ 找不到 bot '{bot}' 的凭据（.env 里没有）")
+    live = S._bot_groups(*creds)           # [{chat_id, name}]
+    cur = {g["chat_id"]: dict(g) for g in groups()}
+    for g in live:
+        cid = g.get("chat_id")
+        if not cid:
+            continue
+        if cid in cur:
+            cur[cid]["name"] = g.get("name") or cur[cid].get("name")
+        else:
+            cur[cid] = {"chat_id": cid, "name": g.get("name"), "external": None,
+                        "note": f"sync-groups({bot}) 发现·请核对 external 真假"}
+    new_groups = list(cur.values())
+    text = REGISTRY_PATH.read_text(encoding="utf-8")
+    block = '"groups": [\n' + ",\n".join("    " + json.dumps(g, ensure_ascii=False) for g in new_groups) + "\n  ]"
+    text2, n = re.subn(r'"groups":\s*\[.*?\n  \]', block, text, count=1, flags=re.S)
+    if n != 1:
+        raise SystemExit("❌ agent-registry.json 里没找到 groups 段（先手加一个空 `\"groups\": []`）")
+    REGISTRY_PATH.write_text(text2, encoding="utf-8")
+    return new_groups
+
+
 # ---------- CLI 渲染 ----------
 
 def _fmt_rows(agents: list[dict]) -> str:
@@ -145,6 +217,14 @@ def main() -> int:
     pis = sub.add_parser("is-shared", help="某仓是否共享仓（exit 0=是/1=否·脚本用）")
     pis.add_argument("repo")
 
+    sub.add_parser("groups", help="列所有群（chat_id/群名/external·ARCH-140 §7）")
+    pgn = sub.add_parser("group-name", help="chat_id → 群名（via=<群名> 源头）")
+    pgn.add_argument("chat_id")
+    prp = sub.add_parser("resolve-person", help="外部人 open_id → 名字（from=<人名>·本地缓存）")
+    prp.add_argument("open_id")
+    psg = sub.add_parser("sync-groups", help="从飞书群列表 API 拉某 bot 所在群 → 更新 groups 段（群名 API 源头）")
+    psg.add_argument("--bot", required=True)
+
     args = p.parse_args()
 
     if args.cmd == "whois":
@@ -178,6 +258,32 @@ def main() -> int:
         ok = is_shared(args.repo)
         print("yes" if ok else "no")
         return 0 if ok else 1
+
+    if args.cmd == "groups":
+        gs = groups()
+        if args.json:
+            print(json.dumps(gs, ensure_ascii=False, indent=2))
+        else:
+            for g in gs:
+                print(f"{g.get('chat_id')}  {'★外部' if g.get('external') else '内部 '}  {g.get('name')}")
+        return 0
+
+    if args.cmd == "group-name":
+        n = group_name(args.chat_id)
+        print(n or args.chat_id)          # 查不到原样回 chat_id
+        return 0 if n else 1
+
+    if args.cmd == "resolve-person":
+        n = person_name(args.open_id)
+        print(n or args.open_id)          # 查不到原样回 open_id
+        return 0 if n else 1
+
+    if args.cmd == "sync-groups":
+        gs = sync_groups(args.bot)
+        print(f"✅ groups 段已更新（{len(gs)} 个群·名字从飞书 API 拉）：")
+        for g in gs:
+            print(f"  {g.get('chat_id')}  {g.get('name')}  external={g.get('external')}")
+        return 0
 
     # 默认 / list
     agents = load_agents()

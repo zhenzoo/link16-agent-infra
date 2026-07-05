@@ -1051,6 +1051,58 @@ def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None):
     return (d.get("data") or {}).get("message_id") if d.get("code") == 0 else None
 
 
+# ---------- 外部通道：群名 / 外部真人名字（都 API 源头·绝不硬编码·ARCH-140 §7）----------
+def _group_display(chat_id):
+    """chat_id → 群名（名册 groups 段·`via=<群名>` 源头）。查不到回 None。"""
+    if not chat_id:
+        return None
+    try:
+        try:
+            from registry import group_name
+        except ImportError:
+            from feishu.registry import group_name
+        return group_name(chat_id)
+    except Exception:  # noqa: BLE001 — 名册不可用不挡·退 None（via 退回「群」）
+        return None
+
+
+def _chat_members(chat_id, app_id, app_secret):
+    """群成员 API → [{member_id(open_id), name}]（bot 自己 im:chat 权限·读群·不碰 owner 账号）。"""
+    import urllib.request
+    tok = _tenant_token(app_id, app_secret)
+    req = urllib.request.Request(
+        f"https://open.feishu.cn/open-apis/im/v1/chats/{chat_id}/members?page_size=100",
+        headers={"Authorization": f"Bearer {tok}"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        d = json.loads(r.read().decode("utf-8"))
+    return (d.get("data") or {}).get("items", []) if d.get("code") == 0 else []
+
+
+def _resolve_person(open_id, chat_id, bot):
+    """外部真人 open_id → 名字：本地缓存 miss 则群成员 API 现查+缓存（API 源头·ARCH-140 §7）。查不到回 None。
+    ⚠️ 含阻塞网络调用 → on_message 里用 asyncio.to_thread 调，别直接 await 阻塞事件循环。"""
+    if not open_id or not chat_id:
+        return None
+    try:
+        try:
+            from registry import person_name, cache_person
+        except ImportError:
+            from feishu.registry import person_name, cache_person
+    except Exception:  # noqa: BLE001
+        return None
+    n = person_name(open_id)
+    if n:
+        return n
+    try:
+        for m in _chat_members(chat_id, bot["app_id"], bot["app_secret"]):
+            if m.get("member_id") == open_id and m.get("name"):
+                cache_person(open_id, m["name"])
+                return m["name"]
+    except Exception:  # noqa: BLE001 — 查不到不挡·退 None（信封退回 open_id）
+        pass
+    return None
+
+
 # ---------- 进程管理 ----------
 def _bridge_pids(exclude_self=True, bot=None):
     """【在跑的 bot 进程】PID。bot 给定时只匹配 `--bot <name>` 那个进程。
@@ -1498,15 +1550,17 @@ def run(bot_name=None):
                     #   ⇒ 反射性回复到不了 peer，死循环结构上没了。（对照旧版：群→route=a2a 把回复焊回群→无限循环。）
                     env_route = "route=p2a"
                     if is_group:
-                        from_disp, via_disp = a2a_from_name(text, sender or "agent"), "群"
-                        # 第三极 p2a-ext（2026-07-05·ARCH-140）：群消息 + 无 a2a 戳(=不是 peer bot) + 发信人≠owner
-                        #   = 【外部真人】→ 信封写回【原群】+ @他 → 出站复用 _route_to_dest 的「群+@」路径回原群。
-                        #   无死循环：环只发生在 bot↔bot(peer 有戳→仍 route=p2a 回主人 DM)；真人不会无限自动回复。
-                        #   owner 群内 @ 仍走 p2a 回 DM（保内部编排 A2A→P2A 可见性不变）。
-                        if (not _A2A_FROM_RE.search(text or "")) and sender and sender != load_owner(bot["name"]):
-                            _gid = getattr(msg, "chat_id", "") or ""
-                            if _gid:
-                                env_route, via_disp = f"route=p2a-ext dest={_gid} at={sender}", "群·外部人"
+                        _gid = getattr(msg, "chat_id", "") or ""
+                        _gname = _group_display(_gid)                          # via=<群名>（名册·API 源头·ARCH-140 §7）
+                        via_disp = f"群:{_gname}" if _gname else "群"
+                        from_disp = a2a_from_name(text, sender or "agent")     # peer bot(有戳) → 戳/名册解出名字
+                        # 真人（无 a2a 戳 = 不是 peer bot）→ from= 用群成员 API 查真名（owner+外部人都 API 源头·不硬编码·§7.1）
+                        if (not _A2A_FROM_RE.search(text or "")) and sender and _gid:
+                            from_disp = (await asyncio.to_thread(_resolve_person, sender, _gid, bot)) or sender
+                            # 第三极 p2a-ext（§7）：只有【非 owner】外部真人 → 回原群 + @他；owner 群内@ 仍 p2a 回 DM(保编排可见性)。
+                            #   无死循环：环只 bot↔bot(peer 有戳→仍 p2a)；真人不会无限自动回复。
+                            if sender != load_owner(bot["name"]):
+                                env_route, via_disp = f"route=p2a-ext dest={_gid} at={sender}", f"{via_disp}·外部人"
                     else:
                         from_disp, via_disp = "host", "DM"
                     marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route}]"

@@ -67,3 +67,27 @@
 
 - **v0.6（2026-07-03 本档）实现**：`feishu_bridge.py on_message` 群消息信封 `route=a2a…` → **`route=p2a`**（普通回复恒回主人）；**删** 静音/熔断/spin/re-arm 块 + `/a2a-unmute`+`/a2a-status` slash + `import a2a_guard` + `_spin` 实例；**删文件** `a2a_guard.py`、`a2a_end.py`；`TOOLS.md` 去 `a2a_end`/`a2a_guard`。**⚠️ 改桥需 stop→start 重启生效。**
 - **历史（均被取代）**：`PLAN-910`（reply-wait 守望）· v0.4 简化 · v0.5 熔断（`PLAN-912`）。本模型是对「死循环」的**结构性根治**，不再有兜底闸。
+
+## §7 · 外部通道（对外群 · 外部真人）—— 定义在这里，任何 session 读它就懂
+
+> **场景**：某 bot 进了**对外群**（如 `tb25-jiuzhouMV` 在「对外群A」），群里**外部真人**（黄滟、朱镇…）@ 它。这套怎么走、名字哪来、用哪些工具——**全定义在本节 + 代码，不靠某个 agent 记着**（session 关了、换人、换群，下个 session 读这节就全懂）。
+
+### §7.1 · 铁律：一切名字【有源头·API 查·绝不硬编码/凭记忆】
+群名、人名**都不准硬编码、不准凭记忆猜**——必须是**飞书 API 现查**到的（就像 bot 的 open_id/显示名一样有源头）。落成文件（名册/缓存）只是 API 结果的落盘，源头永远是 API。反例教训（2026-07-05）：把 `ou_f8dd…` 凭「听来的」当成「朱健」，API 一查其实是「朱镇」——所以名字只信 API。
+
+### §7.2 · 三件事怎么运转
+| 环节 | 怎么走 | 源头（API）| 落哪 |
+|---|---|---|---|
+| **回信路由** | 外部真人（群 + 无 a2a 戳 + 发信人≠owner）→ 信封 `route=p2a-ext dest=<群> at=<发信人>` → 回**原群 + @他**（见 §3） | —（结构判定）| 代码 `feishu_bridge.py` on_message + `_route_to_dest` |
+| **`via=<群名>`** | chat_id → 群名 | `im/v1/chats`（群列表·`send_feishu_msg._bot_groups`）| **`agent-registry.json` 的 `groups` 段**（committed SSOT·`registry.py sync-groups` 拉）|
+| **`from=<人名>`** | 发信人 open_id → 人名 | **`im/v1/chats/{chat_id}/members`（群成员·用 bot 自己 `im:chat` 权限读群·不碰 owner 账号）** | **本地缓存** `feishu/_state/people-cache.local.json`（gitignore·桥遇新外部人自动查+缓存）|
+| **@ 那个人** | 回信里 `<at id=<open_id>>` | 飞书**自动把 open_id 渲染成他的名字** + 通知他 | —（不落盘·飞书现渲·所以 @ 永不硬编码名字）|
+
+### §7.3 · 工具 / 路径（要用哪个查哪个）
+- `python feishu/registry.py sync-groups` —— 把某 bot 所在群拉进名册 `groups` 段（群名的源头）。
+- `python feishu/registry.py group-name <chat_id>` / `resolve-person <open_id>` —— 查群名 / 人名。
+- 群成员现查 = `im/v1/chats/{chat_id}/members`（桥内 `_resolve_person` 自动调 + 缓存）。
+- 发东西到对外群 = `send_feishu_file.py`（视频/文件）/ `send_feishu_msg.py`（文字 + `--at` @人）。
+
+### §7.4 · 安全（主人决策 2026-07-05）
+对外群**不加「外部人只读」限制**——外部真人**既能收回复、也能派活给 bot**（此 bot 专为对外群操作·群放行不变）。将来某群若要限制，可做成 per-群 knob。防环不受影响：环只 bot↔bot（peer 仍 `route=p2a` 回主人 DM），真人不会无限自动回复。
