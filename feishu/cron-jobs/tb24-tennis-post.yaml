@@ -2,9 +2,9 @@
 # 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
 jobs:
 - name: tennis-post-daily
-  desc: 每天凌晨 02:00 触发 tennis-post 仓「写今天的 tennis post」全套流水线：先做完在制期(否则按镜像逻辑选下一家) → ARCH-220 六 Stage 一趟到底
-    → 飞书成套交付主人。主人第二天补第一手实测再改卡片一小段。
-  cron: 0 2 * * *
+  desc: 每天凌晨 02:05 触发 tennis-post 仓「开始写下一篇网球公司拆解」全套流水线：先做完在制期(否则按镜像逻辑选下一家) → ARCH-220 六 Stage 逐段过闸
+    → 飞书成套交付主人。主人第二天补第一手实测再改卡片一小段。（2:05 错开 autopilot 的 2:00·2026-07-07）
+  cron: 5 2 * * *
   tz: Asia/Shanghai
   enabled: true
   prompt: 写今天的 tennis post：按本仓 CLAUDE.md「一句话触发」+ ARCH-220 六个 Stage 【逐段过闸】跑完整条流水线——每段产出对照该 stage『对应文档』自检、过了再进下一段，别一趟到底把成品堆完再回头改（见

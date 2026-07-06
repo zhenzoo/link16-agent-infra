@@ -1,0 +1,9 @@
+# tb24-xhs-autopilot 的定时任务 · cron-jobs/<bot>.yaml（bot 名=文件名·别在此重复写 bot）
+# 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
+jobs:
+- name: daily-cruise
+  cron: 0 2 * * *
+  tz: Asia/Shanghai
+  enabled: true
+  desc: 每天凌晨 02:00 开启 xhs 今天的巡航（新增 2026-07-07）
+  prompt: 开启今天的巡航
