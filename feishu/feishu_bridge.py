@@ -787,7 +787,9 @@ def _drive_picker(pty, workspace_id, answers, picker):
 # ---------- 必达发送：检查 SendResult · 重试 · 卡片→markdown→纯文本→webhook 四级兜底 ----------
 async def _send_checked(channel, chat_id, payload, name, kind):
     """单次 channel.send + 检查 SendResult.success（带 retryable 重试）。绝不抛。
-    返回 (ok: bool, err_code|None)。"""
+    返回 (ok: bool, err|None, transient: bool)。**transient**=True 表【瞬时网络错/可重试】（DNS 解析不了 /
+    ConnectionError / 或 retryable API 错——会自己恢复·该【耐心重投】）；False=【真失败】（非 retryable API 错·
+    如 230013 目标非法——重试没用·该走兜底）。上层 guaranteed_send 据此决定「重投 vs webhook」。"""
     # 机械闸：所有 markdown/text 出站在此封口裸 URL（防飞书 autolink 贪婪吞 CJL·2026-06-24）。
     # 卡片路径(card_send)走 _linkify 已包 [url](url)·不经此处；此处覆盖 guaranteed_send 的 markdown/text 必达路径。
     if isinstance(payload, dict):
@@ -795,28 +797,31 @@ async def _send_checked(channel, chat_id, payload, name, kind):
             if isinstance(payload.get(_k), str):
                 payload[_k] = _seal_bare_urls(payload[_k])
     last = None
+    transient = True                                    # 默认瞬时（除非撞到非 retryable 的真失败）
     for attempt, wait in enumerate(SEND_RETRY_BACKOFF, start=1):
         if wait:
             await asyncio.sleep(wait)
         try:
             res = await channel.send(chat_id, payload)
-        except Exception as e:  # noqa: BLE001 — 网络/编码等
+        except Exception as e:  # noqa: BLE001 — 网络/编码等·瞬时（DNS/连接·会恢复）
             last = f"raised:{type(e).__name__}:{str(e)[:120]}"
+            transient = True
             continue
         if res and res.success:
             chunks = getattr(res, "chunk_ids", None)
             if chunks and len(chunks) > 1:
                 blog(name, f"send({kind}) ✅ 自动分条 {len(chunks)} 条")
-            return True, None
+            return True, None, True
         err = getattr(res, "error", None) if res else None
         code = getattr(err, "code", None)
         raw = getattr(err, "raw_code", None)
         retryable = bool(getattr(err, "retryable", False))
+        transient = retryable                           # 非 retryable API 错 = 真失败·重试没用
         last = f"code={code} raw={raw} hint={getattr(err, 'hint', None)}"
         blog(name, f"send({kind}) ❌ {last}（尝试 {attempt}/{len(SEND_RETRY_BACKOFF)}）")
         if not retryable:
             break
-    return False, last
+    return False, last, transient
 
 
 def _webhook_fallback(text, name):
@@ -841,14 +846,21 @@ def _webhook_fallback(text, name):
 
 async def guaranteed_send(channel, chat_id, text, name):
     """必达发送一段文本：markdown（SDK 自动分条长文）→ 失败退纯文本（飞书 text 不解析 md·最稳）
-    → 再失败退 webhook（到群）。绝不抛。返回 'markdown'|'text'|'webhook'|'failed'。"""
+    → 再失败：【瞬时网络错】返回 'failed'（**不 webhook**·交给上层耐心重投投【对的目标】）·【真失败】才退 webhook（到群）。
+    绝不抛。返回 'markdown'|'text'|'webhook'|'failed'。"""
     text = (text or "").strip() or "（空回复）"
-    ok, _ = await _send_checked(channel, chat_id, {"markdown": text}, name, "markdown")
+    ok, _, _ = await _send_checked(channel, chat_id, {"markdown": text}, name, "markdown")
     if ok:
         return "markdown"
-    ok, _ = await _send_checked(channel, chat_id, {"text": text}, name, "text")
+    ok, _, transient = await _send_checked(channel, chat_id, {"text": text}, name, "text")
     if ok:
         return "text"
+    # 瞬时网络错（DNS/连接·会恢复）→ 【不走 webhook】·返回 'failed' → 上层 _deliver 抛 RetrySend → 桥现有耐心
+    # 重投对着【正确的 DM 目标】投到恢复（根治 webhook「假成功发错群」短路耐心重投·2026-07-06 主人拍板）。
+    if transient:
+        blog(name, "send 全失败·瞬时网络错 → 不 webhook·交耐心重投(RetrySend)投对的目标")
+        return "failed"
+    # 真失败（非 retryable·如 230013 目标非法·重试没用）→ webhook 最后兜底（发到群·至少让人看到）
     return "webhook" if await asyncio.to_thread(_webhook_fallback, text, name) else "failed"
 
 
