@@ -1,0 +1,16 @@
+# tb24-tennis-post 的定时任务 · cron-jobs/<bot>.yaml（bot 名=文件名·别在此重复写 bot）
+# 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
+jobs:
+- name: tennis-post-daily
+  desc: 每天凌晨 02:00 触发 tennis-post 仓「写今天的 tennis post」全套流水线：先做完在制期(否则按镜像逻辑选下一家) → ARCH-220 六 Stage 一趟到底
+    → 飞书成套交付主人。主人第二天补第一手实测再改卡片一小段。
+  cron: 0 2 * * *
+  tz: Asia/Shanghai
+  enabled: true
+  prompt: 写今天的 tennis post：按本仓 CLAUDE.md「一句话触发」+ ARCH-220 六个 Stage 【逐段过闸】跑完整条流水线——每段产出对照该 stage『对应文档』自检、过了再进下一段，别一趟到底把成品堆完再回头改（见
+    ARCH-220 §1 过闸契约）、别问我确认。① 选题：先看 posts/ 有没有已开工未发布的在制期(有 _notes.md 但 SPEC-210 发布记录未回填)——有就接着把它做完并交付；没有才去
+    SPEC-210 §1 矩阵挑「已发期号」为空、且与既发期成镜像/对照的下一家。② 若在制期 _notes.md 里有『主人第一手实测』小节：实测口径 > 二手评测，被实测证伪的二手说法必须撤(ARCH-230
+    §7.5)，页脚数据源列『主理人实测』。③ 调研 cross-validate(每个上卡数字 ≥2 源，回填 SPEC-210 并标数据时点) → 文案(必跑 scripts/xhs_count.py
+    + scripts/check_copy.py 两道机械闸，全过才算数) → 找真图逐张 Read 肉眼核身份 → 出图(GPT 封面 edit 模式 + HTML 内页 6~7 页·品牌色用 PIL
+    从该公司真机/官网取色·每期不同) → 用 send_feishu_media 按阅读顺序成套发我 + 文案发干净版飞书在线文档。④ 数字全以 SPEC-210 为 SSOT 且发帖前必重核。⑤
+    全程无对外内部引用、无 emoji、无中英混杂。做完发我一条 DM：本期是谁、镜像主题一句话、共几张卡、还差什么等我补。

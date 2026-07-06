@@ -19,12 +19,18 @@
     "<prompt> [飞书 from=cron:<job> to=<bot> via=定时 · route=p2a]"
   桥的 userprompt hook 从信封解析 route=p2a → 那个 bot 干完【回复恒回主人 DM】（不会漏进群 / 不串台）。
 
+【载体】每个 bot 一个 `feishu/cron-jobs/<bot>.yaml`（bot 名=文件名·专属划分·别混）；旧 `cron-jobs.json` 仍读（向后兼容）。
+【多机】守护进程只【真触发】本机名册(bridge-bots.local.json)里的 bot 的任务 → cron-jobs/ 可共享、两机不撞、不写死 host。
+
 用法：
-  python bridge_cron.py list                      # 列所有定时器（cron / 目标 bot / 上次触发）
-  python bridge_cron.py fire <name> [--dry-run]    # 立刻手动触发一个 job（--dry-run 只打印 marker 不注入·测试用）
-  python bridge_cron.py run                         # 前台跑守护循环（start 用它起后台）
-  python bridge_cron.py start | stop | status       # 后台守护进程 起 / 停 / 看
-  python bridge_cron.py check "0 9 * * *" [--n 5]   # 调试：打印该 cron 表达式未来 N 次触发（本地时区）
+  python bridge_cron.py board                       # ⭐ 全舰队总览：每个 agent 排了啥·下次/上次·本机●/别机○
+  python bridge_cron.py add --bot X --name N --cron "0 9 * * *" --sop docs/SOP-xxx   # 加：--sop 引到该仓 SOP（或 --prompt "…"）
+  python bridge_cron.py rm | enable | disable --bot X --name N   # 删 / 启用 / 停用
+  python bridge_cron.py list [--bot X]              # 列 json（全部 / 某 bot）
+  python bridge_cron.py fire <name> [--dry-run]     # 立刻手动触发一个 job（--dry-run 只打印 marker 不注入·测试用）
+  python bridge_cron.py run                          # 前台跑守护循环（start 用它起后台）
+  python bridge_cron.py start | stop | status        # 后台守护进程 起 / 停 / 看
+  python bridge_cron.py check "0 9 * * *" [--n 5]    # 调试：打印该 cron 表达式未来 N 次触发（本地时区）
 
 cron 5 段 = 分 时 日 月 周（周 0=周日 · 7 也当周日）；支持 * , - / 组合。
   例：`0 9 * * *`=每天 09:00 · `*/30 * * * *`=每半小时 · `0 9 * * 1-5`=工作日 09:00。
@@ -38,13 +44,18 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+try:
+    import yaml                                        # 每 bot 一个 cron-jobs/<bot>.yaml（多行 prompt 友好·可注释）
+except ImportError:                                    # 没装也不崩：退回只读 legacy cron-jobs.json
+    yaml = None
 
 # ---------- 轻量路径常量（不 import 重的 feishu_bridge —— 只有 fire/run 真投递时才 import 它）----------
 HERE = Path(__file__).resolve().parent                 # …/feishu
 PROJECT = HERE.parent                                  # 仓库根
 STATE_DIR = HERE / "_state"
 LOG_DIR = HERE / "_logs"
-JOBS_PATH = HERE / "cron-jobs.json"
+JOBS_DIR = HERE / "cron-jobs"                          # 【专属划分】每 bot 一个 <bot>.yaml（bot 名=文件名·隐含·不重复写）
+JOBS_PATH = HERE / "cron-jobs.json"                    # legacy 扁平表（向后兼容·迁移期同时读·迁完可空）
 LASTFIRE_PATH = STATE_DIR / "cron-last-fired.json"
 LOG_PATH = LOG_DIR / "bridge-cron.log"
 DEFAULT_TZ = "Asia/Shanghai"
@@ -137,13 +148,71 @@ def next_fires(expr, tz=DEFAULT_TZ, n=5, horizon_min=60 * 24 * 40):
 
 
 # ---------- 登记表 / 状态 ----------
-def load_jobs():
-    try:
-        data = json.loads(JOBS_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+def _roster_bots():
+    """本机名册(bridge-bots.local.json)里的 bot 名集合 —— 守护进程只跑【本机 bot】的任务·多机零撞车·不写死 hostname。"""
+    for fn in ("bridge-bots.local.json", "bridge-bots.json"):
+        try:
+            d = json.loads((HERE / fn).read_text(encoding="utf-8"))
+            names = {b["name"] for b in d.get("bots", []) if b.get("name")}
+            if names:
+                return names
+        except (OSError, ValueError, KeyError):
+            continue
+    return set()
+
+
+def _bot_yaml(bot):
+    return JOBS_DIR / f"{bot}.yaml"
+
+
+def _load_bot_file(bot):
+    """读 cron-jobs/<bot>.yaml → jobs list（每条注入 bot=文件名·文件里不必重复写 bot）。绝不抛。"""
+    if yaml is None:
         return []
-    jobs = data.get("jobs", []) if isinstance(data, dict) else data
-    return jobs if isinstance(jobs, list) else []
+    try:
+        data = yaml.safe_load(_bot_yaml(bot).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    raw = data.get("jobs", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    out = []
+    for j in raw:
+        if isinstance(j, dict):
+            j = dict(j); j["bot"] = bot                # bot 隐含 = 文件名（忽略文件内可能误写的 bot 字段）
+            out.append(j)
+    return out
+
+
+def _save_bot_file(bot, jobs):
+    """把某 bot 的 jobs 写回 cron-jobs/<bot>.yaml（去掉隐含 bot 字段·带表头注释）。"""
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    clean = [{k: v for k, v in j.items() if k != "bot"} for j in jobs]
+    header = (f"# {bot} 的定时任务 · cron-jobs/<bot>.yaml（bot 名=文件名·别在此重复写 bot）\n"
+              "# 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。\n")
+    with _bot_yaml(bot).open("w", encoding="utf-8") as f:
+        f.write(header)
+        yaml.safe_dump({"jobs": clean}, f, allow_unicode=True, sort_keys=False, default_flow_style=False, width=100)
+
+
+def load_jobs():
+    """全量任务 = ① cron-jobs/*.yaml（每 bot 一文件·bot=文件名）② legacy cron-jobs.json（向后兼容）。
+    (bot,name) 去重·per-bot 文件优先；每条都带 bot 字段。"""
+    jobs, seen = [], set()
+    if yaml is not None and JOBS_DIR.is_dir():
+        for p in sorted(JOBS_DIR.glob("*.yaml")):
+            for j in _load_bot_file(p.stem):
+                key = (j.get("bot"), j.get("name"))
+                if key not in seen:
+                    seen.add(key); jobs.append(j)
+    try:                                               # legacy 扁平表（迁完为空即无副作用）
+        data = json.loads(JOBS_PATH.read_text(encoding="utf-8"))
+        for j in (data.get("jobs", []) if isinstance(data, dict) else (data or [])):
+            if isinstance(j, dict):
+                key = (j.get("bot"), j.get("name"))
+                if key not in seen:
+                    seen.add(key); jobs.append(j)
+    except (OSError, ValueError):
+        pass
+    return jobs
 
 
 def _load_lastfire():
@@ -215,12 +284,15 @@ def fire(job, dry_run=False):
 
 # ---------- 守护循环 ----------
 def cmd_run():
-    log(f"cron 守护进程启动 · tick={TICK_SEC}s · jobs={JOBS_PATH}")
+    log(f"cron 守护进程启动 · tick={TICK_SEC}s · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
     lastfire = _load_lastfire()
     while True:
         try:
+            roster = _roster_bots()                    # 每 tick 重取·只跑【本机 bot】的任务（多机不撞·不写死 host）
             for job in load_jobs():                    # 每 tick 热读 → 加 / 改 / 停 job 无需重启
                 if not job.get("enabled", True):
+                    continue
+                if roster and job.get("bot") not in roster:   # 非本机 bot 的任务 → 本机不触发
                     continue
                 name = job.get("name")
                 expr = job.get("cron")
@@ -318,10 +390,105 @@ def cmd_status():
               f"下次≈{nxt}  上次={lastfire.get(nm, '—')}")
 
 
-def cmd_list():
-    jobs = load_jobs()
+def cmd_board():
+    """全舰队总览：每个 bot 排了哪些定时任务（本机 roster 标 ●本机 / 别机 ○）· 下次/上次。"""
+    jobs, roster, lastfire = load_jobs(), _roster_bots(), _load_lastfire()
+    pids = _cron_pids()
+    by_bot = {}
+    for j in jobs:
+        by_bot.setdefault(j.get("bot", "?"), []).append(j)
+    print(f"cron 守护进程：{'在跑 PID=' + ','.join(pids) if pids else '没跑（用 `start` 起）'} · 目录 {JOBS_DIR}")
+    if not by_bot:
+        print("（还没有任何定时任务 · `add --bot <bot> --name <n> --cron \"0 9 * * *\" --sop <仓内SOP路径>` 加一个）")
+        return
+    print()
+    for bot in sorted(by_bot):
+        print(f"[{'●本机' if bot in roster else '○别机'}] {bot}")
+        for j in by_bot[bot]:
+            st = "on " if j.get("enabled", True) else "OFF"
+            try:
+                nf = next_fires(j.get("cron", ""), j.get("tz", DEFAULT_TZ), n=1)
+                nxt = nf[0] if nf else "—"
+            except Exception:                          # noqa: BLE001
+                nxt = "(cron 错)"
+            print(f"    [{st}] {j.get('name','?'):<26} {j.get('cron',''):<14} 下次≈{nxt}  上次={lastfire.get(j.get('name'), '—')}")
+            if j.get("desc"):
+                print(f"           ↳ {j['desc']}")
+    print("\n本机只【真触发】标 ●本机 的任务（roster 过滤·多机同读一份 cron-jobs/ 不撞车）。")
+
+
+def _require_roster_bot(bot):
+    roster = _roster_bots()
+    if roster and bot not in roster:
+        print(f"❌ '{bot}' 不在本机名册。可用：{', '.join(sorted(roster))}", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_add(bot, name, cron, prompt=None, sop=None, tz=None, desc=None):
+    if yaml is None:
+        print("❌ 没装 pyyaml，无法写 per-bot yaml（pip install pyyaml）", file=sys.stderr)
+        sys.exit(2)
+    _require_roster_bot(bot)
+    if not cron:
+        print("❌ add 需 --cron \"分 时 日 月 周\"", file=sys.stderr)
+        sys.exit(2)
+    try:
+        cron_match(cron, datetime.now(ZoneInfo(tz or DEFAULT_TZ)))     # 校验 cron 合法
+    except ValueError as e:
+        print(f"❌ cron 表达式非法：{e}", file=sys.stderr)
+        sys.exit(2)
+    if not prompt and not sop:
+        print("❌ 要么 --prompt \"…\" 要么 --sop <仓内 SOP 路径>", file=sys.stderr)
+        sys.exit(2)
+    if sop and not prompt:                             # 大脑在 agent 自己仓的 SOP·触发词只是把它引过去（闹钟 vs 大脑）
+        prompt = f"定时任务触发：请执行本仓 {sop} 里定义的流程（按其步骤走、产出按该 SOP 交付）。"
+    jobs = _load_bot_file(bot)
+    if any(j.get("name") == name for j in jobs):
+        print(f"❌ {bot} 已有同名任务 '{name}'（先 rm 或换名）", file=sys.stderr)
+        sys.exit(2)
+    job = {"name": name, "cron": cron, "tz": tz or DEFAULT_TZ, "enabled": True}
+    if desc:
+        job["desc"] = desc
+    job["prompt"] = prompt
+    jobs.append(job)
+    _save_bot_file(bot, jobs)
+    nxt = (next_fires(cron, tz or DEFAULT_TZ, 1) or ["—"])[0]
+    print(f"✅ 加好：{bot} / {name} · cron={cron} · 下次≈{nxt}")
+    print(f"   文件：{_bot_yaml(bot)}（守护进程热读·免重启·`board` 可查）")
+
+
+def cmd_rm(bot, name):
+    jobs = _load_bot_file(bot)
+    keep = [j for j in jobs if j.get("name") != name]
+    if len(keep) == len(jobs):
+        print(f"❌ {bot} 没有任务 '{name}'（`list --bot {bot}` 看）", file=sys.stderr)
+        sys.exit(2)
+    if keep:
+        _save_bot_file(bot, keep)
+    else:                                              # 删光了 → 连空壳一起删（cron-jobs/ 只留真有任务的·一眼看谁有）
+        try:
+            _bot_yaml(bot).unlink()
+        except OSError:
+            pass
+    print(f"✅ 删掉 {bot} / {name}" + ("（该 bot 已无任务·yaml 一并删除）" if not keep else ""))
+
+
+def cmd_set_enabled(bot, name, on):
+    jobs = _load_bot_file(bot)
+    if not any(j.get("name") == name for j in jobs):
+        print(f"❌ {bot} 没有任务 '{name}'", file=sys.stderr)
+        sys.exit(2)
+    for j in jobs:
+        if j.get("name") == name:
+            j["enabled"] = on
+    _save_bot_file(bot, jobs)
+    print(f"✅ {bot} / {name} → {'启用' if on else '停用'}")
+
+
+def cmd_list(bot=None):
+    jobs = [j for j in load_jobs() if (bot is None or j.get("bot") == bot)]
     if not jobs:
-        print(f"（{JOBS_PATH} 里没有 job）")
+        print(f"（{('bot ' + bot + ' ') if bot else ''}没有定时任务 · `board` 看全部 · `add` 加）")
         return
     print(json.dumps(jobs, ensure_ascii=False, indent=2))
 
@@ -329,6 +496,10 @@ def cmd_list():
 def main():
     argv = sys.argv[1:]
     cmd = argv[0] if argv else "status"
+
+    def _opt(flag, default=None):                      # 取 --flag 的值（缺=default）
+        return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else default
+
     if cmd == "run":
         cmd_run()
     elif cmd == "start":
@@ -337,8 +508,23 @@ def main():
         cmd_stop()
     elif cmd == "status":
         cmd_status()
+    elif cmd == "board":
+        cmd_board()
     elif cmd == "list":
-        cmd_list()
+        cmd_list(_opt("--bot"))
+    elif cmd in ("add", "rm", "enable", "disable"):
+        bot, name = _opt("--bot"), _opt("--name")
+        if not bot or not name:
+            print("用法：add/rm/enable/disable --bot <bot> --name <name> "
+                  "[add: --cron \"0 9 * * *\" (--sop <仓内SOP路径> | --prompt \"…\") --tz .. --desc ..]", file=sys.stderr)
+            sys.exit(2)
+        if cmd == "add":
+            cmd_add(bot, name, _opt("--cron"), prompt=_opt("--prompt"), sop=_opt("--sop"),
+                    tz=_opt("--tz"), desc=_opt("--desc"))
+        elif cmd == "rm":
+            cmd_rm(bot, name)
+        else:
+            cmd_set_enabled(bot, name, cmd == "enable")
     elif cmd == "fire":
         if len(argv) < 2:
             print("用法：fire <job-name> [--dry-run]", file=sys.stderr)

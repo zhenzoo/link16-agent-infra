@@ -1,15 +1,6 @@
 {
   "_README": "通用 CRON 登记表 —— 到点把 prompt 注入某个 bot 的 Claude Code 会话（机制 = feishu/bridge_cron.py）。加一个定时任务 = 在 jobs 里加一项；cron 守护进程每 tick 热读，加/改/停无需重启。任务本体（如「回评论」）写在各内容仓的 SOP 里，这里的 prompt 只是把 agent 引到那份 SOP 的一句触发词。",
   "_fields": "name=唯一名 · desc=人读说明 · cron=5段(分 时 日 月 周·周0=周日) · tz=时区(默认Asia/Shanghai) · bot=目标bot名(见bridge-bots.local.json) · prompt=注入的任务提示词 · enabled=开关 · host=(可选)只在此机器hostname触发(多机防重复·留空=哪台跑该bot就哪台触发)",
-  "jobs": [
-    {
-      "name": "reply-comments-daily",
-      "desc": "每天 09:00 触发 notes 仓「回评论」SOP：读 X/Threads/小红书三平台新评论 → 逐条起草回复 → 汇成一个飞书在线文档发我确认（先不真回复，等我看过点头）",
-      "cron": "0 9 * * *",
-      "tz": "Asia/Shanghai",
-      "bot": "tb24-notes-2",
-      "enabled": true,
-      "prompt": "回评论：请执行本仓 docs/SOP-020-reply-to-comments.md 的每日回评论流程 —— 读 X / Threads / 小红书三平台的新评论，逐条用我的 taste 起草回复，汇成一个飞书在线文档发我确认。先只出草稿、别真回复，等我看过文档点头后再按平台发（X/Threads 我确认后你用 API 发，小红书我自己手动贴）。"
-    }
-  ]
+  "jobs": [],
+  "_MIGRATED": "jobs 已迁至 cron-jobs/<bot>.yaml (2026-07-07)·本文件留作向后兼容空壳·新任务用 bridge_cron.py add"
 }

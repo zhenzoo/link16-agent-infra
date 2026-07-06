@@ -31,6 +31,7 @@
 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) | **ARCH** · wmux 怎么驱动面板（daemon RPC / split-here / 守卫）+ **§8 确切信号**（probe/kickoff·判面板死活靠探针不靠读屏） |
 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) | **ARCH** · 飞书桥怎么搭（@bot→注入 / 回传 v8 hook→outbox→drainer / 多 bot 模型 / 自愈） |
 | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) | **ARCH** · **agent↔agent 通讯协议**（架在桥之上：send / 必回文字 / reply-wait 守望 / 一步读群 · 全靠结构化信号 + 工具 · 零硬编码 · 冷启动跳启动卡） |
+| [`docs/ARCH-150-agent-cron.md`](docs/ARCH-150-agent-cron.md) | **ARCH** · **给智能体排定时任务（CRON）**：闹钟 vs 大脑 · 每 bot 一个 `cron-jobs/<bot>.yaml`（专属划分）· 守护进程只跑本机 bot（多机不撞·零硬编码）· `bridge_cron.py board/add/rm` |
 | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md) | **SOP** · 怎么一步步注册一个飞书 bot（扫码 OAuth → 设名/头像 → 开权限 → 加名册 → 重启桥）+ **bot↔仓库↔职责 名册表** |
 | [`docs/SOP-125-bot-rename.md`](docs/SOP-125-bot-rename.md) | **SOP** · 给已存在的 bot **改名**：改哪些名/文件 + 扫描 + **改完必私聊 DM 一次让它重新认主人**（否则群里派活回复发错人·2026-07-05 arch 实证） |
 | [`docs/SOP-130-cutover.md`](docs/SOP-130-cutover.md) | **SOP** · 飞书桥从 xhs 旧桥切到 link16 新桥（precondition + 两步切 + 验收 + 30 秒回退·Owner 手动） |
