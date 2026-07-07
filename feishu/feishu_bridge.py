@@ -6,7 +6,8 @@
   手机飞书 @bot → 飞书云 →(WebSocket)→ 该 bot 的进程
     · 没会话 → wmux_session.spawn 新建专属 workspace + 起 ccp + 等就绪 → 记进 per-bot 注册表
     · 有会话 → 注入那个 pty（普通消息末尾缀 [飞书-<bot>] 标记 · slash command 原样透传不缀）→ worker 会话 hook(Stop/PostToolUse) 写 outbox → drainer 读 outbox 发回飞书（v8）
-    · slash command：bridge 自己认 /clear /cd /account /screen /stop /close /help；其余（/resume /rename /model …）verbatim 转发进 ccp
+    · slash command：bridge 自己认 /clear /cd /account /screen /stop /close /new /help；其余（/resume /rename /model …）verbatim 转发进 ccp
+      （/new = 起个全新【空】会话不注入任何文本·把「起会话」和「注入内容」拆开：先 /new 起空的 → 再自己发消息喂它）
     · 会话死了（你手关 workspace）→ 下次消息自动重生
 
 🔴 进程模型：lark_channel 一个进程只能跑【一个】WS 连接（模块级全局 ws loop · 2026-06-15 实证：
@@ -1261,6 +1262,27 @@ def run(bot_name=None):
                 def_dir = default_cwd(bot)                               # 名册默认目录（下次重开用这个）
                 head = "🗑 已关闭会话" if alive else "🛌 本来就没有会话"
                 await reply(chat_id, f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）"); return
+            if cmd == "/new":
+                # 开一个【全新空会话·不注入任何文本】——与「正常发消息起会话」【同一 spawn 路径】(ensure_session)，
+                #   唯一区别：不缀文本、不注入 → 起好停在就绪 ❯，等你【自己发消息注入】。
+                #   之前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；/new 把「起会话」和「注入内容」拆开：
+                #   先 /new 起个空的 → 再自己发消息喂它。
+                #   起在【名册默认账号 + 默认目录】（与 /close 一致·撤掉临时 /account 切的号 + /cd 切的目录·主人拍板 2026-07-07）。
+                agent_runtime.reset_account(bot, account_default)     # 账号原地回名册默认（改 bot dict → 下面 spawn 用默认号）
+                if alive:
+                    try:
+                        await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
+                    except Exception:  # noqa: BLE001
+                        pass
+                clear_session(bot["name"])                            # 清注册表(含 /cd 的 cwd + 旧 runtime 字段) → current_cwd 回默认目录·spawn 在默认目录起
+                _dir = await asyncio.to_thread(current_cwd, bot)
+                _acc_lbl, _dir_lbl = runtime_labels(_dir)
+                await reply(chat_id, f"🆕 正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个全新的 {agent_runtime.display_name(bot)}…十几秒后就绪（**空会话·不注入任何文本**）")
+                try:
+                    await asyncio.to_thread(ensure_session, bot)   # eager 冷启（不像 /cd·/account 懒启动·立刻起）·不注入
+                except Exception as e:  # noqa: BLE001
+                    await reply(chat_id, f"❌ 起会话失败：{str(e)[:200]}（@ 我发 /screen 看现场）"); return
+                await reply(chat_id, f"✅ 全新的 {agent_runtime.display_name(bot)} 已就绪·空的（没注入任何文本·账号+目录已回名册默认）——现在直接发消息就注入进去"); return
             if cmd == "/cd":
                 cur = await asyncio.to_thread(current_cwd, bot)
                 if not arg:
@@ -1309,6 +1331,7 @@ def run(bot_name=None):
                     "· `/screen` — 看现场\n"
                     "· `/stop` — 打断当前任务（顺手清空输入框）\n"
                     "· `/close` — 关会话（顺手把临时切的账号切回名册默认）\n"
+                    "· `/new` — 起一个【全新空会话】·不注入任何文本（起在名册默认账号+目录·有活会话先关旧的）→ 停在就绪态，你自己发消息注入\n"
                     "· `/help` — 本帮助\n\n"
                     f"📂 **当前在** `{cur}`\n**书签**：{bm}（如 `/cd yoach` `/cd post`）")); return
             if cmd in ("/account", "/acc", "/账号"):

@@ -39,7 +39,7 @@
 
 - **会话注册表（每 bot 一个文件 · 多进程无 race）**：`_autopilot/bridge-session-<bot>.json` = `{workspace_id, pty, jsonl}`（桥自己写自己读 · `jsonl` = 这个会话钉死的 transcript 路径·见 §2.5）。另有 `_autopilot/bridge-owner-<bot>.json` 记 owner。**这取代了旧的 `supervisor.pty` 单指针**——bot 绑的是「桥自己造的会话」，不是「猜哪个总控」，所以永远指得对、不会指到忙总控。
 - **彻底删掉**：`supervisor.pty` 认领、`register_supervisor.py`、wsid8 pty 文件、「🛌 没人认领总控不在岗」那套——owned-session 下不需要。
-- **斜杠命令**：桥**只拦截下面这 6 个自己的命令**；**其余任何 `/xxx` 一律 verbatim 透传进会话**（当 Claude Code 自己的 slash command·见末条）：
+- **斜杠命令**：桥**只拦截下面这 8 个自己的命令**；**其余任何 `/xxx` 一律 verbatim 透传进会话**（当 Claude Code 自己的 slash command·见末条）：
   - `/clear` → 给会话发 `/clear` 清空上下文（面板留着）
   - `/cd` → **像文件浏览器一样在目录树里走**（2026-06-18 重构 · 配置 `feishu/bridge-cd-bookmarks.json`）：
     - **无参 `/cd`** = 列【bot 当前所在目录】的全部直接子目录 + 编号 → **你回一个数字就【选中】那个目录**（手机零打字 · 不过滤 · dotfolder/归档全列）。**⚠️ 懒启动（2026-06-26）：回数字只是【选中目录·不立刻起会话】**（`_do_cd` 关旧会话 + 把目录暂存进注册表 `cwd`、清掉 runtime 字段、**不 spawn**），真正起会话推迟到你发【下一条正式消息】时由 `on_message→ensure_session` 在该目录冷启。「当前目录」= 会话注册表 `bridge-session-<bot>.json` 的 `cwd`（每次 spawn / `/cd` 都写）· 没有则 bot 默认 cwd（仓库类 bot = 本仓库根 · config 类 = 其配的 cwd）。回数字的消费在 `on_message`：上条 `/cd` 把「编号→路径」存进 `bridge-cd-pending-<bot>.json`（15min 有效），下条纯数字命中即【选中暂存】；回非数字 = 改主意，清待选照常处理。
@@ -50,6 +50,8 @@
   - `/screen` → 读屏看现场
   - `/stop` → `ctrl+c` 打断当前 turn
   - `/close` → `workspace.close` 干净撤掉这个 bot 的会话 + **清注册表（含 `/cd` 过的 `cwd`）+ 账号切回名册默认** → **下次 @ 用名册默认账号 + 默认目录重建**。起会话/关会话/自愈重生的飞书提示都打印「账号 + 目录」并各自标注「（默认）/（已切·默认 X）」，让你一眼看出用哪个号、在哪个目录起的。
+  - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
+  - `/account <别名> [目录]` → **切登录账号**（临时·关旧会话·可叠加 `/cd` 目录·懒启动：发下条正式消息才真起）。别名 `cc/ccp/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
   - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进 ccp 会话**（verbatim·**绝不缀 `[飞书]` 标记**·否则行首不是 `/` → CC 不认成 slash command）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
 
