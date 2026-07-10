@@ -13,7 +13,7 @@ jobs:
     §7.5)，页脚数据源列『主理人实测』。③ 调研 cross-validate(每个上卡数字 ≥2 源，回填 SPEC-210 并标数据时点) → 文案(必跑 scripts/xhs_count.py
     + scripts/check_copy.py 两道机械闸，全过才算数) → 找真图逐张 Read 肉眼核身份 → 出图(GPT 封面 edit 模式 + HTML 内页 6~7 页·品牌色用 PIL
     从该公司真机/官网取色·每期不同) → 用 send_feishu_media 按阅读顺序成套发我 + 文案发干净版飞书在线文档。④ 数字全以 SPEC-210 为 SSOT 且发帖前必重核。⑤
-    全程无对外内部引用、无 emoji、无中英混杂。做完发我一条 DM：本期是谁、镜像主题一句话、共几张卡、还差什么等我补。
+    全程无对外内部引用、无 emoji、无中英混杂。⑥【证据链硬要求·见 docs/ARCH-240（2026-07-11）】每个上卡数字带证据链+分级标注(实测>官方>多源>单源>口述>查无)、可溯源；电商真实数据=亚马逊评价/BSR 走 ScraperAPI(key 在 .env·无登录·可无人值守跑)，京东/淘宝销量评价【凌晨无人值守跑不了 chrome-direct·它要主人 Chrome 登着+过验证】→ 标『待主人白天 chrome-direct 补核』、别编数也别写『无数据』；别把『我们没查到』当『客观不存在』、别拿单样本下全盘结论、绝对化措辞(没人买/没人摸过/查无/榜上无名)一律软化(ARCH-240 §1)。若轮到横向对比/汇总期(P001-P006 六家已发)→ 拉 SPEC-210 §1 矩阵、每个对比数字发帖前重核带 evidence、图密度对标往期。做完发我一条 DM：本期是谁、镜像主题一句话、共几张卡、哪些数走了 ScraperAPI 实测、哪些待我白天 chrome-direct 补。
 - name: comment-factcheck-daily
   cron: 0 9 * * *
   tz: Asia/Shanghai
