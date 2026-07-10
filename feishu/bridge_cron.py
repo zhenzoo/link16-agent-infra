@@ -482,6 +482,7 @@ def cmd_set_enabled(bot, name, on):
         if j.get("name") == name:
             j["enabled"] = on
     _save_bot_file(bot, jobs)
+    log(f"📝 手动{'启用' if on else '停用'} {bot}/{name}（bridge_cron.py {'enable' if on else 'disable'}·留痕）")
     print(f"✅ {bot} / {name} → {'启用' if on else '停用'}")
 
 
