@@ -14,3 +14,13 @@ jobs:
     + scripts/check_copy.py 两道机械闸，全过才算数) → 找真图逐张 Read 肉眼核身份 → 出图(GPT 封面 edit 模式 + HTML 内页 6~7 页·品牌色用 PIL
     从该公司真机/官网取色·每期不同) → 用 send_feishu_media 按阅读顺序成套发我 + 文案发干净版飞书在线文档。④ 数字全以 SPEC-210 为 SSOT 且发帖前必重核。⑤
     全程无对外内部引用、无 emoji、无中英混杂。做完发我一条 DM：本期是谁、镜像主题一句话、共几张卡、还差什么等我补。
+- name: comment-factcheck-daily
+  cron: 0 9 * * *
+  tz: Asia/Shanghai
+  enabled: true
+  desc: 每天09:00拉 tennis-post 所有已发帖小红书评论→按 ARCH-240 §4 筛事实质疑、溯源定责→报主人建议(改帖 or 回评)·不擅自动手
+  prompt: 每天 09:00 评论 fact-check（按本仓 docs/ARCH-240 §4 溯源闭环）：① 用 tikhub 拉 ZHEN好玩 账号所有已发帖的小红书评论——note IDs
+    见 SPEC-210 发布记录（如 P001=6a47a0e3000000001c026797 / P005=6a4deb3e0000000007028953），没登记的先 tikhub search
+    xhs ZHEN好玩 定位本人那几条；每帖 note xhs <id> --comments 拉全（楼中楼+ip_location）。② 跟上次比挑出【新增】评论里的事实性质疑（数字/参数/销量/实机/奖项/价格…），忽略灌水情绪。③
+    逐条重新核查+溯源，定责四选一：源数据错/过期、agent 漂移(张冠李戴幻觉)、我们表述太满(单样本下全盘/把没查到当不存在/绝对化)、评论本身错(网友说反或误解)。平台内部数据(京东/淘宝销量评价)用
+    browser-act chrome-direct 登录态核、亚马逊用 ScraperAPI，别只读糊弄。④ 汇成一条 DM 报我：每条质疑+证据+定责+建议措施(错在我们→改帖重传；错在评论→回评澄清)。先别擅自改帖或回评，等我点头。没有新质疑就报一句今日无新事实质疑。
