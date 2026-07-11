@@ -4,6 +4,6 @@ jobs:
 - name: daily-cruise
   cron: 0 2 * * *
   tz: Asia/Shanghai
-  enabled: true
+  enabled: false
   desc: 每天凌晨 02:00 开启 xhs 今天的巡航（新增 2026-07-07）
   prompt: 开启今天的巡航

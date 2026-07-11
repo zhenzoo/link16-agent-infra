@@ -6,18 +6,22 @@ jobs:
     错开 autopilot 的 2:00·2026-07-07）
   cron: 5 2 * * *
   tz: Asia/Shanghai
-  enabled: true
+  enabled: false
   prompt: 写今天的 tennis post：按本仓 CLAUDE.md「一句话触发」+ ARCH-220 六个 Stage 【逐段过闸】跑完整条流水线——每段产出对照该 stage『对应文档』自检、过了再进下一段，别一趟到底把成品堆完再回头改（见
     ARCH-220 §1 过闸契约）、别问我确认。① 选题：先看 posts/ 有没有已开工未发布的在制期(有 _notes.md 但 SPEC-210 发布记录未回填)——有就接着把它做完并交付；没有才去
     SPEC-210 §1 矩阵挑「已发期号」为空、且与既发期成镜像/对照的下一家。② 若在制期 _notes.md 里有『主人第一手实测』小节：实测口径 > 二手评测，被实测证伪的二手说法必须撤(ARCH-230
     §7.5)，页脚数据源列『主理人实测』。③ 调研 cross-validate(每个上卡数字 ≥2 源，回填 SPEC-210 并标数据时点) → 文案(必跑 scripts/xhs_count.py
     + scripts/check_copy.py 两道机械闸，全过才算数) → 找真图逐张 Read 肉眼核身份 → 出图(GPT 封面 edit 模式 + HTML 内页 6~7 页·品牌色用 PIL
     从该公司真机/官网取色·每期不同) → 用 send_feishu_media 按阅读顺序成套发我 + 文案发干净版飞书在线文档。④ 数字全以 SPEC-210 为 SSOT 且发帖前必重核。⑤
-    全程无对外内部引用、无 emoji、无中英混杂。⑥【证据链硬要求·见 docs/ARCH-240（2026-07-11）】每个上卡数字带证据链+分级标注(实测>官方>多源>单源>口述>查无)、可溯源；电商真实数据=亚马逊评价/BSR 走 ScraperAPI(key 在 .env·无登录·可无人值守跑)，京东/淘宝销量评价【凌晨无人值守跑不了 chrome-direct·它要主人 Chrome 登着+过验证】→ 标『待主人白天 chrome-direct 补核』、别编数也别写『无数据』；别把『我们没查到』当『客观不存在』、别拿单样本下全盘结论、绝对化措辞(没人买/没人摸过/查无/榜上无名)一律软化(ARCH-240 §1)。若轮到横向对比/汇总期(P001-P006 六家已发)→ 拉 SPEC-210 §1 矩阵、每个对比数字发帖前重核带 evidence、图密度对标往期。做完发我一条 DM：本期是谁、镜像主题一句话、共几张卡、哪些数走了 ScraperAPI 实测、哪些待我白天 chrome-direct 补。
+    全程无对外内部引用、无 emoji、无中英混杂。⑥【证据链硬要求·见 docs/ARCH-240（2026-07-11）】每个上卡数字带证据链+分级标注(实测>官方>多源>单源>口述>查无)、可溯源；电商真实数据=亚马逊评价/BSR
+    走 ScraperAPI(key 在 .env·无登录·可无人值守跑)，京东/淘宝销量评价【凌晨无人值守跑不了 chrome-direct·它要主人 Chrome 登着+过验证】→ 标『待主人白天
+    chrome-direct 补核』、别编数也别写『无数据』；别把『我们没查到』当『客观不存在』、别拿单样本下全盘结论、绝对化措辞(没人买/没人摸过/查无/榜上无名)一律软化(ARCH-240 §1)。若轮到横向对比/汇总期(P001-P006
+    六家已发)→ 拉 SPEC-210 §1 矩阵、每个对比数字发帖前重核带 evidence、图密度对标往期。做完发我一条 DM：本期是谁、镜像主题一句话、共几张卡、哪些数走了 ScraperAPI
+    实测、哪些待我白天 chrome-direct 补。
 - name: comment-factcheck-daily
   cron: 0 9 * * *
   tz: Asia/Shanghai
-  enabled: true
+  enabled: false
   desc: 每天09:00拉 tennis-post 所有已发帖小红书评论→按 ARCH-240 §4 筛事实质疑、溯源定责→报主人建议(改帖 or 回评)·不擅自动手
   prompt: 每天 09:00 评论 fact-check（按本仓 docs/ARCH-240 §4 溯源闭环）：① 用 tikhub 拉 ZHEN好玩 账号所有已发帖的小红书评论——note IDs
     见 SPEC-210 发布记录（如 P001=6a47a0e3000000001c026797 / P005=6a4deb3e0000000007028953），没登记的先 tikhub search
