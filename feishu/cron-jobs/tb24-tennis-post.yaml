@@ -6,7 +6,7 @@ jobs:
     错开 autopilot 的 2:00·2026-07-07）
   cron: 5 2 * * *
   tz: Asia/Shanghai
-  enabled: false
+  enabled: true
   prompt: 写今天的 tennis post：按本仓 CLAUDE.md「一句话触发」+ ARCH-220 六个 Stage 【逐段过闸】跑完整条流水线——每段产出对照该 stage『对应文档』自检、过了再进下一段，别一趟到底把成品堆完再回头改（见
     ARCH-220 §1 过闸契约）、别问我确认。① 选题：先看 posts/ 有没有已开工未发布的在制期(有 _notes.md 但 SPEC-210 发布记录未回填)——有就接着把它做完并交付；没有才去
     SPEC-210 §1 矩阵挑「已发期号」为空、且与既发期成镜像/对照的下一家。② 若在制期 _notes.md 里有『主人第一手实测』小节：实测口径 > 二手评测，被实测证伪的二手说法必须撤(ARCH-230
@@ -21,7 +21,7 @@ jobs:
 - name: comment-factcheck-daily
   cron: 0 9 * * *
   tz: Asia/Shanghai
-  enabled: false
+  enabled: true
   desc: 每天09:00拉 tennis-post 所有已发帖小红书评论→按 ARCH-240 §4 筛事实质疑、溯源定责→报主人建议(改帖 or 回评)·不擅自动手
   prompt: 每天 09:00 评论 fact-check（按本仓 docs/ARCH-240 §4 溯源闭环）：① 用 tikhub 拉 ZHEN好玩 账号所有已发帖的小红书评论——note IDs
     见 SPEC-210 发布记录（如 P001=6a47a0e3000000001c026797 / P005=6a4deb3e0000000007028953），没登记的先 tikhub search
