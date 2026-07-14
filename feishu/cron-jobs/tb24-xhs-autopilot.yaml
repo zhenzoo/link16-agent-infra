@@ -2,8 +2,8 @@
 # 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
 jobs:
 - name: daily-cruise
-  cron: 0 2 * * *
+  cron: 0 0 * * *
   tz: Asia/Shanghai
   enabled: true
-  desc: 每天凌晨 02:00 开启 xhs 今天的巡航（新增 2026-07-07）
+  desc: 每天 00:00（晚上12点）开启 xhs 今天的巡航 · ~10h 跑完约 10:00 备好首档（2026-07-14 Publisher 改 02:00→00:00）
   prompt: 开启今天的巡航
