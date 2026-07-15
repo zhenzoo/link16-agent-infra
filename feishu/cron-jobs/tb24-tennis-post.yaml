@@ -2,18 +2,17 @@
 # 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
 jobs:
 - name: tennis-post-daily
-  desc: 每天凌晨 02:05 触发 tennis-post 仓「写下一篇网球公司拆解」全套流水线：选题【先读当前弧计划 docs/PLAN-260】(下一个待写=P008 斯波阿斯) → ARCH-220 六 Stage 逐段过闸 → 飞书成套交付主人。主人第二天补第一手实测再改卡片一小段。（2:05 错开 autopilot 的 2:00）
+  desc: 每天 02:05 触发 tennis-post【巡航】：总控串行开子面板写【2 篇】网球公司拆解(读 docs/ARCH-000-INDEX 标「当前弧」的 PLAN 看写到哪·先接在制期) → 每篇 worker 落 _DONE.md → 总控亲验三闸 + 飞书成套交付主人 + 进度 DM → 巡航总结。机制见 docs/ARCH-300。(02:05 错开 xhs autopilot 的 00:00)
   cron: 5 2 * * *
   tz: Asia/Shanghai
   enabled: true
   prompt: |
-    写今天的 tennis post：按本仓 CLAUDE.md「一句话触发」+ ARCH-220 六个 Stage 【逐段过闸】跑完整条流水线——每段产出对照该 stage『对应文档』自检、过了再进下一段，别一趟到底把成品堆完再回头改（见 ARCH-220 §1 过闸契约）、别问我确认。
-    ① 选题：先看 posts/ 有没有已开工未发布的在制期(有 _notes.md 但 SPEC-210 发布记录未回填)——有就接着把它做完并交付；没有就【先读当前弧计划 docs/PLAN-260】按其推荐顺序取下一家(当前下一个待写 = P008 斯波阿斯 SIBOASI·东莞传统源头巨头·客观深挖 + 一节白牌/贴牌口碑裂缝·slug p008-siboasi·直接继承 PLAN-260 里预装的 DD 底料/待S1/镜像/源)；PLAN-260 里各期都写完了才回 SPEC-210 §1 矩阵挑「已发期号」为空、成镜像的下一家。
-    ② 若在制期 _notes.md 里有『主人第一手实测』小节：实测口径 > 二手评测，被实测证伪的二手说法必须撤(ARCH-230 §7.5)，页脚数据源列『主理人实测』。
-    ③ 调研【顺线深挖·越深越好：按 ARCH-220 §7 工具路由，每个 DD 项分派对应工具、多查询并行——tikhub 社媒/口碑/发现玩家、anysearch batch 全网、jina 抓官网取色、Tracxn/CBInsights 融资、Google Patents 专利顺权利人反查公司主体、企查查、电商；能挖多深挖多深、能挖多少挖多少、查无就诚实标『查无』、别只用 WebSearch 糊、别做故事厚度分级预判】cross-validate(每个上卡数字 ≥2 源，回填 SPEC-210 并标数据时点) → 文案(必跑 scripts/xhs_count.py + scripts/check_copy.py 两道机械闸，全过才算数) → 找真图逐张 Read 肉眼核身份 → 出图(GPT 封面 edit 模式 + HTML 内页 6~7 页·品牌色用 PIL 从该公司真机/官网取色·每期不同·出完必跑 scripts/check_cards.py + scripts/taste_gate.py 两道卡片闸) → 用 send_feishu_media 按阅读顺序成套发我 + 文案发干净版飞书在线文档。
-    ④ 数字全以 SPEC-210 为 SSOT 且发帖前必重核。
-    ⑤ 全程无对外内部引用、无 emoji、无中英混杂。
-    ⑥【证据链硬要求·见 docs/ARCH-240（2026-07-11）】每个上卡数字带证据链+分级标注(实测>官方>多源>单源>口述>查无)、可溯源；电商真实数据=亚马逊评价/BSR 走 ScraperAPI(key 在 .env·无登录·可无人值守跑)，京东/淘宝销量评价【凌晨无人值守跑不了 chrome-direct·它要主人 Chrome 登着+过验证】→ 标『待主人白天 chrome-direct 补核』、别编数也别写『无数据』；别把『我们没查到』当『客观不存在』、别拿单样本下全盘结论、绝对化措辞(没人买/没人摸过/查无/榜上无名)一律软化(ARCH-240 §1)。若轮到横向对比/汇总期→拉 SPEC-210 §1 矩阵、每个对比数字发帖前重核带 evidence、图密度对标往期。做完发我一条 DM：本期是谁、镜像主题一句话、共几张卡、哪些数走了 ScraperAPI 实测、哪些待我白天 chrome-direct 补。
+    开启今天的 tennis post 巡航：按本仓 CLAUDE.md「🚀 巡航触发」+ docs/ARCH-300 §2 主循环跑——你当【总控】、自己不写帖，串行开子面板、每篇一个全新 headless 会话写帖，本次【固定写 2 篇】。别问确认、别自己写帖、别停。
+    Step A 启动：echo $WMUX_PTY_ID > _autopilot/supervisor.pty 然后 python _autopilot/spawn_worker.py tag-self。
+    Step B 定队列：读 docs/ARCH-000-INDEX.md 找标「当前弧」的 PLAN(现=PLAN-290)看写到哪、先接 posts/ 里在制未发期、按弧顺序取下 2 篇(各定 PNN+公司+slug、一句话记镜像)。
+    Step C 串行写 2 篇：每篇 python _autopilot/spawn_worker.py spawn-writer PNN → 读 _autopilot/worker-prompt.md 填占位符 → spawn_worker.py kickoff <pty> "<填好的提示词>" → 同轮挂双层唤醒(run_in_background 跑 until [ -f posts/pNNN-slug/_DONE.md ]; do sleep 30; done + ScheduleWakeup 1800)让出 turn → 醒来查 marker：出了就亲跑 scripts/check_cards.py + check_copy.py + taste_gate.py 三闸复核 + 确认 SPEC-210 本期行已回填 → 按 _DONE.md 卡片清单 send_feishu_media 发我(--to 我 open_id·封面在前) + 干净文案发飞书在线文档 + 一条进度 DM。worker 面板留存供返修、不关。上一篇落 _DONE 才起下一篇(spawn-writer 内建串行 lease)。
+    Step D 收尾：2 篇都交付 → 发我巡航总结 DM(两篇各是谁/镜像/几张卡/哪些数走 ScraperAPI 实测/哪些待我白天 chrome-direct 补/三闸复核) → 停(固定 2·绝不起第 3 篇)。
+    异常自愈见 ARCH-300 §6：worker 限流/卡 → kickoff 注「继续」不 /clear；真路绝/欠费/断网 → 发我 DM 等我。
 - name: comment-factcheck-daily
   cron: 0 9 * * *
   tz: Asia/Shanghai
