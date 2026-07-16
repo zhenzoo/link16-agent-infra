@@ -54,6 +54,13 @@ CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_s
 #   OK / 吞吐截断是 warmup 假象"的结论是错的·已被真实截断推翻——别再据此放行裸 send）。
 #   含 TAB 的数据（cookies/TSV）另在 on_message 上游落盘转 Read（send/paste 都救不了 TAB→空格）。
 SEND_MAX_CHARS = 16000   # marker 作 node 命令行参传递的天花板(~Windows CreateProcess 32767 留余量·send/paste 共用·与截断无关)
+# 注入投递保证（§2.12b · 2026-07-16）：paste 后别盲等 0.3s 就 enter——settle 按字数线性伸缩 + 回车后读屏闭环校验重按。
+INJECT_SETTLE_BASE = 0.2         # settle 基线秒（短消息 1 块 ≈ 这个值·闭环兜底→可略激进）
+INJECT_SETTLE_PER_CHUNK = 0.03   # 每 100 字块 + 这么多秒（长文本 TUI 消化更久·线性给）
+INJECT_SETTLE_CAP = 3.0          # settle 封顶秒（再长也不无限等·剩下交闭环校验兜）
+INJECT_VERIFY_TRIES = 6          # 回车后闭环校验重按上限（还卡就再按·超过=真卡→喊人）
+INJECT_VERIFY_FIRST = 0.35       # 第一次校验读屏前的间隔（给提交时间清 composer·避免清框慢时白重按拖时间）
+INJECT_VERIFY_POLL = 0.35        # 重按后每次校验读屏前的间隔秒（双提交无风险·enter 顺序处理·空框重按=无害）
 SEND_RETRY_BACKOFF = (0, 2, 5)    # channel.send 失败重试等待秒（retryable 错误码才重试）
 # 单次发卡硬超时（2026-06-18 实证根因）：SDK 默认 max_attempts=5 × httpx 每阶段 30s → 单次卡死最坏 ~150s，
 # 而 drainer 是【单协程顺序 await】→ 一次卡死冻结整条回传、后续 answer/progress 全队头阻塞，靠 doctor
@@ -708,15 +715,50 @@ def ensure_session(bot):
     return ws, pty, True, jsonl
 
 
+def _composer_holds_paste(screen, marker):
+    """读屏判「我注入的内容还卡在输入框(composer)里没提交吗」（§2.12b 闭环校验用）。
+    composer = 屏幕【最后一个 `❯` 之后】的内容（提交后原文进 scrollback·scrollback 不带 `❯`→取最后一个 `❯` 干净避开）。
+    卡住信号（2026-07-16 真机亲验 Claude Code v2.1.211）：
+      · 长消息折叠 → 含 `[Pasted text`
+      · 短消息内联 → 含 marker 尾段（每条 marker 末尾都是信封 `… route=…]`·唯一好认）
+    读不到 `❯` / 空屏 → 返回 False（不据此误判卡住·交给 settle + 重按上限兜底·绝不空转）。"""
+    if not screen:
+        return False
+    idx = screen.rfind("❯")
+    if idx < 0:
+        return False
+    tail = screen[idx + 1:]
+    if "[Pasted text" in tail:
+        return True
+    sig = marker[-24:].strip()          # marker 末段（含 route=…] 信封尾）= 短消息内联时的指纹
+    return bool(sig and sig in tail)
+
+
 def _inject(pty, workspace_id, marker):
-    """把带标记的消息发进 bot 会话并回车（同步 · 给 to_thread 用）。
-    一律走 paste（限速分块·bracketed-paste）：CC 输入框是 TUI·有吞吐上限，裸 send 把多千字一次性灌入会丢字→
-    截断（2026-06-28 实证）。paste 对短消息也无害（≤100字=1 个 chunk）。含 TAB 的数据已在 on_message 拦去落盘
-    （send/paste 都救不了 TAB→空格），到这儿的 marker 不含 TAB。"""
+    """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
+
+    三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
+      ① 线性分档 settle：paste 后按字数/块数伸缩等待（短消息 ~0.3s·长文本按需），取代旧固定 sleep(0.3) 盲赌。
+      ② 回车后闭环校验：读屏看输入框还卡着我的内容没 → 卡就重按 enter，最多 INJECT_VERIFY_TRIES 次直到框空。
+      ③ N 次仍卡 → 返回 False（调用方 DM 喊主人·绝不静默）。
+    paste 仍走限速分块 bracketed-paste（CC 输入框有吞吐上限·裸 send 会丢字截断·2026-06-28 实证）；marker 不含 TAB（上游已拦）。"""
     allow = ["--allow-ws", workspace_id]
     wmux("paste", pty, marker, *allow)
-    time.sleep(0.3)
+    # ① 线性分档 settle（块数 = 字数÷100·向上取整）
+    chunks = max(1, -(-len(marker) // 100))
+    time.sleep(min(INJECT_SETTLE_CAP, INJECT_SETTLE_BASE + INJECT_SETTLE_PER_CHUNK * chunks))
     wmux("enter", pty, *allow)
+    # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
+    for i in range(INJECT_VERIFY_TRIES):
+        time.sleep(INJECT_VERIFY_FIRST if i == 0 else INJECT_VERIFY_POLL)
+        try:
+            scr = read_screen(pty, 10)
+        except RuntimeError:
+            scr = ""
+        if not _composer_holds_paste(scr, marker):
+            return True                          # 输入框已空 = 提交成功
+        wmux("enter", pty, *allow)               # 还卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
+    return False                                 # 重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
 def _pending_reinject_blocked(ad, bname, pty):
@@ -1602,7 +1644,13 @@ def run(bot_name=None):
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
                     pre = {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)}
                     inject_wall = time.time()
-                    await asyncio.to_thread(_inject, pty, ws, marker)
+                    inject_ok = await asyncio.to_thread(_inject, pty, ws, marker)
+                    if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
+                        blog(bot["name"], f"[{tid}] ⚠️ 注入后校验：重按{INJECT_VERIFY_TRIES}次仍卡输入框(没提交) → 已喊主人")
+                        try:
+                            await reply(msg.chat_id, "⚠️ 你上一条消息注入我的终端后【没提交成功】（重试多次仍卡在输入框，我可能没收到）——请重发一次，或 @我 发 /screen 看现场。")
+                        except Exception:  # noqa: BLE001 — 告警失败不致命
+                            pass
                     # 投递保证：记 pending（撞 auto-compact 被吃 → 零 outbox 活动+超时 → doctor 重投/通知·§2.13）
                     try:
                         _obx = bridge_outbox.outbox_path(str(STATE_DIR), bot["name"])

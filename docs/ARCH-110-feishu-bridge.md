@@ -390,6 +390,33 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 ---
 
+## § 2.12b · 注入消息怎么保证【真提交】（线性分档 settle + 回车后闭环校验 + 喊人 · 2026-07-16 根治「消息卡输入框没发出去」）
+
+> 一句话：`_inject` 把飞书消息 paste 进 Claude 输入框后**不再盲等 0.3s 就回车**——而是 ① settle 时间**按消息字数线性伸缩**（短消息还是 ~0.3s，长消息按需等）② 回车后**读屏确认输入框真空了**（真提交），没提交就**重按回车**最多 N 次 ③ N 次仍卡 → **DM 喊主人**（绝不静默）。根治「长文本 / TUI 忙时回车被吞、消息孤零零留在输入框」。
+
+**病根（2026-07-16 用户实证 + 真机复现）**：旧 `_inject` = `paste → time.sleep(0.3) → enter`，固定 0.3s 是**唯一赌注**。paste 是分块限速的（`wmux paste` 100字/块·长文本 paste 本身要 4~5s），paste 返回只代表「字节已交 daemon」，**不代表 Claude 的 TUI 已把粘贴消化+提交进输入框**。长文本 / 后台命令刚完 TUI 正忙时，0.3s 不够 → 回车抢在消化完成前按下 → 被吞 → 文字卡输入框。**是负载相关的偶发竞态**（干净环境真 paste+0.3+enter 复现不出·印证用户「有的时候」）→ 修法必须走**闭环自愈**，不是把 0.3 调大赌一个够用的值。
+
+**为什么不能靠 agentStatus / 每条读屏轮询（实测定的取舍）**：
+- **agentStatus 废**：2026-07-16 真机实测 Claude Code v2.1.211——空闲/卡输入框/在跑**全程报 `running`**，根本分不清「卡住」和「在处理」（这也解释了 §2.13 旧兜底为什么对卡输入框无效）。
+- **开销实测**（真机中位数）：`read_screen`=112ms/次（每次 spawn node）、`extract` 查 transcript=130~250ms 且**随会话膨胀无上限**、paste 短=200ms / 长=5180ms。→ **不能每条消息都读屏轮询 / 查 transcript**（平白拖慢 99% 的常态短消息、还额外 spawn node 抢资源反使 TUI 更忙）。
+
+**结构化信号 · 检测「消息还卡输入框吗」（2026-07-16 亲验）**：读屏取【最后一个 `❯` 之后的内容】= 输入框(composer)现况——
+- **卡住**：长消息折叠成 `❯ [Pasted text #N]`；短消息内联 `❯ …route=p2a]`（marker 尾段在）。
+- **已提交**：`❯` 后空（仅 "Try" 灰占位）+ 原文进 scrollback（scrollback **不带 `❯`**·只有活输入框带）→ 取最后一个 `❯` 之后就干净避开 scrollback 误判。
+
+**三层修法（SSOT 在 `feishu_bridge.py._inject` + `_composer_holds_paste`）**：
+1. **第一层·线性分档 settle（所有消息·零额外 I/O）**：`settle = min(CAP, BASE + PER_CHUNK×块数)`（块数=字数÷100·发消息时就知道·不用探测）。短消息 1 块→~0.3s（跟旧版一样快）；长消息 51 块→~1.8s（它本就需要）。治主要病因（长文本）、短消息零代价。
+2. **第二层·回车后闭环校验（真兜底·+112ms 一次读屏/条）**：enter 后 `read_screen` 看 `_composer_holds_paste`——还卡就重按 enter，最多 `INJECT_VERIFY_TRIES` 次直到输入框空。用「我的消息还躺在框里吗」这个**直接信号**，不是「Claude 忙不忙」那个分不清的 agentStatus。参照 §2.10 `_drive_picker` 已验证的闭环模式。
+3. **第三层·极兜底（仅 N 次全失败才触发）**：重按 N 次仍卡 → `_inject` 返回 False → 主调用点 `card_send` DM 喊主人「上一条注入后没提交成功·请重发 / @我 /screen」。根治静默黑洞。
+
+**常量**（`feishu_bridge.py`·e2e 调）：`INJECT_SETTLE_BASE=0.3` / `INJECT_SETTLE_PER_CHUNK=0.03` / `INJECT_SETTLE_CAP=3.0` / `INJECT_VERIFY_TRIES=5` / `INJECT_VERIFY_POLL=0.4`。
+
+**成本**：短消息 ~600ms→~712ms（+112 一次校验·换「永不静默卡住」）；长消息 ~5600ms(常卡)→~7200ms(可靠·多的相对本就 5s 的 paste 是零头)。
+
+**和 §2.13 的分工**：本节（§2.12b）治「消息**从没提交**·卡输入框」（同步·`_inject` 内自愈）；§2.13 治「消息**已提交但撞 auto-compact 被吃**」（异步·doctor 兜）——两个不同失败，各管各。
+
+---
+
 ## § 2.13 · 注入投递保证（撞 auto-compact 不再静默黑洞 · 2026-06-18 根治）
 
 > 一句话：桥注入一条消息后**记一笔 pending**；若那一轮被 **auto-compact 吃掉**（上下文满时提交触发压缩、消息没被当成 turn 处理、会话回 idle、零回复），doctor 会**检测到并必达重投 + 通知你**——不再像以前那样无声丢失、你干等不到回复。
@@ -406,6 +433,8 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 **实现**：`bridge_outbox.py`(pending_path/write/load/clear/status 纯函数) + `feishu_bridge.py`(on_message 记 pending · `_recover_pending` · `PENDING_TIMEOUT_SEC=120`) + `bridge_doctor.py`(doctor_loop 加 `recover_pending` dep·每轮 per-bot 调·异常不拖垮)。验证：pending_status 六态单测 + doctor 调用/抗异常 + 真会话挂真 hooks e2e（正常→active 不误投 / 打断模拟被吃→stuck / 重投真答出来）。
 
 **已知边界（诚实·v2 · 2026-06-19）**：① ~~纯思考 >120s 误判重投一次~~ **已被 `_pending_reinject_blocked` 结构闸根治**（agentStatus 非 idle → 不重投）② 进度流过后 mid-turn 才 compact 卡死（size 已涨→判 active）→ 本机制不覆盖·由 §2.5 drainer 发卡超时 + §3 outbox backlog 自愈部分兜底 ③ 真撞 compact 那一刻 agentStatus 恰好还没回 idle（极短窗）→ 下一轮 doctor(30s 后)再判·最终仍会重投(不漏)。
+
+> ⚠️ **agentStatus 可靠性存疑（2026-07-16 实测·待复核）**：Claude Code v2.1.211 实测——**空闲/在跑的会话都报 `running`，没观察到回 `idle`**（与本节「只有真空闲/死壳才 idle」的旧假设相悖）。若属实，则 `_pending_reinject_blocked` 的 agentStatus 闸会**永远 block**、本节的 compact 重投几乎不触发（既存问题·非本次 §2.12b 引入）。本次改动只治「卡输入框」（§2.12b·靠读屏直接信号·不依赖 agentStatus），**未动 compact 兜底**；agentStatus 判据是否要换成读屏「回到空闲提示符」信号，留作后续单独课题。
 
 ---
 
