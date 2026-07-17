@@ -21,3 +21,12 @@ feishu/inbox/
 # python
 __pycache__/
 *.pyc
+
+# Cloudflare Wrangler 本地缓存（部署 mockup 展厅时生成·非源码·会重建）
+.wrangler/
+
+# mockup 展厅索引（publish_mockup.py 每次部署自动生成·构建产物·不入库）
+docs/mockups/index.html
+
+# 一次性临时脚本（探索用·勿提交）
+feishu/_fs_list_tmp.py
