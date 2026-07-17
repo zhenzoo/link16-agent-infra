@@ -1,0 +1,5 @@
+[
+  {"method":"item/completed","params":{"threadId":"root","turnId":"parent-turn","item":{"id":"c1","type":"agentMessage","phase":"commentary","text":"父任务开始。"}}},
+  {"method":"item/completed","params":{"threadId":"child","turnId":"child-turn","item":{"id":"child-message","type":"agentMessage","phase":"commentary","text":"不应进入主人卡片。"}}},
+  {"method":"item/completed","params":{"threadId":"root","turnId":"parent-turn","item":{"id":"a1","type":"collabAgentToolCall","tool":"wait","status":"completed","agentsStates":{"child":{"status":"completed"}}}}}
+]

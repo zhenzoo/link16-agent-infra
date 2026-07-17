@@ -1,0 +1,77 @@
+[
+  {
+    "method": "item/completed",
+    "params": {
+      "threadId": "root",
+      "turnId": "turn-security",
+      "item": {
+        "id": "cmd-search",
+        "type": "commandExecution",
+        "status": "completed",
+        "cwd": "__WORKSPACE__",
+        "command": "rg PLAN916_RAW_COMMAND_X feishu tests",
+        "aggregatedOutput": "PLAN916_RAW_OUTPUT_X",
+        "stdout": "PLAN916_RAW_STDOUT_X",
+        "stderr": "PLAN916_RAW_STDERR_X",
+        "arguments": {"secret": "PLAN916_RAW_ARGUMENT_X"},
+        "commandActions": [
+          {"type": "search", "command": "PLAN916_RAW_ACTION_X", "query": "PLAN916_RAW_QUERY_X", "path": "__WORKSPACE__/feishu"},
+          {"type": "read", "command": "PLAN916_RAW_ACTION_X", "name": "safe", "path": "__WORKSPACE__/tests"},
+          {"type": "read", "command": "PLAN916_RAW_ACTION_X", "name": "outside", "path": "__OUTSIDE__/PLAN916_OUTSIDE_PATH_X.txt"},
+          {"type": "read", "command": "PLAN916_RAW_ACTION_X", "name": "env", "path": "__WORKSPACE__/.env"}
+        ]
+      }
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "threadId": "root",
+      "turnId": "turn-security",
+      "item": {
+        "id": "cmd-python",
+        "type": "commandExecution",
+        "status": "completed",
+        "cwd": "__WORKSPACE__",
+        "command": "python -m py_compile feishu/bridge_events.py",
+        "aggregatedOutput": "PLAN916_RAW_OUTPUT_X",
+        "commandActions": [
+          {"type": "read", "command": "PLAN916_RAW_ACTION_X", "name": "script", "path": "__WORKSPACE__/feishu/bridge_events.py"}
+        ]
+      }
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "threadId": "root",
+      "turnId": "turn-security",
+      "item": {
+        "id": "patch",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [
+          {"path": "__WORKSPACE__/docs/PLAN-916-generated.md", "kind": {"type": "add"}, "diff": "PLAN916_RAW_DIFF_X"},
+          {"path": "__WORKSPACE__/feishu/bridge_events.py", "kind": {"type": "update"}, "diff": "PLAN916_RAW_DIFF_X"},
+          {"path": "__WORKSPACE__/credentials-PLAN916_SECRET_PATH_X.json", "kind": {"type": "update"}, "diff": "PLAN916_RAW_DIFF_X"},
+          {"path": "__OUTSIDE__/private-key.pem", "kind": {"type": "delete"}, "diff": "PLAN916_RAW_DIFF_X"}
+        ]
+      }
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "threadId": "root",
+      "turnId": "turn-security",
+      "item": {
+        "id": "dynamic",
+        "type": "dynamicToolCall",
+        "status": "completed",
+        "tool": "PLAN916_SECRET_TOOL_X",
+        "arguments": {"path": "__WORKSPACE__/.env", "secret": "PLAN916_RAW_ARGUMENT_X"},
+        "contentItems": [{"type": "text", "text": "PLAN916_RAW_OUTPUT_X"}]
+      }
+    }
+  }
+]

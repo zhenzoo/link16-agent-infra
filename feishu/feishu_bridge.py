@@ -187,8 +187,11 @@ def load_bots():
             "display_name": s.get("display_name"),
             "claude_config_dir": s.get("claude_config_dir"),  # 名册账号覆盖(如 ~/.claude-work2)·漏拷会让默认账号永远回退 personal·只 /account 临时切才生效
             "codex_home": s.get("codex_home"),
+            "codex_transport": s.get("codex_transport"),
+            "delivery_contract": s.get("delivery_contract"),
             "agent_cmd": s.get("agent_cmd"),
             "ready_markers": s.get("ready_markers"),
+            "ready_timeout_sec": s.get("ready_timeout_sec"),
         })
     return bots
 
@@ -521,8 +524,24 @@ def read_screen(pty, tail=30):
         return raw
 
 
-def _wait_agent_ready(bot, pty, workspace_id=None, timeout=READY_TIMEOUT_SEC):
+def _app_server_ready_signal(bot, since):
+    if not (isinstance(bot, dict) and bot.get("codex_transport") == "app-server-canary"):
+        return False
+    path = STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            int(record.get("worker_pid") or 0) > 0
+            and float(record.get("ts") or 0) >= since
+        )
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return False
+
+
+def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
     """spawn worker 后轮询屏幕，看到该 runtime 的 ready marker = 就绪可注入。"""
+    timeout = float(timeout or bot.get("ready_timeout_sec") or READY_TIMEOUT_SEC)
+    wait_started = time.time()
     deadline = time.time() + timeout
     trust_sent = False
     while time.time() < deadline:
@@ -534,6 +553,15 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=READY_TIMEOUT_SEC):
                 time.sleep(0.5)
                 continue
             if agent_runtime.is_ready(bot, scr):
+                return True
+            # A resumed app-server thread does not run the warmup turn again,
+            # and Codex rotates the grey composer suggestion. Use the fresh
+            # worker handshake plus a visible TUI composer as the stable
+            # process-level readiness signal.
+            if (
+                _app_server_ready_signal(bot, wait_started)
+                and re.search(r"(?m)^›(?:\s+.*)?$", scr) is not None
+            ):
                 return True
         except RuntimeError:
             pass
@@ -1182,6 +1210,51 @@ def _bridge_pids(exclude_self=True, bot=None):
         return []
 
 
+def _parse_bridge_processes(items):
+    """Group one WMI process snapshot by the exact `--bot` argument."""
+    grouped = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("CommandLine") or "")
+        if not re.search(r"feishu_bridge\.py.*\brun\b", command, re.I):
+            continue
+        match = re.search(r"--bot\s+(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))", command)
+        if not match:
+            continue
+        name = next((value for value in match.groups() if value), "")
+        pid = str(item.get("ProcessId") or "").strip()
+        if name and pid:
+            grouped.setdefault(name, []).append(pid)
+    return grouped
+
+
+def _bridge_process_map():
+    """Enumerate every live bridge process with one WMI call.
+
+    Status/doctor used to issue one 15-second WMI query per registered bot,
+    making a healthy multi-bot fleet look hung. Keep `_bridge_pids` for the
+    single-instance/stop paths; dashboards use this snapshot instead.
+    """
+    ps = (
+        "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
+        "Where-Object { $_.CommandLine -match 'feishu_bridge\\.py.*\\brun\\b' } | "
+        "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
+        )
+        raw = (result.stdout or "").strip()
+        if not raw:
+            return {}
+        items = json.loads(raw)
+        return _parse_bridge_processes(items if isinstance(items, list) else [items])
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return {}
+
+
 def _kill(pids):
     if pids:
         subprocess.run(["powershell", "-NoProfile", "-Command",
@@ -1449,12 +1522,19 @@ def run(bot_name=None):
                 await reply(chat_id, (
                     f"🔑 已选账号 `{al}`（{label}）· 目录 `{staged_dir}`{'（新目录）' if moved else ''} · **会话还没起** —— "
                     f"发下一条正式消息我就用它起会话。临时切·`/close` 切回默认 `{default_acc}`")); return
-            # 非 bridge 命令 → 当 agent CLI 自己的 slash command，原样转发进会话（/resume /rename /model /compact …）
-            # ⚠️ 必须 verbatim·绝不缀 [飞书] 标记，否则行首不是「/」→ CC 不认成 slash command。
+            # 非 bridge 命令 → 当 agent CLI 自己的 slash command 转发进会话。
+            # Codex 兼容：只有 `/name` 确实命中一个已安装 skill 时，才转成 `$name`；
+            # /resume /rename /model /compact 等 Codex 原生命令仍 verbatim。
+            # Claude 一律 verbatim，绝不缀 [飞书] 标记，否则行首不是「/」→ CC 不认。
             if not alive:
                 await reply(chat_id, "🛌 你还没有会话——先发句话起会话，再发 slash command"); return
-            await asyncio.to_thread(wmux, "send", rec["pty"], text, "--allow-ws", rec["workspace_id"])
+            forwarded = agent_runtime.codex_skill_invocation(
+                bot, text, cwd=await asyncio.to_thread(current_cwd, bot)
+            ) or text
+            await asyncio.to_thread(wmux, "send", rec["pty"], forwarded, "--allow-ws", rec["workspace_id"])
             await asyncio.to_thread(wmux, "enter", rec["pty"], "--allow-ws", rec["workspace_id"])
+            if forwarded != text:
+                await reply(chat_id, f"🧩 已把 `{cmd}` 转成 Codex skill `{forwarded.split()[0]}` 并转发"); return
             await reply(chat_id, f"⏎ 已把 `{cmd}` 原样转发给 {agent_runtime.display_name(bot)}（slash command）"); return
 
         async def on_message(msg):
@@ -1476,12 +1556,21 @@ def run(bot_name=None):
             if not is_group and not is_allowed(bot, sender):
                 blog(bot["name"], f"拒绝 open_id={sender}（非主人/非白名单）: {text[:50]!r}")
                 return
+            # 交互卡片被转发进来 → 飞书只递【占位】：content_text="[interactive]" 或正文被替换成「请升级至最新版本客户端」。
+            # 卡片真内容飞书【不下发给 bot】——2026-07-10 实测钉死：user_dsl 已不随转发下发(连自家卡/同会话/几十秒前都没有)、
+            # 占位图 resources 下载报 14005(跨/同 app 都 Resource Deleted)、get-message 只回占位。→ 归一化成空，让它走下面
+            # 「没正文」那条【可操作回执】路（截图 / 复制文字 / 让我翻历史），而不是把 "[interactive]" 干灌进会话让对端一脸懵。
+            _card_placeholder = (text == "[interactive]") or ("请升级至最新版本客户端" in text)
+            if _card_placeholder:
+                text = ""
             if not text and not resources:
                 # 没文本也没附件：多半是【转发的交互卡片 / 特殊类型】，SDK 主 content_text 解析为空。
                 # 旧版在这里静默 return = 黑洞(你转发卡片那边啥都收不到·2026-06-16 实证)。改：
                 # ① 先取 SDK 兜底文本 safe_content_text（卡片走 interactive 深walk / 转发走 merge_forward 抓取）；
                 # ② 仍空就【回执告诉你收到了什么类型】(raw_content_type)·绝不再静默吞。
                 text = (getattr(msg, "safe_content_text", "") or "").strip()
+                if text == "[interactive]" or "请升级至最新版本客户端" in text:
+                    text = ""                                  # SDK 兜底文本又是占位 → 同样当空，别让占位漏下去
                 if not text:                                   # 转发的交互卡片 → 挖 user_dsl 真内容 → 注入终端
                     fwd = _forwarded_card_text(msg)
                     if fwd:
@@ -1505,8 +1594,18 @@ def run(bot_name=None):
                         await channel.add_reaction(msg.id, "THUMBSUP")
                     except Exception:  # noqa: BLE001
                         pass
-                    blog(bot["name"], f"[{(msg.id or '')[-6:]}] 收到无文本消息 type={rct} → 回执+抓raw落盘(不静默吞)")
-                    await reply(msg.chat_id, f"📩 收到你一条「{rct}」消息，但没解析出文字（多半是没有文字的卡片/特殊格式）。我已把它的原始结构记下来分析——你把要点转成文字、或截图发我就能马上处理。")
+                    blog(bot["name"], f"[{(msg.id or '')[-6:]}] 收到{'卡片占位' if _card_placeholder else '无文本'}消息 type={rct} → 回执+抓raw落盘(不静默吞)")
+                    if _card_placeholder:
+                        await reply(msg.chat_id, (
+                            "📩 我收到一张【卡片】，但飞书没把卡里的文字交给我——这是飞书对卡片消息的硬限制："
+                            "卡片正文只留在飞书服务器渲染给人看，转发进来只剩占位，**跨会话 / 跨应用 / 连转发我自己发的卡都读不到**（我这边已实测钉死）。\n"
+                            "要我读到内容，任选一条：\n"
+                            "① 把卡片【截图】发我 —— 图片我能看（最省事，任何卡都行）；\n"
+                            "② 长按卡片【复制文字】，粘贴成普通消息发我；\n"
+                            "③ 如果这是我、或别的 bot 以前发的（哪怕是很久以前、已关掉的会话）——直接说「找一下你之前发我的关于 X 的那条」，"
+                            "我从本地收发记录里给你翻出来（我们把每条发出去的消息都存了盘，不靠会话记忆）。"))
+                    else:
+                        await reply(msg.chat_id, f"📩 收到你一条「{rct}」消息，但没解析出文字（多半是没有文字的卡片/特殊格式）。我已把它的原始结构记下来分析——你把要点转成文字、或截图发我就能马上处理。")
                     return
             tid = (msg.id or "")[-6:] or str(int(time.time()))[-6:]   # 贯穿本条消息全链路的 trace id
             blog(bot["name"], f"[{tid}] 收到 {sender}: {text[:80]!r}")
@@ -1921,16 +2020,23 @@ def cmd_stop(bot_filter=None):
           else f"已停全部 bot 进程 PID={','.join(pids)}")
 
 
-def cmd_status():
+def cmd_status(bot_filter=None):
     live = set()
     try:
         for w in wmux_session.workspaces():
             live.update(w.get("ptyIds") or [])
     except Exception:  # noqa: BLE001
         print("（wmux 没开 / 连不上，会话活性未知）")
+    running = _bridge_process_map()
+    bots = load_bots()
+    if bot_filter:
+        bots = [b for b in bots if b["name"] == bot_filter]
+        if not bots:
+            print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
+            return
     any_run = False
-    for b in load_bots():
-        pids = _bridge_pids(exclude_self=True, bot=b["name"])
+    for b in bots:
+        pids = running.get(b["name"], [])
         proc = ("在跑 PID=" + ",".join(pids)) if pids else "没跑"
         if pids:
             any_run = True
@@ -2036,7 +2142,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
     sys.exit(0 if delivered else 1)
 
 
-def cmd_doctor():
+def cmd_doctor(bot_filter=None):
     """一眼健康（机械闸·不用 grep 日志）：每 bot 的 进程 / 会话活性 / jsonl 钉没钉 / DM 目标 / 最近一条 receipt。"""
     live = set()
     try:
@@ -2045,9 +2151,16 @@ def cmd_doctor():
     except Exception:  # noqa: BLE001
         pass
     print("飞书桥健康（v8 · hook→outbox→drainer · doctor 自愈 · 详细 outbox 健康跑 bridge_doctor.py）：")
-    for b in load_bots():
+    running = _bridge_process_map()
+    bots = load_bots()
+    if bot_filter:
+        bots = [b for b in bots if b["name"] == bot_filter]
+        if not bots:
+            print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
+            return
+    for b in bots:
         name = b["name"]
-        proc = "✅跑" if _bridge_pids(exclude_self=True, bot=name) else "❌停"
+        proc = "✅跑" if running.get(name) else "❌停"
         rec = load_session(name) or {}
         pty = rec.get("pty")
         sess = ("活" if pty in live else "死·下次@重生") if pty else "无"
@@ -2089,7 +2202,7 @@ def main():
     elif args.cmd == "stop":
         cmd_stop(args.bot)
     elif args.cmd == "status":
-        cmd_status()
+        cmd_status(args.bot)
     elif args.cmd == "workspaces":
         cmd_workspaces()
     elif args.cmd == "send":
@@ -2098,7 +2211,7 @@ def main():
         body = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
         cmd_send(bot_name, body, args.to, args.json, args.image, args.doc, args.name)
     elif args.cmd == "doctor":
-        cmd_doctor()
+        cmd_doctor(args.bot)
 
 
 if __name__ == "__main__":

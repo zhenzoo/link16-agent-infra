@@ -124,6 +124,31 @@ python feishu/install_codex_bridge_hooks.py --write
 
 **当前边界**：AskUserQuestion 结构化检测仍是 Claude PreToolUse 路径；Codex 的交互问题样式需等真实 payload 后再补 adapter。桥的 `/screen`、`/stop`、`/close`、`/cd`、附件下载、飞书发送路径已 runtime-neutral。
 
+### § 2.4.2 · Codex typed milestone canary（PLAN-915 · 2026-07-17）
+
+Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。开启 `codex_transport: app-server-canary` 的 bot 使用以下拓扑：
+
+`官方 Codex TUI --remote` ↔ `该 bot 私有 app-server` ↔ `Link16 typed-event observer` → `milestone-v1 outbox` → 共享 drainer。
+
+- TUI 仍是官方 TUI，wmux 注入、slash command、resume 体验不由 Link16 重写。
+- `app-server-canary` 的 remote TUI 就绪以 Codex composer 标记（`› Use /skills` 或空 `›`）为准，不强制依赖普通 CLI 首屏的 `OpenAI Codex` banner；普通 Codex CLI 仍保留 banner + composer 双确认。若把 remote TUI 误判为未就绪，补发逻辑会把 worker 启动命令投进已经运行的 composer，并在第二次超时后误关活 workspace。
+- observer 只接 root thread 的 typed item；collab child thread 不进入主人卡，root collab item 只渲完成度。
+- `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 只写脱敏 ledger，最终答案仍由 Stop hook 单路投递。
+- `reasoning`、命令全文、tool input/output、等待 UI、token transport 事件全部丢弃。命令字段只允许在 producer 内存中做一次保守分类，raw 值不得进入 ledger、outbox、progress-state 或卡片。
+- 相邻工具输出实际调用数、类别计数和安全路径摘要；plan 以同一 event id 增 revision，原位更新。
+- app-server canary 中 PostToolUse hook no-op，避免工具双写；Stop hook 核对 root thread，排除子 agent final。
+- canary flag 只允许放机器本地 `bridge-bots.local.json`。未标 flag 的 Codex/Claude 启动与 producer 完全不变。
+
+共享 envelope：`contract=milestone-v1, runtime, session, root_turn, steps[{event_id,revision,kind,label,...safe_metadata}], route`。生产协议依赖 app-server typed item，不依赖 Codex session JSONL。
+
+**PLAN-916 安全公开元数据白名单**：
+
+- 单个 tool event 只允许 `tool_family`（固定枚举）、`program`（固定显示名）、`status`（固定状态）及 `access_paths/write_paths/create_paths`。
+- 路径只允许当前 workspace 内、无 `..` 的仓库相对路径；工作区外路径、变量路径、`.env`、私钥/凭据类文件名直接丢弃。路径在 producer 内去重并设硬上限，未知字段默认不透传。
+- 聚合 tool step 只允许 `tool_count`、`tool_types[{family,program,count}]`、三组安全路径及其数值 total、`source_event_ids`；持久化路径每组最多 50 个，卡片显示前 5 个并用 total 计算“另有 N 个”。继续复用 `tools:<first_event_id>` 稳定键与 revision 原位更新。
+- plan step 可携带 `plan_completed/plan_total`，供 header 显示“计划 2/3”；renderer 不从中文 label 反向解析结构数据。
+- event ledger、progress outbox、`bridge-progress-state-<bot>.json` 和最终卡片是同一防泄漏边界，四层都必须通过 raw command/output/absolute-home/secret-marker=0 的回归。
+
 详细 rollout 见 [`docs/_plans/PLAN-2026-06-18-bridge-multi-agent-runtime.md`](_plans/PLAN-2026-06-18-bridge-multi-agent-runtime.md)。
 
 ---
@@ -136,8 +161,8 @@ python feishu/install_codex_bridge_hooks.py --write
 - **v8 怎么做（4 件）**：
   1. **作用域**：桥 spawn worker 时带 `--settings <_autopilot/bridge-hooks.json>`（运行时生成·绝对路径·跨 repo 安全）+ env `FEISHU_BRIDGE_SESSION=<bot>` / `FEISHU_BRIDGE_OUTBOX_DIR`。hook **只作用桥起的会话**（env 不命中即 `exit 0`）→ **永不进你日常 ccp / 不写项目 `.claude/settings.json` / 零额外开销**。
   2. **Stop hook**（`feishu/hooks/bridge_stop.py`）：一轮结束 → 读 transcript，**只取 anchor(末条真用户消息)之后【终结态消息】(`stop_reason ∈ {end_turn, max_tokens, stop_sequence, refusal}`)的 assistant 文本拼接**（结构上排除 `tool_use`/`pause_turn` 的过渡话）→ 追 `{"kind":"answer",…}` 到 `_autopilot/bridge-outbox-<bot>.jsonl`。⚠️ **竞态防护（2026-06-18 · 详见 `_BRIDGE-HARDENING-LOG.md §9`）**：hook 开火与「最终答案落盘」几乎同刻，为防读在写前、抓到上一块过渡文本（实证：tb25-speech 把调工具前的「Now let me publish…」当答案发），**在 15s timeout 内短轮询（~200ms/次）直到终结态文本出现再写**；到点仍空 → 不发（宁缺勿错）。**每轮都触发**：首轮 / autopilot 每轮 / **background-shell 唤醒轮** —— 全覆盖（旧轮询漏掉的就是这些）。
-  3. **PostToolUse hook**（`bridge_posttool.py`·matcher 收窄到实质动作 Bash/Edit/Write/Task/… 跳过高频 Read/Glob）：每个工具完成 → 追 `{"kind":"progress","label":…}`。**取代会过期的流式进度卡**（每条独立·永不 10min 死）。
-  4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox（重启不重放）→ answer 立即 `card_send` / progress 限流合并（`coalesce_sec`）发 → 去重集防双发。**不再等 turn、不被任何长 turn 阻塞**。
+  3. **PostToolUse / typed milestone producer**：Claude 保留 `bridge_posttool.py` transcript race-guard；普通 Codex 保留 compact PostToolUse。PLAN-915/916 canary 改由 app-server typed observer 写 `milestone-v1`，commentary 原文 + plan/collab 状态 + 相邻工具安全摘要；raw reasoning/command/output 只在内存中短暂出现并在写 ledger/outbox 前完成 allowlist 投影。
+  4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox（重启不重放）→ answer 立即 `card_send` / progress 限流合并（`coalesce_sec`）发 → 去重集防双发。`milestone-v1` 另持久化 message id、当前卡 event ids、acked revision 与 route；因此 progress-state 与 ledger/outbox 一样只能包含安全公开元数据。edit 失败/卡满时新卡只从 dirty event 续，不复制旧 snapshot。**不再等 turn、不被任何长 turn 阻塞**。
 - **SSOT / 隔离**：hook 只写 outbox 文件（**不碰飞书凭据**）；唯一持飞书 WS + 凭据的是桥进程；outbox **单写（hook）单读（drainer）**。
 - **⚠️ 过渡铁律**：hook 只在会话 **spawn 那一刻**（`--settings`）挂上 → **重启桥不会给已在跑的旧会话补 hook**。新会话自动带 v8；已在跑的会话（旧桥裸 ccp 起的）要 **respawn**（`/close`+re-@ 或自然重启）才获 v8 auto-mirror（总控下次巡航自动获得）。
 - _(jsonl 钉死 / 唤醒判别那套是 v7 防串台机制·v8 outbound 已不依赖 jsonl·现仅 `/screen`、`cmd_doctor` 显示用·`on_message` 里 re-pin 循环标 vestigial·下轮清理删)_
@@ -175,6 +200,7 @@ python feishu/install_codex_bridge_hooks.py --write
 > **一条铁律贯穿进度 + 回复**：内容都走飞书**互动卡片**；一张卡 `update_card` **原地长大** → 满 ~2800 字（`CARD_BUDGET`）**或 `update_card` 失败** 就冻结、开新卡接着写（**不截断·不重发**）。`guaranteed_send`(markdown) 降为「发卡彻底失败」的最终兜底（几乎不触发）。
 
 - **进度卡（原地长大 + 满则轮换）**：PostToolUse hook 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**——你看到的是**同一张卡在长大**（实时显示 💭思考 / 📝文字 / ✏️📖🔧 全工具 + 头部 🔧/💭/🪙 计数）。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随【信息量】有界增长，**不随时间线性刷屏**。
+- **Codex milestone 工具摘要（PLAN-916）**：commentary 保持原样；每个相邻工具段集总为“实际调用次数 + 工具/运行时类别 + 访问/修改/新增路径”。路径仓库相对化、每组最多 5 个，超出显示“另有 N 个”；只读段明确写“修改：无”。header 显示“计划完成度 + 实际工具次数”，不暴露内部里程碑/工具段计数。完整命令、参数、输出、绝对路径和 reasoning 不进入任何持久层或卡片。
 - **答案卡（同款·超长拆连续多卡）**：Stop hook 把该轮最终回复 + 过程小结 footer 写 outbox；drainer 发答案卡，**>2800 字按行拆成连续多卡**（card1 满→card2 接着写·**不再退 markdown**）。
 - **最终兜底**：只有 `new_card`/`update_card` **彻底失败**才退 `guaranteed_send`（互动卡→markdown→text→webhook·每级验真送达）。
 - **裸 URL 自动 `_linkify`** 成可点链接。

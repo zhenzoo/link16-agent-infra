@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Link16 飞书进度卡 Before / After</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #eef2f8; color: #172033; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  .page { width: 1520px; min-height: 1040px; padding: 54px 58px 64px; margin: 0 auto; }
+  .eyebrow { color: #5b6b85; font-weight: 700; font-size: 16px; letter-spacing: .08em; text-transform: uppercase; }
+  h1 { margin: 9px 0 10px; font-size: 38px; line-height: 1.2; letter-spacing: -.02em; }
+  .sub { margin: 0 0 34px; color: #637089; font-size: 18px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; align-items: start; }
+  .column { background: rgba(255,255,255,.7); border: 1px solid #dbe2ee; border-radius: 22px; padding: 24px; box-shadow: 0 14px 36px rgba(49,67,97,.08); }
+  .colhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .coltitle { font-size: 25px; font-weight: 800; }
+  .badge { padding: 7px 11px; border-radius: 999px; font-size: 13px; font-weight: 800; }
+  .bad { background: #fee7e5; color: #b42318; }
+  .good { background: #dcfce7; color: #166534; }
+  .card { background: #fff; border: 1px solid #dfe5ef; border-radius: 16px; padding: 20px 22px; box-shadow: 0 5px 15px rgba(39,55,82,.06); margin-bottom: 16px; }
+  .card:last-child { margin-bottom: 0; }
+  .card-top { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding-bottom: 14px; border-bottom: 1px solid #edf0f5; }
+  .title { font-size: 19px; font-weight: 800; }
+  .meta { color: #7b879b; font-size: 13px; white-space: nowrap; }
+  .logs { margin-top: 15px; font-family: Consolas,"SFMono-Regular",monospace; color: #4e5a6e; font-size: 13px; line-height: 1.65; }
+  .log { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 3px 0; }
+  .repeat { margin-top: 11px; padding: 10px 12px; border-radius: 10px; background: #fff4f2; color: #9f2d24; font-family: inherit; font-size: 13px; }
+  .phase { display: inline-flex; align-items: center; gap: 8px; padding: 7px 11px; border-radius: 10px; background: #eef4ff; color: #2558b8; font-weight: 800; font-size: 14px; }
+  .summary { margin: 15px 0 0; display: grid; gap: 11px; }
+  .row { display: grid; grid-template-columns: 82px 1fr; gap: 12px; font-size: 15px; line-height: 1.55; }
+  .key { color: #68758b; font-weight: 700; }
+  .val { color: #1f2a3d; }
+  .risk { color: #8a4b08; }
+  .next { color: #175cd3; font-weight: 700; }
+  .gate { margin-top: 16px; padding: 13px 15px; border-radius: 12px; background: #fff8e6; border: 1px solid #f6d778; color: #744b00; font-weight: 700; }
+  .footer { margin-top: 15px; padding-top: 13px; border-top: 1px solid #edf0f5; color: #8490a3; font-size: 13px; }
+  .arrow { margin: 26px auto 0; width: fit-content; color: #4c5c75; font-weight: 700; font-size: 16px; background: #fff; border: 1px solid #dce3ee; border-radius: 999px; padding: 10px 16px; }
+</style>
+</head>
+<body>
+<main class="page" data-screenshot="comparison">
+  <div class="eyebrow">Link16 · Codex progress UX</div>
+  <h1>飞书进度：从“工具流水账”变成“先对齐、再汇报阶段判断”</h1>
+  <p class="sub">这是目标效果 mockup，不是已经上线的界面。收到确认前不改生产桥。</p>
+  <section class="grid">
+    <div class="column">
+      <div class="colhead"><div class="coltitle">Before · 当前体验</div><div class="badge bad">高噪声 / 低语义</div></div>
+      <div class="card">
+        <div class="card-top"><div class="title">🤖 进行中 · 🔧117 💭0</div><div class="meta">不断 patch / 轮换</div></div>
+        <div class="logs">
+          <div class="log">🔧 python -m py_compile codex-personal\sync_claude_skills.py ...</div>
+          <div class="log">🔧 Get-Content feishu\agent_runtime.py | Select-Object ...</div>
+          <div class="log">🔧 git -C "$HOME\.claude-personal" diff --check</div>
+          <div class="log">🔧 $tempBase = [System.IO.Path]::GetFullPath($env:TEMP)</div>
+          <div class="log">✏️ D:/410_VibeCoding/.../sync_claude_skills.py</div>
+          <div class="log">🔧 python -m unittest discover -s tests -v</div>
+          <div class="log">🔧 Get-Content feishu\agent_runtime.py | Select-Object ...</div>
+        </div>
+        <div class="repeat">↻ edit 失败后，新卡再次带上此前完整 snapshot；用户看到旧命令重复出现。</div>
+      </div>
+      <div class="card">
+        <div class="title">用户真正缺失的信息</div>
+        <div class="summary">
+          <div class="row"><div class="key">不知道</div><div class="val">现在确认了什么事实？</div></div>
+          <div class="row"><div class="key">不知道</div><div class="val">为什么选这个方案？风险是什么？</div></div>
+          <div class="row"><div class="key">不知道</div><div class="val">还在做方案，还是已经擅自开始执行？</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="column">
+      <div class="colhead"><div class="coltitle">After · 推荐体验</div><div class="badge good">先 align / 低频 milestone</div></div>
+      <div class="card">
+        <div class="card-top"><div class="title">🧭 方案对齐 · 等待你拍板</div><div class="meta">执行前</div></div>
+        <div class="summary">
+          <div class="row"><div class="key">目标</div><div class="val">让 Claude config 新 skill 自动被 Codex 发现，同时保持 Claude 为唯一真源。</div></div>
+          <div class="row"><div class="key">证据</div><div class="val">现有 adapter 正文实时读取源；缺口只在新增/改名后的发现层刷新。</div></div>
+          <div class="row"><div class="key">推荐</div><div class="val">接 update hook，但先给出文件范围、删除边界和验证方式。</div></div>
+          <div class="row"><div class="key">不做</div><div class="val">未确认前不改代码、不全量 apply、不重启桥。</div></div>
+        </div>
+        <div class="gate">等待：回复“按推荐方案执行”后才进入实施。</div>
+      </div>
+      <div class="card">
+        <div class="card-top"><div class="title">🤖 执行中 · 阶段 2/4</div><div class="phase">方案设计</div></div>
+        <div class="summary">
+          <div class="row"><div class="key">已确认</div><div class="val">工具洪水来自 PostToolUse；commentary 没有 lifecycle hook。</div></div>
+          <div class="row"><div class="key">当前判断</div><div class="val">先降噪并建 milestone 通道；app-server 只做 throwaway 验证。</div></div>
+          <div class="row"><div class="key">风险</div><div class="val risk">直接切 app-server 会影响 wmux/resume，不能偷渡进本轮。</div></div>
+          <div class="row"><div class="key">下一步</div><div class="val next">给出 before/after 和分步 PLAN，等你确认。</div></div>
+        </div>
+        <div class="footer">原始工具明细已折叠（本地日志可查）· 同一张阶段卡低频更新 · 最终答案另起</div>
+      </div>
+    </div>
+  </section>
+  <div class="arrow">关键变化：工具调用仍可审计，但不再占据用户的飞书对话</div>
+</main>
+</body>
+</html>

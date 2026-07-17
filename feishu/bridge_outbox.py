@@ -36,6 +36,54 @@ def hwm_path(state_dir, bot):
     return os.path.join(state_dir, f"bridge-outbox-hwm-{bot}.json")
 
 
+def progress_state_path(state_dir, bot):
+    return Path(state_dir) / f"bridge-progress-state-{bot}.json"
+
+
+def load_progress_state(state_dir, bot):
+    """Restore only the milestone-v1 delivery cursor/card state.
+
+    Legacy Claude progress remains process-local.  The durable state is used
+    only after a runtime explicitly emits the new contract.
+    """
+    try:
+        raw = json.loads(progress_state_path(state_dir, bot).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict) or raw.get("contract") != "milestone-v1":
+        return {}
+    return {
+        "v2_turn": raw.get("turn"),
+        "v2_steps": raw.get("steps") or [],
+        "v2_mid": raw.get("mid"),
+        "v2_card_ids": raw.get("card_ids") or [],
+        "v2_acked": raw.get("acked") or {},
+        "v2_route": raw.get("route"),
+    }
+
+
+def save_progress_state(state_dir, bot, state):
+    if not state.get("v2_turn"):
+        return
+    target = progress_state_path(state_dir, bot)
+    payload = {
+        "contract": "milestone-v1",
+        "turn": state.get("v2_turn"),
+        "steps": state.get("v2_steps") or [],
+        "mid": state.get("v2_mid"),
+        "card_ids": state.get("v2_card_ids") or [],
+        "acked": state.get("v2_acked") or {},
+        "route": state.get("v2_route"),
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        pass
+
+
 def load_hwm(state_dir, bot):
     p = hwm_path(state_dir, bot)
     try:
@@ -335,7 +383,14 @@ CARD_BUDGET = 2800   # 单卡正文字数上限（飞书卡 ~3000·留余量）
 
 
 def _has_pending(state):
-    return len(state.get("steps") or []) > state.get("flushed", 0)
+    legacy = len(state.get("steps") or []) > state.get("flushed", 0)
+    acked = state.get("v2_acked") or {}
+    milestone = any(
+        int(step.get("revision") or 1) > int(acked.get(str(step.get("event_id"))) or 0)
+        for step in (state.get("v2_steps") or [])
+        if step.get("event_id")
+    )
+    return legacy or milestone
 
 
 def _header(full, usage):
@@ -398,6 +453,103 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
     state = {turn,steps,usage,seg_start,cur_mid,flushed,last_flush,sent}。返回动作数。"""
     n = 0
 
+    def _safe_count(value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _v2_text(steps, snapshot=None):
+        labels = [str(step.get("label") or "").strip() for step in steps]
+        labels = [label for label in labels if label]
+        snapshot = snapshot or steps
+        plan = next((step for step in reversed(snapshot) if step.get("kind") == "plan"), None)
+        tool_total = sum(
+            _safe_count(step.get("tool_count"))
+            for step in snapshot if step.get("kind") == "tool"
+        )
+        header = "🤖 **进行中**"
+        if plan and _safe_count(plan.get("plan_total")):
+            header += f" · 计划 {_safe_count(plan.get('plan_completed'))}/{_safe_count(plan.get('plan_total'))}"
+        header += f" · 工具 {tool_total} 次"
+        return _card_text(header, labels)
+
+    def _v2_dirty():
+        acked = state.get("v2_acked") or {}
+        return [
+            step for step in (state.get("v2_steps") or [])
+            if step.get("event_id")
+            and int(step.get("revision") or 1) > int(acked.get(str(step.get("event_id"))) or 0)
+        ]
+
+    def _v2_ack(steps):
+        acked = state.setdefault("v2_acked", {})
+        for step in steps:
+            event_id = str(step.get("event_id") or "")
+            if event_id:
+                acked[event_id] = int(step.get("revision") or 1)
+
+    async def _v2_new_cards(steps):
+        """Send only unseen/changed milestone blocks; return (last_mid,last_ids)."""
+        nonlocal n
+        if not steps:
+            return None, []
+        snapshot = state.get("v2_steps") or []
+        groups, current = [], []
+        for step in steps:
+            trial = current + [step]
+            if current and len(_v2_text(trial, snapshot)) > CARD_BUDGET:
+                groups.append(current)
+                current = [step]
+            else:
+                current = trial
+        if current:
+            groups.append(current)
+        last_mid, last_ids = None, []
+        for group in groups:
+            text = _v2_text(group, snapshot)
+            chunks = _ans_chunks(text)
+            for chunk in chunks:
+                last_mid = await new_card(chunk, route=state.get("v2_route"))
+                n += 1
+            last_ids = [str(step.get("event_id")) for step in group if step.get("event_id")]
+        return last_mid, last_ids
+
+    async def _flush_v2():
+        nonlocal n
+        dirty = _v2_dirty()
+        if not dirty:
+            return
+        by_id = {str(step.get("event_id")): step for step in (state.get("v2_steps") or [])}
+        card_ids = [event_id for event_id in (state.get("v2_card_ids") or []) if event_id in by_id]
+        for step in dirty:
+            event_id = str(step.get("event_id"))
+            if event_id not in card_ids:
+                card_ids.append(event_id)
+        card_steps = [by_id[event_id] for event_id in card_ids]
+        text = _v2_text(card_steps, state.get("v2_steps") or [])
+        mid = state.get("v2_mid")
+        if mid and len(text) <= CARD_BUDGET:
+            ok = await edit_card(mid, text)
+            n += 1
+            if ok:
+                state["v2_card_ids"] = card_ids
+                _v2_ack(dirty)
+                state["last_flush"] = clock()
+                return
+            # The old card already contains every acked event.  A replacement
+            # message must contain only the dirty delta, never that snapshot.
+            mid, card_ids = await _v2_new_cards(dirty)
+        elif mid:
+            # Current card is full: seal it and continue from unseen changes.
+            mid, card_ids = await _v2_new_cards(dirty)
+        else:
+            mid, card_ids = await _v2_new_cards(card_steps)
+        state["v2_mid"] = mid
+        state["v2_card_ids"] = card_ids
+        _v2_ack(dirty)
+        state["last_flush"] = clock()
+
     async def _flush_progress():
         nonlocal n
         full = state.get("steps") or []
@@ -411,10 +563,14 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 ok = await edit_card(state["cur_mid"], text)
                 n += 1
                 if not ok:                                # edit 失败(撞上限?) → 当轮换：弃旧卡开新卡
-                    state["cur_mid"] = await new_card(text)
+                    pending_start = max(state.get("flushed", 0), state["seg_start"])
+                    pending = [s.get("label", "") for s in full[pending_start:state["seg_start"] + k]]
+                    delta = _card_text(head, pending or seg[:k])
+                    state["cur_mid"] = await new_card(delta, route=state.get("progress_route"))
+                    state["seg_start"] = pending_start
                     n += 1
             else:
-                state["cur_mid"] = await new_card(text)
+                state["cur_mid"] = await new_card(text, route=state.get("progress_route"))
                 n += 1
             if full_fit:
                 break                                     # 收完·此卡保持开放(下次接着 edit 长大)
@@ -452,9 +608,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             key = _ans_key(r)
             if key in state["sent"]:
                 continue
+            await _flush_v2()
             await _flush_progress()                       # 进度卡刷到最新·保序
             full = state.get("steps") or []
             state["cur_mid"] = None                        # 进度卡封口·答案另起
+            state["v2_mid"] = None
+            state["v2_card_ids"] = []
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
             route = r.get("route")                         # 本轮回信路由（bridge_stop 在 Stop 时钉进记录·防异步 drain 撞下一轮覆盖）
@@ -484,6 +643,16 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             if on_ask:
                 on_ask(questions, key, r.get("session"))
         elif kind == "progress":
+            if r.get("contract") == "milestone-v1":
+                turn = r.get("root_turn") or r.get("turn")
+                if turn != state.get("v2_turn"):
+                    state["v2_turn"] = turn
+                    state["v2_mid"] = None
+                    state["v2_card_ids"] = []
+                    state["v2_acked"] = {}
+                state["v2_steps"] = r.get("steps") or []
+                state["v2_route"] = r.get("route")
+                continue
             steps = r.get("steps")
             if steps is None:                              # 老式单 label 兜底 → 累加
                 lbl = (r.get("label") or "").strip()
@@ -498,7 +667,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 state["flushed"] = 0
             state["steps"] = steps
             state["usage"] = r.get("usage") or state.get("usage") or {}
+            state["progress_route"] = r.get("route") or state.get("progress_route")
     if _has_pending(state) and (force_flush or clock() - state["last_flush"] >= coalesce_sec):
+        await _flush_v2()
         await _flush_progress()
     return n
 
@@ -518,7 +689,8 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
     path = outbox_path(state_dir, bot)
     offset = hwm_load()
     state = {"turn": None, "steps": [], "usage": {}, "seg_start": 0, "cur_mid": None,
-             "flushed": 0, "last_flush": clock(), "sent": set(), "picker_active": False}
+             "flushed": 0, "last_flush": clock(), "sent": set(), "picker_active": False,
+             **load_progress_state(state_dir, bot)}
     stuck = {"off": None, "since": 0.0}                   # 某 offset 卡多久(送达重试·防永堵)
     deps = dict(new_card=new_card, edit_card=edit_card, send_plain=send_plain)
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
@@ -533,6 +705,7 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                     await drain_batch(recs, state=state, coalesce_sec=coalesce_sec, clock=clock,
                                       on_ask=on_ask, on_resume=on_resume, **deps)
                 except RetrySend:                          # 送达失败(网络抽) → 不推 HWM·下轮重发(去重不重复)
+                    save_progress_state(state_dir, bot, state)
                     if stuck["off"] != offset:
                         stuck["off"], stuck["since"] = offset, clock()
                     if clock() - stuck["since"] >= GIVE_UP_SEC:   # 久发不出(多为永久错) → 放弃·推进解堵
@@ -540,11 +713,16 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                         hwm_save(offset)
                         stuck["off"] = None
                 else:
+                    # Persist message id + event revision cursor before HWM.
+                    # A controlled bridge restart can then resume the same card
+                    # without replaying already acknowledged milestones.
+                    save_progress_state(state_dir, bot, state)
                     offset = new_off
                     hwm_save(offset)
                     stuck["off"] = None
             elif _has_pending(state) and clock() - state["last_flush"] >= coalesce_sec:
                 await drain_batch([], state=state, coalesce_sec=coalesce_sec, clock=clock,
                                   on_ask=on_ask, on_resume=on_resume, **deps)
+                save_progress_state(state_dir, bot, state)
         except Exception:                            # noqa: BLE001 — drainer 绝不崩
             await asleep(1.0)

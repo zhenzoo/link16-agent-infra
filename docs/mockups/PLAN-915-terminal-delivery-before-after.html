@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Link16 Codex terminal delivery before and after</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --ink: #14223c; --muted: #68758d; --line: #dbe3ef; --paper: #ffffff;
+    --blue: #2457c5; --blue-bg: #edf4ff; --green: #18794e; --green-bg: #e9f8ef;
+    --red: #b9382b; --red-bg: #fff0ed; --amber: #98620b; --amber-bg: #fff7df;
+  }
+  body { margin: 0; background: #edf2f8; color: var(--ink); font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .page { width: 1600px; min-height: 1140px; margin: 0 auto; padding: 48px 56px 58px; }
+  .eyebrow { color: #526b91; font-size: 15px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+  h1 { margin: 8px 0 8px; max-width: 1320px; font-size: 39px; line-height: 1.2; letter-spacing: -.025em; }
+  .subtitle { margin: 0 0 26px; color: var(--muted); font-size: 17px; }
+  .grid { display: grid; grid-template-columns: .92fr 1.08fr; gap: 28px; align-items: stretch; }
+  .panel { padding: 22px; border: 1px solid #d7e0ec; border-radius: 22px; background: rgba(255,255,255,.72); box-shadow: 0 15px 40px rgba(42,61,91,.08); }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .panel-title { font-size: 25px; font-weight: 850; }
+  .badge { padding: 7px 11px; border-radius: 999px; font-size: 12px; font-weight: 850; }
+  .bad { color: var(--red); background: var(--red-bg); }
+  .good { color: var(--green); background: var(--green-bg); }
+  .card { margin-bottom: 14px; padding: 18px 20px; border: 1px solid #dce4ef; border-radius: 15px; background: var(--paper); box-shadow: 0 5px 14px rgba(39,54,82,.055); }
+  .card:last-child { margin-bottom: 0; }
+  .card-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding-bottom: 12px; border-bottom: 1px solid #edf1f6; }
+  .title { font-size: 18px; font-weight: 850; }
+  .meta { color: #8390a5; font-size: 12px; white-space: nowrap; }
+  .logs { margin-top: 12px; color: #536078; font: 12.5px/1.62 Consolas, "SFMono-Regular", monospace; }
+  .log { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 2px 0; }
+  .repeat { color: var(--red); background: var(--red-bg); border-left: 3px solid #e66c60; margin: 9px -7px 0; padding: 8px 10px; border-radius: 8px; }
+  .missing { margin-top: 12px; padding: 12px 13px; border: 1px dashed #ef8a80; border-radius: 11px; background: #fff8f7; }
+  .missing strong { color: var(--red); }
+  .quote { margin-top: 6px; color: #69748a; font-size: 13px; line-height: 1.5; text-decoration: line-through; text-decoration-color: #e88c83; }
+  .stream { display: grid; gap: 10px; margin-top: 14px; }
+  .event { display: grid; grid-template-columns: 32px 1fr; gap: 10px; align-items: start; }
+  .icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: #f2f5fa; font-size: 15px; }
+  .event-body { padding: 9px 11px; border-radius: 10px; background: #f7f9fc; font-size: 14px; line-height: 1.52; }
+  .comment .icon, .comment .event-body { background: var(--blue-bg); }
+  .comment .event-body { border-left: 3px solid #6a91e8; }
+  .plan .icon, .plan .event-body { background: #f3efff; }
+  .tool .event-body { color: #536078; }
+  .agent .icon, .agent .event-body { background: var(--green-bg); }
+  .label { display: inline-block; margin-bottom: 3px; color: #62718b; font-size: 11px; font-weight: 850; letter-spacing: .04em; text-transform: uppercase; }
+  .foot { margin-top: 14px; padding-top: 11px; border-top: 1px solid #edf1f6; color: #8490a3; font-size: 12px; }
+  .answer { border-color: #bcd8c8; background: #fbfffc; }
+  .answer .title { color: var(--green); }
+  .answer p { margin: 12px 0 0; color: #33425a; font-size: 14px; line-height: 1.55; }
+  .rulebar { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; margin-top: 24px; }
+  .rule { min-height: 114px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 15px; background: white; }
+  .rule h3 { margin: 0 0 8px; font-size: 16px; }
+  .rule p { margin: 0; color: #637087; font-size: 13px; line-height: 1.55; }
+  .show h3 { color: var(--blue); } .compress h3 { color: var(--amber); } .hide h3 { color: #6d7480; }
+  .contract { margin-top: 18px; text-align: center; color: #445774; font-size: 15px; font-weight: 780; }
+  code { font-family: Consolas, monospace; font-size: .94em; }
+</style>
+</head>
+<body>
+<main class="page" data-screenshot="terminal-delivery-comparison">
+  <div class="eyebrow">Link16 · Codex terminal → Feishu</div>
+  <h1>不是“先不先执行”的问题：是终端事件该怎么筛、怎么压、怎么保证只出现一次</h1>
+  <p class="subtitle">目标态 mockup · 仅用于对齐卡片协议，尚未接入生产桥。</p>
+
+  <section class="grid">
+    <div class="panel">
+      <div class="panel-head"><div class="panel-title">Before · 当前 Codex</div><div class="badge bad">工具有了 · 对话没了</div></div>
+      <div class="card">
+        <div class="card-head"><div class="title">🤖 进行中 · 🔧117 💭0</div><div class="meta">卡片 A</div></div>
+        <div class="logs">
+          <div class="log">🔧 Get-Content feishu\agent_runtime.py | Select-Object ...</div>
+          <div class="log">🔧 rg -n "PostToolUse|Stop|jsonl|progress" feishu docs</div>
+          <div class="log">✏️ D:/410_VibeCoding/.../sync_claude_skills.py</div>
+          <div class="log">🔧 python -m unittest discover -s tests -v</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="title">🤖 进行中 · 🔧118 💭0</div><div class="meta">patch 失败 → 新卡 B</div></div>
+        <div class="logs">
+          <div class="log repeat">↻ Get-Content feishu\agent_runtime.py（旧）</div>
+          <div class="log repeat">↻ rg -n "PostToolUse|Stop..."（旧）</div>
+          <div class="log repeat">↻ sync_claude_skills.py（旧）</div>
+          <div class="log repeat">↻ unittest discover（旧）</div>
+          <div class="log">🔧 python feishu/bridge_history.py --bot ...（新）</div>
+        </div>
+      </div>
+      <div class="missing">
+        <strong>终端里有，飞书里没有：</strong>
+        <div class="quote">“我已经确认到一个关键点：现有 Codex 适配器本来就是薄壳……下一步我会……”</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><div class="panel-title">After · 推荐卡片协议</div><div class="badge good">可见旁白优先 · 事件只消费一次</div></div>
+      <div class="card">
+        <div class="card-head"><div class="title">🤖 进行中 · 方案核对</div><div class="meta">💬2 · 🔧23 · 📋2/5</div></div>
+        <div class="stream">
+          <div class="event comment">
+            <div class="icon">💬</div>
+            <div class="event-body"><span class="label">Commentary · 原样显示</span><br>我已经确认到一个关键点：Claude 适配器正文实时读取源目录；真正缺的是发现目录刷新，而不是复制正文。</div>
+          </div>
+          <div class="event tool">
+            <div class="icon">🔧</div>
+            <div class="event-body"><span class="label">Tools · 相邻分组</span><br>本段完成 8 个工具：搜索×3 · 读取×4 · 验证×1<br><small>最近动作：核对 Claude/Codex hook 与 outbox 状态机</small></div>
+          </div>
+          <div class="event plan">
+            <div class="icon">📋</div>
+            <div class="event-body"><span class="label">Plan · 只显示当前状态</span><br>2/5 · 正在定义“哪些事件显示、哪些压缩、哪些隐藏”</div>
+          </div>
+          <div class="event agent">
+            <div class="icon">👥</div>
+            <div class="event-body"><span class="label">Subagents · 状态变化才显示</span><br>2/2 已完成 · “Waiting / Finished waiting”不进飞书</div>
+          </div>
+          <div class="event comment">
+            <div class="icon">💬</div>
+            <div class="event-body"><span class="label">Commentary · 原样显示</span><br>只读调查已收敛：Claude 用 JSONL 重建可见文字；Codex 当前 hook 只能拿工具，完整旁白需走带 phase 的原生 item stream。</div>
+          </div>
+        </div>
+        <div class="foot">最后更新 11:18:42 · 原始命令/输出留本地 · patch 失败时从下一未送达事件续卡</div>
+      </div>
+      <div class="card answer">
+        <div class="card-head"><div class="title">✅ 最终答案</div><div class="meta">另起一张 · 恰好一次</div></div>
+        <p>最终结论和交付物在这里完整发送；不复制前面的 commentary，不夹带工具流水账。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="rulebar">
+    <div class="rule show"><h3>原样显示</h3><p><code>commentary</code> 与 <code>final_answer</code>。这是 Codex 主动说给用户听的话，不是内部 chain-of-thought。</p></div>
+    <div class="rule compress"><h3>压缩显示</h3><p>plan、工具、文件变更、subagent 状态。按事件 ID 去重，工具按相邻区间合并。</p></div>
+    <div class="rule hide"><h3>完全隐藏</h3><p>raw reasoning、命令/输出全文、Waiting/Finished waiting、spinner、token_count。</p></div>
+  </section>
+  <div class="contract">同一卡可以重绘；一旦开新卡，只能从最后确认送达事件的下一条开始。</div>
+</main>
+</body>
+</html>

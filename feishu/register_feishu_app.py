@@ -84,7 +84,7 @@ def _bot_identity(app_id, app_secret):
         return None, None
 
 
-def append_registry_stub(app_id, app_secret, bot_arg, cli_name):
+def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"):
     """建完【自动】往 agent-registry.json 补一条 stub —— 把「登记协议」从『靠人记得回写』变成『脚本自动做』。
     open_id/显示名现查·verified 按是否查到·幂等(已有同名跳过)。repo/machine 让运行的 agent 核对补全(脚本不知道它管哪个仓)。"""
     import json
@@ -106,7 +106,7 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name):
         print(f"\n✅ agent-registry.json 已有 '{name}' → 跳过（幂等·没重复加）", flush=True)
         return
     stub = {"name": name, "machine": machine, "send_key": send_key, "open_id": oid or "",
-            "at_name": f"@{name}", "repo": "", "shared": False, "runtime": "claude",
+            "at_name": f"@{name}", "repo": "", "shared": False, "runtime": runtime,
             "role": "", "verified": bool(oid)}
     text = reg.read_text(encoding="utf-8")
     idx = text.rfind("\n  ]")                 # agents 数组闭合行 → 在它前插一条(保原格式·不整文件 reformat)
@@ -125,6 +125,8 @@ def main():
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
     ap.add_argument("--bot", default=None,
                     help="bot 标识（如 ws2）→ 写 FEISHU_BRIDGE_<BOT>_APP_ID/SECRET；不给 = 默认键")
+    ap.add_argument("--runtime", choices=("claude", "codex"), default="claude",
+                    help="运行时写入 agent-registry stub（默认 claude；Codex bot 传 codex）")
     args = ap.parse_args()
 
     if args.bot:
@@ -147,7 +149,7 @@ def main():
     print(f"\n✅ 应用「{args.name}」创建成功 · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
 
     # 自动登记进 agent-registry.json（登记协议自动化·不靠人记得回写）
-    append_registry_stub(app_id, secret, args.bot, args.name)
+    append_registry_stub(app_id, secret, args.bot, args.name, args.runtime)
 
     # 一键预置(40+)【不含】的【应用身份/tenant】权限——注册后【一条链全开】，免事后逐个手动补
     # (SSOT: feishu_docs.APP_IDENTITY_MANUAL_SCOPES = 云文档在线查看 drive:drive+docx:document(:create) + 群a2a im:chat + 收群@ + 听全群)。

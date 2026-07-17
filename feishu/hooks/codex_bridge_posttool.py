@@ -13,18 +13,25 @@ def _label(tool_name, tool_input):
     if tool_name in ("Bash", "Shell", "PowerShell"):
         cmd = tool_input.get("command") or tool_input.get("cmd") or ""
         return "🔧 " + (cmd.strip().splitlines()[0][:140] if cmd else tool_name)
-    if tool_name in ("apply_patch", "Edit", "Write", "MultiEdit"):
-        path = tool_input.get("path") or tool_input.get("file_path") or ""
-        return "✏️ " + (path or tool_name)
-    if tool_name in ("Read", "Grep", "Glob"):
-        path = tool_input.get("path") or tool_input.get("pattern") or ""
-        return "📖 " + (path or tool_name)
+    if tool_name in ("apply_patch", "Edit", "Write"):
+        command = tool_input.get("command") or ""
+        match = None
+        if command:
+            import re
+            match = re.search(r"(?m)^\*\*\* (?:Update|Add|Delete) File: (.+)$", command)
+        path = (match.group(1).strip() if match else None) or tool_input.get("path") or tool_input.get("file_path") or ""
+        return "✏️ " + (path or "apply_patch")
     return f"🔧 {tool_name}"
 
 
 def main():
     bot = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not bot:
+        return
+    # app-server-canary has a typed item observer that emits grouped tool
+    # milestones.  Keeping this raw PostToolUse producer enabled would double
+    # every tool and reintroduce command text into the card.
+    if os.environ.get("FEISHU_CODEX_EVENT_STREAM") == "1":
         return
     try:
         inp = json.loads(sys.stdin.read().lstrip("\ufeff"))
@@ -41,6 +48,12 @@ def main():
         "label": _label(tool_name, inp.get("tool_input") or {}),
     }
     outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (Path.cwd() / "_autopilot"))
+    try:
+        route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
+        if isinstance(route, dict):
+            rec["route"] = route
+    except (OSError, ValueError):
+        pass
     outbox = outdir / f"bridge-outbox-{bot}.jsonl"
     try:
         outbox.parent.mkdir(parents=True, exist_ok=True)

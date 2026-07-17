@@ -105,6 +105,7 @@ def _outbound_from_outbox(bot, include_progress):
     读 live + 切流前归档(_pre-cutover-archive·2026-06-28 从老 orchestrator/_autopilot 复制·只读·drainer 不碰子目录·零重发)。"""
     def _parse(p):
         out = []
+        milestone_seen = {}
         if not p.exists():
             return out
         try:
@@ -130,6 +131,17 @@ def _outbound_from_outbox(bot, include_progress):
                         out.append({"ts": float(ts), "dir": "out", "kind": "ask", "text": f"[问你] {heads}".strip()})
                     elif k == "progress" and include_progress:
                         steps = r.get("steps") or []
+                        if r.get("contract") == "milestone-v1":
+                            for step in steps:
+                                event_id = str(step.get("event_id") or "")
+                                revision = int(step.get("revision") or 1)
+                                if not event_id or revision <= milestone_seen.get(event_id, 0):
+                                    continue
+                                milestone_seen[event_id] = revision
+                                label = (step.get("label") or "").strip()
+                                if label:
+                                    out.append({"ts": float(ts), "dir": "out", "kind": "progress", "text": label})
+                            continue
                         lbl = (steps[-1].get("label") if steps else r.get("label")) or ""
                         if lbl:
                             out.append({"ts": float(ts), "dir": "out", "kind": "progress", "text": lbl})

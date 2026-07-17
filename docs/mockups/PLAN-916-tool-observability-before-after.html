@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PLAN-916 tool observability before and after</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --ink:#17223a; --muted:#69758b; --line:#dbe3ee; --paper:#fff;
+    --blue:#2457c5; --blue-bg:#edf4ff; --green:#18794e; --green-bg:#e9f8ef;
+    --amber:#98620b; --amber-bg:#fff7df; --red:#b9382b; --red-bg:#fff0ed;
+    --violet:#6547b7; --violet-bg:#f3efff;
+  }
+  body { margin:0; background:#edf2f8; color:var(--ink); font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  .page { width:1600px; min-height:1050px; margin:0 auto; padding:46px 54px 52px; }
+  .eyebrow { color:#526b91; font-size:14px; font-weight:850; letter-spacing:.12em; text-transform:uppercase; }
+  h1 { margin:8px 0 8px; font-size:38px; line-height:1.2; letter-spacing:-.025em; }
+  .subtitle { margin:0 0 25px; color:var(--muted); font-size:17px; }
+  .grid { display:grid; grid-template-columns:.9fr 1.1fr; gap:28px; align-items:start; }
+  .panel { padding:21px; border:1px solid #d7e0ec; border-radius:22px; background:rgba(255,255,255,.72); box-shadow:0 15px 40px rgba(42,61,91,.08); }
+  .panel-head { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:15px; }
+  .panel-title { font-size:24px; font-weight:850; }
+  .badge { padding:7px 11px; border-radius:999px; font-size:12px; font-weight:850; white-space:nowrap; }
+  .bad { color:var(--amber); background:var(--amber-bg); }
+  .good { color:var(--green); background:var(--green-bg); }
+  .card { padding:18px 19px; border:1px solid #dce4ef; border-radius:15px; background:var(--paper); box-shadow:0 5px 14px rgba(39,54,82,.055); }
+  .card-head { display:flex; justify-content:space-between; gap:16px; align-items:center; padding-bottom:12px; border-bottom:1px solid #edf1f6; }
+  .title { font-size:18px; font-weight:850; }
+  .meta { color:#8390a5; font-size:12px; white-space:nowrap; }
+  .stream { display:grid; gap:10px; margin-top:13px; }
+  .event { display:grid; grid-template-columns:32px 1fr; gap:10px; align-items:start; }
+  .icon { width:30px; height:30px; display:grid; place-items:center; border-radius:9px; background:#f2f5fa; font-size:15px; }
+  .body { padding:10px 12px; border-radius:10px; background:#f7f9fc; color:#40506a; font-size:13.5px; line-height:1.52; }
+  .comment .icon,.comment .body { background:var(--blue-bg); }
+  .comment .body { border-left:3px solid #6a91e8; }
+  .plan .icon,.plan .body { background:var(--violet-bg); }
+  .tool .body { border:1px solid #e2e8f1; background:#fbfcfe; }
+  .label { display:inline-block; margin-bottom:4px; color:#62718b; font-size:10.5px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }
+  .detail { display:grid; grid-template-columns:58px 1fr; gap:7px; margin-top:5px; }
+  .key { color:#718098; font-weight:800; }
+  code { padding:1px 4px; border-radius:5px; background:#eef2f7; color:#33445f; font:12px/1.5 Consolas,"SFMono-Regular",monospace; }
+  .problem { margin-top:14px; padding:13px 14px; border:1px dashed #e7b35c; border-radius:12px; background:#fffaf0; color:#70531d; font-size:13.5px; line-height:1.55; }
+  .problem strong { color:#8a5a04; }
+  .foot { margin-top:13px; padding-top:11px; border-top:1px solid #edf1f6; color:#8490a3; font-size:12px; }
+  .rules { display:grid; grid-template-columns:repeat(4,1fr); gap:15px; margin-top:23px; }
+  .rule { min-height:104px; padding:15px 16px; border:1px solid var(--line); border-radius:14px; background:#fff; }
+  .rule h3 { margin:0 0 7px; font-size:15px; }
+  .rule p { margin:0; color:#657187; font-size:12.5px; line-height:1.5; }
+  .r1 h3 { color:var(--blue); } .r2 h3 { color:var(--green); } .r3 h3 { color:var(--violet); } .r4 h3 { color:var(--red); }
+  .contract { margin-top:17px; text-align:center; color:#445774; font-size:14px; font-weight:780; }
+</style>
+</head>
+<body>
+<main class="page" data-screenshot="tool-observability-comparison">
+  <div class="eyebrow">Link16 · PLAN-916 · Feishu progress card</div>
+  <h1>保留现在好读的过程文字，再补一层“我用了什么、看了哪里”</h1>
+  <p class="subtitle">目标不是恢复命令流水账，而是让每个工具段都留下可审计、可扫读的聚合摘要。</p>
+
+  <section class="grid">
+    <div class="panel">
+      <div class="panel-head"><div class="panel-title">Before · 当前 canary</div><div class="badge bad">文字清楚 · 工具过度压缩</div></div>
+      <div class="card">
+        <div class="card-head"><div class="title">🤖 进行中 · 里程碑 7 · 工具段 3</div><div class="meta">当前样式</div></div>
+        <div class="stream">
+          <div class="event comment"><div class="icon">💬</div><div class="body"><span class="label">Commentary</span><br>我先核对这张卡属于哪个进程生命周期，再确认切换边界和新 renderer 是否已经生效。</div></div>
+          <div class="event tool"><div class="icon">🔧</div><div class="body"><span class="label">Tools · 相邻分组</span><br>本段 5 个工具：验证×5</div></div>
+          <div class="event plan"><div class="icon">📋</div><div class="body"><span class="label">Plan</span><br>2/3 · 正在制作并渲染 Before / After mockup</div></div>
+          <div class="event comment"><div class="icon">💬</div><div class="body"><span class="label">Commentary</span><br>证据已经对上：旧 turn 先收尾，之后新 worker 才开始消费 typed milestones。</div></div>
+          <div class="event tool"><div class="icon">🔧</div><div class="body"><span class="label">Tools · 相邻分组</span><br>本段 3 个工具：验证×3</div></div>
+        </div>
+        <div class="foot">原始命令和输出已隐藏</div>
+      </div>
+      <div class="problem"><strong>仍然回答不了：</strong>用了 <code>rg</code>、读取工具还是 Python？看过哪些文件？有没有修改文件？“验证×5”安全，但对主人来说信息不足。</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><div class="panel-title">After · 推荐方案</div><div class="badge good">按段集总 · 类型与路径可见</div></div>
+      <div class="card">
+        <div class="card-head"><div class="title">🤖 进行中 · 计划 2/3 · 工具 8 次</div><div class="meta">推荐样式</div></div>
+        <div class="stream">
+          <div class="event comment"><div class="icon">💬</div><div class="body"><span class="label">Commentary · 原样保留</span><br>我先核对这张卡属于哪个进程生命周期，再确认切换边界和新 renderer 是否已经生效。</div></div>
+          <div class="event tool"><div class="icon">🔧</div><div class="body">
+            <span class="label">工具活动 · 5 次 · 聚合展示</span>
+            <div class="detail"><div class="key">类型</div><div>搜索 <code>rg</code> ×2 · 读取 <code>Get-Content</code> ×2 · Python 验证 ×1</div></div>
+            <div class="detail"><div class="key">访问</div><div><code>feishu/bridge_events.py</code> · <code>feishu/bridge_outbox.py</code> · <code>docs/PLAN-915-…md</code></div></div>
+            <div class="detail"><div class="key">修改</div><div>无</div></div>
+          </div></div>
+          <div class="event plan"><div class="icon">📋</div><div class="body"><span class="label">Plan · 当前状态</span><br>2/3 · 正在制作并渲染 Before / After mockup</div></div>
+          <div class="event comment"><div class="icon">💬</div><div class="body"><span class="label">Commentary · 原样保留</span><br>证据已经对上：旧 turn 先收尾，之后新 worker 才开始消费 typed milestones。</div></div>
+          <div class="event tool"><div class="icon">🔧</div><div class="body">
+            <span class="label">工具活动 · 3 次 · 聚合展示</span>
+            <div class="detail"><div class="key">类型</div><div>读取 ×1 · 浏览器渲染 ×2</div></div>
+            <div class="detail"><div class="key">访问</div><div><code>docs/mockups/PLAN-916-…html</code></div></div>
+            <div class="detail"><div class="key">新增</div><div><code>docs/PLAN-916-…md</code> · <code>docs/images/PLAN-916-…png</code></div></div>
+          </div></div>
+        </div>
+        <div class="foot">路径全部仓库相对化、去重并限量 · 原始命令/参数/输出仍只留本地</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="rules">
+    <div class="rule r1"><h3>文字仍是主角</h3><p>commentary 与计划状态不降级，不被工具摘要吞掉。</p></div>
+    <div class="rule r2"><h3>工具按段聚合</h3><p>显示总次数、动作类别与代表性运行时，不逐条刷屏。</p></div>
+    <div class="rule r3"><h3>路径可审计</h3><p>访问、修改、新增分栏；仓库相对路径去重，默认最多 5 个。</p></div>
+    <div class="rule r4"><h3>敏感内容不外发</h3><p>隐藏完整命令、参数、输出、绝对用户路径、环境值与 reasoning。</p></div>
+  </section>
+  <div class="contract">推荐验收口径：一眼看懂“做了什么、用了什么、碰了哪里、有没有写”，但无法从卡片还原原始命令。</div>
+</main>
+</body>
+</html>

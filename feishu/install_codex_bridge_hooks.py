@@ -30,14 +30,19 @@ def _hook_cmd(path: Path) -> str:
 def bridge_hooks(repo: Path) -> dict:
     stop = repo / "feishu" / "hooks" / "codex_bridge_stop.py"
     post = repo / "feishu" / "hooks" / "codex_bridge_posttool.py"
+    route = repo / "feishu" / "hooks" / "bridge_userprompt.py"
     return {
         "Stop": [{
-            "matcher": "*",
             "hooks": [{"type": "command", "command": _hook_cmd(stop), "timeout": 10}],
         }],
         "PostToolUse": [{
-            "matcher": "Bash|Shell|PowerShell|apply_patch|Edit|Write|MultiEdit|Read|Grep|Glob|mcp__.*",
+            # Current Codex canonical hook surfaces. Edit/Write are documented
+            # aliases for apply_patch matchers; input still reports apply_patch.
+            "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
             "hooks": [{"type": "command", "command": _hook_cmd(post), "timeout": 5}],
+        }],
+        "UserPromptSubmit": [{
+            "hooks": [{"type": "command", "command": _hook_cmd(route), "timeout": 5}],
         }],
     }
 
@@ -51,9 +56,44 @@ def load_json(path: Path) -> dict:
         return {}
 
 
+def _is_bridge_command(command: str | None) -> bool:
+    """Recognize both the old XHS location and the Link16-owned hooks.
+
+    This lets the installer replace a legacy installation instead of appending
+    a second copy that would emit duplicate progress/answer records.
+    """
+    if not command:
+        return False
+    normalized = command.replace("\\", "/").lower()
+    return any(name in normalized for name in (
+        "/hooks/codex_bridge_stop.py",
+        "/hooks/codex_bridge_posttool.py",
+        "/hooks/bridge_userprompt.py",
+    ))
+
+
+def _without_bridge_commands(entries: list) -> list:
+    cleaned = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            cleaned.append(entry)
+            continue
+        kept = [
+            hook for hook in (entry.get("hooks") or [])
+            if not (isinstance(hook, dict) and _is_bridge_command(hook.get("command")))
+        ]
+        if kept:
+            cleaned.append({**entry, "hooks": kept})
+    return cleaned
+
+
 def merge_hooks(existing: dict, additions: dict) -> dict:
     out = dict(existing or {})
     hooks = dict(out.get("hooks") or {})
+    # Remove stale/previous bridge definitions across every event first while
+    # preserving unrelated hooks such as the user's completion sound.
+    for event, entries in list(hooks.items()):
+        hooks[event] = _without_bridge_commands(list(entries or []))
     for event, entries in additions.items():
         current = list(hooks.get(event) or [])
         seen = {
@@ -85,7 +125,18 @@ def main():
 
     codex_home = Path(os.path.expanduser(args.codex_home))
     target = codex_home / "hooks.json"
-    merged = merge_hooks(load_json(target), bridge_hooks(Path(args.repo).resolve()))
+    repo = Path(args.repo).resolve()
+    additions = bridge_hooks(repo)
+    missing = [
+        hook["command"]
+        for entries in additions.values()
+        for entry in entries
+        for hook in entry.get("hooks") or []
+        if not Path(hook["command"].split('"', 2)[1]).exists()
+    ]
+    if missing:
+        raise SystemExit("bridge hook script missing: " + ", ".join(missing))
+    merged = merge_hooks(load_json(target), additions)
     text = json.dumps(merged, ensure_ascii=False, indent=2)
 
     if not args.write:

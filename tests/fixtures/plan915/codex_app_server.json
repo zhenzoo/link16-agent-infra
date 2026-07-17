@@ -1,0 +1,8 @@
+[
+  {"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"m1","type":"agentMessage","phase":"commentary","text":"正在核对桥接契约。"}}},
+  {"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"r1","type":"reasoning","summary":["private"]}}},
+  {"method":"turn/plan/updated","params":{"threadId":"root","turnId":"turn-1","plan":[{"step":"核对","status":"inProgress"},{"step":"验证","status":"pending"}]}},
+  {"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"x1","type":"commandExecution","status":"completed","command":"SECRET RAW COMMAND"}}},
+  {"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"x2","type":"commandExecution","status":"completed","aggregatedOutput":"SECRET RAW OUTPUT"}}},
+  {"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"m2","type":"agentMessage","phase":"final_answer","text":"完成。"}}}
+]

@@ -31,6 +31,7 @@ for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"
 os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 BASE = "https://open.feishu.cn/open-apis"
 ENV = resolve_env_path()
+PROJECT = Path(__file__).resolve().parent.parent
 
 # 能力 → 满足它的 scope。每个能力 = 若干「需求组」，每组内任一 scope 满足即可，所有组都满足才算「有」。
 # ⚠️ 在线文档/媒体 需 drive:drive **且** docx:document(:create)——只有 drive 不够(创建 docx 会报 99991672)。
@@ -142,7 +143,7 @@ def main():
         entries = discover_env_bots()
     else:
         try:
-            cfg = json.loads(Path(bots_config_path()).read_text(encoding="utf-8"))
+            cfg = json.loads(Path(bots_config_path(PROJECT)).read_text(encoding="utf-8"))
             entries = [(b["name"], b.get("app_id_env"), b.get("app_secret_env")) for b in cfg.get("bots", [])]
         except Exception:  # noqa: BLE001
             entries = [(n, f"FEISHU_BRIDGE_{n.upper()}_APP_ID", f"FEISHU_BRIDGE_{n.upper()}_APP_SECRET")
@@ -179,7 +180,7 @@ def main():
             continue
         cells = "".join(f" | {'✅ 有' if r['caps'][n] else '— 无':<13}" for n in cap_names)
         print(f"{bot:<14}{cells} | {r['total_scopes']}")
-    if args.raw and args.bot and not result[args.bot].get("error"):
+    if args.raw and args.bot and args.bot in result and not result[args.bot].get("error"):
         print(f"\n=== {args.bot} 全部已授权 scope（{result[args.bot]['total_scopes']}）===")
         for s in result[args.bot]["scopes"]:
             print(f"  {s}")

@@ -16,6 +16,7 @@ from pathlib import Path
 
 CLAUDE_READY_MARK = "❯"
 CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
+CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
 
 
 def _q(value) -> str:
@@ -88,6 +89,63 @@ def _codex_home(bot) -> Path:
         return Path(os.path.expanduser(raw))
     personal = Path.home() / ".codex-personal"
     return personal if personal.exists() else Path.home() / ".codex"
+
+
+_CODEX_NATIVE_SLASH = {
+    "apps", "clear", "compact", "diff", "experimental", "feedback",
+    "fork", "help", "init", "logout", "mcp", "mention", "model", "new",
+    "permissions", "personality", "quit", "rename", "resume", "review",
+    "skills", "status",
+}
+
+
+def _skill_frontmatter_name(skill_file: Path) -> str | None:
+    """Read only the frontmatter name needed for Feishu slash compatibility."""
+    try:
+        head = skill_file.read_text(encoding="utf-8", errors="replace")[:16384]
+    except OSError:
+        return None
+    match = re.match(r"^---\s*\r?\n(.*?)\r?\n---", head, re.S)
+    if not match:
+        return skill_file.parent.name
+    name = re.search(
+        r"(?m)^name:\s*['\"]?([^'\"\r\n]+)['\"]?\s*$", match.group(1)
+    )
+    return name.group(1).strip() if name else skill_file.parent.name
+
+
+def codex_skill_invocation(bot, text: str, cwd=None) -> str | None:
+    """Translate a legacy `/skill args` message to Codex `$skill args`.
+
+    Translation is deliberately conservative: it is Codex-only, never
+    captures a native Codex slash command, and requires an installed skill
+    whose frontmatter name matches exactly. This lets Feishu users keep their
+    Claude muscle memory without changing command semantics globally.
+    """
+    if runtime_name(bot) != "codex" or not isinstance(text, str):
+        return None
+    match = re.match(r"^/([^\s]+)(?:\s+(.*))?$", text.strip(), re.S)
+    if not match:
+        return None
+    requested = match.group(1).strip()
+    if requested.casefold() in _CODEX_NATIVE_SLASH:
+        return None
+
+    roots = [Path.home() / ".agents" / "skills", _codex_home(bot) / "skills"]
+    if cwd:
+        roots.insert(0, Path(cwd).expanduser() / ".agents" / "skills")
+    seen = set()
+    for root in roots:
+        key = root.as_posix().casefold()
+        if key in seen or not root.is_dir():
+            continue
+        seen.add(key)
+        for skill_file in root.glob("*/SKILL.md"):
+            name = _skill_frontmatter_name(skill_file)
+            if name and name.casefold() == requested.casefold():
+                args = (match.group(2) or "").strip()
+                return f"${name}" + (f" {args}" if args else "")
+    return None
 
 
 # ---------- 账号别名（镜像 ~/.bashrc 的 cc/ccp/ccw* + cx/cxp · 给 /account 运行时切换用）----------
@@ -181,6 +239,14 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         )
     if spec.name == "codex":
         codex_home = _codex_home(bot).as_posix()
+        if isinstance(bot, dict) and bot.get("codex_transport") == "app-server-canary":
+            worker = (project / "feishu" / "codex_app_server_worker.py").as_posix()
+            return (
+                env
+                + f"CODEX_HOME={_q(codex_home)} FEISHU_CODEX_EVENT_STREAM=1 "
+                + f"python {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} "
+                + f"--state-dir {_q(autopilot.as_posix())} --codex-home {_q(codex_home)}"
+            )
         return (
             env
             + f"CODEX_HOME={_q(codex_home)} "
@@ -213,12 +279,24 @@ def is_ready(bot, screen: str) -> bool:
     if spec.name == "codex":
         if needs_trust_confirmation(bot, screen):
             return False
+        composer_ready = (
+            "› Use /skills" in screen
+            or re.search(r"(?m)^›\s*$", screen) is not None
+        )
+        if isinstance(bot, dict) and bot.get("codex_transport") == "app-server-canary":
+            # The official --remote TUI can omit the normal CLI's
+            # "OpenAI Codex" banner. Requiring that banner makes an already
+            # usable composer look unready. Its empty composer can also show a
+            # rotating suggestion instead of a bare ``›``. The worker's exact
+            # warmup answer is therefore the stable second readiness signal;
+            # unlike accepting any ``› text`` line, it cannot mistake a real
+            # draft for an idle composer.
+            return composer_ready or CODEX_APP_SERVER_READY_MARK in screen
         return (
             "OpenAI Codex" in screen
             and (
                 "permissions: YOLO mode" in screen
-                or "› Use /skills" in screen
-                or re.search(r"(?m)^›\s*$", screen) is not None
+                or composer_ready
             )
         )
     if spec.name == "custom":
