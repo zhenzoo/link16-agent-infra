@@ -1340,12 +1340,14 @@ def run(bot_name=None):
                 shot = await asyncio.to_thread(read_screen, rec["pty"], 40)
                 await reply(chat_id, md="```\n" + shot[-1500:] + "\n```"); return
             if cmd == "/clear":
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 控制命令=撤销投递契约→清账（§2.13·防 doctor 误判重投）
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可重置（发句话自动起）"); return
                 await asyncio.to_thread(wmux, "send", rec["pty"], "/clear", "--allow-ws", rec["workspace_id"])
                 await asyncio.to_thread(wmux, "enter", rec["pty"], "--allow-ws", rec["workspace_id"])
                 await reply(chat_id, "🧹 已重置会话上下文（/clear）"); return
             if cmd == "/stop":
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /stop=撤销投递契约→清账（否则撞 compact 的 pending 被 doctor 误判重投·§2.13·根治「/stop 后又乱重投」）
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可打断"); return
                 # ① ctrl+c 打断当前任务（与原行为一致·已验证能停）
@@ -1369,6 +1371,7 @@ def run(bot_name=None):
                         ("（输入框还有残留·去终端瞄一眼）" if cleared is False else ""))
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /close=结束会话=撤销投递契约→清账（§2.13）
                 agent_runtime.reset_account(bot, account_default)         # /close = 结束本会话 = 账号切回名册默认
                 if alive:
                     await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
@@ -1378,6 +1381,7 @@ def run(bot_name=None):
                 head = "🗑 已关闭会话" if alive else "🛌 本来就没有会话"
                 await reply(chat_id, f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）"); return
             if cmd == "/new":
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /new=全新会话=撤销旧投递契约→清账（§2.13）
                 # 开一个【全新空会话·不注入任何文本】——与「正常发消息起会话」【同一 spawn 路径】(ensure_session)，
                 #   唯一区别：不缀文本、不注入 → 起好停在就绪 ❯，等你【自己发消息注入】。
                 #   之前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；/new 把「起会话」和「注入内容」拆开：
@@ -1925,17 +1929,25 @@ def run(bot_name=None):
                 return
             txt = (p or {}).get("text") or ""
             if int((p or {}).get("attempts", 0)) < 1 and pty and ws:
+                ok = True                                          # 注入结果当真·不再吞异常后谎报「已重投」（B2·2026-07-18）
                 try:
-                    await asyncio.to_thread(_inject, pty, ws, txt)         # 重投·compact 后上下文已空·必成
-                except Exception:  # noqa: BLE001
-                    pass
-                _obx = bridge_outbox.outbox_path(ad, bname)
-                _sz = os.path.getsize(_obx) if os.path.exists(_obx) else 0
-                bridge_outbox.pending_write(ad, bname, text=txt, size0=_sz, attempts=1)  # 重置计时+标记已重投1次
-                blog(bname, "🔁 投递保证：上一条撞 compact 零活动 → 已重投(attempt 1)")
-                tgt = mirror_target(bname)
-                if tgt:
-                    await card_send(ch, tgt, "🔁 你上一条消息可能撞上了自动压缩没被处理——已为你**自动重投一次**，稍等回复。", bname)
+                    await asyncio.to_thread(_inject, pty, ws, txt)         # 重投·compact 后上下文已空·正常必成
+                except Exception as e:  # noqa: BLE001 — 会话已关/死壳 → 注入抛错 → 没投进去
+                    ok = False
+                    blog(bname, f"🔁 投递保证：重投注入失败（{str(e)[:80]}）→ 会话可能已关")
+                if ok:
+                    _obx = bridge_outbox.outbox_path(ad, bname)
+                    _sz = os.path.getsize(_obx) if os.path.exists(_obx) else 0
+                    bridge_outbox.pending_write(ad, bname, text=txt, size0=_sz, attempts=1)  # 重置计时+标记已重投1次
+                    blog(bname, "🔁 投递保证：上一条撞 compact 零活动 → 已重投(attempt 1)")
+                    tgt = mirror_target(bname)
+                    if tgt:
+                        await card_send(ch, tgt, "🔁 你上一条消息可能撞上了自动压缩没被处理——已为你**自动重投一次**，稍等回复。", bname)
+                else:                                              # 没投进去（会话已关/死壳）→ 清账 + 诚实告知（绝不谎报「稍等回复」让你干等）
+                    bridge_outbox.pending_clear(ad, bname)
+                    tgt = mirror_target(bname)
+                    if tgt:
+                        await card_send(ch, tgt, "⚠️ 你上一条消息没能重投（会话可能已关）——请手动重发，或 `/close` 重开。", bname)
             else:                                              # 重投后仍零活动 → 放弃（不循环）+ 喊人
                 bridge_outbox.pending_clear(ad, bname)
                 blog(bname, "🔁 投递保证：重投后仍零活动 → 放弃·喊人")

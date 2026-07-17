@@ -453,14 +453,26 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 - **记 pending**：`on_message` 正常注入后 → `bridge-pending-<bot>.json{ts, size0=注入时 outbox 字节数, attempts}`（`bridge_outbox.pending_write`）。
 - **活动 = outbox 字节增长**：每 bot 独立 outbox 文件 → 只有它自己的 hook(progress/answer)写入才让它变大 → `getsize` 涨 = 那一轮真发生了（O(1)·精确·无同秒 ts 歧义）。
 - **检测**（`bridge_outbox.pending_status`·doctor 每 30s per-bot 调）：`size 涨`=**active**(turn 发生/进行中 → 信任 drainer → 清 pending) / `零活动 + 超 PENDING_TIMEOUT_SEC(120s)`=**stuck**(疑被吃/卡) / 否则 **waiting**。
-- 🚨 **重投前【结构闸】`_pending_reinject_blocked`（2026-06-19 根治频繁误报·用户最烦）**：「outbox 零活动 + 超时」**≠ 真撞 compact**——**长思考开场 / 纯文字回答 / 等你答题** 都零 outbox 却在跑（实证 cartoonMV 长思考 127s 被冤判重投）。判 stuck 后**两道结构信号确认真没在处理才放行重投**：① **picker 待答**(`bridge-picker` 在)=正常暂停等答→不重投；② **wmux `agentStatus != 'idle'`**(`running`/`waiting`/`working`)=会话还活着在跑→不重投（实证：活跃 turn 全程非 idle·哪怕长思考 115s 也不翻 idle；**只有真回空闲提示符/死壳才 `idle`**）。只有 picker 无【且】`agentStatus=='idle'`/读不到 → 才算真撞 compact·放行重投。
-- **必达恢复**（`_recover_pending` closure）：过闸后 stuck 且 attempts<1 → **重投**那条消息(compact 后上下文已空·必成) + DM「已为你自动重投」+ 重置计时(attempts=1)；重投后仍 stuck → DM「重投仍无响应·请手动重发 / `/close` 重开」+ 清 pending（**给 guard·不循环**）。
+- 🚨 **重投前【结构闸】`_pending_reinject_blocked`（2026-06-19 根治频繁误报·用户最烦）**：「outbox 零活动 + 超时」**≠ 真撞 compact**——**长思考开场 / 纯文字回答 / 等你答题** 都零 outbox 却在跑（实证 cartoonMV 长思考 127s 被冤判重投）。判 stuck 后**两道结构信号确认真没在处理才放行重投**：① **picker 待答**(`bridge-picker` 在)=正常暂停等答→不重投；② **wmux `agentStatus != 'idle'`**(`running`/`waiting`/`working`)=会话还活着在跑→不重投（实证：活跃 turn 全程非 idle·哪怕长思考 115s 也不翻 idle；~~只有真回空闲提示符/死壳才 `idle`~~【⚠️ 此假设 **2026-07-18 实测证伪**·见本节末表：`idle` 只代表「无 agent 裸壳」·活会话在跑/空闲都非 idle】）。只有 picker 无【且】`agentStatus=='idle'`/读不到 → 才算真撞 compact·放行重投（**注：此闸建在被证伪的假设上·档2 将换 transcript 信号·见本节末**）。
+- **必达恢复**（`_recover_pending` closure）：过闸后 stuck 且 attempts<1 → **重投**那条消息(compact 后上下文已空) + DM「已为你自动重投」+ 重置计时(attempts=1)；重投后仍 stuck → DM「重投仍无响应·请手动重发 / `/close` 重开」+ 清 pending（**给 guard·不循环**）。
+- 🔴 **重投不撒谎（B2·2026-07-18 根治）**：`_inject` 的返回/异常**当真**——注入抛错(会话已关/死壳)时**绝不再吞异常后照发「已为你自动重投·稍等回复」**（旧 bug·让你干等永不来的回复·yoach 日志实证）；改为**清账 + DM「⚠️ 没能重投·会话可能已关·请手动重发 / `/close` 重开」**。卡的数量不变·只是内容变成真的。
+- 🔴 **控制命令清账（B1·2026-07-18 根治「/stop 后又乱重投」）**：`/stop` `/clear` `/close` `/new` = 主人明确「这活不要了 / 换会话」= **撤销投递契约** → 各分支开头 `bridge_outbox.pending_clear`。病根：`/stop` 以前只 ctrl+c + 回「已打断」，**从不碰 pending 账本** → 那笔「等回传」的账变成永久 stuck 雷（M 已被杀·永不回传·outbox 永远零活动+超时）→ doctor 每 30s 拿它掷骰子。**「有时候才触发」的真相 = M 在被 /stop 前有没有回传过任何东西**（有→size 涨→判 active→自动清账→无事；一个字节没回就被停→留雷）——跟你停没停无关·跟你停得早不早有关。
 
 **实现**：`bridge_outbox.py`(pending_path/write/load/clear/status 纯函数) + `feishu_bridge.py`(on_message 记 pending · `_recover_pending` · `PENDING_TIMEOUT_SEC=120`) + `bridge_doctor.py`(doctor_loop 加 `recover_pending` dep·每轮 per-bot 调·异常不拖垮)。验证：pending_status 六态单测 + doctor 调用/抗异常 + 真会话挂真 hooks e2e（正常→active 不误投 / 打断模拟被吃→stuck / 重投真答出来）。
 
 **已知边界（诚实·v2 · 2026-06-19）**：① ~~纯思考 >120s 误判重投一次~~ **已被 `_pending_reinject_blocked` 结构闸根治**（agentStatus 非 idle → 不重投）② 进度流过后 mid-turn 才 compact 卡死（size 已涨→判 active）→ 本机制不覆盖·由 §2.5 drainer 发卡超时 + §3 outbox backlog 自愈部分兜底 ③ 真撞 compact 那一刻 agentStatus 恰好还没回 idle（极短窗）→ 下一轮 doctor(30s 后)再判·最终仍会重投(不漏)。
 
-> ⚠️ **agentStatus 可靠性存疑（2026-07-16 实测·待复核）**：Claude Code v2.1.211 实测——**空闲/在跑的会话都报 `running`，没观察到回 `idle`**（与本节「只有真空闲/死壳才 idle」的旧假设相悖）。若属实，则 `_pending_reinject_blocked` 的 agentStatus 闸会**永远 block**、本节的 compact 重投几乎不触发（既存问题·非本次 §2.12b 引入）。本次改动只治「卡输入框」（§2.12b·靠读屏直接信号·不依赖 agentStatus），**未动 compact 兜底**；agentStatus 判据是否要换成读屏「回到空闲提示符」信号，留作后续单独课题。
+> ✅ **agentStatus 假设【已证伪·结案】（2026-07-18 本机 4-workspace 同时采样实测·结原 2026-07-16 的「待复核」）**：旧假设「只有真空闲/死壳才 `idle`、非 idle = 在跑」**是错的**——
+>
+> | workspace | agentStatus | 真实状态 |
+> |---|---|---|
+> | `bot-tb25-link16`（采样时正在真跑） | **`waiting`** | 在跑 |
+> | `bot-tb25-phd-taoci`（空闲） | **`running`** | 空闲 |
+> | `Workspace 1`（裸壳·agentName 空） | **`idle`** | 无 agent |
+>
+> **结论**：`idle` 只出现在【压根没 agent 的裸壳】上；任何活着的 Claude 会话不管在跑还是空闲都报 `waiting`/`running`、**永不 idle**（我在跑却报 waiting、别人空闲却报 running·两个方向同时证伪）。→ `_pending_reinject_blocked` 的 agentStatus 闸实际只判「这 pty 还有没有 agent」，**判不了「在跑 vs 空闲」**（拿「会话死没死」的信号答「消息被吃了没」·问错问题）。
+> **推论**：§2.13 想治的「真撞 compact 重投」因**活会话永不 idle → agentStatus 闸永远 block → 原始目的其实几乎从未生效**（只是没人发现）。
+> **修法分档（SSOT：`docs/PLAN-918` Part B）**：**档1（本次 2026-07-18·B1/B2）** 先消灭「/stop 留雷」这个天天骚扰人的真实雷源 + 重投不再撒谎（不依赖 agentStatus·靠「控制命令即撤销契约」这条确定语义）；**档2（后续）** 把闸判据从「Claude 忙不忙」换成直接问 ground truth「M 到底进没进 transcript」+ fail-open 改 fail-closed（成本论据不成立：那是否决「每条都查」·这里每 120s 且只在已判 stuck 的罕见路径查一次）。
 
 ---
 
