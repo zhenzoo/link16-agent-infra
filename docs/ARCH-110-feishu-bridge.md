@@ -443,6 +443,24 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 ---
 
+## § 2.12c · /stop 清输入框：有界轮询 + 复用 §2.12b 检测（2026-07-18 根治「慢会话漏清 + 措辞时有时无」）
+
+> 一句话：`/stop` 打断后把「退回 composer 的被打断消息」用**有界轮询**清掉，取代旧「固定 `sleep(0.8s)` 读一次」的时机竞态（慢会话消息晚退回 → 那次读到空 → 漏清·主人实证）。
+
+**真机实测钉死的事实（2026-07-18 · throwaway 逐键验）**：
+- **能清空整个输入框的键只有【单 `ctrl+c`】**（框非空 → 清空且不退出）。`escape` 实测**清不掉**；`ctrl+u` wmux **根本不支持发**（支持键仅 enter/tab/ctrl+c/ctrl+d/ctrl+z/ctrl+l/escape/方向键）→ 旧注释提 `ctrl+u` 作废。
+- **单 `ctrl+c` 永远安全**（单发绝不退会话）；退会话需**无间隔快速连按 2~3 记**。有间隔（≥~0.4s）就安全 → 轮询间隔天然当保险。
+- **旧 `_composer_draft`（只认【行首】❯）有渲染漏判**：composer 的 `❯` 有时黏在 ─── 分隔线**行尾**（不在行首）→ 旧检测漏看草稿、误判「空」→ 不清。已退役，换成 §2.12b 的 `_composer_holds_paste`（`rfind("❯")`·rendering-robust）。
+
+**修法（SSOT：`feishu_bridge._stop_clear_composer` + `/stop` 分支）**：
+1. `/stop` 先从 pending 账本取「被打断消息原文」当 marker（在 B1 清账之前）→ ctrl+c 打断 → `_stop_clear_composer` 有界轮询（`STOP_CLEAR_TRIES=10 × STOP_CLEAR_POLL=0.4s ≈ 4s` 窗口）。
+2. 每轮读屏 `_composer_holds_paste(scr, marker)`：残留在 → 补【单】ctrl+c → 下轮确认；见过残留后变空 = **cleared** / 整窗没见 = **empty**（消息没退回框/本就空）/ 窗末仍在 = **residual**（顽固·喊人去看）。
+3. **措辞统一**：`/stop` 回复永远带一句明确状态（`已清空` / `本就是空的` / `仍有顽固残留·去终端瞄一眼`）——根治「有时带括号有时不带·主人搞混」。marker 检测天然避开占位符「Try …」误判（占位不含 marker 指纹）。
+
+**验证**：真机 e2e 3 例（基本清 / 空框 / **慢会话草稿 1.8s 晚退回·旧固定 0.8s 必漏·轮询仍 catch = RED→GREEN**）+ CI 单测 5 例（`tests/test_stop_clear_composer.py`）。⚠️ 需**重启桥**才生效（进程持旧码）。
+
+---
+
 ## § 2.13 · 注入投递保证（撞 auto-compact 不再静默黑洞 · 2026-06-18 根治）
 
 > 一句话：桥注入一条消息后**记一笔 pending**；若那一轮被 **auto-compact 吃掉**（上下文满时提交触发压缩、消息没被当成 turn 处理、会话回 idle、零回复），doctor 会**检测到并必达重投 + 通知你**——不再像以前那样无声丢失、你干等不到回复。

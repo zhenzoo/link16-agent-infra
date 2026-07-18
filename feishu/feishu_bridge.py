@@ -61,6 +61,10 @@ INJECT_SETTLE_CAP = 3.0          # settle 封顶秒（再长也不无限等·剩
 INJECT_VERIFY_TRIES = 6          # 回车后闭环校验重按上限（还卡就再按·超过=真卡→喊人）
 INJECT_VERIFY_FIRST = 0.35       # 第一次校验读屏前的间隔（给提交时间清 composer·避免清框慢时白重按拖时间）
 INJECT_VERIFY_POLL = 0.35        # 重按后每次校验读屏前的间隔秒（双提交无风险·enter 顺序处理·空框重按=无害）
+# /stop 清输入框（§2.12c · 2026-07-18 根治「慢会话漏清」）：打断后【有界轮询】把退回 composer 的消息清掉，
+# 取代旧【固定 0.8s 单次读】（慢会话里消息晚退回→那一次读到空→漏清）。单 ctrl+c 清非空框·实测安全（退出需快速连按）。
+STOP_CLEAR_TRIES = 10            # 轮询次数上限（×POLL ≈ 4s 窗口·覆盖慢会话延迟退回草稿）
+STOP_CLEAR_POLL = 0.4            # 每次轮询间隔秒（也天然给 ctrl+c 间距·防「快速连按 = 退会话」）
 SEND_RETRY_BACKOFF = (0, 2, 5)    # channel.send 失败重试等待秒（retryable 错误码才重试）
 # 单次发卡硬超时（2026-06-18 实证根因）：SDK 默认 max_attempts=5 × httpx 每阶段 30s → 单次卡死最坏 ~150s，
 # 而 drainer 是【单协程顺序 await】→ 一次卡死冻结整条回传、后续 answer/progress 全队头阻塞，靠 doctor
@@ -579,22 +583,6 @@ def _agent_live(bot, pty):
     return agent_runtime.is_live(bot, scr)
 
 
-def _composer_draft(pty):
-    """读屏取 Claude Code 输入框(composer)里的残留草稿文本（strip 后非空）或 ""。
-    composer = 屏幕【最底部】那条 `❯ ` 行（历史已提交的 `❯ <text>` 在更上方·滚到分隔线之上）；
-    底下可能还有 `⏵⏵ bypass…` 指示行，故从下往上找第一条以 ❯ 打头的行即活动 composer。
-    给 /stop「清输入框」用：先确认非空再补 ctrl+c（空框绝不补·防双 ctrl+c 退出会话）。读不到 → ""。"""
-    try:
-        scr = read_screen(pty, 12)
-    except RuntimeError:
-        return ""
-    for ln in reversed(scr.splitlines()):
-        s = ln.strip()
-        if s.startswith("❯"):
-            return s[1:].strip()          # ❯ 之后的内容 = 草稿（空则 ""）
-    return ""
-
-
 # ---------- transcript 定位（钉死每会话自己的 jsonl · 消灭多会话串台）----------
 def _project_jsonls(bot):
     """全 project 下所有 (Path, mtime)。"""
@@ -787,6 +775,39 @@ def _inject(pty, workspace_id, marker):
             return True                          # 输入框已空 = 提交成功
         wmux("enter", pty, *allow)               # 还卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
     return False                                 # 重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
+
+
+def _stop_clear_composer(pty, workspace_id, marker):
+    """/stop 打断后：把「退回输入框的那条被打断消息」清掉。有界轮询·复用 §2.12b 的 `_composer_holds_paste`
+    检测（`rfind("❯")`·rendering-robust·不像旧 `_composer_draft` 只认行首 ❯ 会漏「❯ 黏在 ─── 行尾」的渲染）。
+    marker = pending 记的被打断消息原文（空 = 没有待清内容）。返回：
+      'cleared'  见过残留、清掉了。
+      'empty'    整个窗口没见残留 = 消息没退回框（已提交/本就空）。
+      'residual' 清了仍在·顽固 → 诚实喊人去终端看。
+    安全：只在【读到残留】那一下补【单】ctrl+c（实测单发永不退会话·退出需快速连按）；轮询间隔天然给足 ctrl+c 间距。
+    取代旧「固定 sleep(0.8) 读一次」的时机竞态（慢会话消息晚退回 → 那次读到空 → 漏清·2026-07-18 主人实证 + 真机复验）。"""
+    if not marker:
+        return "empty"
+    allow = ["--allow-ws", workspace_id]
+    saw = False
+    for i in range(STOP_CLEAR_TRIES):
+        time.sleep(STOP_CLEAR_POLL)
+        try:
+            scr = read_screen(pty, 10)
+        except RuntimeError:
+            scr = ""
+        if _composer_holds_paste(scr, marker):   # 残留还卡在 composer → 补单 ctrl+c 清（下一轮确认清没清）
+            saw = True
+            wmux("key", pty, "ctrl+c", *allow)
+        elif saw:
+            return "cleared"                      # 之前见过残留、现在没了 = 清掉了
+    if not saw:
+        return "empty"                            # 整窗没见残留 = 消息没退回框
+    try:
+        scr = read_screen(pty, 10)                # 窗口末再读一次定夺（末轮刚补的 ctrl+c 生效没）
+    except RuntimeError:
+        scr = ""
+    return "residual" if _composer_holds_paste(scr, marker) else "cleared"
 
 
 def _pending_reinject_blocked(ad, bname, pty):
@@ -1347,28 +1368,24 @@ def run(bot_name=None):
                 await asyncio.to_thread(wmux, "enter", rec["pty"], "--allow-ws", rec["workspace_id"])
                 await reply(chat_id, "🧹 已重置会话上下文（/clear）"); return
             if cmd == "/stop":
-                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /stop=撤销投递契约→清账（否则撞 compact 的 pending 被 doctor 误判重投·§2.13·根治「/stop 后又乱重投」）
+                _pend = bridge_outbox.pending_load(str(STATE_DIR), bot["name"]) or {}   # B6: 先拿被打断消息原文(给清框检测)·再清账
+                _pmark = _pend.get("text") or ""
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # B1: /stop=撤销投递契约→清账（防 doctor 误判重投·§2.13·根治「/stop 后又乱重投」）
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可打断"); return
                 # ① ctrl+c 打断当前任务（与原行为一致·已验证能停）
                 await asyncio.to_thread(wmux, "key", rec["pty"], "ctrl+c", "--allow-ws", rec["workspace_id"])
-                # ② 打断后 Claude Code 把被中断/排队的那条消息退回输入框(composer)·残留在那。
-                #    ⚠️ ctrl+u / esc 都【清不掉】Claude Code 的 composer（2026-06-22 throwaway 实测钉死·旧版用
-                #    ctrl+u 根本没生效、还假报「已清空」）。真能清的是【单记 ctrl+c】：框非空→清空且不退出（实测）；
-                #    但【空框连按两记 ctrl+c = 退出整个会话】。所以补这记 ctrl+c 前【必须读屏确认 composer 非空】，
-                #    空了就绝不补（否则把 ① 那记凑成「空框双 ctrl+c」误杀会话）。cleared 以读屏验真为准·不再乐观假报。
-                await asyncio.sleep(0.8)                   # 等被中断消息退回 composer 落定
-                cleared = None                            # None=本来就空·无需清
+                # ② B6（§2.12c·2026-07-18）：打断后 Claude 把消息退回 composer → 【有界轮询】清掉（复用 §2.12b 检测·
+                #    rendering-robust·不再赌固定 0.8s 单次读——慢会话消息晚退回会漏清·主人实证）。返回三态·措辞统一。
+                status = "empty"
                 try:
-                    if await asyncio.to_thread(_composer_draft, rec["pty"]):   # 读屏：确认 composer 有残留草稿
-                        await asyncio.to_thread(wmux, "key", rec["pty"], "ctrl+c", "--allow-ws", rec["workspace_id"])
-                        await asyncio.sleep(0.4)
-                        cleared = not await asyncio.to_thread(_composer_draft, rec["pty"])  # 读屏验真清没清
-                except Exception as e:
-                    cleared = False
-                    blog(bot["name"], f"/stop 清输入框失败(忽略)：{e}")
-                tail = ("（输入框已清空）" if cleared else
-                        ("（输入框还有残留·去终端瞄一眼）" if cleared is False else ""))
+                    status = await asyncio.to_thread(_stop_clear_composer, rec["pty"], rec["workspace_id"], _pmark)
+                except Exception as e:  # noqa: BLE001
+                    status = "residual"
+                    blog(bot["name"], f"/stop 清输入框异常(忽略)：{e}")
+                tail = {"cleared": "（输入框已清空）",
+                        "empty": "（输入框本就是空的）",
+                        "residual": "（输入框仍有顽固残留·去终端瞄一眼）"}.get(status, "")
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /close=结束会话=撤销投递契约→清账（§2.13）
