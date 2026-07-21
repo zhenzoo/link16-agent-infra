@@ -203,7 +203,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。开启
 - **Codex milestone 工具摘要（PLAN-916）**：commentary 保持原样；每个相邻工具段集总为“实际调用次数 + 工具/运行时类别 + 访问/修改/新增路径”。路径仓库相对化、每组最多 5 个，超出显示“另有 N 个”；只读段明确写“修改：无”。header 显示“计划完成度 + 实际工具次数”，不暴露内部里程碑/工具段计数。完整命令、参数、输出、绝对路径和 reasoning 不进入任何持久层或卡片。
 - **答案卡（同款·超长拆连续多卡）**：Stop hook 把该轮最终回复 + 过程小结 footer 写 outbox；drainer 发答案卡，**>2800 字按行拆成连续多卡**（card1 满→card2 接着写·**不再退 markdown**）。
 - **最终兜底**：只有 `new_card`/`update_card` **彻底失败**才退 `guaranteed_send`（互动卡→markdown→text→webhook·每级验真送达）。
-- **裸 URL 自动 `_linkify`** 成可点链接。
+- **发出前链接检查（PLAN-921）**：卡片、markdown/text 兜底与群纯文字共用 `outbound_links.sanitize_outbound_links`。本地绝对路径、`/D:/...`、`file:///`、UNC、仓库相对路径从 Markdown 链接解除，改成“标签 + 明文代码路径”；普通行内网页链接不动；独占一行的外链及飞书 docx / Cloudflare Pages 会另露原始 URL。代码区、锚点和图片 Markdown 保持既有语义。处理幂等，多级 fallback 重跑不会重复加 URL。
 - **drainer deps**（注入·见 `feishu_bridge.run()`）：`new_card(text)->message_id`（`_ensure_card_snapshot` 发卡）· `edit_card(mid,text)->bool`（`update_card`）· `send_plain(text)`（`card_send` 兜底）。`coalesce_sec` 只作「相邻 update 最小间隔（批量化）」，**轮换靠字数/失败·不靠时间**。
 - **裸 URL 自动 `_linkify`** 成 `[url](url)` 可点（飞书卡片不自动 linkify 裸网址）。
 - **🔒 机械闸 `_seal_bare_urls`（2026-06-24）**：卡片路径走 `_linkify` 已包链接·**但 `guaranteed_send`(markdown/text 必达兜底/镜像直发) 不经 `_linkify`** → 裸 URL 紧贴 CJK/全角时飞书**原生 autolink 贪婪**把后续中文整段吞进 href（实证：`https://x.com/…872（中文…)` 渲成一整条超链接·href 里 `%EF%BC%88…`）。修：在**最低发送收口 `_send_checked`**（覆盖 guaranteed_send 的 markdown+text）+ `_send_group_text`（a2a 群）对 payload 跑 `_seal_bare_urls`——裸 URL 紧跟非 ASCII 时插一个空格强制 autolink 在 URL 真末尾终止（只在该精确危险态触发·8 例单测过·URL 本身不改·已 `[](){}` 包的靠负 lookbehind 跳过）。软规则（链接单独成行）只是兜底·这道闸才是确定性保证。**改桥代码需重启桥才生效**（别在活会话中途重启）。
@@ -356,7 +356,8 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 2. **建导入任务** `POST /drive/v1/import_tasks`（`type=docx` · `point={mount_type:1, mount_key:""}`=bot 云空间根目录）→ `data.ticket`。
 3. **轮询** `GET /drive/v1/import_tasks/{ticket}`（间隔 2s·上限 ~30 次）→ **成功判据 = `job_status==0` 且 `token` 非空**（坑：status=0 但 token 空 = 仍处理中·别当成功）→ 取 `data.result.{token,url}`。
 4. **授权 owner（关键坑·否则你点链接「无权限」）** `POST /drive/v1/permissions/{token}/members?type=docx`（body `{member_type:"openid", member_id:<owner open_id>, perm:"view", type:"user"}`）。⚠️ body 的 `type:"user"`(成员类别) ≠ query 的 `type=docx`(资源类别)·两个都要传。
-5. **发链接**：把 `data.result.url` 用 `card_send` 发到 DM（裸 URL 自动 `_linkify` 可点）。
+5. **发链接**：把 `data.result.url` 用 `card_send` 发到 DM（原始 URL 明文可见且可点）。
+6. **final 对账（PLAN-921）**：桥内同 bot 的 p2a 回合用 `send --doc` 成功取得 URL 后，追加一条 `kind=doc_delivery` 到该 bot outbox；drainer 去重并原子持久化到 `bridge-delivery-state-<bot>.json`，在下一条匹配的 p2a answer 追加“标题 + 原始 docx URL”。answer 真正送达后才清账；失败重试、桥重启都保留。显式 `--to`、手工 terminal、别的 bot 与 a2a 路由不登记，避免串收件人。
 
 **支持**：`.md`/`.markdown`/`.mark` 和 `.html` 都导成 docx（文档类只能导成 docx）。≤20MB 走单次上传。
 
@@ -369,7 +370,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 **边界（诚实）**：① 你在飞书里改了文档，**改动留在飞书云那篇·不会自动回灌本地 `.md`**——回灌要再加一步（`GET /docs/v1/content` 把文档拉回 markdown 覆盖本地）·是 v2。② 它**会在飞书云存一份文档**（导入到 bot 云空间根目录·可后续归到专用文件夹/定期清）——Publisher 已知此 tradeoff 并接受。③ `type=docx` 与 public 分享 enum 有「不确定」项·首篇先测（见 plan）。
 
-**SSOT / 不硬编码**：复用 `scripts/send_card_feishu.py` 的 `api`/`tenant_token`（stdlib·绕代理·不重写 token 逻辑）；owner open_id 取桥已持久化的 `bridge-owner-<bot>.json` / 会话 open_id；不硬编码 folder/盘符/用户名。**`send` 是独立短进程·即改即用·不需重启桥。**
+**SSOT / 不硬编码**：复用 `scripts/send_card_feishu.py` 的 `api`/`tenant_token`（stdlib·绕代理·不重写 token 逻辑）；owner open_id 取桥已持久化的 `bridge-owner-<bot>.json` / 会话 open_id；不硬编码 folder/盘符/用户名。`send` 的建文档与直发是独立短进程、即改即用；PLAN-921 的 final 对账由常驻 drainer 消费，需重启对应 bot bridge 后生效。CLI/receipt 同时记录正文字符数、文档源字符数/字节数与 doc URL，不再把 doc-only 误报成“0 字”。
 
 ## § 2.11b · 在线查看媒体（本地【图片 / 视频 / 任意文件】→ 嵌进 docx → 发链接 · 2026-06-19）
 

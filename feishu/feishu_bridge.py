@@ -97,6 +97,7 @@ import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
+from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
 
 try:
     import notify as _notify  # scripts/notify.py · 纯标库 webhook（绕代理 3 重试）· 必达最后一道兜底
@@ -887,7 +888,7 @@ async def _send_checked(channel, chat_id, payload, name, kind):
     if isinstance(payload, dict):
         for _k in ("markdown", "text"):
             if isinstance(payload.get(_k), str):
-                payload[_k] = _seal_bare_urls(payload[_k])
+                payload[_k] = _seal_bare_urls(sanitize_outbound_links(payload[_k]))
     last = None
     transient = True                                    # 默认瞬时（除非撞到非 retryable 的真失败）
     for attempt, wait in enumerate(SEND_RETRY_BACKOFF, start=1):
@@ -1015,6 +1016,7 @@ def _linkify(text):
     URL 整行【消失】·2026-06-16 social_media 实证；代码块里讲 `![..]()` 语法也该原样）。"""
     if not text:
         return text or ""
+    text = sanitize_outbound_links(text)
     text = _unwrap_url_code(text)                     # 先拆纯-URL 反引号→裸 URL（否则下面按代码区跳过→飞书不可点·2026-06-29）
     parts = _CODE_REGION_RE.split(text)
     for i in range(0, len(parts), 2):                 # 偶数下标=非代码区；奇数=代码区原样留
@@ -1141,7 +1143,7 @@ def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None):
     为什么不发卡片：飞书把【收到的卡片】渲成占位 "[interactive]" → 对端 bot 读不到正文(也读不到哨兵)；
     纯文字 content_text 对端能直接读 → agent↔agent 必走此路（2026-06-18 实证）。"""
     import urllib.request
-    content = (f'<at user_id="{at_open_id}"></at> ' if at_open_id else "") + (text or "")
+    content = (f'<at user_id="{at_open_id}"></at> ' if at_open_id else "") + sanitize_outbound_links(text or "")
     content = _seal_bare_urls(content)   # 机械闸：a2a 群纯文字也封口裸 URL（防 autolink 贪婪·2026-06-24）
     tok = _tenant_token(app_id, app_secret)
     body = json.dumps({"receive_id": chat_id, "msg_type": "text",
@@ -2089,6 +2091,64 @@ def cmd_workspaces():
         print(f"  {w.get('name'):<16} id={wid}  wsid8={short}  ptys={len(w.get('ptyIds') or [])}")
 
 
+_TEXT_DOC_SUFFIXES = {".md", ".markdown", ".mark", ".html", ".htm", ".txt"}
+
+
+def _doc_source_stats(path):
+    """Return honest source size; character count exists only for text inputs."""
+    if not path:
+        return {"source_bytes": None, "source_chars": None}
+    source = Path(path)
+    try:
+        source_bytes = source.stat().st_size
+    except OSError:
+        source_bytes = None
+    source_chars = None
+    if source.suffix.lower() in _TEXT_DOC_SUFFIXES:
+        try:
+            source_chars = len(source.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return {"source_bytes": source_bytes, "source_chars": source_chars}
+
+
+def _queue_doc_delivery(bot_name, *, explicit_to, doc_url, title, stats, direct_delivered):
+    """Queue a p2a document URL for final-answer reconciliation.
+
+    Only a tool running inside the same bot's bridge session may enqueue.  A
+    manual operator push, explicit recipient, or a2a turn must not contaminate a
+    later owner-DM answer.
+    """
+    if not doc_url or explicit_to is not None:
+        return None
+    if os.environ.get("FEISHU_BRIDGE_SESSION") != bot_name:
+        return None
+    route = _load_turn_route(bot_name) or {"kind": "p2a"}
+    if route.get("kind") != "p2a":
+        return None
+    return bridge_outbox.append_record(str(STATE_DIR), bot_name, {
+        "kind": "doc_delivery",
+        "ts": int(time.time()),
+        "url": doc_url,
+        "title": title,
+        "route": route,
+        "source_bytes": stats.get("source_bytes"),
+        "source_chars": stats.get("source_chars"),
+        "direct_delivered": bool(direct_delivered),
+    })
+
+
+def _send_size_label(text, doc_stats):
+    parts = []
+    if text:
+        parts.append(f"正文 {len(text)} 字")
+    if doc_stats.get("source_chars") is not None:
+        parts.append(f"文档源 {doc_stats['source_chars']} 字")
+    elif doc_stats.get("source_bytes") is not None:
+        parts.append(f"文档源 {doc_stats['source_bytes']} bytes")
+    return " · ".join(parts) or "0 字"
+
+
 def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_name=None):
     """独立短进程主动推送一条到飞书 DM（REST·不依赖常驻桥进程）。
     目标优先级：--to > 会话 chat_id > owner open_id（私聊）。文字复用 guaranteed_send 四级兜底。
@@ -2113,6 +2173,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             print(f"❌ 图片不存在: {image}", file=sys.stderr); sys.exit(2)
     if doc and not Path(doc).is_file():
         print(f"❌ 文档不存在: {doc}", file=sys.stderr); sys.exit(2)
+    doc_stats = _doc_source_stats(doc)
     # 文档授权对象 = 显式 open_id 目标 > owner > 会话 open_id（bot 建的文档必授权否则 owner 打不开）
     grant_oid = None
     if doc:
@@ -2157,17 +2218,31 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
     img_ok, via, doc_ok, doc_url = asyncio.run(_go())
     delivered = (((via != "failed") if via is not None else True)
                  and (img_ok is not False) and (doc_ok is not False))
+    reconcile_queued = None
+    if doc_url:
+        reconcile_queued = _queue_doc_delivery(
+            bot_name, explicit_to=to, doc_url=doc_url,
+            title=(doc_name or Path(doc).name).strip(), stats=doc_stats,
+            direct_delivered=(via != "failed"),
+        )
+        if reconcile_queued is False:
+            blog(bot_name, "⚠️ 在线文档已创建，但 final 对账记录写入 outbox 失败")
     receipt(bot_name, {"tid": "push", "kind": "push", "chat_id": target, "delivered": delivered,
                        "via": via, "image": (bool(img_ok) if image else None),
-                       "doc": (bool(doc_ok) if doc else None), "len": len(text)})
+                       "doc": (bool(doc_ok) if doc else None), "doc_url": doc_url,
+                       "reconcile_queued": reconcile_queued,
+                       "len": len(text), "text_chars": len(text), **doc_stats})
     if as_json:
         print(json.dumps({"delivered": delivered, "via": via, "image_ok": img_ok,
                           "doc_ok": doc_ok, "doc_url": doc_url,
-                          "bot": bot_name, "to": target, "len": len(text)}, ensure_ascii=False))
+                          "reconcile_queued": reconcile_queued,
+                          "bot": bot_name, "to": target, "len": len(text),
+                          "text_chars": len(text), **doc_stats}, ensure_ascii=False))
     else:
         extra = (f" 图片{'✅' if img_ok else '❌'}" if image else "") + \
-                (f" 文档{'✅' if doc_ok else '❌'}{('·'+doc_url) if doc_url else ''}" if doc else "")
-        print(f"{'✅ 已送达' if delivered else '❌ 未送达'} via={via}{extra} → {target}（{len(text)} 字）")
+                (f" 文档{'✅' if doc_ok else '❌'}{('·'+doc_url) if doc_url else ''}" if doc else "") + \
+                (" 对账⚠️未登记" if reconcile_queued is False else "")
+        print(f"{'✅ 已送达' if delivered else '❌ 未送达'} via={via}{extra} → {target}（{_send_size_label(text, doc_stats)}）")
     sys.exit(0 if delivered else 1)
 
 

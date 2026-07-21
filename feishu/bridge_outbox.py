@@ -40,6 +40,63 @@ def progress_state_path(state_dir, bot):
     return Path(state_dir) / f"bridge-progress-state-{bot}.json"
 
 
+def delivery_state_path(state_dir, bot):
+    return Path(state_dir) / f"bridge-delivery-state-{bot}.json"
+
+
+def load_delivery_state(state_dir, bot):
+    """Load pending online-document links; malformed/local old state is empty."""
+    try:
+        raw = json.loads(delivery_state_path(state_dir, bot).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    docs = raw.get("pending_docs") if isinstance(raw, dict) else None
+    if not isinstance(docs, list):
+        return []
+    return [doc for doc in docs if isinstance(doc, dict) and str(doc.get("url") or "").startswith("https://")]
+
+
+def save_delivery_state(state_dir, bot, pending_docs):
+    """Atomically persist doc reconciliation with bounded Windows-lock retries."""
+    target = delivery_state_path(state_dir, bot)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "pending_docs": pending_docs or []}
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    try:
+        if target.read_text(encoding="utf-8") == serialized:
+            return True
+    except OSError:
+        if not pending_docs and not target.exists():
+            return True
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    for delay in (0, 0.02, 0.05, 0.1, 0.2):
+        if delay:
+            time.sleep(delay)
+        try:
+            tmp.write_text(serialized, encoding="utf-8")
+            os.replace(tmp, target)
+            return True
+        except OSError:
+            continue
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return False
+
+
+def append_record(state_dir, bot, record):
+    """Append one small bridge outbox record; return False on local I/O failure."""
+    try:
+        path = Path(outbox_path(state_dir, bot))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except OSError:
+        return False
+
+
 def load_progress_state(state_dir, bot):
     """Restore only the milestone-v1 delivery cursor/card state.
 
@@ -378,6 +435,54 @@ def _ask_key(r):
     return ("ask", r.get("session"), hash(json.dumps(r.get("questions") or [], ensure_ascii=False, sort_keys=True)))
 
 
+def _route_key(route):
+    route = route if isinstance(route, dict) else {}
+    kind = route.get("kind") or "p2a"
+    if kind == "p2a":
+        return ("p2a",)
+    return (kind, route.get("dest"), route.get("at"))
+
+
+def _remember_doc_delivery(state, record):
+    url = str(record.get("url") or "").strip()
+    if not url.startswith("https://"):
+        return
+    title = re.sub(r"\s+", " ", str(record.get("title") or "在线文档")).strip()
+    doc = {
+        "url": url,
+        "title": title or "在线文档",
+        "route": record.get("route") if isinstance(record.get("route"), dict) else {"kind": "p2a"},
+        "source_bytes": int(record.get("source_bytes") or 0),
+        "source_chars": record.get("source_chars"),
+        "direct_delivered": bool(record.get("direct_delivered")),
+        "ts": int(record.get("ts") or 0),
+    }
+    pending = state.setdefault("pending_docs", [])
+    key = (url, _route_key(doc["route"]))
+    for index, old in enumerate(pending):
+        if (old.get("url"), _route_key(old.get("route"))) == key:
+            pending[index] = doc
+            return
+    pending.append(doc)
+
+
+def _answer_with_docs(text, docs):
+    entries = []
+    seen = set()
+    for doc in docs:
+        url = str(doc.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        # A target hidden inside [label](url) is not visibly reconcilable.
+        if not re.search(rf"(?m)^\s*{re.escape(url)}\s*$", text):
+            title = re.sub(r"\s+", " ", str(doc.get("title") or "在线文档")).strip()
+            entries.append(f"{title or '在线文档'}：\n{url}")
+    if not entries:
+        return text
+    return text.rstrip() + "\n\n本轮在线文档：\n" + "\n".join(entries)
+
+
 # ---------- 处理一批记录（纯逻辑·可单测）----------
 CARD_BUDGET = 2800   # 单卡正文字数上限（飞书卡 ~3000·留余量）
 
@@ -597,6 +702,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
 
     for r in recs:
         kind = r.get("kind")
+        if kind == "doc_delivery":
+            _remember_doc_delivery(state, r)
+            continue
         if kind in ("answer", "progress") and state.get("picker_active"):
             state["picker_active"] = False            # 回合恢复 → 清 picker 状态（结构化确认源）
             if on_resume:
@@ -605,6 +713,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             text = (r.get("text") or "").strip()
             if not text:
                 continue
+            route = r.get("route")                         # 本轮回信路由（bridge_stop 在 Stop 时钉进记录·防异步 drain 撞下一轮覆盖）
+            matched_docs = [
+                doc for doc in (state.get("pending_docs") or [])
+                if _route_key(doc.get("route")) == _route_key(route)
+            ]
+            text = _answer_with_docs(text, matched_docs)
             key = _ans_key(r)
             if key in state["sent"]:
                 continue
@@ -616,8 +730,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["v2_card_ids"] = []
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
-            route = r.get("route")                         # 本轮回信路由（bridge_stop 在 Stop 时钉进记录·防异步 drain 撞下一轮覆盖）
             await _deliver(_ans_chunks(text), key, route)  # 送达失败→抛 RetrySend·下轮重发(不丢·去重)
+            if matched_docs:
+                matched_ids = {id(doc) for doc in matched_docs}
+                state["pending_docs"] = [
+                    doc for doc in (state.get("pending_docs") or []) if id(doc) not in matched_ids
+                ]
             state["sent"].add(key)
             if len(state["sent"]) > SENT_CAP:
                 state["sent"].clear()
@@ -690,6 +808,7 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
     offset = hwm_load()
     state = {"turn": None, "steps": [], "usage": {}, "seg_start": 0, "cur_mid": None,
              "flushed": 0, "last_flush": clock(), "sent": set(), "picker_active": False,
+             "pending_docs": load_delivery_state(state_dir, bot),
              **load_progress_state(state_dir, bot)}
     stuck = {"off": None, "since": 0.0}                   # 某 offset 卡多久(送达重试·防永堵)
     deps = dict(new_card=new_card, edit_card=edit_card, send_plain=send_plain)
@@ -705,6 +824,7 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                     await drain_batch(recs, state=state, coalesce_sec=coalesce_sec, clock=clock,
                                       on_ask=on_ask, on_resume=on_resume, **deps)
                 except RetrySend:                          # 送达失败(网络抽) → 不推 HWM·下轮重发(去重不重复)
+                    save_delivery_state(state_dir, bot, state.get("pending_docs") or [])
                     save_progress_state(state_dir, bot, state)
                     if stuck["off"] != offset:
                         stuck["off"], stuck["since"] = offset, clock()
@@ -716,6 +836,9 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                     # Persist message id + event revision cursor before HWM.
                     # A controlled bridge restart can then resume the same card
                     # without replaying already acknowledged milestones.
+                    docs_saved = save_delivery_state(state_dir, bot, state.get("pending_docs") or [])
+                    if state.get("pending_docs") and not docs_saved:
+                        raise OSError("pending doc delivery state is not durable yet")
                     save_progress_state(state_dir, bot, state)
                     offset = new_off
                     hwm_save(offset)
@@ -723,6 +846,7 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
             elif _has_pending(state) and clock() - state["last_flush"] >= coalesce_sec:
                 await drain_batch([], state=state, coalesce_sec=coalesce_sec, clock=clock,
                                   on_ask=on_ask, on_resume=on_resume, **deps)
+                save_delivery_state(state_dir, bot, state.get("pending_docs") or [])
                 save_progress_state(state_dir, bot, state)
         except Exception:                            # noqa: BLE001 — drainer 绝不崩
             await asleep(1.0)

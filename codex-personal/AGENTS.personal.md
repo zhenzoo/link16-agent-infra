@@ -19,6 +19,10 @@ configuration read-only unless the user explicitly asks to change it.
 - Report visible, verifiable outcomes instead of line counts.
 - Explain technical work in plain language first, then add implementation
   details that help the user verify or maintain it.
+- For medium or heavy technical explanations, keep three things together:
+  explain the system change in the user's own plain-language concepts, define
+  each technical term where it appears, and show a concrete before/after or a
+  real runtime branch. Keep simple operational answers simple.
 - Preserve unrelated user changes in dirty worktrees.
 - Use `apply_patch` for intentional file edits and `rg`/`rg --files` for search.
 
@@ -97,6 +101,11 @@ as fallback or when broader context is needed.
   workflow.
 - Feishu: use Link16 infrastructure and its registered bot routing. Do not
   assume Claude JSONL semantics for Codex; use the Codex hook/event records.
+- In a Feishu `route=p2a` turn, publish finished documents through the
+  maintained Feishu workflow and list each resulting external URL visibly in
+  the final reply. Put external delivery URLs on their own lines. Show local
+  filesystem paths as plain or inline-code text, never as links that imply a
+  phone can open them.
 
 ## Shared Repositories
 
