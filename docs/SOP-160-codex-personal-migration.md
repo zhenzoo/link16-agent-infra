@@ -27,10 +27,54 @@ to workflow bodies are visible immediately; adding, renaming, deleting a
 workflow, or changing its frontmatter name/description requires republishing
 the adapters.
 
+## Bootstrap from zero (fresh machine, no `~/.codex-personal` yet)
+
+`configure_personal.py` **edits** an isolated Codex home; it does not create one
+from scratch (it aborts if `config.toml` is absent). On a machine that has never
+run the Personal profile, initialize the home first, then run Install/refresh.
+
+```powershell
+# 0a. Update Codex first — older CLIs may not know the target model string.
+codex update ; codex --version          # target: >= 0.144.x
+
+# 0b. Point every step at the isolated home for the whole session.
+$env:CODEX_HOME = "$HOME\.codex-personal"
+
+# 0c. OAuth login (ChatGPT plan, NOT an API key). Creates ~/.codex-personal +
+#     auth.json + skeleton dirs. Login does NOT guarantee a config.toml, and the
+#     script cannot log in for you, so this step is always required.
+codex login
+
+# 0d. Seed a minimal config.toml. OPTIONAL since configure_personal.py now
+#     self-seeds this exact content when config.toml is missing (see below), but
+#     run it explicitly on older script versions. Do NOT copy ~/.codex/config.toml
+#     (drags in per-machine project-trust paths, stale notify, old MCP tables).
+#     The wmux/mattermost MCP tables are appended by configure_personal.py.
+@'
+cli_auth_credentials_store = "file"
+model = "gpt-5.6-sol"
+sandbox_mode = "danger-full-access"
+approval_policy = "on-request"
+model_reasoning_effort = "xhigh"
+'@ | Set-Content -Encoding utf8 "$HOME\.codex-personal\config.toml"
+```
+
+Notes:
+- **Model / posture are a deliberate choice, not a blind copy.** `gpt-5.6-sol`
+  needs Codex >= 0.144.x. `sandbox_mode = "danger-full-access"` bypasses the
+  sandbox (matches the reference machine's posture) — confirm this is intended
+  for the target machine before adopting it.
+- **wmux bundle must be installed** before step 1 below: `configure_personal.py`
+  aborts with `No installed wmux MCP bundle found` if
+  `%LOCALAPPDATA%\wmux\app-*\resources\mcp-bundle\index.js` is absent.
+- Reference: the mature machine's `~/.codex-personal` was originally created by
+  `codex login` under `CODEX_HOME`, not by this toolkit — hence this section
+  closes the previously-undocumented from-zero step.
+
 ## Install or refresh
 
 ```powershell
-# 1. Personal rules and MCP wrappers
+# 1. Personal rules and MCP wrappers (self-seeds config.toml if 0d was skipped)
 python codex-personal/configure_personal.py
 python codex-personal/configure_personal.py --apply
 

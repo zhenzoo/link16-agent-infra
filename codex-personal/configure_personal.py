@@ -18,6 +18,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = REPO_ROOT / "codex-personal"
 
+# Minimal config.toml written when an isolated home has none yet. Kept to the
+# bare essentials on purpose (see SOP-160 "Bootstrap from zero"): copying an
+# existing ~/.codex/config.toml would drag in per-machine project-trust paths,
+# stale notify lines, and old MCP tables. The wmux/mattermost MCP tables are
+# appended by the normal flow below. `codex login` (for auth.json) is still a
+# manual prerequisite this script cannot perform.
+SEED_CONFIG = (
+    'cli_auth_credentials_store = "file"\n'
+    'model = "gpt-5.6-sol"\n'
+    'sandbox_mode = "danger-full-access"\n'
+    'approval_policy = "on-request"\n'
+    'model_reasoning_effort = "xhigh"\n'
+)
+
 
 def replace_table_family(text: str, family: str, replacement: str) -> str:
     """Replace a TOML table and all of its child tables, preserving neighbors."""
@@ -54,8 +68,12 @@ def main() -> None:
     config = codex_home / "config.toml"
     agents = codex_home / "AGENTS.md"
     wrapper = codex_home / "scripts" / "start_mattermost_mcp.ps1"
-    if not config.exists():
-        raise SystemExit(f"Codex config does not exist: {config}")
+    seeding = not config.exists()
+    if seeding:
+        print(
+            f"[bootstrap] no config.toml at {config}; will seed a minimal one. "
+            f"Remember to run `codex login` under CODEX_HOME={codex_home} for auth."
+        )
 
     wmux = newest_wmux_bundle()
     if wmux is None:
@@ -79,7 +97,7 @@ def main() -> None:
         f'args = ["{wmux.as_posix()}"]',
     ])
 
-    original = config.read_text(encoding="utf-8")
+    original = SEED_CONFIG if seeding else config.read_text(encoding="utf-8")
     updated = replace_table_family(original, "mcp_servers.mattermost", mattermost_table)
     updated = replace_table_family(updated, "mcp_servers.wmux", wmux_table)
 
@@ -94,7 +112,8 @@ def main() -> None:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = codex_home / "backups" / f"link16-personal-{stamp}"
     backup.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(config, backup / "config.toml")
+    if not seeding:  # nothing to back up on a fresh, seeded home
+        shutil.copy2(config, backup / "config.toml")
     if agents.exists():
         shutil.copy2(agents, backup / "AGENTS.md")
 
