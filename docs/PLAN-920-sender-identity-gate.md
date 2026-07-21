@@ -48,3 +48,4 @@
 
 ## 回填日志
 - **2026-07-22** · 立项 + 主人拍板 Phase 1。病根 §源码级亲验（含事故 session chat_id 逐字核对 + 身份锚 agent_runtime:229 焊死）。
+- **2026-07-22** · **S1/S2/S3 全落地**（link16 `823a487`·已 push）。S1：bridge_env.py 加 `assert_sender_identity` + `_norm_bot` + `_may_send_as`（+58 行）。S2：4 发送面各 +2 行（import + parse_args 后调用）。S3：`tests/test_sender_identity_gate.py` 9 例全绿（红→绿复现事故 / 自发 / terminal / 归一化 / 白名单默认空=严格+命中放行 / cron-agent / 4 面 subprocess 集成·冒用退出码 1）。**live 验**：本会话 me=tb25-link16 冒用 tb25-phd-taoci-3 → 身份越界·退出码 1；以自己身份连发 2 条 peer 通知 → 过闸零回归。**tb25 即时 live**（共用同一 checkout）·已通知 tb24-link16 拉。**Phase 1 完成**。
