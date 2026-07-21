@@ -28,7 +28,7 @@ from pathlib import Path
 ORCH = Path(__file__).resolve().parent
 PROJECT = ORCH.parent
 sys.path.insert(0, str(ORCH))
-from bridge_env import resolve_env_path, bots_config_path  # noqa: E402
+from bridge_env import resolve_env_path, bots_config_path, assert_sender_identity  # noqa: E402
 
 # 飞书国内端点直连·绕代理（同 feishu_bridge）
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -102,6 +102,7 @@ def main():
     ap.add_argument("--text", default=None, help="附带说明（飞书文件消息不支持 caption → 作为单独一条消息发）")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     a = ap.parse_args()
+    assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
     p = Path(a.file)
     if not p.is_file():
         raise SystemExit(f"❌ 文件不存在: {a.file}")

@@ -42,7 +42,7 @@ from pathlib import Path
 ORCH = Path(__file__).resolve().parent
 PROJECT = ORCH.parent
 sys.path.insert(0, str(ORCH))
-from bridge_env import resolve_env_path, bots_config_path  # noqa: E402
+from bridge_env import resolve_env_path, bots_config_path, assert_sender_identity  # noqa: E402
 
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
@@ -295,6 +295,7 @@ def main():
         raise SystemExit("❌ 需要 --bot <发送方>")
     if not a.text:
         raise SystemExit("❌ 需要 --text <正文>")
+    assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
 
     ats = list(a.at) + [resolve_open_id(nm) for nm in a.at_agent]
     target = a.to

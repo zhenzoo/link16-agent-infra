@@ -11,6 +11,7 @@ register_feishu_app / bridge_feishu_probe / bridge_doctor）都走这里，跨�
 
 遵循用户 CLAUDE.md 跨机铁律：外部 VibeCoding 路径走 `VIBECODING_ROOT`，绝不硬编码盘符/用户名。
 """
+import json
 import os
 from pathlib import Path
 
@@ -77,3 +78,60 @@ def resolve_wmux_rpc(project_root):
     if home.exists():
         return home
     return Path(project_root) / "wmux" / "wmux-rpc.js"   # link16: 正本在 wmux/(原 orchestrator/)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 发送者身份闸（防跨-agent bot 冒用 · PLAN-920 · 2026-07-22）
+#
+# 病根：4 个发送面（send_feishu_{msg,media,file,voice}.py）的 --bot = 「用谁的凭据发」，但从不
+# 核对 --bot 是不是调用方本人；凭据又全在共享 .env → 任意 agent 能冒用任意 bot 当发送者。
+# 修法：把「以谁身份发」和「发给谁」分开——发送者身份（--bot）必须 == 本人；发给别人走 --to-agent
+# （只改路由目标·不改发送者）。桥 spawn 的会话身份钉在 FEISHU_BRIDGE_SESSION（agent_runtime.worker_cmd
+# 启动命令即焊·整会话不变），是可信锚点。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _norm_bot(s):
+    """bot 名归一化：大小写不敏感 + `_`↔`-` 等价（与 send_feishu_msg._norm 同规则）。"""
+    return (s or "").strip().lower().replace("_", "-")
+
+
+def _may_send_as(me):
+    """me 允许【代发】的 bot 名集合 —— agent-registry.json 的 `may_send_as` 字段（默认空=严格）。
+    留给将来编排者【合法】代发多 bot 的口子（职责·非冒用）；现状全空 = 严格等值。
+    best-effort：名册缺失/格式异常/任何错 → 返回空集（从严·绝不因读名册失败而放宽闸）。"""
+    try:
+        reg = Path(__file__).resolve().parent / "agent-registry.json"
+        data = json.loads(reg.read_text(encoding="utf-8"))
+        for a in data.get("agents", []):
+            if _norm_bot(a.get("name")) == _norm_bot(me):
+                return {_norm_bot(x) for x in (a.get("may_send_as") or [])}
+    except Exception:  # noqa: BLE001 — 读名册失败一律从严（空集），不放宽
+        pass
+    return set()
+
+
+def assert_sender_identity(bot):
+    """发送者身份闸：桥 spawn 的 agent 会话不得用【别的 bot】身份发消息（防冒用·PLAN-920）。
+
+    - me = FEISHU_BRIDGE_SESSION（桥开机焊死·整会话不变）：
+        · me 未设 → 纯 terminal / 操作者手动 / cron 守护进程本身 → 无锚可校验 → 放行（可信场景）。
+          （注：cron 到点是把任务【注入 bot 的现有会话】，那会话 me 是设着的 → 照样被本闸管住·非后门。）
+        · me 已设 & --bot == me → 以自己身份发（含发给别人：--to-agent 只改目标·不改这里）→ 放行。
+        · me 已设 & --bot 在 me 的 may_send_as 白名单 → 显式允许代发（默认空）→ 放行。
+        · 否则（me 已设 & --bot ≠ me & 不在白名单）→ 冒用 → SystemExit（报错指路 --to-agent）。
+    调用点：各发送面 parse_args 之后、取凭据/发送之前第一件事。
+    """
+    me = os.environ.get("FEISHU_BRIDGE_SESSION")
+    if not me:
+        return  # 无身份锚 = 可信操作者场景（terminal / 手动 / cron 守护进程）→ 放行
+    if _norm_bot(bot) == _norm_bot(me):
+        return  # 以自己身份发
+    if _norm_bot(bot) in _may_send_as(me):
+        return  # 显式白名单代发（编排者场景·默认空=不会命中）
+    raise SystemExit(
+        f"❌ 身份越界：你是 [{me}]，不能用 [{bot}] 的身份发送（防冒用别的 bot 当发送者·PLAN-920）。\n"
+        f"   · 要把消息发给别的 agent → 用 --to-agent {bot}（发送者仍是你自己·只改路由目标）。\n"
+        f"   · 若确需代发（编排者场景）→ 在 agent-registry.json 给 [{me}] 加 "
+        f"\"may_send_as\": [\"{bot}\"]。"
+    )

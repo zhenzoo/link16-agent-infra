@@ -39,7 +39,7 @@ ORCH = Path(__file__).resolve().parent
 PROJECT = ORCH.parent
 sys.path.insert(0, str(ORCH))
 sys.path.insert(0, str(PROJECT / "scripts"))
-from bridge_env import resolve_env_path, bots_config_path  # noqa: E402
+from bridge_env import resolve_env_path, bots_config_path, assert_sender_identity  # noqa: E402
 # 飞书 REST 传输原语（绕代理 OPENER）——和 feishu_docs 同走 orchestrator/feishu_rest（Phase1.2 解耦）
 from feishu_rest import api, tenant_token, send_msg  # noqa: E402
 
@@ -173,6 +173,7 @@ def main():
     ap.add_argument("--no-transcode", action="store_true", help="跳过转码（输入须已是 Ogg/Opus）")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     a = ap.parse_args()
+    assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
 
     src = Path(a.audio)
     if not src.is_file():
