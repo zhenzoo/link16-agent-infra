@@ -3,6 +3,19 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.7.0 — Codex 飞书生产链路：事件流、跨 runtime 配置与可核对交付（2026-07-22）
+
+**WHY**：v0.6.0 后 Codex 已能接入飞书，但启动就绪、过程事件、Personal/skill 同步、发送者身份和最终交付仍分散在兼容逻辑里。线上 canary 先后暴露了重复启动命令、工具原文污染进度卡、bot 身份冒用，以及本地路径被包装成手机打不开的链接、在线文档卡已发但 final 无 URL 对账等问题。
+
+**WHAT（生产化收口）**
+- **Codex app-server 与 typed event stream**：以 `agent_runtime.py` 区分 Claude/Codex 启动和 ready 信号；commentary、living plan、工具类型/次数/访问路径形成安全里程碑，原始命令和 reasoning 不进入飞书卡片；outbox cursor 支持编辑、重启续传和 live canary 验收。
+- **跨 runtime Personal/skills 一致**：Claude Personal 作为共享工作流来源，经 PowerShell 5.1 `govctl` 与 Codex publisher/configure 流程同步到所有 Codex Personal bot；保留各 runtime 原生入口，不复制第二套业务脚本。
+- **可靠性与身份边界**：完善注入/重试和 bridge/session 复用；发送者身份闸阻止桥会话冒用其他 bot，agent registry 与本机 roster 职责明确。
+- **最终交付可核对**：Link16 出站统一检查 Markdown 链接；本地/UNC/相对路径显示为明文而非假链接，Cloudflare Pages、飞书 docx 等交付地址显式显示原始 URL。`send --doc` 记录真实源大小，并将成功文档写入持久对账账本，下一条 owner DM final 成功送达后清账，失败或重启不丢。
+- **验证**：PLAN-915/916/917/918/920/921 的 focused tests、全量单测与真实飞书 canary 均通过；`v0.6.0` 保留为本版之前的稳定回退基线。
+
+---
+
 ## v0.6.0 — a2a 死循环【结构性根治】：默认回主人·发 peer 靠主动带戳（删掉整套熔断）（2026-07-03）
 
 **WHY**：v0.5.x 靠「连续 N 条低内容→熔断+静音」兜底,主人判定**不简洁、烧 token、且抓不住「客气环」**(🤝对齐/🫡待命 有内容不重复)。根本矛盾:**只要一轮的 route 焊死 a2a,agent terminal 输出任何字都被桥推回群**——实证 agent 说「我不发了」照样被推群、又循环。软办法(agent 自觉)结构上不可能 work,能干预的只有桥。

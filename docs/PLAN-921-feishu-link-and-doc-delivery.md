@@ -1,7 +1,7 @@
 # PLAN-921 · 飞书最终回复的链接与在线文档交付闭环
 
-> **立项** 2026-07-22（主人已确认实施） · **状态** 🟡 执行中
-> **plan_version** 1 · **范围** Link16 出站渲染、文档投递账本、Codex/Claude Personal 规则
+> **立项** 2026-07-22（主人已确认实施） · **状态** 🟢 完成
+> **plan_version** 2 · **范围** Link16 出站渲染、文档投递账本、Codex/Claude Personal 规则
 > **不在范围** Cartoon MV 业务仓、Speech 会话启动、现有 busy-guard 改动
 
 ## 一句话目标
@@ -42,7 +42,7 @@
 - [x] S2 · Link16：实现发出前链接检查、文档登记/回填与正确统计。
 - [x] S3 · 测试：覆盖 8 类链接、代码区保护、去重、两文档、失败重试、重启恢复、统计。
 - [x] S4 · 激活：同步 Personal；等 CartoonMV 当前 turn 完成并送达后切到新 bridge。Speech 不启动。
-- [ ] S5 · 交付：审阅独立 diff，提交 Link16，打 `v0.7.0` 标签；不推送远端。
+- [x] S5 · 交付：审阅独立 diff，提交 Link16，打 `v0.7.0` 标签；不推送远端。
 
 ## 回填日志
 
@@ -51,3 +51,4 @@
 - **2026-07-22** · S2 完成：三类发送出口共用幂等链接检查；`send --doc` 写有序对账记录，drainer 按路由持久化、失败保留、成功清账；CLI/receipt 改报真实源大小。只读复审指出的 UNC、Windows 文件锁、登记失败告警均已补齐。
 - **2026-07-22** · S3 完成：16 个新定向测试、83 个仓库全量测试与 focused `py_compile` 全绿；真实 `_linkify` 探针确认本地路径不可点、Pages 原始地址可见、裸 URL 保持可点。既有 ResourceWarning 与本改动无关。
 - **2026-07-22** · S4 完成：PowerShell 5.1 `govctl sync -Apply` 后二次 dry-run 为 0 变化；现役 Codex AGENTS 与维护源 SHA256 一致。CartoonMV bridge 从 PID 16528 切到 45580，Link16 bridge 从 20792 切到 39672，worker/session 均保留；CartoonMV live canary 真卡送达且 HWM 追平。Speech PID 24444 未变、无 session/worker。
+- **2026-07-22** · S5 完成：独立暂存审计排除了既存 busy-guard 及其测试；功能提交为 `76d78f4`，本发布记录提交作为 `v0.7.0` 标签落点，全程未推送。
