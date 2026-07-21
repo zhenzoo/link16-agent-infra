@@ -2,21 +2,40 @@
 # 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
 jobs:
 - name: tennis-post-daily
-  desc: 每天 02:05 触发 tennis-post【巡航】：总控串行开子面板写【2 篇】网球公司拆解(读 docs/ARCH-000-INDEX 标「当前弧」的 PLAN 看写到哪·先接在制期) → 每篇 worker 落 _DONE.md → 总控亲验三闸 + 飞书成套交付主人 + 进度 DM → 巡航总结。机制见 docs/ARCH-300。(02:05 错开 xhs autopilot 的 00:00)
+  desc: 每天 02:05 触发 tennis-post【巡航】：总控串行开子面板写【2 篇】网球公司拆解(读 docs/ARCH-000-INDEX 标「当前弧」的 PLAN 看写到哪·先接在制期)
+    → 每篇 worker 落 _DONE.md → 总控亲验三闸 + 飞书成套交付主人 + 进度 DM → 巡航总结。机制见 docs/ARCH-300。(02:05 错开 xhs autopilot
+    的 01:00)
   cron: 5 2 * * *
   tz: Asia/Shanghai
-  enabled: false
-  prompt: |
-    开启今天的 tennis post 巡航：按本仓 CLAUDE.md「🚀 巡航触发」+ docs/ARCH-300 §2 主循环跑——你当【总控】、自己不写帖，串行开子面板、每篇一个全新 headless 会话写帖，本次【固定写 2 篇】。别问确认、别自己写帖、别停。
+  enabled: true
+  prompt: '开启今天的 tennis post 巡航：按本仓 CLAUDE.md「🚀 巡航触发」+ docs/ARCH-300 §2 主循环跑——你当【总控】、自己不写帖，串行开子面板、每篇一个全新
+    headless 会话写帖，本次【固定写 2 篇】。别问确认、别自己写帖、别停。
+
     Step A 启动：echo $WMUX_PTY_ID > _autopilot/supervisor.pty 然后 python _autopilot/spawn_worker.py tag-self。
+
     Step B 定队列：读 docs/ARCH-000-INDEX.md 找标「当前弧」的 PLAN(现=PLAN-290)看写到哪、先接 posts/ 里在制未发期、按弧顺序取下 2 篇(各定 PNN+公司+slug、一句话记镜像)。
-    Step C 串行写 2 篇：每篇 python _autopilot/spawn_worker.py spawn-writer PNN → 读 _autopilot/worker-prompt.md 填占位符 → spawn_worker.py kickoff <pty> "<填好的提示词>" → 同轮挂双层唤醒(run_in_background 跑 until [ -f posts/pNNN-slug/_DONE.md ]; do sleep 30; done + ScheduleWakeup 1800)让出 turn → 醒来查 marker：出了就亲跑 scripts/check_cards.py + check_copy.py + taste_gate.py 三闸复核 + 确认 SPEC-210 本期行已回填 → 按 _DONE.md 卡片清单 send_feishu_media 发我(--to 我 open_id·封面在前) + 干净文案发飞书在线文档 + 一条进度 DM。worker 面板留存供返修、不关。上一篇落 _DONE 才起下一篇(spawn-writer 内建串行 lease)。
-    Step D 收尾：2 篇都交付 → 发我巡航总结 DM(两篇各是谁/镜像/几张卡/哪些数走 ScraperAPI 实测/哪些待我白天 chrome-direct 补/三闸复核) → 停(固定 2·绝不起第 3 篇)。
+
+    Step C 串行写 2 篇：每篇 python _autopilot/spawn_worker.py spawn-writer PNN → 读 _autopilot/worker-prompt.md
+    填占位符 → spawn_worker.py kickoff <pty> "<填好的提示词>" → 同轮挂双层唤醒(run_in_background 跑 until [ -f posts/pNNN-slug/_DONE.md
+    ]; do sleep 30; done + ScheduleWakeup 1800)让出 turn → 醒来查 marker：出了就亲跑 scripts/check_cards.py + check_copy.py
+    + taste_gate.py 三闸复核 + 确认 SPEC-210 本期行已回填 → 按 _DONE.md 卡片清单 send_feishu_media 发我(--to 我 open_id·封面在前)
+    + 干净文案发飞书在线文档 + 一条进度 DM。worker 面板留存供返修、不关。上一篇落 _DONE 才起下一篇(spawn-writer 内建串行 lease)。
+
+    Step D 收尾：2 篇都交付 → 发我巡航总结 DM(两篇各是谁/镜像/几张卡/哪些数走 ScraperAPI 实测/哪些待我白天 chrome-direct 补/三闸复核) → 停(固定 2·绝不起第
+    3 篇)。
+
     异常自愈见 ARCH-300 §6：worker 限流/卡 → kickoff 注「继续」不 /clear；真路绝/欠费/断网 → 发我 DM 等我。
+
+    '
 - name: comment-factcheck-daily
   cron: 0 9 * * *
   tz: Asia/Shanghai
-  enabled: false
+  enabled: true
   desc: 每天09:00拉 tennis-post 所有已发帖小红书评论→按 ARCH-240 §4 溯源定责→报主人建议(改帖 or 回评)·不擅自动手
-  prompt: |
-    每天 09:00 评论 fact-check（按本仓 docs/ARCH-240 §4 溯源闭环）：① 用 tikhub 拉 ZHEN好玩 账号所有已发帖的小红书评论——note IDs 见 SPEC-210 发布记录（如 P001=6a47a0e3000000001c026797 / P005=6a4deb3e0000000007028953），没登记的先 tikhub search xhs ZHEN好玩 定位本人那几条；每帖 note xhs <id> --comments 拉全（楼中楼+ip_location）。② 跟上次比挑出【新增】评论里的事实性质疑（数字/参数/销量/实机/奖项/价格…），忽略灌水情绪。③ 逐条重新核查+溯源，定责四选一：源数据错/过期、agent 漂移(张冠李戴幻觉)、我们表述太满(单样本下全盘/把没查到当不存在/绝对化)、评论本身错(网友说反或误解)。平台内部数据(京东/淘宝销量评价)用 browser-act chrome-direct 登录态核、亚马逊用 ScraperAPI，别只读糊弄。④ 汇成一条 DM 报我：每条质疑+证据+定责+建议措施(错在我们→改帖重传；错在评论→回评澄清)。先别擅自改帖或回评，等我点头。没有新质疑就报一句今日无新事实质疑。
+  prompt: '每天 09:00 评论 fact-check（按本仓 docs/ARCH-240 §4 溯源闭环）：① 用 tikhub 拉 ZHEN好玩 账号所有已发帖的小红书评论——note IDs
+    见 SPEC-210 发布记录（如 P001=6a47a0e3000000001c026797 / P005=6a4deb3e0000000007028953），没登记的先 tikhub search
+    xhs ZHEN好玩 定位本人那几条；每帖 note xhs <id> --comments 拉全（楼中楼+ip_location）。② 跟上次比挑出【新增】评论里的事实性质疑（数字/参数/销量/实机/奖项/价格…），忽略灌水情绪。③
+    逐条重新核查+溯源，定责四选一：源数据错/过期、agent 漂移(张冠李戴幻觉)、我们表述太满(单样本下全盘/把没查到当不存在/绝对化)、评论本身错(网友说反或误解)。平台内部数据(京东/淘宝销量评价)用
+    browser-act chrome-direct 登录态核、亚马逊用 ScraperAPI，别只读糊弄。④ 汇成一条 DM 报我：每条质疑+证据+定责+建议措施(错在我们→改帖重传；错在评论→回评澄清)。先别擅自改帖或回评，等我点头。没有新质疑就报一句今日无新事实质疑。
+
+    '
