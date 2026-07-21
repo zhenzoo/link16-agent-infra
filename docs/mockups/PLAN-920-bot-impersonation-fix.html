@@ -1,0 +1,307 @@
+<title>飞书桥 · Bot 冒用安全问题 + 根治方案</title>
+<style>
+  :root{
+    --bg:#0a0e16; --panel:#111826; --panel2:#0e1420; --line:#1f2a3c;
+    --ink:#e8eef6; --mut:#8a9bb4; --dim:#5f7085;
+    --danger:#ff5b6a; --danger-bg:rgba(255,91,106,.10); --danger-ln:rgba(255,91,106,.35);
+    --warn:#ffb02e; --warn-bg:rgba(255,176,46,.10);
+    --safe:#3ddc97; --safe-bg:rgba(61,220,151,.10); --safe-ln:rgba(61,220,151,.35);
+    --data:#3fb6f4; --data-bg:rgba(63,182,244,.10);
+    --tac:#12e0c4;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+      radial-gradient(1200px 600px at 80% -10%,rgba(18,224,196,.06),transparent 60%),
+      radial-gradient(900px 500px at -10% 10%,rgba(63,182,244,.06),transparent 55%),
+      var(--bg);
+    color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:940px;margin:0 auto;padding:28px 18px 80px}
+  code,.mono{font-family:var(--mono)}
+  .id{font-family:var(--mono);font-size:.82em;color:var(--data);word-break:break-all}
+  h1{font-size:clamp(22px,5vw,32px);margin:.2em 0 .1em;letter-spacing:.5px}
+  h2{font-size:clamp(18px,3.6vw,23px);margin:0}
+  .sub{color:var(--mut);font-size:15px;margin:6px 0 0}
+  .badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-family:var(--mono);
+    padding:4px 10px;border-radius:20px;border:1px solid var(--safe-ln);color:var(--safe);background:var(--safe-bg)}
+  .hero{border:1px solid var(--line);border-radius:16px;padding:22px 20px;margin-bottom:26px;
+    background:linear-gradient(180deg,rgba(18,224,196,.05),transparent 40%),var(--panel)}
+  .tac{color:var(--tac);font-family:var(--mono)}
+  section{margin:30px 0}
+  .snum{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:9px;
+    font-family:var(--mono);font-weight:700;font-size:15px;color:var(--bg);background:var(--tac);margin-right:10px;flex:0 0 auto}
+  .shead{display:flex;align-items:center;margin-bottom:14px}
+  .card{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:16px 16px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:680px){.grid3,.grid2{grid-template-columns:1fr}}
+  .bot{border:1px solid var(--line);border-radius:12px;padding:13px;background:var(--panel2)}
+  .bot h3{margin:0 0 8px;font-size:15px;display:flex;align-items:center;gap:7px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .kv{font-size:12px;color:var(--mut);margin:3px 0}
+  .kv b{color:var(--ink);font-weight:600}
+  .pool{margin-top:14px;border:1px dashed var(--warn);background:var(--warn-bg);border-radius:12px;padding:13px 15px}
+  .pool .t{color:var(--warn);font-weight:700;font-size:14px;margin-bottom:4px}
+  .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:4px;gap:4px;margin-bottom:14px;flex-wrap:wrap}
+  .seg button{appearance:none;border:0;background:transparent;color:var(--mut);font:inherit;font-size:13px;font-weight:600;
+    padding:8px 14px;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap}
+  .seg button.on{color:var(--bg)}
+  .seg.danger button.on{background:var(--danger)}
+  .seg.safe button.on{background:var(--safe)}
+  .seg.data button.on{background:var(--data)}
+  .pane{display:none;animation:fade .25s ease}
+  .pane.on{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .flow{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap}
+  .node{flex:1 1 150px;min-width:135px;border:1px solid var(--line);border-radius:11px;padding:12px;background:var(--panel2);text-align:center}
+  .node .lab{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+  .node .val{font-weight:700;margin-top:3px;font-size:14px}
+  .node .val small{display:block;font-weight:400;color:var(--mut);font-size:11.5px;margin-top:2px}
+  .node.hit{border-color:var(--danger-ln);background:var(--danger-bg)}
+  .node.ok{border-color:var(--safe-ln);background:var(--safe-bg)}
+  .arrow{display:flex;align-items:center;color:var(--dim);font-size:20px;flex:0 0 auto}
+  @media(max-width:680px){.arrow{transform:rotate(90deg);width:100%;justify-content:center;height:18px}}
+  .verdict{margin-top:13px;padding:12px 14px;border-radius:11px;font-size:14px;display:flex;gap:9px;align-items:flex-start}
+  .verdict.bad{background:var(--danger-bg);border:1px solid var(--danger-ln);color:#ffd0d5}
+  .verdict.good{background:var(--safe-bg);border:1px solid var(--safe-ln);color:#c7f5e2}
+  .verdict b{color:#fff}
+  .cmd{font-family:var(--mono);font-size:12.5px;background:#060a11;border:1px solid var(--line);border-radius:9px;
+    padding:11px 13px;overflow-x:auto;color:#cfe3f5;margin:10px 0}
+  .cmd .flag{color:var(--warn)} .cmd .bad{color:var(--danger);font-weight:700} .cmd .good{color:var(--safe);font-weight:700}
+  .cmd .cmt{color:var(--dim)}
+  .layer{border-left:3px solid var(--danger);padding:2px 0 2px 14px;margin:14px 0}
+  .layer h4{margin:0 0 4px;font-size:15px;color:var(--danger)}
+  .fileref{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:8px}
+  .fileref b{color:var(--data)}
+  ul.clean{margin:8px 0 0;padding-left:0;list-style:none}
+  ul.clean li{position:relative;padding-left:22px;margin:7px 0;font-size:14px;color:var(--mut)}
+  ul.clean li b{color:var(--ink);font-weight:600}
+  ul.clean li::before{content:"";position:absolute;left:4px;top:9px;width:7px;height:7px;border-radius:2px;background:var(--tac)}
+  .gate{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:12px}
+  .gate .row{display:flex;gap:0;border-top:1px solid var(--line);font-size:13.5px}
+  .gate .row:first-child{border-top:0}
+  .gate .c1{flex:0 0 42%;padding:11px 13px;background:var(--panel2);font-family:var(--mono);font-size:12px;color:var(--ink)}
+  .gate .c2{flex:1;padding:11px 13px;color:var(--mut)}
+  .gate .c2 .tag{font-weight:700}
+  .tag.pass{color:var(--safe)} .tag.block{color:var(--danger)} .tag.allow{color:var(--data)}
+  .phase{display:flex;gap:12px;margin-top:8px}
+  @media(max-width:680px){.phase{flex-direction:column}}
+  .phase .p{flex:1;border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--panel)}
+  .phase .p .h{font-family:var(--mono);font-size:12px;font-weight:700;padding:3px 9px;border-radius:6px;display:inline-block;margin-bottom:8px}
+  .p1 .h{background:var(--safe-bg);color:var(--safe);border:1px solid var(--safe-ln)}
+  .p2 .h{background:var(--data-bg);color:var(--data);border:1px solid rgba(63,182,244,.35)}
+  table.test{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+  table.test th,table.test td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  table.test th{color:var(--dim);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px}
+  table.test td.r{font-family:var(--mono);font-size:12px}
+  .chk{color:var(--safe);font-weight:700}
+  .foot{margin-top:36px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:12.5px}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--mut);margin:2px 3px 2px 0}
+</style>
+
+<div class="wrap">
+
+  <div class="hero">
+    <span class="badge">● LINK16 独立查证 · 非听信复盘</span>
+    <h1>飞书桥 · <span class="tac">Bot 冒用</span> 安全问题 + 根治方案</h1>
+    <p class="sub">一个 agent 能<b style="color:var(--ink)">冒用别的 bot 身份</b>发消息、还能<b style="color:var(--ink)">伪造发信人</b>——本页用真实数据说清：出了什么事、病根在哪、怎么无退化根治。</p>
+  </div>
+
+  <!-- ========== §1 真实数据 ========== -->
+  <section>
+    <div class="shead"><span class="snum">1</span><h2>真实数据 — 现场到底长什么样</h2></div>
+    <div class="card">
+      <p style="margin:0 0 12px;color:var(--mut);font-size:14px">套磁网一套 <b style="color:var(--ink)">3 个 agent</b>（同一主人），各是一个飞书 bot、各有自己的 DM 通道：</p>
+      <div class="grid3">
+        <div class="bot">
+          <h3><span class="dot" style="background:var(--data)"></span>Professor Hub</h3>
+          <div class="kv"><b>tb25-phd-taoci</b>（本次发信人真身）</div>
+          <div class="kv">DM 通道 <span class="id">oc_b5d48448…158d5</span></div>
+          <div class="kv">cwd <span class="mono" style="font-size:11px">wt/professor</span></div>
+        </div>
+        <div class="bot">
+          <h3><span class="dot" style="background:var(--mut)"></span>Letter</h3>
+          <div class="kv"><b>tb25-phd-taoci-2</b></div>
+          <div class="kv">推荐信模块</div>
+        </div>
+        <div class="bot">
+          <h3><span class="dot" style="background:var(--danger)"></span>CV Hub</h3>
+          <div class="kv"><b>tb25-phd-taoci-3</b>（被冒用的那个）</div>
+          <div class="kv">DM 通道 <span class="id">oc_dd72889…a68e</span></div>
+          <div class="kv">cwd <span class="mono" style="font-size:11px">wt/cv</span></div>
+        </div>
+      </div>
+      <div class="pool">
+        <div class="t">⚠ 三个 agent 共享两样东西</div>
+        <div style="font-size:13.5px;color:var(--mut)">
+          ① 同一个 <code style="color:var(--warn)">.env</code> —— <b style="color:var(--ink)">所有 bot 的凭据（app_id/secret）都堆在里面</b>，任意 agent 的进程都读得到任意 bot 的密码。<br>
+          ② 同一个 <code style="color:var(--warn)">.claude-personal</code> 记忆库 —— CV 写的一条记忆（“我=飞书 bot tb25-phd-taoci-3”）被 Professor 读到、错当成自己。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== §2 事故重演 ========== -->
+  <section>
+    <div class="shead"><span class="snum">2</span><h2>事故重演 — 截图发错了人</h2></div>
+    <div class="seg data" id="seg-inc">
+      <button data-p="inc-ok" class="on">✅ 应该发生（正确）</button>
+      <button data-p="inc-bad">❌ 实际发生（事故）</button>
+    </div>
+
+    <div class="pane on" id="inc-ok">
+      <div class="cmd">python send_feishu_media.py <span class="flag">--bot</span> <span class="good">tb25-phd-taoci</span>  <span class="cmt"># = 我自己</span></div>
+      <div class="flow">
+        <div class="node"><div class="lab">发信 agent</div><div class="val">Professor<small>me=tb25-phd-taoci</small></div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="lab">用谁的凭据</div><div class="val">Professor<small>自己的 app</small></div></div>
+        <div class="arrow">→</div>
+        <div class="node ok"><div class="lab">进哪个 DM</div><div class="val">Professor DM<small>oc_b5d4…158d5</small></div></div>
+      </div>
+      <div class="verdict good"><span>✅</span><div><b>正确：</b>用自己身份发、进自己的 DM。主人在 Professor 的对话框看到 Professor 的成果，天经地义。</div></div>
+    </div>
+
+    <div class="pane" id="inc-bad">
+      <div class="cmd">python send_feishu_media.py <span class="flag">--bot</span> <span class="bad">tb25-phd-taoci-3</span>  <span class="cmt"># ← 硬编码成了 CV，不是我！没给 --to</span></div>
+      <div class="flow">
+        <div class="node"><div class="lab">发信 agent</div><div class="val">Professor<small>me=tb25-phd-taoci</small></div></div>
+        <div class="arrow">→</div>
+        <div class="node hit"><div class="lab">用谁的凭据</div><div class="val" style="color:var(--danger)">CV 的！<small>冒用 CV 的 app</small></div></div>
+        <div class="arrow">→</div>
+        <div class="node hit"><div class="lab">进哪个 DM</div><div class="val" style="color:var(--danger)">CV DM<small>oc_dd72…a68e</small></div></div>
+      </div>
+      <div class="verdict bad"><span>❌</span><div><b>事故：</b>不给 <code>--to</code> 时，源码默认发到 <code>--bot</code> 那个 bot 自己的 DM（<b>send_feishu_media.py:106</b> = <code>target = a.to or sess.get("chat_id")</code>）。于是 Professor 的截图<b>用 CV 的身份、进了 CV 的 DM</b>。主人在 CV 的对话框看到 Professor 的截图 → 发现异常。</div></div>
+    </div>
+  </section>
+
+  <!-- ========== §3 病根两层 ========== -->
+  <section>
+    <div class="shead"><span class="snum">3</span><h2>病根 — 两层，比误投更严重</h2></div>
+    <div class="seg danger" id="seg-root">
+      <button data-p="root-1" class="on">① 冒用身份</button>
+      <button data-p="root-2">② 伪造发信人</button>
+    </div>
+
+    <div class="pane on" id="root-1">
+      <div class="card">
+        <div class="layer">
+          <h4>任意 agent 能冒用任意 bot 当发送者</h4>
+          <p style="margin:0;color:var(--mut);font-size:14px">4 个发送工具（<code>send_feishu_msg / media / file / voice</code>）里，<code>--bot</code> 参数 = “用谁的凭据发”，但——</p>
+        </div>
+        <ul class="clean">
+          <li><b>从不核对</b> <code>--bot</code> 是不是调用方本人：4 个脚本全程<b>一次都没读过</b>身份锚 <code>FEISHU_BRIDGE_SESSION</code>（桥开机钉进环境的“我是谁”）。</li>
+          <li><b>凭据全共享</b>：所有 bot 的密码都在同一个 <code>.env</code>，任意 agent 的进程都取得到。</li>
+          <li>两者一叠 = <b style="color:var(--danger)">谁都能冒充谁发消息</b>。这次三个 bot 同主人没外泄；<b>主人不同就是真泄露</b>。</li>
+        </ul>
+        <div class="fileref">证据 · <b>send_feishu_media.py:106</b> <code>target = a.to or sess.get("chat_id")</code> ｜ 4 面均 <b>0</b> 次引用 <code>FEISHU_BRIDGE_SESSION</code> ｜ 凭据经 <code>_bot_creds(--bot)</code> 从共享 .env 取</div>
+      </div>
+    </div>
+
+    <div class="pane" id="root-2">
+      <div class="card">
+        <div class="layer">
+          <h4>a2a 信封的“发信人”是自己盖的 → 可伪造</h4>
+          <p style="margin:0;color:var(--mut);font-size:14px">agent 互相喊话时，消息尾会盖一个信封 <code>[飞书_from_X_to_Y]</code> 标明谁发的。问题是——</p>
+        </div>
+        <ul class="clean">
+          <li>这个 <code>from_X</code> 是<b>发信方用自己传的 <code>--bot</code> 自己盖上去的</b>。</li>
+          <li>接收方<b>反查不出真发信人</b>（飞书 open_id 按 app 隔离，收到消息只知道“某 bot”、验不了是不是本人）。</li>
+          <li>所以冒用者能把信封盖成<b style="color:var(--danger)">受害者的名字</b>当 from → 不只是发错地方，还能<b>冒名顶替发信身份</b>，接收方毫无察觉。</li>
+        </ul>
+        <div class="fileref">证据 · <b>send_feishu_msg.py:312</b> <code>send_text = f"{text} [飞书_from_{a.bot}_to_{a.to_agent}]"</code> — from 直接取 <code>a.bot</code>（谁传的就盖谁）</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== §4 解决方案 ========== -->
+  <section>
+    <div class="shead"><span class="snum">4</span><h2>根治方案 — 把“以谁身份发”和“发给谁”彻底分开</h2></div>
+    <p class="sub" style="margin-bottom:14px">病根 = <code>--bot</code> 一个参数同时管了“身份”和“默认发到谁”。方案 = 加一道<b style="color:var(--ink)">发送者身份闸</b>，只堵冒用、不碰路由。</p>
+
+    <div class="seg safe" id="seg-fix">
+      <button data-p="fix-block" class="on">🛑 冒用 → 被拒</button>
+      <button data-p="fix-a2a">🤝 a2a → 照常</button>
+      <button data-p="fix-term">💻 terminal → 放行</button>
+    </div>
+
+    <div class="pane on" id="fix-block">
+      <div class="cmd"><span class="cmt"># me=tb25-phd-taoci 的会话里跑：</span><br>python send_feishu_media.py <span class="flag">--bot</span> <span class="bad">tb25-phd-taoci-3</span></div>
+      <div class="verdict bad" style="background:var(--danger-bg)"><span>🛑</span><div><b>当场拒绝：</b>“身份越界：你是 <code>tb25-phd-taoci</code>，不能用 <code>tb25-phd-taoci-3</code> 的身份发。发给别的 agent 请用 <code>--to-agent</code>（只改路由目标、不改发送者）。” — 事故被闸挡死。</div></div>
+    </div>
+    <div class="pane" id="fix-a2a">
+      <div class="cmd">python send_feishu_msg.py <span class="flag">--bot</span> <span class="good">tb25-phd-taoci</span> <span class="flag">--to-agent</span> tb25-link16 <span class="cmt"># 以自己身份，发给别人</span></div>
+      <div class="verdict good"><span>🤝</span><div><b>照常送达：</b>合法 a2a 永远是“<b>以我自己身份</b>、发给对方”。<code>--bot=自己</code> 过闸；<code>--to-agent</code> 只改<b>目标</b>不改发送者，路由一点不动。对方凭据只用来查“共享群/open_id”，不用于发送。<b>零回归。</b></div></div>
+    </div>
+    <div class="pane" id="fix-term">
+      <div class="cmd"><span class="cmt"># 纯终端 / cron 守护进程本身（没有身份锚）：</span><br><span class="cmt">$</span> unset FEISHU_BRIDGE_SESSION ; python send_feishu_msg.py <span class="flag">--bot</span> anybot …</div>
+      <div class="verdict good"><span>💻</span><div><b>放行：</b>没有身份锚 = 可信操作者场景（主人手动 / 基建脚本）。<b>terminal、cron 零回归。</b>（注：cron 到点是把任务<b>注入 bot 的现有会话</b>，那会话身份锚是设着的 → 照样被闸管住，<b>不是绕过后门</b>。）</div></div>
+    </div>
+
+    <div class="gate">
+      <div class="row"><div class="c1">me = FEISHU_BRIDGE_SESSION</div><div class="c2"><b>身份锚</b>：桥开机钉进环境的“我是谁”，整会话不变</div></div>
+      <div class="row"><div class="c1">me 已设 &amp; --bot == me</div><div class="c2"><span class="tag pass">✓ 放行</span> 以自己身份发（含发给别人：--to-agent 改目标）</div></div>
+      <div class="row"><div class="c1">me 已设 &amp; --bot ≠ me</div><div class="c2"><span class="tag block">✕ 拒绝</span> 冒用 → 报错提示改用 --to-agent</div></div>
+      <div class="row"><div class="c1">me 未设（terminal/cron 守护）</div><div class="c2"><span class="tag allow">◇ 放行</span> 可信操作者场景</div></div>
+      <div class="row"><div class="c1">白名单口子（默认空=严格）</div><div class="c2"><span class="tag allow">◇ 可选</span> 将来编排者合法代发多 bot → 名册声明一行、不改代码</div></div>
+    </div>
+
+    <div class="phase">
+      <div class="p p1">
+        <span class="h">PHASE 1 · 止血（现在做）</span>
+        <div style="font-size:13.5px;color:var(--mut)">身份闸放共享模块 <code>bridge_env.py</code>，4 个发送面各 import 一行即生效。堵住冒用 + 伪造，a2a/p2a/terminal/cron 全零回归。</div>
+      </div>
+      <div class="p p2">
+        <span class="h">PHASE 2 · 跨主人根治（以后）</span>
+        <div style="font-size:13.5px;color:var(--mut)">凭据隔离：a2a 路由改用名册存的 open_id + 只用自己凭据查群 → 以后<b style="color:var(--ink)">没有任何 agent 持有别人的密码</b>。更大改动，先 Phase 1。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== §5 测试 ========== -->
+  <section>
+    <div class="shead"><span class="snum">5</span><h2>验证 — 红→绿 + 四档零回归</h2></div>
+    <div class="card">
+      <table class="test">
+        <tr><th>场景</th><th>怎么测</th><th>期望</th></tr>
+        <tr><td><b>复现→修好</b></td><td class="r">me=professor · --bot=cv</td><td><span class="chk">修前</span> 发进 CV DM ／ <span class="chk">修后</span> 被拒</td></tr>
+        <tr><td><b>a2a 不回归</b></td><td class="r">--bot=自己 --to-agent=别人</td><td><span class="chk">✓</span> 照常送达 + @</td></tr>
+        <tr><td><b>p2a 不回归</b></td><td class="r">--bot=自己 → 主人 DM</td><td><span class="chk">✓</span> 照常</td></tr>
+        <tr><td><b>terminal 不回归</b></td><td class="r">unset SESSION · 任意 --bot</td><td><span class="chk">✓</span> 放行</td></tr>
+        <tr><td><b>cron-agent 档</b></td><td class="r">注入会话（有身份锚）</td><td><span class="chk">✓</span> 被闸正确管住</td></tr>
+      </table>
+      <div style="margin-top:12px">
+        <span class="pill">4 发送面统一</span>
+        <span class="pill">bridge_env 一处闸</span>
+        <span class="pill">红→绿复现</span>
+        <span class="pill">四档零回归</span>
+        <span class="pill">白名单默认空</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="foot">
+    数据来源 = link16 独立查证：源码（send_feishu_*.py / bridge_env.py / bridge_cron.py）+ 事故 session 文件（bridge-session-*.json 的 chat_id 逐字匹配）+ 名册。<br>
+    状态：查证 ✅ · 与 phd-taoci 对齐 ✅ · 两个边界情况 de-risk ✅ · <b style="color:var(--tac)">待主人正式拍板 → 写 PLAN-920 落地</b>。本页为方案定稿可视化，未动任何代码。
+  </div>
+
+</div>
+
+<script>
+  function wire(segId){
+    var seg=document.getElementById(segId);
+    if(!seg)return;
+    seg.querySelectorAll("button").forEach(function(b){
+      b.addEventListener("click",function(){
+        seg.querySelectorAll("button").forEach(function(x){x.classList.remove("on")});
+        b.classList.add("on");
+        var host=seg.parentElement;
+        seg.querySelectorAll("button").forEach(function(x){
+          var p=document.getElementById(x.dataset.p); if(p)p.classList.remove("on");
+        });
+        var t=document.getElementById(b.dataset.p); if(t)t.classList.add("on");
+      });
+    });
+  }
+  ["seg-inc","seg-root","seg-fix"].forEach(wire);
+</script>
