@@ -235,6 +235,13 @@ def resolve_open_id(name):
         oid, _ = _bot_self(*creds)
         if oid:
             return oid
+    try:                                       # ④ 名册登记的 open_id（2026-07-23）：@ 一个 peer 只需要
+        from registry import find as _reg_find  # 【它的 open_id + 我自己的凭据】，不需要它的 app secret。
+        oid = (_reg_find(name) or {}).get("open_id")   # 对面新建 bot 只要 push 了名册，我 pull 完就能喊，
+        if oid:                                        # 不必等 envsync 把别人的密钥同步过来（少一层耦合）。
+            return oid
+    except Exception:  # noqa: BLE001
+        pass
     try:                                       # 方案B：报错也列名册友好名（你可只用显示名喊 tb24-*）
         from registry import load_agents
         reg = {_norm(x.get("name")) for x in load_agents()}
