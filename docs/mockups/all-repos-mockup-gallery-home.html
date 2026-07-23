@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>全仓 mockup 总览展厅 · mockups-demo.pages.dev 首页方案</title>
+<style>
+  :root{
+    --paper:#faf9f5; --ink:#23201b; --sub:#6e6555; --faint:#9a917e;
+    --line:#e5ded0; --accent:#d97757; --card:#fffefb; --chip:#f0ebdf;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.6 system-ui,"Segoe UI","PingFang SC",sans-serif;background:var(--paper);color:var(--ink)}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 20px 80px}
+
+  header.top{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:8px}
+  h1{font-size:26px;margin:0 0 6px}
+  .tagline{color:var(--sub);font-size:14px;margin:0}
+  .stats{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .stat{background:var(--chip);border-radius:999px;padding:5px 13px;font-size:13px;color:var(--sub)}
+  .stat b{color:var(--accent);font-size:15px}
+
+  .toolbar{position:sticky;top:0;z-index:20;background:var(--paper);padding:14px 0 12px;
+           border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  .toolbar input{flex:1;min-width:180px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;
+                 background:var(--card);font:inherit;font-size:14px;color:var(--ink)}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--card)}
+  .seg button{border:0;background:transparent;padding:8px 14px;font:inherit;font-size:13px;color:var(--sub);cursor:pointer}
+  .seg button.on{background:var(--accent);color:#fff;font-weight:600}
+
+  section.repo{margin-top:30px}
+  .repohead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+            border-left:3px solid var(--accent);padding-left:10px;margin-bottom:14px}
+  .repohead h2{font-size:17px;margin:0}
+  .repohead .meta{color:var(--faint);font-size:12.5px}
+  .repohead a.dom{color:var(--sub);font-size:12.5px;text-decoration:none;border-bottom:1px dotted var(--faint)}
+  .tag{font-size:11px;padding:2px 8px;border-radius:999px;background:#f3e3dc;color:#a8543a}
+  .tag.stale{background:#eee9dc;color:#8a7f66}
+  .tag.local{background:#e4ece2;color:#4d6b4a}
+
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(268px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;
+        text-decoration:none;color:inherit;display:flex;flex-direction:column;
+        transition:transform .15s ease, box-shadow .15s ease}
+  .card:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(60,45,25,.10)}
+  .shot{position:relative;height:170px;background:#f3f0e8;border-bottom:1px solid var(--line);overflow:hidden}
+  .shot iframe{position:absolute;top:0;left:0;width:1280px;height:800px;border:0;
+               transform:scale(.209);transform-origin:0 0;pointer-events:none;background:#fff}
+  .shot .veil{position:absolute;inset:0}           /* 吃掉点击·整卡可点 */
+  .shot .ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+            color:var(--faint);font-size:12.5px;letter-spacing:.05em}
+  .cardbody{padding:11px 13px 13px}
+  .cardtitle{font-size:14px;font-weight:600;line-height:1.35;margin:0 0 4px;word-break:break-word}
+  .cardsub{font-size:11.5px;color:var(--faint);font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+
+  .listmode .grid{grid-template-columns:1fr}
+  .listmode .shot{display:none}
+  .listmode .card{flex-direction:row;align-items:center;padding:2px 0}
+
+  footer{margin-top:56px;border-top:1px solid var(--line);padding-top:18px;color:var(--sub);font-size:13px}
+  footer h3{font-size:14px;margin:0 0 8px}
+  footer li{margin:4px 0}
+  code{background:var(--chip);padding:1px 5px;border-radius:4px;font-size:12.5px}
+  @media(max-width:520px){
+    .grid{grid-template-columns:1fr 1fr;gap:11px}
+    .shot{height:118px}.shot iframe{transform:scale(.145)}
+    h1{font-size:21px}.cardtitle{font-size:12.5px}.cardsub{display:none}
+  }
+</style>
+<div class="wrap">
+  <header class="top">
+    <h1>全仓 mockup 总览展厅</h1>
+    <p class="tagline">一个页面看完所有仓库的 mockup / demo · 按仓库分组 · 卡片是真实页面预览 · 点开即可交互</p>
+    <div class="stats">
+      <span class="stat"><b>11</b> 个仓库</span>
+      <span class="stat"><b>30</b> 个 mockup</span>
+      <span class="stat"><b>2</b> 台机器汇流</span>
+      <span class="stat">数据源：Cloudflare Pages 分支实拉 · 2026-07-22</span>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <input id="q" placeholder="搜：仓库名 / mockup 名（如 professor、PLAN-920、3p）">
+    <div class="seg">
+      <button class="on" data-mode="card">卡片预览</button>
+      <button data-mode="list">纯列表</button>
+    </div>
+  </div>
+
+  <div id="board"></div>
+
+  <footer>
+    <h3>这一版是「怎么长」的方案稿 —— 三处请你拍板</h3>
+    <ol>
+      <li><b>预览图怎么来</b>：现在卡片里是 <code>&lt;iframe&gt;</code> 实时嵌真页面（滚到才加载）——永远最新、零烤图流程；另一条路是发布时用 shot-scraper 烤成 PNG（手机更省流量，但要多一步、且会滞后）。</li>
+      <li><b>旧 slug 清不清</b>：<code>mockups-notes</code>（= notes 旧名）、<code>taoci-prof</code>（= phd-taoci-professor 旧名）、<code>phdtaoci-cvpreview</code>（空的）三个是历史残留，本页先标灰。</li>
+      <li><b>谁来刷新</b>：总览页数据 = Cloudflare 分支列表 + 各展厅页，任一台机器跑一条命令就能重烤整页（含另一台机器的 mockup）。</li>
+    </ol>
+  </footer>
+</div>
+
+<script>
+// —— 真实数据：2026-07-22 从 Cloudflare Pages API 列分支 + 逐个拉 <slug>.mockups-demo.pages.dev/ 解析得到 ——
+const DATA = [
+  {slug:"creator-research",   repo:"creator-research",       last:"2026-07-22 14:12", files:["rachel-3p","rachel-teardown-3p","rachel-x-teardown","three-platform"]},
+  {slug:"pressroom",          repo:"pressroom",              last:"2026-07-22 06:09", files:["merge-workstation","unified-ui"]},
+  {slug:"video-studio",       repo:"video-studio",           last:"2026-07-21 19:11", files:["digital-human-material-film","subtitle-bottom"]},
+  {slug:"link16-agent-infra", repo:"link16-agent-infra",     last:"2026-07-21 18:14", files:["PLAN-914-progress-before-after","PLAN-915-terminal-delivery-before-after","PLAN-916-tool-observability-before-after","PLAN-920-bot-impersonation-fix"]},
+  {slug:"notes",              repo:"notes",                  last:"2026-07-20 18:06", files:["architecture-refactor","N017-3p","N018-3p","N018-preview","pipeline-design","three-platform"]},
+  {slug:"phd-taoci-professor",repo:"phd-taoci · professor",  last:"2026-07-20 17:41", files:["PLAN-080-professor-hub-redesign","PLAN-080-professor-hub-redesign-v2","PLAN-080-professor-hub-redesign-v3","PLAN-080-professor-hub-redesign-v4","professor-hub-drilldown"]},
+  {slug:"phd-taoci-cv",       repo:"phd-taoci · cv",         last:"2026-07-19 07:50", files:["cvhub-overleaf-layout"]},
+  {slug:"phd-taoci-letter",   repo:"phd-taoci · letter",     last:"2026-07-21 14:57", files:["letterhub-worklist-and-letter"]},
+  {slug:"cartoon-musical-mv", repo:"cartoon-musical-mv",     last:"2026-07-21 11:50", files:["shama-prompt-apprenticeship-lab","shama-replication-training-studio"]},
+  {slug:"tennis-post",        repo:"tennis-post",            last:"2026-07-21 03:15", files:["p018-finale-comparison-cards"]},
+  {slug:"xhs-card-gen",       repo:"xhs-card-gen",           last:"2026-07-20 04:27", files:["follow-vs-save-quadrant","topic-taste-verdict"]},
+  {slug:"mockups-notes",      repo:"mockups-notes",          last:"2026-07-20 12:36", stale:"旧 slug · 已被 notes 取代", files:["dashboard","N017-3p","N018-3p","N018-preview","pipeline-design","three-platform"]},
+  {slug:"taoci-prof",         repo:"taoci-prof",             last:"2026-07-19 05:36", stale:"旧 slug · 已被 phd-taoci-professor 取代", files:["PLAN-080-professor-hub-redesign","PLAN-080-professor-hub-redesign-v2","PLAN-080-professor-hub-redesign-v3","PLAN-080-professor-hub-redesign-v4"]},
+  {slug:"phdtaoci-cvpreview", repo:"phdtaoci-cvpreview",     last:"2026-07-19 18:15", stale:"空分支 · 建议删", files:[]},
+  {slug:"phd-taoci",          repo:"phd-taoci（主仓）",       last:"—", local:"本机 docs/mockups 有 6 个 · 从未发布", files:[]},
+];
+
+const pretty = n => n.replace(/-/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+const board = document.getElementById("board");
+
+function render(filter=""){
+  const f = filter.trim().toLowerCase();
+  board.innerHTML = "";
+  DATA.forEach(g=>{
+    const files = g.files.filter(x => !f || x.toLowerCase().includes(f) || g.repo.toLowerCase().includes(f) || g.slug.includes(f));
+    if(!files.length && !(!f && g.files.length===0)) return;
+    const sec = document.createElement("section");
+    sec.className = "repo";
+    const base = `https://${g.slug}.mockups-demo.pages.dev`;
+    sec.innerHTML = `
+      <div class="repohead">
+        <h2>${g.repo}</h2>
+        <span class="meta">${g.files.length} 个 · 最近更新 ${g.last}</span>
+        <a class="dom" href="${base}/" target="_blank">${g.slug}.mockups-demo.pages.dev</a>
+        ${g.stale?`<span class="tag stale">${g.stale}</span>`:""}
+        ${g.local?`<span class="tag local">${g.local}</span>`:""}
+      </div>
+      <div class="grid"></div>`;
+    const grid = sec.querySelector(".grid");
+    files.forEach(name=>{
+      const a = document.createElement("a");
+      a.className = "card"; a.href = `${base}/${name}`; a.target = "_blank";
+      a.innerHTML = `
+        <div class="shot" data-src="${base}/${name}"><div class="ph">预览加载中…</div></div>
+        <div class="cardbody">
+          <p class="cardtitle">${pretty(name)}</p>
+          <p class="cardsub">${g.slug}/${name}</p>
+        </div>`;
+      grid.appendChild(a);
+    });
+    if(!files.length){
+      grid.innerHTML = `<p style="color:var(--faint);font-size:13px;margin:0">（该分支下暂无页面）</p>`;
+    }
+    board.appendChild(sec);
+  });
+  observeShots();
+}
+
+// 懒加载：滚到附近才真去拉那一页，手机上不会 30 个 iframe 一起冲
+let io;
+function observeShots(){
+  if(io) io.disconnect();
+  io = new IntersectionObserver(es=>{
+    es.forEach(e=>{
+      if(!e.isIntersecting) return;
+      const box = e.target;
+      if(box.dataset.loaded) return;
+      box.dataset.loaded = "1";
+      const fr = document.createElement("iframe");
+      fr.loading = "lazy"; fr.src = box.dataset.src; fr.setAttribute("scrolling","no");
+      fr.onload = ()=> box.querySelector(".ph")?.remove();
+      box.appendChild(fr);
+      box.insertAdjacentHTML("beforeend", '<div class="veil"></div>');
+      io.unobserve(box);
+    });
+  }, {rootMargin:"400px"});
+  document.querySelectorAll(".shot").forEach(s=>io.observe(s));
+}
+
+document.getElementById("q").addEventListener("input", e=>render(e.target.value));
+document.querySelectorAll(".seg button").forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll(".seg button").forEach(x=>x.classList.remove("on"));
+    b.classList.add("on");
+    document.body.classList.toggle("listmode", b.dataset.mode==="list");
+  };
+});
+render();
+</script>
+</html>
