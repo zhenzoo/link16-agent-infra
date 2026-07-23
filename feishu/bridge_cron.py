@@ -323,8 +323,10 @@ def _cron_pids(exclude_self=True):
           "$_.CommandLine -match 'bridge_cron\\.py' -and $_.CommandLine -match ' run' } "
           "| Select-Object -ExpandProperty ProcessId")
     try:
+        # errors="replace"：PYTHONUTF8=1 下 text=True 按 UTF-8 解码，powershell stderr 若是 GBK 中文会崩读线程
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=15)
     except (OSError, subprocess.SubprocessError):
         return []
     pids = [p.strip() for p in (r.stdout or "").splitlines() if p.strip().isdigit()]
@@ -336,7 +338,9 @@ def _cron_pids(exclude_self=True):
 def _kill(pids):
     for p in pids:
         try:
-            subprocess.run(["taskkill", "/F", "/PID", p], capture_output=True, text=True, timeout=15)
+            # 不用 taskkill 的输出 → DEVNULL 不解码；否则中文 Windows「成功…」(GBK 0xb3) 在 PYTHONUTF8=1 下崩读线程
+            subprocess.run(["taskkill", "/F", "/PID", p],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
         except (OSError, subprocess.SubprocessError):
             pass
 
