@@ -3,6 +3,18 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.7.2 — 两处防御性硬化 + 名册同步（2026-07-23）
+
+**WHY**：v0.7.1 后攒了 2 个真 fix + 3 条名册/配置同步，都已落地验证、无在制系列 → 给两台机留一个干净回退点。两个 fix 都是**「守着答案却报错 / 崩掉」**类的防御缺口，不改任何行为契约。
+
+**WHAT**
+- **fix(a2a) `58f6a13`**：按名字喊 peer 时补名册 `open_id` 兜底。`resolve_open_id` 原本只认三档（`ou_` 字面 / `.env` 的 `_OPEN_ID` / `.env` 凭据现查 `bot/v3/info`）——**全落在 `.env` 上**，而 `agent-registry.json` 里 verified 的 `open_id` 只在**报错时**被拿来列友好名。实证：tb24 新登两只 Codex bot 后，`video-studio-codex` 因凭据恰在 `.env` 里而蒙对、`creator-research-codex` 直接报「找不到智能体」。修法 = 原报错分支前加第 ④ 档 `registry.find(name).open_id`（纯附加·命不中照抛原错）。**⇒ 对面新建 bot 只要 push 名册，这边 pull 完就能喊，不必 envsync 同步对方 app secret**（@ peer 只需「对方 open_id + 我自己凭据」；群定位在拿不到对方群列表时回退「发送方唯一群」）。
+- **fix(cron) `cecc0f7`**（tb24-ccp-config 定位 + 隔离复现）：`bridge_cron.py` 在**中文 Windows + `PYTHONUTF8=1`** 下读 `taskkill` / `powershell` 的 **GBK** 输出会崩 subprocess 读线程（非致命：桥照常起，只刷 traceback）。修法 = `_cron_pids()` 加 `encoding="utf-8", errors="replace"`；`_kill()` 输出本就不用 → 改 `stdout/stderr=DEVNULL`（不解码就不会崩）。
+- **chore(registry) `0057bf6` / `676cd76` / `f81b1b5`**：`shared_repos` card-studio → **pressroom**（引擎改名同步）；名册补登 tb24 两只 Codex bot（`tb24-video-studio-codex` / `tb24-creator-research-codex`·带 verified open_id）；`tb24-tennis-post` 两条 cron 暂停（`enabled: false`）。
+- **验证**：全仓 87 项测试通过；`bridge_cron.py` py_compile 过。⚠️ **cron 修复需下次自然重启桥才生效**（遵主人「不擅自重启」硬规则，未重启）。
+
+---
+
 ## v0.7.1 — Codex typed-event 转正为默认：建 bot 不再需要「先标准路径」（2026-07-23）
 
 **WHY**：tb24 上新建的两只 Codex bot（video-studio / creator-research）进度卡在主人手机上**一条条刷原始命令**（🔧 Get-Content… / 🔧 git status…）。根因不是 bug 而是**默认值**：SOP-121 写着「先标准路径建通、富投递等 canary 转正再统一开」，建 bot 的 agent 照做 → 名册没写 `codex_transport` → 掉回裸 CLI + PostToolUse hook 的命令原文路。而 typed-event 早已在 tb25 生产跑通（2 只 worker 在跑·691 条 tool 事件·raw leak = 0），只是**文档闸没人翻牌**（SOP-160 的 fleet-wide gate + PLAN-916 Step 6 状态都停在旧状态）。主人 2026-07-23 拍板：**默认全 canary，老标准模式弃用**。
