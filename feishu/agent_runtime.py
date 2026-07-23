@@ -18,6 +18,29 @@ CLAUDE_READY_MARK = "❯"
 CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
 CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
 
+# Codex 投递路 = typed-event app-server【默认】（主人 2026-07-23 拍板：建 codex bot 一律 canary，
+# 裸 CLI + hook 那条「命令原文刷屏」的老路弃用）。名册显式写下面任一别名才回退老路（应急用）。
+CODEX_TRANSPORT_APP_SERVER = "app-server-canary"
+CODEX_TRANSPORT_LEGACY = "cli-legacy"
+_CODEX_LEGACY_ALIASES = {"cli-legacy", "bare-cli", "standard", "legacy", "cli"}
+
+
+def codex_transport(bot) -> str:
+    """这只 codex bot 走哪条投递路：默认 typed-event app-server；只有名册显式写 cli-legacy 才回退。
+
+    省略字段 = 默认 canary —— 这样【任何】新建/存量 codex bot 都不会因为忘写字段而掉回
+    命令原文刷屏的老路（tb24 两只 bot 就是这么掉的）。ARCH-110 §2.4.1 / SOP-121。
+    """
+    raw = (bot.get("codex_transport") if isinstance(bot, dict) else None) or ""
+    raw = str(raw).strip().lower()
+    return CODEX_TRANSPORT_LEGACY if raw in _CODEX_LEGACY_ALIASES else CODEX_TRANSPORT_APP_SERVER
+
+
+def uses_app_server(bot) -> bool:
+    """是否用 codex_app_server_worker.py 起（= 干净卡：工具类型/次数/路径，不带命令原文）。"""
+    return runtime_name(bot) in ("codex", "code-x", "code x") and \
+        codex_transport(bot) == CODEX_TRANSPORT_APP_SERVER
+
 
 def _q(value) -> str:
     """Quote a path/value for the git-bash command line used by wmux."""
@@ -239,7 +262,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         )
     if spec.name == "codex":
         codex_home = _codex_home(bot).as_posix()
-        if isinstance(bot, dict) and bot.get("codex_transport") == "app-server-canary":
+        if uses_app_server(bot):
             worker = (project / "feishu" / "codex_app_server_worker.py").as_posix()
             return (
                 env
@@ -283,7 +306,7 @@ def is_ready(bot, screen: str) -> bool:
             "› Use /skills" in screen
             or re.search(r"(?m)^›\s*$", screen) is not None
         )
-        if isinstance(bot, dict) and bot.get("codex_transport") == "app-server-canary":
+        if uses_app_server(bot):
             # The official --remote TUI can omit the normal CLI's
             # "OpenAI Codex" banner. Requiring that banner makes an already
             # usable composer look unready. Its empty composer can also show a

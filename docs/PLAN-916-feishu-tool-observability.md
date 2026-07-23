@@ -176,7 +176,7 @@ PLAN-915 已解决两件核心问题：Codex 可见 commentary 能进入飞书�
 - **改什么·改哪里**：仅 canary bot 的 feature flag/worker；任何重启在执行前单独确认。
 - **交付物**：真实飞书卡、bridge-history、receipt、event ledger 四层证据。
 - **验证**：类型和相对路径可见；每段最多 5 个路径；raw leak=0；final 恰好 1 条；其他 bot 未切换。
-- **当前状态**：🔄 主人已确认只切换 `tb25-link16-codex`。首次 helper 已正确等到授权 answer 的精确回执，但新 app-server remote TUI 没有普通 CLI 的 `OpenAI Codex` banner；旧 ready 判据因此连续误报未就绪，把 worker 命令投进已运行的 composer，并在第二次超时后关闭活 workspace。现已按真实 screen oracle 修正为：仅 `app-server-canary` 接受 composer marker，普通 Codex CLI 仍要求 banner + composer，trust prompt 仍不放行。6 项 runtime 定向测试与 40 项全仓测试通过；当前 workspace/PTY 已钉回 session，单 bot bridge 已加载修复，准备重新执行 canary。首次失败未产生 canary marker且 raw leak=0；其他 bot 未重启。
+- **当前状态**：✅ **已完成并于 2026-07-23 转正为默认路**（主人拍板：新建 Codex bot 一律 typed-event，老「标准路径」弃用）。落地 = `agent_runtime.codex_transport()` 默认返回 `app-server-canary`，只有名册显式写 `cli-legacy` 才回退；SOP-121 改写为「默认 canary」+ 存量 bot 切换的 `/new` 补步，SOP-160 的 fleet-wide 闸同步翻牌。转正当时的实证：tb25 三只 Codex bot 全带标记、2 只 worker 在跑（`tb25-link16-codex` / `tb25-cartoonMV-codex`），后者 event ledger 691 条 tool 事件、label 带命令原文的 = 0。以下为原始 canary 记录：主人已确认只切换 `tb25-link16-codex`。首次 helper 已正确等到授权 answer 的精确回执，但新 app-server remote TUI 没有普通 CLI 的 `OpenAI Codex` banner；旧 ready 判据因此连续误报未就绪，把 worker 命令投进已运行的 composer，并在第二次超时后关闭活 workspace。现已按真实 screen oracle 修正为：仅 `app-server-canary` 接受 composer marker，普通 Codex CLI 仍要求 banner + composer，trust prompt 仍不放行。6 项 runtime 定向测试与 40 项全仓测试通过；当前 workspace/PTY 已钉回 session，单 bot bridge 已加载修复，准备重新执行 canary。首次失败未产生 canary marker且 raw leak=0；其他 bot 未重启。
 
 ### Step 7 · 全体 Codex 智能体接入审计
 

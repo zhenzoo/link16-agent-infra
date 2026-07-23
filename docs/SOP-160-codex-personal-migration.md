@@ -183,7 +183,15 @@ only that bridge process:
 python feishu/feishu_bridge.py start --bot tb25-link16-codex
 ```
 
-Do not apply the flag fleet-wide until the real Feishu before/after is accepted.
+**Graduated 2026-07-23 (owner decision).** Typed-event delivery is now the
+default for every Codex bot: `agent_runtime.codex_transport()` returns
+`app-server-canary` unless the roster explicitly says `cli-legacy`, so a missing
+field can no longer drop a bot back to the deprecated raw-command path. The old
+"do not apply fleet-wide until accepted" gate is retired — the real Feishu
+before/after was accepted (v0.7.0, real canary on `tb25-link16-codex` and
+`tb25-cartoonMV-codex`). Still switch **one bot at a time**, and see
+[`SOP-121`](SOP-121-codex-bot-register.md) for the extra `/new` step an
+already-running bot needs.
 
 ## Verification
 

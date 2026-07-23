@@ -13,7 +13,7 @@
 | `feishu/bridge_outbox.py` | **v8 回传唯一发送引擎 drainer**：增量读 outbox → 发卡片 / 进度限流合并 / 去重；持久化本轮在线文档并在 final 列出原始 docx URL | （桥 runner 起的后台 task） |
 | `feishu/bridge_doctor.py` | 机械自愈：outbox 三态诊断 + 卡→自动重启 drainer | `python feishu/bridge_doctor.py [--bot X]` |
 | `feishu/hooks/bridge_stop.py`+`bridge_posttool.py`(+pretool, codex) | 桥会话 hook：Stop→写 outbox answer / PostToolUse→写 progress | （桥 spawn 的会话自动调） |
-| `feishu/codex_app_server_probe.py` · `codex_app_server_worker.py` | PLAN-915：Codex typed-event 只读探针；单 bot app-server canary（官方 TUI `--remote` + milestone observer） | `python feishu/codex_app_server_probe.py`；生产仅由 `codex_transport=app-server-canary` 启动 |
+| `feishu/codex_app_server_probe.py` · `codex_app_server_worker.py` | PLAN-915：Codex typed-event 只读探针；app-server worker（官方 TUI `--remote` + milestone observer）= **所有 codex bot 的默认投递路**（2026-07-23 转正·干净卡：工具类型/次数/路径·不带命令原文） | `python feishu/codex_app_server_probe.py`；生产由桥自动起（`agent_runtime.uses_app_server`·名册写 `codex_transport: cli-legacy` 才回退老路） |
 | `feishu/jsonl_reply_extract.py` | 从 transcript 提回复（`last_turn_reply` / `extract` / `progress`） | （Stop hook 用） |
 | `feishu/register_feishu_app.py` | **一键建飞书 bot**（扫码 OAuth + 预置 40+ 权限 + WS）· 末步打印开全权限链 | `python feishu/register_feishu_app.py --name X --bot wsN` |
 | `feishu/whoami.py` | **自查身份**：「我这个 Claude 会话对应哪个飞书 bot」（读 `FEISHU_BRIDGE_SESSION` env + 名册 + 会话记录 → bot/显示名/cwd/open_id） | `python feishu/whoami.py`（`--json`） |

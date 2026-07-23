@@ -37,10 +37,11 @@ class CodexSkillInvocationTests(unittest.TestCase):
 
 
 class CodexCanaryRuntimeTests(unittest.TestCase):
-    def test_only_explicit_canary_uses_app_server_worker(self):
+    def test_codex_defaults_to_app_server_worker(self):
+        """主人 2026-07-23 拍板：codex bot 默认 typed-event，漏写字段也不掉回老路。"""
         project = ROOT
         state = ROOT / "feishu" / "_state"
-        canary = agent_runtime.worker_cmd(
+        explicit = agent_runtime.worker_cmd(
             {
                 "name": "tb25-link16-codex",
                 "agent": "codex",
@@ -50,15 +51,32 @@ class CodexCanaryRuntimeTests(unittest.TestCase):
             project,
             state,
         )
-        ordinary = agent_runtime.worker_cmd(
+        implicit = agent_runtime.worker_cmd(          # 名册没写 codex_transport = 也走 canary
             {"name": "another-codex", "agent": "codex", "codex_home": "~/.codex-personal"},
             project,
             state,
         )
-        self.assertIn("codex_app_server_worker.py", canary)
-        self.assertIn("FEISHU_CODEX_EVENT_STREAM=1", canary)
-        self.assertNotIn("codex_app_server_worker.py", ordinary)
-        self.assertIn("codex --dangerously-bypass", ordinary)
+        for cmd in (explicit, implicit):
+            self.assertIn("codex_app_server_worker.py", cmd)
+            self.assertIn("FEISHU_CODEX_EVENT_STREAM=1", cmd)
+
+    def test_explicit_cli_legacy_still_falls_back_to_bare_codex(self):
+        """应急回退口：只有显式写 cli-legacy 才回到已弃用的裸 CLI + hook 路。"""
+        legacy = agent_runtime.worker_cmd(
+            {
+                "name": "old-codex",
+                "agent": "codex",
+                "codex_home": "~/.codex-personal",
+                "codex_transport": "cli-legacy",
+            },
+            ROOT,
+            ROOT / "feishu" / "_state",
+        )
+        self.assertNotIn("codex_app_server_worker.py", legacy)
+        self.assertIn("codex --dangerously-bypass", legacy)
+        self.assertFalse(agent_runtime.uses_app_server({"agent": "codex", "codex_transport": "bare-cli"}))
+        self.assertTrue(agent_runtime.uses_app_server({"agent": "codex"}))
+        self.assertFalse(agent_runtime.uses_app_server({"agent": "claude"}))
 
     def test_remote_tui_is_ready_without_normal_cli_banner(self):
         remote = {
@@ -67,7 +85,11 @@ class CodexCanaryRuntimeTests(unittest.TestCase):
         }
         screen = "status line\n› Use /skills to list available skills"
         self.assertTrue(agent_runtime.is_ready(remote, screen))
-        self.assertFalse(agent_runtime.is_ready({"agent": "codex"}, screen))
+        self.assertTrue(agent_runtime.is_ready({"agent": "codex"}, screen))   # 默认即 canary
+        # 只有显式回退老路的 bot 才仍要求普通 CLI 的 banner（remote TUI 没有它）
+        self.assertFalse(
+            agent_runtime.is_ready({"agent": "codex", "codex_transport": "cli-legacy"}, screen)
+        )
 
     def test_remote_tui_bare_composer_is_ready_but_trust_prompt_is_not(self):
         remote = {

@@ -126,7 +126,7 @@ python feishu/install_codex_bridge_hooks.py --write
 
 ### § 2.4.2 · Codex typed milestone canary（PLAN-915 · 2026-07-17）
 
-Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。开启 `codex_transport: app-server-canary` 的 bot 使用以下拓扑：
+Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026-07-23 起这是所有 Codex bot 的默认路**（`agent_runtime.codex_transport()`：名册没写 = `app-server-canary`；只有显式写 `cli-legacy` 才回退到已弃用的裸 CLI + hook「命令原文」路）。拓扑：
 
 `官方 Codex TUI --remote` ↔ `该 bot 私有 app-server` ↔ `Link16 typed-event observer` → `milestone-v1 outbox` → 共享 drainer。
 

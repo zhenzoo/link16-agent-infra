@@ -3,6 +3,19 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.7.1 — Codex typed-event 转正为默认：建 bot 不再需要「先标准路径」（2026-07-23）
+
+**WHY**：tb24 上新建的两只 Codex bot（video-studio / creator-research）进度卡在主人手机上**一条条刷原始命令**（🔧 Get-Content… / 🔧 git status…）。根因不是 bug 而是**默认值**：SOP-121 写着「先标准路径建通、富投递等 canary 转正再统一开」，建 bot 的 agent 照做 → 名册没写 `codex_transport` → 掉回裸 CLI + PostToolUse hook 的命令原文路。而 typed-event 早已在 tb25 生产跑通（2 只 worker 在跑·691 条 tool 事件·raw leak = 0），只是**文档闸没人翻牌**（SOP-160 的 fleet-wide gate + PLAN-916 Step 6 状态都停在旧状态）。主人 2026-07-23 拍板：**默认全 canary，老标准模式弃用**。
+
+**WHAT**
+- **默认值反转（一处收口）**：新增 `agent_runtime.codex_transport()` / `uses_app_server()` —— 名册**没写** `codex_transport` = `app-server-canary`；**只有显式**写 `cli-legacy`/`bare-cli`/`standard` 才回退老路。`worker_cmd` 与 `is_ready` 两处判据改用同一 resolver。⇒ **漏写字段不再可能把 bot 掉回刷屏路**。
+- **SOP-121 改写**：删「不阻塞项：富投递等 canary 转正」整节 → 换成「默认 canary + 两条路对比表」；名册模板补 `codex_transport`/`delivery_contract`；重启示例改单 bot + worker 启动行；写明 `FEISHU_CODEX_EVENT_STREAM=1` 让 hook 自动让路（**不用卸 hook、不会双投**）。
+- **新增「给已在跑的 bot 切过来」节（tb24 实测的两个坑）**：① 光加字段 + stop/start **不够**，桥会复用旧 bare-codex 会话 → **必须再发 `/new`** 才真正换 worker；② `/new` **别用 Git-bash 发**（MSYS 路径转换吃成 `C:/Program Files/Git/new`·本机复现），用 PowerShell，或前缀 `MSYS_NO_PATHCONV=1`（实测可解）。新建 bot 无此问题（没有旧会话）。
+- **翻牌两处过期闸**：`SOP-160` 的 “Do not apply fleet-wide until accepted” → 记为 2026-07-23 graduated；`PLAN-916` Step 6 状态 🔄 → ✅ 转正（附转正当时实证）。`ARCH-110 §2.4.2`、`TOOLS.md` 同步改口径。
+- **验证**：`tests/test_agent_runtime.py` 改写为「默认即 canary」+ 新增 `cli-legacy` 回退用例；**全仓 87 项测试通过**。⚠️ 存量 bot 需 stop/start + `/new` 才生效。
+
+---
+
 ## v0.7.0 — Codex 飞书生产链路：事件流、跨 runtime 配置与可核对交付（2026-07-22）
 
 **WHY**：v0.6.0 后 Codex 已能接入飞书，但启动就绪、过程事件、Personal/skill 同步、发送者身份和最终交付仍分散在兼容逻辑里。线上 canary 先后暴露了重复启动命令、工具原文污染进度卡、bot 身份冒用，以及本地路径被包装成手机打不开的链接、在线文档卡已发但 final 无 URL 对账等问题。

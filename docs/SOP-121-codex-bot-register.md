@@ -24,28 +24,31 @@ Codex bot 依赖一个隔离的 Codex home + 装好桥 hook；同一台机所有
    ```
    OAuth 扫码 / 自动写 `.env` / 自动补 `agent-registry.json` stub 全同 SOP-120；`--runtime codex` 让 stub 的 `runtime` 字段写成 `codex`（默认 `claude`）。
 
-2. **运行时名册 `bridge-bots.local.json` 加行 → 带 3 个 Codex 字段**（`register` 脚本**不写**这个 · 手动加）：
+2. **运行时名册 `bridge-bots.local.json` 加行 → 带 5 个 Codex 字段**（`register` 脚本**不写**这个 · 手动加）：
    ```jsonc
    {
      "name": "<key>",
      "app_id_env": "FEISHU_BRIDGE_<KEY>_APP_ID",
-     "agent": "codex",                 // ← 桥用 Codex runtime 起（省略 = 默认 claude）
-     "codex_home": "~/.codex-personal", // ← 指隔离 home（省略 = ~/.codex-personal）
-     "cwd": "<workspace 绝对路径>"       // ← 该 bot 的工作目录
+     "agent": "codex",                          // ← 桥用 Codex runtime 起（省略 = 默认 claude）
+     "codex_home": "~/.codex-personal",          // ← 指隔离 home（省略 = ~/.codex-personal）
+     "cwd": "<workspace 绝对路径>",               // ← 该 bot 的工作目录
+     "codex_transport": "app-server-canary",     // ← typed-event 干净卡（省略也是它·见下「默认 canary」）
+     "delivery_contract": "milestone-v1"         // ← 投递契约
    }
    ```
+   > 后两个字段**照写**（桥的 app-server 就绪信号目前仍认字面值，写了多一路 ready 信号；漏写也能跑，只是少一路）。**别写 `cli-legacy`** —— 那是已弃用的应急回退口。
 
 3. **其余全照 [`SOP-120 §4`](SOP-120-feishu-register.md) 清单**：开 `drive:drive` + `im:chat`（★群 a2a 必开）权限（勾选 → 创版本 → 发布）、拉进共享群、互换 open_id、双机各配 `.env`、核对 `agent-registry.json` 的 `repo`/`machine`。
 
-4. **重启桥**：
+4. **重启桥**（只起这一只即可）：
    ```powershell
-   python feishu/feishu_bridge.py stop ; python feishu/feishu_bridge.py start
+   python feishu/feishu_bridge.py start --bot <key>
    ```
-   `agent_runtime.py` 会用下面这条起该 bot（**不要**再叠 `-a never` / `-s danger-full-access`，Codex CLI 拒绝该组合）：
+   `agent_runtime.py` 会用 **app-server worker** 起该 bot（默认路 · 见下节）：
    ```
-   codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --no-alt-screen -C "<cwd>"
+   CODEX_HOME=... FEISHU_CODEX_EVENT_STREAM=1 python feishu/codex_app_server_worker.py --bot <key> --cwd <cwd> ...
    ```
-   回复靠 Codex 官方 **Stop hook 的 `last_assistant_message`**（`codex_bridge_stop.py`）· PostToolUse 写压缩进度——**不复刻 Claude JSONL parser**（见 ARCH-110 §2.4.1）。
+   最终回复仍靠 Codex 官方 **Stop hook 的 `last_assistant_message`**（`codex_bridge_stop.py`）；进度卡由 typed-event observer 产出（工具类型 / 次数 / 仓库相对路径，**不带命令原文**）。worker 起时带 `FEISHU_CODEX_EVENT_STREAM=1`，`codex_bridge_posttool.py` 读到就自动让路 → **不会双投、也不用卸 hook**。
 
 ## 验收
 
@@ -53,13 +56,32 @@ Codex bot 依赖一个隔离的 Codex home + 装好桥 hook；同一台机所有
 - 在该 bot 会话里 `python feishu/whoami.py` → 身份卡显示该 bot（`FEISHU_BRIDGE_SESSION` 钉的身份）。
 - 让它 `send_feishu_msg` @ 另一台机的 bot → 能送达（a2a 通）。
 
-## 不阻塞项（别把建 bot 卡在这上面）
+## 默认 canary（typed-event）· 老「标准路径」已弃用（主人 2026-07-23 拍板）
 
-- **PLAN-915 app-server「富卡片投递」canary = 增强 · 非必需**：它把 Codex 终端事件（commentary / 工具活动摘要 / 最终答案）分卡投递，目前只对 `tb25-link16-codex` 开了**单 bot canary**、全舰队 rollout 仍等真实飞书验收。**基础可用的 Codex bot 只需上面标准 hook 路径**（`codex_bridge_stop.py` / `codex_bridge_posttool.py`）就够——先按本 SOP 建通，富投递等 canary 转正再统一开。
+**新建的 Codex bot 一律走 typed-event（app-server worker · 契约 `milestone-v1`）**，不再有「先标准路径、富投递等转正」这一说 —— 那条老路（裸 `codex` CLI + `codex_bridge_posttool.py` 的 `_label` 逐条 dump 命令首行）会让主人手机上的进度卡**一条条刷原始命令**（🔧 Get-Content… / 🔧 git status…），已**弃用**。
+
+- **机制上已经兜住**：`agent_runtime.codex_transport()` —— 名册**没写** `codex_transport` = 默认 `app-server-canary`；**只有显式**写 `cli-legacy` / `bare-cli` / `standard` 才回退老路（应急口，正常别用）。⇒ 漏写字段不再会把 bot 掉回刷屏路（tb24 那两只就是这么掉的）。
+- **两条路的区别**（同一个 Codex，只是桥怎么起它）：
+
+  | | 默认 typed-event | 已弃用 `cli-legacy` |
+  |---|---|---|
+  | 桥怎么起 | `codex_app_server_worker.py`（官方 TUI `--remote` + 私有 app-server + typed-event observer） | 裸 `codex` CLI + PostToolUse hook |
+  | 进度卡 | 工具**类型 / 次数 / 仓库相对路径**聚合（`读取`、`搜索 rg ×2`…） | **命令原文首行**逐条刷 |
+  | 命令 / 参数 / 输出 / reasoning | **不进飞书**（实测 691 条 tool 事件 raw leak = 0） | 命令首行进飞书 |
+
+## 给【已在跑的】Codex bot 切过来（⚠️ 比新建多一步 · tb24 2026-07-23 实测）
+
+**只有存量 bot 需要这节；新建 bot 第一次就带 canary 起，没有这个问题（没有旧会话）。**
+
+1. 名册补 `codex_transport` + `delivery_contract` 两个字段（或确认没写 `cli-legacy`）。
+2. 单 bot 重启桥：`python feishu/feishu_bridge.py stop --bot <key>` → `start --bot <key>`。
+3. ⚠️ **必须再发一次 `/new`** —— **光加字段 + stop/start 不够**：桥会**复用那只 bot 的旧 bare-codex 会话**（还在刷命令原文），`/new` 才会关掉旧 workspace、按新 `worker_cmd` 全新 spawn，真正切到 worker。
+4. ⚠️ **`/new` 这条命令别用 Git-bash 发** —— MSYS 路径转换会把 `/new` 吃成 `C:/Program Files/Git/new`（本机实测；tb24 上是 `D:/Git/...`），命令根本到不了桥。**用 PowerShell 发**；非要用 Git-bash 就前缀 `MSYS_NO_PATHCONV=1`（实测可解）。
+5. 验收：让它干一件带工具的活 → 进度卡应显示「读取 / 搜索 / Git ×N + 路径」，**看不到任何命令原文**。
 
 ## 关联
 
 - [`SOP-120`](SOP-120-feishu-register.md) — 通用 Feishu bot 注册（OAuth / 名册 / 权限 / 群 / 双机 · 本 SOP 的基座）
 - [`SOP-160`](SOP-160-codex-personal-migration.md) — Codex Personal 兼容层 + `~/.codex-personal` bootstrap（前置）
 - [`ARCH-110 §2.4.1`](ARCH-110-feishu-bridge.md) — 多 runtime 适配机制（Claude / Codex 差异收束在 `agent_runtime.py`）
-- [`PLAN-915`](PLAN-915-codex-feishu-terminal-event-delivery.md) — Codex 终端事件 → 飞书卡片富投递契约（canary · 非建 bot 前置）
+- [`PLAN-915`](PLAN-915-codex-feishu-terminal-event-delivery.md) · [`PLAN-916`](PLAN-916-feishu-tool-observability.md) — Codex 终端事件 → 飞书卡片投递契约 + 工具可观测性（**2026-07-23 转正为默认路**）
