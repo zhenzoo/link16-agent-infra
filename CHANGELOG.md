@@ -3,6 +3,26 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.7.4 — 根治 codex `/close` 关不掉对话 + 登记 tb24-pressroom（2026-07-26）
+
+**WHY**：主人对 `tb24-creator-research-codex` 打了 `/close`，下一条消息起的新会话却**完整记得上一轮**——开口就是「先把刚才最后一次小红书作者区调整同步到封面页」。他确认没用过 find-session 一类的东西，要求查清是不是 Codex 本身的缺陷。查因结果：**是我们这层的缺口，不是 Codex 的、也不是 Claude 的。**
+
+`/close` 做了 4 件事（清投递契约 / 账号回名册默认 / 关 wmux 终端 / 删会话注册表），**唯独没删 `_state/bridge-codex-app-thread-<bot>.json`**——全仓搜过，没有任何一行会删它（只有 worker 写、hook 读）。于是下次 spawn 时 `codex_app_server_worker._start_or_resume_thread` 读到旧 `thread_id` 就走 `thread/resume`，把整根对话接回来。**实证**：thread `019f8dbb` 的 rollout 自 `2026-07-23 14:48` 一路追加到 `07-25 23:03`，**144 MB**，中间多次 `/close` 一次没断。
+
+**为什么 Claude 的 `/close` 一直是对的**：看 `agent_runtime.worker_cmd()` 拼出的启动命令——Claude 是 `claude --dangerously-skip-permissions --settings <hooks>`，codex 老路是 `codex --dangerously-bypass-… -C <cwd>`，**两条都不带任何 resume**，终端一关对话就断。只有 app-server 那条起的是我们自己写的 wrapper，才有「记住 thread id 并自动接回」这层。差别不在 Claude vs Codex，在**有没有这层壳**。
+
+**WHAT**
+- 新增 **`clear_codex_thread(bot_name)`**（`feishu_bridge.py:439`）：只 unlink 那个 **117 字节**的指针文件（`{thread_id, cwd}`）。**Codex 本地存档 `~/.codex-personal/sessions/rollout-*.jsonl` 一字节不动**——删的是书签不是书，要翻旧账仍可用 codex 自己的 resume。
+- `/close`(1408) 与 `/new`(1427) 各加一处调用，紧跟 `clear_session`。**放在 `if alive` 判断【外】**——没有活会话时打 `/close` 照样清指针（这正是 video-studio 事后补救的路径）。`/new` 一并改，因为它字面就叫「全新会话」，不修它就是骗人。
+- **边界（关键）**：桥重启 / 进程自愈**不**清指针——那正是 `_start_or_resume_thread` 的原设计意图（崩了活不丢）。缺陷只在「主人显式结束」与「进程意外崩溃」**共用了同一套清理逻辑**。
+- **影响面**：`codex_transport` 缺省即 app-server（`agent_runtime.py:28` · 2026-07-23 拍板的默认），故**所有** codex bot 都在这条路上——`tb24-video-studio-codex` 名册里没写该字段，同样中招（其日志把 bug 又演了一遍：`23:54:21 /close` → `23:59:04` 发消息 → resume 回 19:00 的老线程 → `23:59:54` 再 `/close`，两次都白打）。
+
+**验证**：ast 语法 OK · 真调用三态（造假指针→删得掉 / 文件缺失时重复调用不抛异常 / 不误伤别的 bot）· **端到端**：重启 creator-research 加载新码后，主人实打一次 `/close` → 指针文件确实消失。⚠️ 仓库未装 pytest，测试套件未跑。
+
+**顺带**：登记 **`tb24-pressroom`**（App `cli_0000000000000006` · open_id `ou_ddca1bc663…`）——分管 `Post/pressroom` 宣发引擎仓，tb24 由 12 只增至 13 只。补上 `register_feishu_app.py` 不知道的两格：`repo: pressroom` + `shared: true`（pressroom 本就在 `shared_repos` 内，repo-sync 跨机路由靠这一格）。运行时 roster 在 gitignored 的 `bridge-bots.local.json`。**待办**：应用身份权限（`drive:drive`+`docx:document(:create)`+`im:chat`+`group_at_msg`+`group_msg`）待主人点一键链开通发布；拉进「tb24-25交流水吧」群只能人工。
+
+---
+
 ## v0.7.3 — 新机器部署收口成 SOP-100 + 开机自启标准做法（2026-07-25）
 
 **WHY**：主人问「桥的开机自启配置属于 link16 仓吗？以后再部署电脑，照哪份文档？」——一查是**真空白**：装机 runbook（`feishu/SETUP-new-machine.md`）教到 §8「手动 `start` + 验收」就断了，**开机自启只字未提**；`SOP-131` 里虽出现过任务名，但那是本机切流时「把**已存在**的任务改指新路径」的一次性动作，不是从零建的教程。⇒ **新机器照着做完，每次开机仍得手动敲一遍 `start`。** 同时那份 runbook 本身违反全局 `TYPE-NNN-slug` 规范（不在 `docs/`、无编号），还引用着早已改名的 `ARCH-101`。
