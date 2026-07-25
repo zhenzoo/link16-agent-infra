@@ -436,6 +436,19 @@ def clear_session(bot_name):
         f.unlink()
 
 
+def clear_codex_thread(bot_name):
+    """删掉 codex app-server 的 thread 指针 → 下次 spawn 走 thread/start（真·全新会话）。
+
+    只在【主人显式结束会话】(/close · /new) 时调；桥重启 / 进程自愈【不】调 ——
+    那时正是要靠 _start_or_resume_thread 的 resume 保住正在干的活（原设计意图）。
+    ⚠️ 只删指针：Codex 本地存档 ~/.codex-personal/sessions/rollout-*.jsonl 一个字节都不动，
+    只是下次不再自动接上去（要翻旧账仍可用 codex 自己的 resume）。
+    """
+    f = STATE_DIR / f"bridge-codex-app-thread-{bot_name}.json"
+    if f.exists():
+        f.unlink()
+
+
 # ---------- 镜像器高水位（HWM·单独文件·只镜像器一个写者·与会话注册表零争用）----------
 def _mirror_file(bot_name):
     return STATE_DIR / f"bridge-mirror-{bot_name}.json"
@@ -1395,6 +1408,7 @@ def run(bot_name=None):
                 if alive:
                     await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 clear_session(bot["name"])                                # 清掉会话注册表（含 /cd 过的 cwd）→ 下次重开回名册默认目录
+                clear_codex_thread(bot["name"])                           # codex：连 app-server thread 指针一起清 → 下次真·新会话（否则 resume 把旧对话整根接回来）
                 default_acc = default_account()                          # reset 后 = 名册默认账号
                 def_dir = default_cwd(bot)                               # 名册默认目录（下次重开用这个）
                 head = "🗑 已关闭会话" if alive else "🛌 本来就没有会话"
@@ -1413,6 +1427,7 @@ def run(bot_name=None):
                     except Exception:  # noqa: BLE001
                         pass
                 clear_session(bot["name"])                            # 清注册表(含 /cd 的 cwd + 旧 runtime 字段) → current_cwd 回默认目录·spawn 在默认目录起
+                clear_codex_thread(bot["name"])                       # codex：thread 指针一起清 → /new 名副其实是「全新」（否则 resume 接回旧对话）
                 _dir = await asyncio.to_thread(current_cwd, bot)
                 _acc_lbl, _dir_lbl = runtime_labels(_dir)
                 await reply(chat_id, f"🆕 正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个全新的 {agent_runtime.display_name(bot)}…十几秒后就绪（**空会话·不注入任何文本**）")
