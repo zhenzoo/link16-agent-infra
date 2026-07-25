@@ -545,7 +545,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 ## § 4.1 · 跨机可移植（多台电脑各跑各的桥 · 2026-06-16 · 方案 A）
 
-> 📖 **装到新机器的完整 runbook**（requirements.txt / 怎么拿 wmux handler / 为什么之前拿不到 / 排错速查）→ [`feishu/SETUP-new-machine.md`](../feishu/SETUP-new-machine.md)。下面只讲可移植机制本身。
+> 📖 **装到新机器的完整 runbook**（requirements.txt / 怎么拿 wmux handler / 为什么之前拿不到 / **开机自启** / 排错速查）→ [`SOP-100-new-machine-setup.md`](SOP-100-new-machine-setup.md)。下面只讲可移植机制本身。
 
 > 一句话：桥本来把 `.env` 路径和 bot 名册都写死成**一台机**的绝对路径（`E:\…\.env` + committed `bridge-bots.json` 里全是 `E:`/`zhuzhen`）。换台机（盘符/用户名不同）就读不到凭据、改名册又跟另一台机 git 打架。现在两处都改成「**不写死盘符 + 机器本地优先**」，每台电脑能各跑各的桥、各管各的 bot，互不冲突。
 

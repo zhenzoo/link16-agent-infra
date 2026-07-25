@@ -29,6 +29,7 @@
 | 文档 | 类型 · 内容 |
 |---|---|
 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) | **ARCH** · wmux 怎么驱动面板（daemon RPC / split-here / 守卫）+ **§8 确切信号**（probe/kickoff·判面板死活靠探针不靠读屏） |
+| [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) | **SOP** · 🆕 **新机器部署唯一入口**：clone 完从头装桥（依赖 / wmux+`wmux-rpc.js` / `.env` 凭据 / 本机名册 / 起桥验收）+ **§9 开机自启**（wmux 走 Run 键 · 桥走计划任务 `FeishuBridge-Autostart` · 整段机器无关可照抄 · 附「别改成不等登录」陷阱说明）|
 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) | **ARCH** · 飞书桥怎么搭（@bot→注入 / 回传 v8 hook→outbox→drainer / 多 bot 模型 / 自愈） |
 | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) | **ARCH** · **agent↔agent 通讯协议**（架在桥之上：send / 必回文字 / reply-wait 守望 / 一步读群 · 全靠结构化信号 + 工具 · 零硬编码 · 冷启动跳启动卡） |
 | [`docs/ARCH-150-agent-cron.md`](docs/ARCH-150-agent-cron.md) | **ARCH** · **给智能体排定时任务（CRON）**：闹钟 vs 大脑 · 每 bot 一个 `cron-jobs/<bot>.yaml`（专属划分）· 守护进程只跑本机 bot（多机不撞·零硬编码）· `bridge_cron.py board/add/rm` |

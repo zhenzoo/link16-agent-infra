@@ -64,7 +64,7 @@ def resolve_wmux_rpc(project_root):
     """wmux-rpc.js 路径（连 wmux daemon 的 node 客户端 · 桥/wmux_session 跑 `node <这个> rpc …`）。
 
     历史坑：它原是「仓库外、没提交」的自建脚本，只活在主力机 home → 新机器 git clone 完没有它 = 桥连不上
-    wmux = 拿不到 handler（见 SETUP-new-machine.md §0）。2026-06-17 把正本提交进仓库 orchestrator/wmux-rpc.js，
+    wmux = 拿不到 handler（见 docs/SOP-100-new-machine-setup.md §0）。2026-06-17 把正本提交进仓库 wmux/wmux-rpc.js，
     新机不用再手放。解析顺序：
 
       1) 环境变量 WMUX_RPC_PATH（显式 override · 热改/调试用）

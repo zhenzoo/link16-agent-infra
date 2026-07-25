@@ -157,7 +157,8 @@ Copy-Item "$env:VIBECODING_ROOT\Post\tools\xhs-card-gen\orchestrator\bridge_hist
 
 ### E · 文字残留（cosmetic · 不影响功能）
 
-- link16 内 `feishu/*.py` docstring、`feishu/SETUP-new-machine.md`、`docs/SOP-120` 的 `orchestrator/` 字样 → 当 `feishu/` 读 / 择机改。
+- link16 内 `feishu/*.py` docstring、`docs/SOP-100-new-machine-setup.md`（原 `feishu/SETUP-new-machine.md`）、`docs/SOP-120` 的 `orchestrator/` 字样 → 当 `feishu/` 读 / 择机改。
+- **开机自启的通用做法已收进 [`SOP-100`](SOP-100-new-machine-setup.md) §9**（本文 §2-B 只是本机切流时「改指新路径」的一次性动作）。
 - `README.md` / `CLAUDE.md` 的「未切流·生产仍跑 orchestrator」措辞 → 切稳后更新状态。
 
 ### F · 外仓收尾（照 SOP-130 §5）

@@ -1,8 +1,10 @@
-# SETUP · 把飞书桥装到一台新电脑（runbook）
+# SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
-> **用途**：在一台**新机器**上从零跑起 `feishu/feishu_bridge.py`（飞书桥），挂一个能被手机飞书 @ 的本机 bot。
-> **配套**：架构见 [`docs/ARCH-101-feishu-bridge.md`](../docs/ARCH-101-feishu-bridge.md)（§4.1 跨机可移植）· 依赖见 [`requirements.txt`](requirements.txt)。
-> **首次实证**：2026-06-16 在第二台机（`zhenz` / `D:`）跑通本流程，卡点全部记录在下方。
+> **用途**：在一台**新机器**上从零跑起 `feishu/feishu_bridge.py`（飞书桥），挂上能被手机飞书 @ 的本机 bot，并配好**开机自启**（§9）。
+> **这是新机器部署的唯一入口文档** —— clone 完本仓，从 §1 顺着做到 §9 就完事。
+> **配套**：架构见 [`ARCH-110-feishu-bridge.md`](ARCH-110-feishu-bridge.md)（§4.1 跨机可移植）· 依赖见 [`feishu/requirements.txt`](../feishu/requirements.txt) · 注册 bot 细节见 [`SOP-120-feishu-register.md`](SOP-120-feishu-register.md)。
+> **实证**：2026-06-16 第二台机（`zhenz` / `D:`）跑通 §1–§8；2026-07-25 第一台机（`zhuzhen` / `E:`）跑通 §9 开机自启。
+> **原名** `feishu/SETUP-new-machine.md`（2026-07-25 按全局 `TYPE-NNN-slug` 规范搬进 `docs/` 并编号）。
 
 ---
 
@@ -16,7 +18,7 @@
 
 > 🔑 **「为什么之前在新机器拿不到 wmux handler？」** —— 因为缺 `wmux-rpc.js`。桥靠 `node <wmux-rpc.js> rpc workspace.list/new/…` 跟 wmux daemon 对话；这个脚本**原是仓库外的自建脚本（没提交进 git）**，只活在主力机 home，所以 `git pull` 带不来它。新机器 `git clone` 完，Python 装好、wmux 也开着，但只要找不到 `wmux-rpc.js`，桥就连不上 wmux = 拿不到 handler。
 >
-> ✅ **已永久修复（2026-06-17）**：正本已提交进仓库 [`wmux/wmux-rpc.js`](wmux-rpc.js)，桥的 `bridge_env.resolve_wmux_rpc()` 解析顺序 = `WMUX_RPC_PATH` env → `~/wmux-rpc.js`（存在则优先·主力机热改用）→ **仓库副本兜底**。**新机器 clone 完就有了，不用再手放**（§3 的手放步骤现在是可选）。
+> ✅ **已永久修复（2026-06-17）**：正本已提交进仓库 [`wmux/wmux-rpc.js`](../wmux/wmux-rpc.js)，桥的 `bridge_env.resolve_wmux_rpc()` 解析顺序 = `WMUX_RPC_PATH` env → `~/wmux-rpc.js`（存在则优先·主力机热改用）→ **仓库副本兜底**。**新机器 clone 完就有了，不用再手放**（§3 的手放步骤现在是可选）。
 
 ---
 
@@ -24,10 +26,10 @@
 
 | 项 | 怎么查 / 怎么配 |
 |---|---|
-| **`VIBECODING_ROOT` 环境变量** | 指向 `.env` 所在的 VibeCoding 根（如 `D:\410_VibeCoding`）。桥的 `.env` 路径靠它跨机解析（不写死盘符·见 ARCH-101 §4.1）。没设也有上溯/legacy 兜底，但建议设。 |
+| **`VIBECODING_ROOT` 环境变量** | 指向 `.env` 所在的 VibeCoding 根（如 `D:\410_VibeCoding`）。桥的 `.env` 路径靠它跨机解析（不写死盘符·见 ARCH-110 §4.1）。没设也有上溯/legacy 兜底，但建议设。 |
 | **`ccp` 别名（git-bash）** | `~/.bashrc` 里：`alias ccp='CLAUDE_CONFIG_DIR=~/.claude-personal claude --dangerously-skip-permissions'`。桥 spawn 会话时进 bash 打 `ccp` 起 Claude——没有它会话起不出 Claude。 |
 | **node** | `node --version`（`~/wmux-rpc.js` 要 node 跑）。 |
-| **仓库 clone** | `git clone` 本仓库到本机（如 `D:\410_VibeCoding\Post\tools\xhs-card-gen`）。 |
+| **仓库 clone** | `git clone git@github.com:zhenzoo/link16-agent-infra.git` 到本机（惯例位置 `$VIBECODING_ROOT\Post\link16-agent-infra`；`zhenz`/`D:` 那台历史上多一层 `Post\tools\`）。 |
 
 ---
 
@@ -49,7 +51,7 @@ python -c "import lark_oapi; from lark_channel import FeishuChannel, OutboundIma
 ## 3 · wmux + handler（⚠️ 最易卡 · 见 §0 那段）
 
 1. **装 wmux 并打开它**（GUI）。打开后 daemon 起来，home 下会有：`~/.wmux/`（含 `config.json`）、`~/.wmux-auth-token`、`~/.wmux-tcp-port`。
-2. **`wmux-rpc.js` —— ✅ 现在仓库自带，不用手放**（2026-06-17 永久修复）。正本在 [`wmux/wmux-rpc.js`](wmux-rpc.js)，桥/`wmux_session.py` 经 `bridge_env.resolve_wmux_rpc()` 自动引用它（`~/wmux-rpc.js` 存在则优先 → 否则用这份仓库副本）。
+2. **`wmux-rpc.js` —— ✅ 现在仓库自带，不用手放**（2026-06-17 永久修复）。正本在 [`wmux/wmux-rpc.js`](../wmux/wmux-rpc.js)，桥/`wmux_session.py` 经 `bridge_env.resolve_wmux_rpc()` 自动引用它（`~/wmux-rpc.js` 存在则优先 → 否则用这份仓库副本）。
    - 它是基于 wmux 仓库 `examples/event-recorder/wmux-rpc.mjs` 改的 + 加了「workspace 守卫」（跨 workspace 写默认 DENY，只放行 `--allow-ws`；`pane.split` 盲劈拒绝，改用 `split-here`）。
    - 脚本用 `os.homedir()` / `os.userInfo().username` 动态取路径 → **机器无关**。
    - **只在你想热改/override 时**才放 `~/wmux-rpc.js`（它存在则优先）或设环境变量 `WMUX_RPC_PATH=<路径>`。
@@ -126,7 +128,7 @@ cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json
 ```
 编辑 `bridge-bots.local.json`：`name` 对应 `--bot` 标识 · `app_id_env`/`app_secret_env` 是 `.env` 键名 · `cwd` 指向**本机**要驱动的仓库绝对路径。
 
-> **语义**：`bridge-bots.local.json` 存在 = **整盘接管**——桥**只跑**它列的 bot，整盘覆盖 committed 的 `bridge-bots.json`（不合并）。这样本机只连自己的 bot（不撞别的机），也不动入了 git 的共享文件。它已 **gitignore**。详见 ARCH-101 §4.1。
+> **语义**：`bridge-bots.local.json` 存在 = **整盘接管**——桥**只跑**它列的 bot，整盘覆盖 committed 的 `bridge-bots.json`（不合并）。这样本机只连自己的 bot（不撞别的机），也不动入了 git 的共享文件。它已 **gitignore**。详见 ARCH-110 §4.1。
 
 ---
 
@@ -140,6 +142,99 @@ python feishu/feishu_bridge.py status     # 看进程/会话活没活
 
 ---
 
+## 9 · 开机自启（必做 · 否则每次开机都得手动跑 §8）
+
+### 9.0 · 心智模型：**两半都要自启，而且都挂在「登录」上**
+
+桥是两半（§0）：**wmux 半边**托管 Claude 会话、**Python 半边**连飞书。开机后要能无人值守干活，**两半都得自己起来**：
+
+| 半边 | 靠什么自启 | 装机时通常 |
+|---|---|---|
+| **wmux**（GUI） | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `wmux` 项 | wmux 安装程序**自己写好**，一般不用管，§9.1 只是核对 |
+| **飞书桥**（Python） | 计划任务 **`FeishuBridge-Autostart`** | **要手动建**，见 §9.2 |
+
+> 🚨 **别把触发器改成「开机时（不等登录）」——那是个看着更强、实际全废的陷阱。** 两个硬理由：
+> 1. **wmux 是 Electron 桌面应用**（进程带 `--type=renderer` / `--type=gpu-process`），必须有**交互式桌面会话**才活得了。没登录 = 没 wmux = 桥虽然连上了飞书，但收到消息时开不出面板，第一条消息就白扔。
+> 2. 「不等登录」的任务只能以 **SYSTEM** 跑（或把你密码存进任务里跑 Session 0）。SYSTEM 的 home 是 `C:\Windows\System32\config\systemprofile` → `~/.claude-personal`、`~/.wmux`、`$VIBECODING_ROOT\.env` **一个都找不到**，桥连起都起不来。
+>
+> ✅ **真想「通电后手都不用碰」的正解不是改触发器，而是给这台机开 Windows 自动登录**（`netplwiz` 取消「必须输入密码」）。那样链路是：通电 → 自动进桌面 → wmux 自启 → 延迟后桥自启 → 全套活的。代价 = 密码落本地 + 任何人开机即进桌面，**按机器所处环境自己权衡**。
+
+### 9.1 · 核对 wmux 登录自启
+
+```powershell
+Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | Select-Object wmux
+```
+有值（指向 `…\AppData\Local\wmux\app-<ver>\wmux.exe`）= 已配好。**没有**就补一条：
+```powershell
+$wmux = (Get-ChildItem "$env:LOCALAPPDATA\wmux" -Directory -Filter 'app-*' | Sort-Object Name -Descending | Select-Object -First 1).FullName + "\wmux.exe"
+Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name wmux -Value "`"$wmux`""
+```
+
+### 9.2 · 建飞书桥的计划任务（**机器无关 · 整段照抄照跑**）
+
+> 全部走变量取值（`Get-Command` 找解释器、`$env:USERNAME` 取账号、`$env:VIBECODING_ROOT` 取根），**不写死盘符/用户名** —— 任何机器整段粘进 PowerShell 即可。
+
+```powershell
+# ① 本机三个坐标（唯一可能要改的是 $repo：有的机多一层 Post\tools\）
+$repo = "$env:VIBECODING_ROOT\Post\link16-agent-infra"
+if (-not (Test-Path $repo)) { $repo = "$env:VIBECODING_ROOT\Post\tools\link16-agent-infra" }
+$py   = (Get-Command pythonw).Source        # pythonw = 无控制台窗口，开机不闪黑窗
+$me   = "$env:USERDOMAIN\$env:USERNAME"
+"repo=$repo`npy=$py`nuser=$me"              # 先肉眼核一眼这三行
+
+# ② 注册任务
+$action    = New-ScheduledTaskAction -Execute $py -Argument "`"$repo\feishu\feishu_bridge.py`" start" -WorkingDirectory $repo
+$trigger   = New-ScheduledTaskTrigger -AtLogOn -User $me
+$trigger.Delay = "PT1M"                     # 留 1 分钟给 wmux 起完 + 网络就绪
+$principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+             -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+
+Register-ScheduledTask -TaskName "FeishuBridge-Autostart" -Action $action -Trigger $trigger `
+  -Principal $principal -Settings $settings -Force `
+  -Description "登录后延迟 1 分钟跑 link16 的 feishu_bridge.py start，拉起名册全部 bot 桥进程 + cron 守护。"
+```
+
+**各参数为什么这么设**：
+
+| 参数 | 为什么 |
+|---|---|
+| `pythonw.exe`（不是 `python.exe`） | 无控制台 → 开机不弹黑窗。已验：无 console 时 Python 的 `print` 是安全空操作（`sys.stdout is None` 时直接返回），**不会**把 `cmd_start` 打断，后面的 `bridge_cron.py start` 照常跑 |
+| `-AtLogOn` + `Delay PT1M` | 见 §9.0 那个陷阱；1 分钟让 wmux daemon 和网络先就位（桥其实是**收到消息才**去找 wmux，延迟只是保险） |
+| `-LogonType Interactive` | 以你本人身份跑在桌面会话里 → `Path.home()`、`VIBECODING_ROOT`、`~/.wmux` 全部正确 |
+| `-ExecutionTimeLimit ([TimeSpan]::Zero)` | 不限时。桥是常驻进程，默认 3 天上限会被杀 |
+| `-MultipleInstances IgnoreNew` | 已在跑就不重复起（`run` 那层本来也有单实例锁兜底） |
+| 不加 `-RunLevel Highest` | 不需要管理员；普通权限即可，也不会弹 UAC |
+
+### 9.3 · 验收（**不用真重启，手动触发一次即可**）
+
+```powershell
+Start-ScheduledTask -TaskName "FeishuBridge-Autostart"; Start-Sleep 12
+Get-ScheduledTaskInfo FeishuBridge-Autostart | Select-Object LastRunTime, LastTaskResult   # 期望 LastTaskResult = 0
+Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
+  Where-Object { $_.CommandLine -match 'feishu_bridge|bridge_cron' } |
+  ForEach-Object { ($_.CommandLine -split 'feishu\\')[-1] }
+```
+期望：**每个名册 bot 各一行 `feishu_bridge.py run --bot <name>`，外加一行 `bridge_cron.py run`**（cron 守护随整体 `start` 一起起）。
+
+再看日志坐实真连上了飞书云：
+```bash
+tail -5 feishu/_logs/bridge-<某个bot>.log
+# 期望有新的 ========== restart <时间> ========== + "bot identity resolved" + "connected to wss://msg-frontier.feishu.cn"
+```
+
+### 9.4 · 排错
+
+| 症状 | 病因 / 修 |
+|---|---|
+| `LastTaskResult` 非 0 / 进程数为 0 | `$py`/`$repo` 路径不对 → 重跑 §9.2 ① 那三行核对 |
+| 任务跑了、桥起了，但 @ bot 没反应 | wmux 没起（§9.1）或没登录桌面 → 见 §9.0 陷阱 |
+| 开机后要等很久才活 | 正常：登录 + 1 分钟延迟；急就把 `PT1M` 改 `PT30S` 再 `Set-ScheduledTask` |
+| 想临时停掉自启 | `Disable-ScheduledTask -TaskName FeishuBridge-Autostart`（重开 `Enable-`） |
+| 换了仓库路径 / 换了 Python | 重跑 §9.2 整段（带 `-Force`，直接覆盖旧任务） |
+
+---
+
 ## 附录 A · 排错速查
 
 | 症状 | 病因 / 修 |
@@ -150,12 +245,10 @@ python feishu/feishu_bridge.py status     # 看进程/会话活没活
 | 桥起了会话但里面没出 Claude | §1 `ccp` 别名没配 |
 | 桥连不到 `.env` / 凭证空 | `VIBECODING_ROOT` 没设且上溯找不到 `.env`（§1）；或 §6 没 register |
 | 手动开的 wmux 终端不是 git-bash / 目录不对 | §4 GUI 设置（不是改 config.json） |
+| 开机后桥没自己起来 / 每次都要手动 `start` | §9 开机自启没配（或任务被禁用）→ 见 §9.4 |
 
 ## 附录 B · 已知跨机硬编码残留（不影响「只跑本机 bot」）
 
 - ✅ **`wmux-rpc.js` 已永久解（2026-06-17）**：正本进仓库 `wmux/wmux-rpc.js`，**桥 + `wmux_session.py` 已改走 `bridge_env.resolve_wmux_rpc()`**（home 优先 → 仓库副本兜底 → `WMUX_RPC_PATH` override）。新机不用手放。
-- ⚠️ **autopilot 那两个调用方仍未跨机化**（只影响巡航/看门狗·本机只跑本机 bot 可无视）：
-  - `_autopilot/spawn_worker.py`：`RPC = Path.home()/"wmux-rpc.js"`（home-only·没走 resolver·新机无 home 副本会断）。
-  - `_autopilot/watchdog.py`：写死 `%USERPROFILE%\wmux-rpc.js` **+** `REPO = E:\410_VibeCoding\Post\xhs-card-gen`（整个脚本深度耦合 REPO·要跑巡航得先把 REPO 也 PROJECT 化）。
-  - → 真要在新机跑巡航，把这两处也接 `resolve_wmux_rpc()` + watchdog 的 `REPO` 改 PROJECT 派生（独立任务）。
+- ~~autopilot 的 `spawn_worker.py` / `watchdog.py` 硬编码~~ —— **已随抽离作废**：`_autopilot/` 是 xhs 时代的巡航目录，link16 仓里不存在这两个脚本（2026-07-25 核实）。
 - `feishu/bridge-cd-bookmarks.json`（committed）：`/cd` 书签指向主力机路径。本机要本地化可放 `bridge-cd-bookmarks.local.json`（已 gitignore），但**桥目前未读 local 版**（需要时补一行解析）。挂本机 bot 不依赖 `/cd` 书签——cwd 在 bot 名册里直接给。
