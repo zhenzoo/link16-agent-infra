@@ -3,6 +3,21 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.7.3 — 新机器部署收口成 SOP-100 + 开机自启标准做法（2026-07-25）
+
+**WHY**：主人问「桥的开机自启配置属于 link16 仓吗？以后再部署电脑，照哪份文档？」——一查是**真空白**：装机 runbook（`feishu/SETUP-new-machine.md`）教到 §8「手动 `start` + 验收」就断了，**开机自启只字未提**；`SOP-131` 里虽出现过任务名，但那是本机切流时「把**已存在**的任务改指新路径」的一次性动作，不是从零建的教程。⇒ **新机器照着做完，每次开机仍得手动敲一遍 `start`。** 同时那份 runbook 本身违反全局 `TYPE-NNN-slug` 规范（不在 `docs/`、无编号），还引用着早已改名的 `ARCH-101`。
+
+**WHAT**
+- **提拔收口**：`feishu/SETUP-new-machine.md` → **`docs/SOP-100-new-machine-setup.md`**（`git mv` 保历史）。编号 `100` = `1xx` 飞书桥区段的**第一环节（装机）**，排在 `ARCH-110`/`SOP-120`/`SOP-130` 之前；个位留 0 备插补。⇒ **新机器部署从此只有一个入口**：clone → `CLAUDE.md` 文档表 → SOP-100 → §1 顺着做到 §9。
+- **新增 §9 开机自启**（9.0 心智模型 / 9.1 wmux / 9.2 建任务 / 9.3 验收 / 9.4 排错）。**两半各自自启**：wmux 靠注册表 `HKCU\…\Run` 的 `wmux` 项（安装程序自带·只需核对），飞书桥靠计划任务 **`FeishuBridge-Autostart`**（**要手建**）。两者都**不进仓**——和 `.env`、`bridge-bots.local.json` 同类，属机器本地配置，仓库只负责「教怎么配」。
+- **§9.2 整段机器无关、可照抄**：`(Get-Command pythonw).Source` 取解释器 · `$env:USERDOMAIN\$env:USERNAME` 取账号 · `$env:VIBECODING_ROOT` 取根 + 「有的机多一层 `Post\tools\`」自动兜底 → **零硬编码盘符/用户名**。本机把文档原文粘回 PowerShell 实跑验证过（带 `-Force` 幂等重建，参数与预期逐项一致）。
+- **🚨 决策记死在 §9.0：触发器必须 `-AtLogOn`，不准「改进」成开机不等登录。** 两条硬理由：① **wmux 是 Electron 桌面应用**（进程带 `--type=renderer` / `--type=gpu-process`），必须有交互式桌面会话 → 没登录 = 没 wmux = 桥连上飞书了也**开不出面板**，第一条消息就白扔；② 「不等登录」只能以 **SYSTEM** 跑，其 home 是 `C:\Windows\System32\config\systemprofile` → `~/.claude-personal`、`~/.wmux`、`$VIBECODING_ROOT\.env` **一个都找不到**，桥连起都起不来。真要「通电即用」的正解 = 开 Windows 自动登录（权衡也写进去了）。
+- **参数取舍表**（每项写清为什么）：`pythonw`（无控制台不闪黑窗·已验无 console 时 `sys.stdout is None`、`print` 是安全空操作，**不会**打断 `cmd_start` 后面的 `bridge_cron.py start`）· `Delay PT1M`（等 wmux+网络）· `LogonType Interactive`（保 `Path.home()`/env 正确）· `ExecutionTimeLimit 0`（**防默认 3 天上限杀掉常驻桥**）· `MultipleInstances IgnoreNew`。
+- **本机（tb24 · `zhuzhen`/`E:`）已建好并验收**：`LastTaskResult=0`，**12 bot + 1 cron 守护 = 13 进程全起**，各 `feishu/_logs/bridge-<bot>.log` 有新 `restart` 分隔线 + `connected to wss://msg-frontier.feishu.cn`。此前本机**没有**该任务（只有 `zhenz`/`D:` 那台有）。
+- **顺带修**：`ARCH-101`→`ARCH-110` 失效引用、搬家后的相对链接、clone 示例从 `xhs-card-gen` 改 link16；删掉附录 B 里**已作废**的 `_autopilot/spawn_worker.py` + `watchdog.py` 硬编码条目（核实：link16 仓无 `_autopilot/`）。改锚 3 处引用方：`ARCH-110 §4.1` / `SOP-131 §E` / `feishu/bridge_env.py` docstring；`CLAUDE.md` 文档表登记新条目。
+
+---
+
 ## v0.7.2 — 两处防御性硬化 + 名册同步（2026-07-23）
 
 **WHY**：v0.7.1 后攒了 2 个真 fix + 3 条名册/配置同步，都已落地验证、无在制系列 → 给两台机留一个干净回退点。两个 fix 都是**「守着答案却报错 / 崩掉」**类的防御缺口，不改任何行为契约。
