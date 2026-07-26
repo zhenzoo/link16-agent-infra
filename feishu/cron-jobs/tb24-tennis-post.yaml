@@ -7,7 +7,7 @@ jobs:
     的 01:00)
   cron: 5 2 * * *
   tz: Asia/Shanghai
-  enabled: false
+  enabled: true
   prompt: '开启今天的 tennis post 巡航：按本仓 CLAUDE.md「🚀 巡航触发」+ docs/ARCH-300 §2 主循环跑——你当【总控】、自己不写帖，串行开子面板、每篇一个全新
     headless 会话写帖，本次【固定写 2 篇】。别问确认、别自己写帖、别停。
 
@@ -30,7 +30,7 @@ jobs:
 - name: comment-factcheck-daily
   cron: 0 9 * * *
   tz: Asia/Shanghai
-  enabled: false
+  enabled: true
   desc: 每天09:00拉 tennis-post 所有已发帖小红书评论→按 ARCH-240 §4 溯源定责→报主人建议(改帖 or 回评)·不擅自动手
   prompt: '每天 09:00 评论 fact-check（按本仓 docs/ARCH-240 §4 溯源闭环）：① 用 tikhub 拉 ZHEN好玩 账号所有已发帖的小红书评论——note IDs
     见 SPEC-210 发布记录（如 P001=6a47a0e3000000001c026797 / P005=6a4deb3e0000000007028953），没登记的先 tikhub search
