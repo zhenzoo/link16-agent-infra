@@ -2219,6 +2219,9 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                 doc_url, doc_ok = res.get("url"), True
                 if grant_oid and not res.get("granted", True):
                     blog(bot_name, f"⚠️ send --doc 授权 owner 失败({res.get('grant_error')})·你点链接可能无权限")
+                if res.get("public") is False:   # 默认设「任何人凭链接可读」·失败只降级为组织内可见·不挡投递
+                    blog(bot_name, f"⚠️ send --doc 公开链接设置失败({res.get('public_error')})·"
+                                   "外人/别的智能体点链接可能打不开（仅组织内可见）")
             except Exception as e:  # noqa: BLE001
                 doc_ok = False
                 blog(bot_name, f"send --doc 失败: {str(e)[:250]}")

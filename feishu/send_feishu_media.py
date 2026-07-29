@@ -130,12 +130,14 @@ def main():
 
     out = {"sent": sent, "url": url, "token": res.get("token"), "items": res.get("items"),
            "granted": res.get("granted"), "grant_error": res.get("grant_error"),
+           "public": res.get("public"), "public_error": res.get("public_error"),
            "bot": a.bot, "to": target}
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
         g = "" if res.get("granted", True) else f" ⚠️授权失败({res.get('grant_error')})"
-        print(f"{'✅ 已发链接' if sent else '❌ 链接未送达'} → {target}（{len(paths)} 媒体 · {url}）{g}")
+        p = "" if res.get("public") is not False else f" ⚠️公开链接设置失败({res.get('public_error')})·仅组织内可见"
+        print(f"{'✅ 已发链接' if sent else '❌ 链接未送达'} → {target}（{len(paths)} 媒体 · {url}）{g}{p}")
     sys.exit(0 if sent else 1)
 
 

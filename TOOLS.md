@@ -20,11 +20,11 @@
 | `feishu/registry.py` ⭐ | **查名册**：跨机 agent 目录（SSOT=`feishu/agent-registry.json`）唯一查询入口——所有 agent 有哪些名/在哪台机/分管哪个仓/open_id/某仓该通知对面谁拉。**别手 grep JSON、别读 SOP-120 人读表**。也导出 `name_for_open_id()`/`peers_for_repo()` 给桥修戳 + repo-sync 路由用 | `python feishu/registry.py`（全量）/ `peers <仓> --exclude-machine tb25`（路由）/ `resolve <open_id>`（→名字）/ `whois <名\|open_id>` |
 | `feishu/bridge_scope_audit.py` ⭐ | **查 bot 权限矩阵 + 缺权限授权链**（官方 `/scopes`）· **查权限唯一入口** | `python feishu/bridge_scope_audit.py --all-env` |
 | `feishu/bridge_feishu_probe.py` ⭐ | **飞书 API 调试探针**：读各 bot 真实消息历史 / 验真送达 / **一步读 a2a 群**（`--group`/`--chat`·不绕 DM·ARCH-140 §4 兜底读） | `python feishu/bridge_feishu_probe.py --all --recent 3` / `--bot X --verify "片段"` / `--bot X --group --recent 5` |
-| `feishu/feishu_docs.py` | 本地 md/HTML → 飞书云在线文档（`send --doc` 底层）；CLI/receipt 报真实源字符/字节，桥内 p2a final 自动对账原始 URL | `python feishu/feishu_bridge.py send --bot X --doc <file>` |
+| `feishu/feishu_docs.py` | 本地 md/HTML → 飞书云在线文档（`send --doc` 底层）；**产出链接一律「任何人凭链接可读」**（2026-07-29 起默认·人/别的 bot/外人点开即看·`set_public_link()`）；CLI/receipt 报真实源字符/字节，桥内 p2a final 自动对账原始 URL | `python feishu/feishu_bridge.py send --bot X --doc <file>` |
 | `feishu/send_feishu_msg.py` ⭐ | 主动发**纯文字 + @人/@bot** ·`--to-agent <名>` 发到共享群 @对方。**这是发 peer 的【唯一】路**（ARCH-140 v0.6）：agent 普通回复恒回主人 DM，要让某 peer 收到任何东西（派活/回结果/续轮）都必须主动调它。反射性回复到不了 peer → 死循环结构上没了 | `python feishu/send_feishu_msg.py --bot X --to-agent Y --text "..."` |
 | `feishu/send_feishu_file.py` ⭐ | 发**文件本体**附件 | `python feishu/send_feishu_file.py --bot X --to oc_群 --file <f>` |
 | `feishu/send_feishu_voice.py` ⭐ | 发**可拖进度条语音**（带 duration） | `python feishu/send_feishu_voice.py --bot X --audio <a> --text "说明"` |
-| `feishu/send_feishu_media.py` ⭐ | 发**图/视频/媒体在线看**链接（嵌 docx） | `python feishu/send_feishu_media.py --bot X --media <m> --title "..."` |
+| `feishu/send_feishu_media.py` ⭐ | 发**图/视频/媒体在线看**链接（嵌 docx·同走 `feishu_docs`·链接同样默认任何人可看） | `python feishu/send_feishu_media.py --bot X --media <m> --title "..."` |
 | `feishu/feishu_rest.py` | 飞书 REST 原语（api/tenant_token/send_msg · 纯标库绕代理） | （feishu_docs/media/voice 内部用） |
 | `feishu/agent_runtime.py` · `feishu/bridge_env.py` | 多 runtime SSOT（Claude/Codex） · 跨机路径解析（.env/名册/wmux-rpc） | （库） |
 

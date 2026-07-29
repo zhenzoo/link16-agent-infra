@@ -51,7 +51,7 @@
   - `/stop` → `ctrl+c` 打断当前 turn
   - `/close` → `workspace.close` 干净撤掉这个 bot 的会话 + **清注册表（含 `/cd` 过的 `cwd`）+ 账号切回名册默认** → **下次 @ 用名册默认账号 + 默认目录重建**。起会话/关会话/自愈重生的飞书提示都打印「账号 + 目录」并各自标注「（默认）/（已切·默认 X）」，让你一眼看出用哪个号、在哪个目录起的。
   - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
-  - `/account <别名> [目录]` → **切登录账号**（临时·关旧会话·可叠加 `/cd` 目录·懒启动：发下条正式消息才真起）。别名 `cc/ccp/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
+  - `/account <别名> [目录]` → **切登录账号**（临时·关旧会话·可叠加 `/cd` 目录·懒启动：发下条正式消息才真起）。别名 `cc/ccp/ccp2/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义 · `ccp2` = 个人第二号，母版镜像：skills/commands/memory 整目录 junction 回 `~/.claude-personal`、`CLAUDE.md` 走 `@import`）。
   - `/help` → 列全部命令 + `/cd` 书签清单
   - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进 ccp 会话**（verbatim·**绝不缀 `[飞书]` 标记**·否则行首不是 `/` → CC 不认成 slash command）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
 
@@ -356,8 +356,9 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 2. **建导入任务** `POST /drive/v1/import_tasks`（`type=docx` · `point={mount_type:1, mount_key:""}`=bot 云空间根目录）→ `data.ticket`。
 3. **轮询** `GET /drive/v1/import_tasks/{ticket}`（间隔 2s·上限 ~30 次）→ **成功判据 = `job_status==0` 且 `token` 非空**（坑：status=0 但 token 空 = 仍处理中·别当成功）→ 取 `data.result.{token,url}`。
 4. **授权 owner（关键坑·否则你点链接「无权限」）** `POST /drive/v1/permissions/{token}/members?type=docx`（body `{member_type:"openid", member_id:<owner open_id>, perm:"view", type:"user"}`）。⚠️ body 的 `type:"user"`(成员类别) ≠ query 的 `type=docx`(资源类别)·两个都要传。
-5. **发链接**：把 `data.result.url` 用 `card_send` 发到 DM（原始 URL 明文可见且可点）。
-6. **final 对账（PLAN-921）**：桥内同 bot 的 p2a 回合用 `send --doc` 成功取得 URL 后，追加一条 `kind=doc_delivery` 到该 bot outbox；drainer 去重并原子持久化到 `bridge-delivery-state-<bot>.json`，在下一条匹配的 p2a answer 追加“标题 + 原始 docx URL”。answer 真正送达后才清账；失败重试、桥重启都保留。显式 `--to`、手工 terminal、别的 bot 与 a2a 路由不登记，避免串收件人。
+5. **设【任何人凭链接可读】（2026-07-29 起默认开·Publisher 拍板）** `PATCH /drive/v2/permissions/{token}/public?type=docx`（body `{external_access_entity:"open", link_share_entity:"anyone_readable", security_entity/comment_entity/copy_entity:"anyone_can_view"}`·SSOT = `feishu_docs._PUBLIC_LINK_BODY` + `set_public_link()`）。**为什么**：飞书新建文档默认 `link_share_entity=tenant_readable`（**仅本组织内**），主人转给别人、别的智能体拿去读都会「无权限」——每次还要手动去文档里点开分享设置，纯摩擦。现在建完自动设成互联网任何人凭链接可阅读（**只读·不可编辑**）。⚠️ **必须 v2 端点**（v1 是老式 bool 字段、没有 `link_share_entity` 这套 enum）；scope 沿用 `drive:drive`、不用加新权限。失败**不 raise**（文档已建好·只是降级回组织内可见）·返回 `public:false` + `public_error` 让上层 warn。
+6. **发链接**：把 `data.result.url` 用 `card_send` 发到 DM（原始 URL 明文可见且可点）。
+7. **final 对账（PLAN-921）**：桥内同 bot 的 p2a 回合用 `send --doc` 成功取得 URL 后，追加一条 `kind=doc_delivery` 到该 bot outbox；drainer 去重并原子持久化到 `bridge-delivery-state-<bot>.json`，在下一条匹配的 p2a answer 追加“标题 + 原始 docx URL”。answer 真正送达后才清账；失败重试、桥重启都保留。显式 `--to`、手工 terminal、别的 bot 与 a2a 路由不登记，避免串收件人。
 
 **支持**：`.md`/`.markdown`/`.mark` 和 `.html` 都导成 docx（文档类只能导成 docx）。≤20MB 走单次上传。
 
@@ -368,7 +369,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 > - **怎么开**：`register_feishu_app.py` 建完会打印**一键开通链**（`feishu_docs.auth_url(app_id)`），**Claude 把它发给 Publisher** → 点开 → 开通（**务必选「应用身份/tenant_access_token」·不是用户身份**！2026-06-17 podcast/social_media 实证：只开用户身份仍全拒）→ **创建版本并发布**才生效。铺老 bot 同理（各 app_id 一条链）。
 > - 判定够没够：`python feishu/_tmp/_probe_scopes.py <bot>`（4 步都不报 `99991672` = 通）。一键预置建的 app **不含**这权限·必走此步。
 
-**边界（诚实）**：① 你在飞书里改了文档，**改动留在飞书云那篇·不会自动回灌本地 `.md`**——回灌要再加一步（`GET /docs/v1/content` 把文档拉回 markdown 覆盖本地）·是 v2。② 它**会在飞书云存一份文档**（导入到 bot 云空间根目录·可后续归到专用文件夹/定期清）——Publisher 已知此 tradeoff 并接受。③ `type=docx` 与 public 分享 enum 有「不确定」项·首篇先测（见 plan）。
+**边界（诚实）**：① 你在飞书里改了文档，**改动留在飞书云那篇·不会自动回灌本地 `.md`**——回灌要再加一步（`GET /docs/v1/content` 把文档拉回 markdown 覆盖本地）·是 v2。② 它**会在飞书云存一份文档**（导入到 bot 云空间根目录·可后续归到专用文件夹/定期清）——Publisher 已知此 tradeoff 并接受。③ ~~`type=docx` 与 public 分享 enum 有「不确定」项·首篇先测~~ → **2026-07-29 实测定案**：`drive/v2/permissions/{token}/public?type=docx` 的 `link_share_entity` 支持 `anyone_readable`，本机个人版飞书（`my.feishu.cn`）`lock_switch=false`、可自由设 → 已定为默认（见链路第 5 步）。若换成有安全策略的企业租户、管理员锁了外链，此步会返非 0 → 自动降级为组织内可见并 warn，**属组织策略不是代码问题**。
 
 **SSOT / 不硬编码**：复用 `scripts/send_card_feishu.py` 的 `api`/`tenant_token`（stdlib·绕代理·不重写 token 逻辑）；owner open_id 取桥已持久化的 `bridge-owner-<bot>.json` / 会话 open_id；不硬编码 folder/盘符/用户名。`send` 的建文档与直发是独立短进程、即改即用；PLAN-921 的 final 对账由常驻 drainer 消费，需重启对应 bot bridge 后生效。CLI/receipt 同时记录正文字符数、文档源字符数/字节数与 doc URL，不再把 doc-only 误报成“0 字”。
 
@@ -386,7 +387,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
    - **图片**（jpg/png/gif/webp/bmp/heic…）→ 建空 `block_type:27 image:{}` 块 → 上传 `medias/upload_all`（`parent_type=docx_image` · **`parent_node=图片块 block_id`** · multipart 带 `size`）→ `PATCH …/blocks/{id}` `{"replace_image":{"token":file_token}}`。
    - **其他**（视频/音频/pdf/任意）→ 建空 `block_type:23 file:{}` 块（飞书生成**两层**：外 `33` View · 内 `23` file·取**内层 block_id**）→ 上传（`parent_type=docx_file` · **`parent_node=内层文件块 block_id`**·⚠️ **不是 document_id**·fan-sun 参考实现用 doc_id 会撞 `1770013 relation mismatch`·2026-06-19 实证修正）→ `PATCH` `{"replace_file":{"token":file_token}}`。视频/音频/pdf 在文档里**自带内联播放器/预览**。
 3. **取链接** `POST /drive/v1/metas/batch_query`（`request_docs:[{doc_token,doc_type:"docx"}]` · `with_url:true`）→ `data.metas[0].url`（如 `https://my.feishu.cn/docx/…`）。
-4. **授权 owner**（同 §2.11·`permissions/{token}/members?type=docx`·`perm` 默认 `view`）→ **发裸 URL**（单独一行·不进代码块·才可点）。
+4. **授权 owner**（同 §2.11·`permissions/{token}/members?type=docx`·`perm` 默认 `view`）→ **设【任何人凭链接可读】**（同 §2.11 第 5 步·`set_public_link()`·2026-07-29 起默认开）→ **发裸 URL**（单独一行·不进代码块·才可点）。
 
 **坑备忘**：① 建空块 `image:{}`/`file:{}` **必须为空**（带 name/token → `1770001`）。② `docx_file` 上传点 `parent_node` = **内层文件块 block_id**（与图片对称·非 document_id）。③ docx 块写接口限频 3/秒·多媒体批量注意。④ 媒体存进 bot 云空间那篇 docx（不在你个人盘·不乱你视野·可定期清）。
 

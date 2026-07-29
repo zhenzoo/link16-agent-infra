@@ -5,7 +5,8 @@
 旁挂小工具（**不塞 feishu_bridge 主回路**）。被 `feishu_bridge.py send --doc` 调，也可任意会话直接
 `import feishu_docs` 用。链路全 tenant_access_token·bot 身份（详见 ARCH-101 §2.11）：
 
-  upload_all(file_token) → import_tasks(ticket) → 轮询(token+url) → permissions/members 授权 owner → url
+  upload_all(file_token) → import_tasks(ticket) → 轮询(token+url) → permissions/members 授权 owner
+  → permissions/public 设【任何人凭链接可读】(2026-07-29 起默认) → url
 
 🚨 前置：bot 应用开 `drive:drive` + `docx:document`(:create) 这组云文档 scope 才贯通全链（创建 docx 必须 docx；
    drive:drive 只够 upload/import/授权）。一键全开见 register_feishu_app.py（Publisher 后台开通·见 ARCH-101 §2.11）。
@@ -141,12 +142,43 @@ def _grant_member(token: str, doc_token: str, open_id: str, perm: str = "edit"):
     return True, None
 
 
+# 「拿到链接的任何人都能打开看」这一档的公开配置（Publisher 2026-07-29 拍板：
+# 本桥产出的在线文档【一律】走这档 —— 不管是主人自己、别的智能体(a2a)、还是转给外人，
+# 点开就能读，不再有「无权限 / 需要申请」这层摩擦）。
+#   · link_share_entity=anyone_readable  互联网上【获得链接的任何人可阅读】（默认 tenant_readable=仅组织内 → 外人打不开）
+#   · external_access_entity=open        允许分享到组织外（不开的话 anyone_readable 也传不出去）
+#   · security/comment/copy=anyone_can_view  可查看/可评论/可复制（只读够看·不给编辑）
+_PUBLIC_LINK_BODY = {
+    "external_access_entity": "open",
+    "link_share_entity": "anyone_readable",
+    "security_entity": "anyone_can_view",
+    "comment_entity": "anyone_can_view",
+    "copy_entity": "anyone_can_view",
+}
+
+
+def set_public_link(token: str, doc_token: str, *, doc_type: str = "docx"):
+    """Step5 把文档链接设成【任何人凭链接可读】（drive v2 permissions/public·PATCH）。
+
+    失败不 raise——文档已建好、owner 也授过权·只是外人/别的 bot 可能打不开·返回 (False, err) 让上层 warn。
+    注：v2 端点才有 `link_share_entity` 这套 enum（v1 是老式 bool 字段）；scope 用 `drive:drive` 即可。
+    若企业管理员锁了外链（`lock_switch=true` / 安全策略），这里会返非 0 —— 属于组织策略、不是代码问题。"""
+    d = api("PATCH", f"{BASE}/drive/v2/permissions/{doc_token}/public?type={doc_type}",
+            token=token, body=dict(_PUBLIC_LINK_BODY))
+    if d.get("code") != 0:
+        return False, f"{d.get('code')} {d.get('msg')}"
+    return True, None
+
+
 def publish_file_as_doc(app_id: str, app_secret: str, file_path, *,
                         grant_open_id: str | None = None, perm: str = "edit",
                         folder_token: str = "", name: str | None = None,
-                        dry_run: bool = False) -> dict:
-    """本地 md/HTML → 飞书云文档 → (授权 owner) → 返回 {url, token, type, granted, grant_error}。
-    perm: view/edit/full_access（默认 edit·满足「能改存」）。dry_run: 只回显将走的链路不真发。"""
+                        public: bool = True, dry_run: bool = False) -> dict:
+    """本地 md/HTML → 飞书云文档 → (授权 owner) → (设公开链接) → 返回
+    {url, token, type, granted, grant_error, public, public_error}。
+    perm: view/edit/full_access（默认 edit·满足「能改存」）。
+    public: 默认 True = 【拿到链接的任何人（人 / 别的智能体 / 外人）都能打开阅读】（见 set_public_link）。
+    dry_run: 只回显将走的链路不真发。"""
     path = Path(file_path)
     if not path.is_file():
         raise DocImportError(f"文件不存在: {file_path}")
@@ -156,9 +188,10 @@ def publish_file_as_doc(app_id: str, app_secret: str, file_path, *,
     title = name or path.stem
     if dry_run:
         return {"dry_run": True, "ext": ext, "title": title, "grant_open_id": grant_open_id,
-                "perm": perm,
+                "perm": perm, "public": public,
                 "chain": ["upload_all", "import_tasks", "poll(job_status==0&&token)",
-                          (f"grant_member(perm={perm})" if grant_open_id else "skip-grant")]}
+                          (f"grant_member(perm={perm})" if grant_open_id else "skip-grant"),
+                          ("set_public_link(anyone_readable)" if public else "skip-public")]}
     token = _tenant_token(app_id, app_secret)
     file_token = _upload_media(token, path, ext)
     ticket = _create_import_task(token, file_token, ext, title, folder_token)
@@ -166,7 +199,11 @@ def publish_file_as_doc(app_id: str, app_secret: str, file_path, *,
     granted, gerr = True, None
     if grant_open_id:
         granted, gerr = _grant_member(token, doc_token, grant_open_id, perm)
-    return {"url": url, "token": doc_token, "type": dtype, "granted": granted, "grant_error": gerr}
+    pub, perr = None, None
+    if public:
+        pub, perr = set_public_link(token, doc_token)
+    return {"url": url, "token": doc_token, "type": dtype, "granted": granted, "grant_error": gerr,
+            "public": pub, "public_error": perr}
 
 
 # ============================================================================
@@ -287,10 +324,12 @@ def _doc_url(token: str, doc_id: str) -> str:
 def publish_media_as_doc(app_id: str, app_secret: str, files, *,
                          title: str | None = None, captions=None,
                          grant_open_id: str | None = None, perm: str = "view",
-                         dry_run: bool = False) -> dict:
-    """本地【图片/视频/任意文件】多个 → 嵌进一篇飞书 docx → (授权 owner) → 返回 {url, token, items, granted}。
+                         public: bool = True, dry_run: bool = False) -> dict:
+    """本地【图片/视频/任意文件】多个 → 嵌进一篇飞书 docx → (授权 owner) → (设公开链接) → 返回
+    {url, token, items, granted, public, public_error}。
     files: 本地路径 list。captions: 与 files 等长的可选说明（嵌在每个媒体前·None 跳过）。
-    图片走 image 块（内联显示）· 其他走 file 块（视频/音频/pdf 内联播放/预览）。perm 默认 view（只读够看）。"""
+    图片走 image 块（内联显示）· 其他走 file 块（视频/音频/pdf 内联播放/预览）。perm 默认 view（只读够看）。
+    public 默认 True = 【拿到链接的任何人都能打开看】（见 set_public_link）。"""
     paths = [Path(f) for f in files]
     for p in paths:
         if not p.is_file():
@@ -302,7 +341,7 @@ def publish_media_as_doc(app_id: str, app_secret: str, files, *,
         plan = [{"file": p.name, "kind": ("image" if p.suffix.lower() in _IMAGE_EXTS else "file")}
                 for p in paths]
         return {"dry_run": True, "title": doc_title, "items": plan,
-                "grant_open_id": grant_open_id, "perm": perm}
+                "grant_open_id": grant_open_id, "perm": perm, "public": public}
     token = _tenant_token(app_id, app_secret)
     doc_id = _create_docx(token, doc_title)
     items = []
@@ -324,7 +363,11 @@ def publish_media_as_doc(app_id: str, app_secret: str, files, *,
     granted, gerr = True, None
     if grant_open_id:
         granted, gerr = _grant_member(token, doc_id, grant_open_id, perm)
-    return {"url": url, "token": doc_id, "items": items, "granted": granted, "grant_error": gerr}
+    pub, perr = None, None
+    if public:
+        pub, perr = set_public_link(token, doc_id)
+    return {"url": url, "token": doc_id, "items": items, "granted": granted, "grant_error": gerr,
+            "public": pub, "public_error": perr}
 
 
 if __name__ == "__main__":   # 手动测试：python feishu_docs.py <file> [--dry]（凭据从 .env 取 default bot）
