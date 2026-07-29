@@ -14,7 +14,7 @@
   单进程多 channel 会撞 "This event loop is already running"）。所以 **run 只跑一个 bot**；
   **start 为 bridge-bots.json 里每个 bot 各起一个 `run --bot <name>` 隐藏进程**（管理仍是一套命令）。
 
-斜杠命令：/clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（看/切登录账号 cc/ccp/ccw/ccw2/ccw3/cx/cxp·关旧会话用新号重起）· /screen 看现场 · /stop 打断 · /close 关会话
+斜杠命令：/clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（看/切登录账号 cc/ccp/ccp2/ccw/ccw2/ccw3/cx/cxp·关旧会话用新号重起）· /screen 看现场 · /stop 打断 · /close 关会话
 per-bot 会话注册表：feishu/_state/bridge-session-<bot>.json（各进程自写自读 · 无多进程 race）
 配置：orchestrator/bridge-bots.json（每 bot {name, app_id_env, app_secret_env, at_name, cwd}）
 子命令：start（默认·裸跑 `python feishu_bridge.py` 即把所有 bot 各起一隐藏进程） / run [--bot X]（前台调试单 bot） / stop（停全部） / status / workspaces
@@ -1498,7 +1498,7 @@ def run(bot_name=None):
                     "🤖 **可用命令**\n"
                     "· `/cd` — 列【当前目录】子目录带编号 → 回数字【选中目录】（不立刻起会话）\n"
                     "· `/cd ..` 上一级 · `/cd <名字/路径>` 选别处（子目录/书签/任意路径·同样只选不起）\n"
-                    "· `/account ccw2` — 【选】登录账号（cc/ccp/ccw/ccw2/ccw3/cx/cxp·临时·不立刻起）\n"
+                    "· `/account ccw2` — 【选】登录账号（cc/ccp/ccp2/ccw/ccw2/ccw3/cx/cxp·临时·不立刻起）\n"
                     "· `/account ccw2 <目录>` — 一条命令同时选【账号+目录】（目录写法同 `/cd`）\n"
                     "· 💡 `/cd` 选目录、`/account` 选账号都【只是选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录+账号冷启）\n"
                     "· `/clear` — 清空当前会话上下文\n"

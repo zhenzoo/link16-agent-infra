@@ -173,10 +173,11 @@ def codex_skill_invocation(bot, text: str, cwd=None) -> str | None:
 
 # ---------- 账号别名（镜像 ~/.bashrc 的 cc/ccp/ccw* + cx/cxp · 给 /account 运行时切换用）----------
 # alias → (runtime, home)。home：claude 给 CLAUDE_CONFIG_DIR · codex 给 CODEX_HOME。
-# 只收 Publisher 点名的这 7 个（不含 ccg/ccq/cck）。
+# 只收 Publisher 点名的这 8 个（不含 ccg/ccq/cck）。
 ACCOUNT_ALIASES = {
     "cc":   ("claude", "~/.claude"),            # 默认号
     "ccp":  ("claude", "~/.claude-personal"),   # 个人
+    "ccp2": ("claude", "~/.claude-personal2"),  # 个人第二号（母版镜像：skills/commands/memory 整目录 junction 回 ccp·CLAUDE.md 走 @import）
     "ccw":  ("claude", "~/.claude-work"),        # 公司
     "ccw2": ("claude", "~/.claude-work2"),
     "ccw3": ("claude", "~/.claude-work3"),
