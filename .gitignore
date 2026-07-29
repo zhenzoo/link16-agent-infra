@@ -1,6 +1,8 @@
 # 机器本地 bot 名册（每台机各管各的·整盘覆盖 committed bridge-bots.json）
 feishu/bridge-bots.local.json
 feishu/bridge-cd-bookmarks.local.json
+# 改名册前留的本机备份（含本机 cwd·跨机会打架·绝不入库）· 注：gitignore 不支持行尾注释，注释必须独占一行
+feishu/*.local.json.bak*
 
 # 桥运行态（会话/outbox/收据/锚点/收件箱·都是 runtime scratch）
 feishu/_state/
