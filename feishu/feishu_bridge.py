@@ -764,6 +764,25 @@ def _composer_holds_paste(screen, marker):
     return bool(sig and sig in tail)
 
 
+_SPINNER_CHARS = "✻✽✶✳✴✵✷✢✣✤✥⧗"
+
+
+def _busy_or_queued(screen):
+    """会话【正在生成(忙)】或消息【已进排队队列】= 注入已被接受·不是「卡输入框没提交」。
+    给 _inject 校验区分「排队(正常·忙时你发的消息 Claude Code 会排队等这轮干完)」vs「卡死(空闲却没提交)」。
+    信号(2026-07-20 真机实证 zz-busy-test)：
+      ① 排队指示 `queued messages` / `Press up to edit`（明确「已接受·排队中」）；
+      ② 生成中状态行：spinner 字符（✻✽✶…）或 `(Ns ·` 耗时锚（如 `✶ Ideating… (47s · ↓ 1.1k tokens)`）。
+    读不到 / 空屏 → False（不据此误判·交给原 6 次重按 + 喊人兜底·绝不漏报真卡死）。"""
+    if not screen:
+        return False
+    if "queued messages" in screen or "Press up to edit" in screen:
+        return True
+    if any(c in screen for c in _SPINNER_CHARS):
+        return True
+    return bool(re.search(r"\(\s*\d+s\s*·", screen))   # 生成中状态行的耗时锚 `(47s ·`
+
+
 def _inject(pty, workspace_id, marker):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
@@ -787,8 +806,10 @@ def _inject(pty, workspace_id, marker):
             scr = ""
         if not _composer_holds_paste(scr, marker):
             return True                          # 输入框已空 = 提交成功
-        wmux("enter", pty, *allow)               # 还卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
-    return False                                 # 重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
+        if _busy_or_queued(scr):                 # 忙(生成中)/消息已进排队队列 = 已被接受·不是卡死
+            return True                          # → 不误报「没提交」·且【别再按回车】(防把排队消息重复入队)·2026-07-20 根治
+        wmux("enter", pty, *allow)               # 空闲却卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
+    return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
