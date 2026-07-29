@@ -3,6 +3,28 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.8.0 — 在线文档链接默认「任何人可读」+ 注入不再重复入队 + 卡片不再吞引用（2026-07-29）
+
+**WHY**：三个各自独立、但都属于「桥发出去的东西对不对」的缺口，一次收口。最要紧的一个是主人当场点的：桥造的**飞书在线文档链接只有他自己打得开**——转给别人、别的智能体（a2a）拿去读，全是「无权限」，每次还得他手动进文档点一遍分享设置。他拍板：**本桥产出的文档链接一律公开，拿到就能看，别再设那些权限。**
+
+**WHAT**
+
+- **在线文档默认公开**（`feishu_docs.set_public_link()`）：建完文档、授权 owner 之后，多走一步 `PATCH /drive/v2/permissions/{token}/public?type=docx`，把 `link_share_entity` 从飞书默认的 `tenant_readable`（**仅本组织内**）改成 **`anyone_readable`**（互联网任何人可阅读），并开 `external_access_entity: open`（**两个必须一起**——只改前者传不出组织）。`security/comment/copy_entity` 给 `anyone_can_view`：**只读、不给编辑**。
+  - ⚠️ **必须 v2 端点**：v1 是老式 bool 字段、根本没有 `link_share_entity` 这套 enum。scope 沿用 `drive:drive`，不需要新开权限。
+  - **改一处覆盖全部**：所有在线文档链接就两个出口——`publish_file_as_doc`（`send --doc` 的 md/HTML）和 `publish_media_as_doc`（`send_feishu_media` 的图/视频/PDF），两个都加了 `public=True` 默认参数。
+  - **失败不 raise**：文档已建好，只降级回组织内可见 + 返回 `public/public_error` 让上层 warn，不挡投递（企业租户管理员锁外链时会走到这条路，属组织策略非代码问题）。
+  - **实测**：tb25-lab 建探针文档跑完整链路 → 独立回读权限 `link_share_entity=anyone_readable · external_access_entity=open · lock_switch=false` → 删。顺带结掉 `ARCH-110` §2.11 边界③ 遗留的「public 分享 enum 不确定·首篇先测」。
+- **注入校验区分「忙/已排队」与「真卡死」**（`_busy_or_queued()`）：原判据只看输入框还留着 paste 标记就认定「回车被吞」→ 重按。但 Claude Code **正在生成时你发的消息会被排进队列**、输入框内容也还在——桥把正常排队误判成卡死，重按 6 次回车，**把同一条消息重复入队**。现在读屏认两类「已被接受」信号：排队指示（`queued messages` / `Press up to edit`）、生成中状态行（spinner `✻✽✶…` 或耗时锚 `(47s ·`）→ 命中就 return True 且**不再按回车**。读不到屏 → False，交回原重按 + 喊人兜底（**绝不漏报真卡死**）。配套 `tests/test_inject_busy_guard.py`。
+- **卡片不再吞 blockquote**（`outbound_links._flatten_blockquotes()`）：飞书卡片 Markdown 有个坑——blockquote 嵌在列表项下面会**整段静默消失**，主人看到的消息凭空少一块且无任何报错。发出前把 `> ` 前缀整组压成普通段落（前后补空行保段落间距）；用私有区 marker 标记引用行，**才能跨行内代码切分识别整组引用**；代码区逐字节原样保留，绝不动代码里的 `>`；保持幂等（卡片路径与兜底路径可能都跑一遍）。`outbound_links.py` 的定位由此从「链接安全」扩成「Markdown 安全」。
+- **`/account` 认 ccp2**：主人开了第二个个人账号 `~/.claude-personal2`（母版镜像：skills/commands/memory 整目录 junction 回 ccp，CLAUDE.md 走 @import），`ACCOUNT_ALIASES` 由 7 增至 8 个，桥的两处用户可见文案同步。
+- **`.gitignore` 收 `feishu/*.local.json.bak*`**：改名册前留的 `.bak-<日期>` 备份原先没被 ignore，随手 add 就会把**本机专属的 bot cwd 绝对路径**提交进共享仓、跟另一台机打架。⚠️ 顺带记死一条：**gitignore 不支持行尾注释**（`pattern  # 说明` 整行会被当成 pattern，匹配不到任何文件）——本次踩过。
+
+**验证**：全仓 `pytest` **87 passed + 10 subtests**（含本批新增的 busy-guard 与 blockquote 用例）· 公开链接端到端真跑 + 独立 API 回读 oracle 确认。
+
+**顺带记一条工具坑**（本次踩过、值得写进历史）：在 Windows 上拆 `git diff` 补丁**必须走二进制读写**。git 生成的 patch 是纯 LF，Python `read_text/write_text` 会把每个 `\n` 转成 `\r\n` 污染补丁 → apply 失败 → 若用 `--ignore-whitespace` 硬绕，那些 CR 会被**当成文件内容写进 blob**，把整个源文件行尾翻转（本次 `feishu_bridge.py` 一度出现 2333 行全改的假 diff，已 reset 重做）。本仓 `core.autocrlf=true` 但**历史 blob 实际是 CRLF**、且无 `.gitattributes`，尤其要小心。
+
+---
+
 ## v0.7.4 — 根治 codex `/close` 关不掉对话 + 登记 tb24-pressroom（2026-07-26）
 
 **WHY**：主人对 `tb24-creator-research-codex` 打了 `/close`，下一条消息起的新会话却**完整记得上一轮**——开口就是「先把刚才最后一次小红书作者区调整同步到封面页」。他确认没用过 find-session 一类的东西，要求查清是不是 Codex 本身的缺陷。查因结果：**是我们这层的缺口，不是 Codex 的、也不是 Claude 的。**
