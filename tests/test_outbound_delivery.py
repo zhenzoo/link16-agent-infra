@@ -51,6 +51,40 @@ class SuccessfulChannel:
 
 
 class OutboundLinkTests(unittest.TestCase):
+    def test_indented_blockquote_regression_stays_visible(self):
+        source = (
+            "- **How do you plan to use**：复制这段：\n"
+            "  > This is an academic research project using "
+            "(`/graph/v1/author/{id}/papers`) for offline analysis.\n"
+            "- **Which endpoints**：`/graph/v1/author/{id}/papers`"
+        )
+        expected = (
+            "- **How do you plan to use**：复制这段：\n\n"
+            "This is an academic research project using "
+            "(`/graph/v1/author/{id}/papers`) for offline analysis.\n\n"
+            "- **Which endpoints**：`/graph/v1/author/{id}/papers`"
+        )
+        self.assertEqual(sanitize_outbound_links(source), expected)
+        self.assertIn(
+            "This is an academic research project",
+            feishu_bridge._linkify(source),
+        )
+
+    def test_quote_flattening_is_idempotent_and_preserves_code(self):
+        source = (
+            "> first line\n"
+            ">> second line\n"
+            "\t> third line\n"
+            "`  > inline code`\n"
+            "```text\n  > fenced code\n```\n"
+        )
+        result = sanitize_outbound_links(source)
+        self.assertIn("first line\nsecond line\nthird line", result)
+        self.assertNotIn("\n> second line", result)
+        self.assertIn("`  > inline code`", result)
+        self.assertIn("```text\n  > fenced code\n```", result)
+        self.assertEqual(sanitize_outbound_links(result), result)
+
     def test_local_markdown_targets_become_visible_non_links(self):
         cases = {
             "[PLAN](D:/repo/PLAN.md)": "PLAN — `D:/repo/PLAN.md`",
@@ -104,6 +138,18 @@ class OutboundLinkTests(unittest.TestCase):
 
 
 class FallbackLinkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_markdown_fallback_flattens_nested_quote(self):
+        channel = SuccessfulChannel()
+        payload = {"markdown": "- copy:\n  > keep this paragraph\n- next"}
+        ok, _error, _transient = await feishu_bridge._send_checked(
+            channel, "ou_owner", payload, "bot", "markdown"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(
+            channel.payloads[0]["markdown"],
+            "- copy:\n\nkeep this paragraph\n\n- next",
+        )
+
     async def test_markdown_fallback_applies_same_local_path_rule(self):
         channel = SuccessfulChannel()
         payload = {"markdown": "[PLAN](/D:/repo/PLAN.md)"}

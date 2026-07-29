@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pure, idempotent link safety rules for Feishu-bound text."""
+"""Pure, idempotent Markdown safety rules for Feishu-bound text."""
 from __future__ import annotations
 
 import re
@@ -12,6 +12,52 @@ _MD_LINK_RE = re.compile(
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _WINDOWS_DRIVE_RE = re.compile(r"^/?[A-Za-z]:[\\/]")
 _BARE_FILE_URI_RE = re.compile(r"(?<![\w(])file:///[^\s<>\]\)]+", re.IGNORECASE)
+_BLOCKQUOTE_PREFIX_RE = re.compile(r"^[ \t]*(?:>[ \t]*)+", re.MULTILINE)
+
+
+def _flatten_blockquotes(text: str) -> str:
+    """Turn Markdown quotes into plain paragraphs without touching code.
+
+    Feishu card Markdown can silently hide a blockquote nested under a list.
+    A temporary marker lets us detect quote groups across inline-code splits,
+    add stable paragraph spacing, and restore every code region byte-for-byte.
+    """
+    marker = "\ue000FEISHU_QUOTE\ue001"
+    while marker in text:
+        marker += "\ue002"
+
+    parts = _CODE_REGION_RE.split(text)
+    changed = False
+    for index in range(0, len(parts), 2):
+        parts[index], count = _BLOCKQUOTE_PREFIX_RE.subn(marker, parts[index])
+        changed = changed or bool(count)
+    if not changed:
+        return text
+
+    marked = "".join(parts)
+    lines = marked.splitlines(keepends=True)
+    quoted = [line.startswith(marker) for line in lines]
+    newline = "\r\n" if "\r\n" in text else "\n"
+    result = []
+    for index, line in enumerate(lines):
+        if not quoted[index]:
+            result.append(line)
+            continue
+
+        first = index == 0 or not quoted[index - 1]
+        last = index + 1 == len(lines) or not quoted[index + 1]
+        if first and result and result[-1].strip():
+            if not result[-1].endswith(("\n", "\r")):
+                result[-1] += newline
+            result.append(newline)
+
+        result.append(line[len(marker):])
+
+        if last and index + 1 < len(lines) and lines[index + 1].strip():
+            if not result[-1].endswith(("\n", "\r")):
+                result[-1] += newline
+            result.append(newline)
+    return "".join(result)
 
 
 def _target_core(raw: str) -> str:
@@ -83,15 +129,17 @@ def _visible_non_code_text(text: str) -> str:
 
 
 def sanitize_outbound_links(text: str) -> str:
-    """Make local targets honest and important external targets identifiable.
+    """Make Feishu Markdown content-safe and delivery targets identifiable.
 
+    Blockquotes become plain paragraphs because Feishu can hide nested quotes.
     Code regions, anchors, images, and ordinary inline web links are preserved.
-    The function is intentionally idempotent because card and fallback paths may
-    both apply it.
+    The function stays idempotent because card and fallback paths may both apply
+    it.
     """
     if not text:
         return text or ""
 
+    text = _flatten_blockquotes(text)
     exposed = []
     parts = _CODE_REGION_RE.split(text)
     for index in range(0, len(parts), 2):
