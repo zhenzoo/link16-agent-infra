@@ -173,11 +173,13 @@ def codex_skill_invocation(bot, text: str, cwd=None) -> str | None:
 
 # ---------- 账号别名（镜像 ~/.bashrc 的 cc/ccp/ccw* + cx/cxp · 给 /account 运行时切换用）----------
 # alias → (runtime, home)。home：claude 给 CLAUDE_CONFIG_DIR · codex 给 CODEX_HOME。
-# 只收 Publisher 点名的这 8 个（不含 ccg/ccq/cck）。
+# 加新账号别名：这里加一行 + 该账号目录下有 launch.sh（由 ~/.claude-personal 的 `govctl mirror` 生成）即可，
+# worker_cmd 会自动 source 它拿到模型后端 env（见下）。未来 ccg/ccq 同理。
 ACCOUNT_ALIASES = {
     "cc":   ("claude", "~/.claude"),            # 默认号
     "ccp":  ("claude", "~/.claude-personal"),   # 个人
     "ccp2": ("claude", "~/.claude-personal2"),  # 个人第二号（母版镜像：skills/commands/memory 整目录 junction 回 ccp·CLAUDE.md 走 @import）
+    "cck":  ("claude", "~/.claude-kimi"),        # 个人·Kimi K3 1M 后端（母版镜像 + launch.sh 注入 ANTHROPIC_* · 2026-07-31）
     "ccw":  ("claude", "~/.claude-work"),        # 公司
     "ccw2": ("claude", "~/.claude-work2"),
     "ccw3": ("claude", "~/.claude-work3"),
@@ -256,8 +258,21 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
     if spec.name == "claude":
         hooks_json = (autopilot / "bridge-hooks.json").as_posix()
         config_dir = _claude_config_dir(bot).as_posix()
+        # ⚠️ 只换 CLAUDE_CONFIG_DIR **换不了模型后端**：那只是换配置目录，bot 仍然打 Anthropic 官方端点。
+        # 第三方后端（Kimi/GLM/千问…）要的是一串 ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY / ANTHROPIC_MODEL…
+        # 环境变量 → 统一放在【账号目录自己的 launch.sh】里，这里 source 一下即可。
+        # launch.sh 由 ~/.claude-personal 的 `govctl mirror <账号> -Model <preset>` 生成
+        # （密钥是运行时从 $VIBECODING_ROOT/.env 读的 shell 片段，不落盘、不进 git）。
+        # 官方号（cc/ccp/ccp2…）的 launch.sh 只 export CLAUDE_CONFIG_DIR，source 了无副作用；
+        # 没有这个文件的账号（如另一台机还没建）完全按老路走 —— 向后兼容、零风险。
+        # spawn 是把 cd 和本命令**分行**发的，故这里的 `. x.sh;` 自成一句，不会跟 cd 的 && 纠缠。
+        prefix = ""
+        launch_sh = Path(config_dir) / "launch.sh"
+        if launch_sh.is_file():
+            prefix = f". {_q(launch_sh.as_posix())}; "
         return (
-            env
+            prefix
+            + env
             + f"CLAUDE_CONFIG_DIR={_q(config_dir)} "
             + f"claude --dangerously-skip-permissions --settings {_q(hooks_json)}"
         )
