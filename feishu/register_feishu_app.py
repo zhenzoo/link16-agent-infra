@@ -23,12 +23,14 @@ Claude 注册完把它【发给 Publisher】，Publisher 点开 → **全部勾�
 一次开齐、别事后逐个补（2026-06-21 -3 漏 docx 踩坑教训）。不做则此 bot 只能 DM 收发消息/图、不能 send --doc、不能进群 a2a。
 """
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bridge_env import resolve_env_path  # noqa: E402
+import agent_runtime  # noqa: E402
 
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
@@ -91,7 +93,7 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
     reg = Path(__file__).resolve().parent / "agent-registry.json"
     if not reg.exists():
         print("\n⚠️ 没找到 agent-registry.json → 跳过自动登记（请手动加一条）", flush=True)
-        return
+        return None
     oid, disp = _bot_identity(app_id, app_secret)
     name = disp or cli_name
     slug = (bot_arg or "").upper().replace("-", "_")
@@ -101,10 +103,10 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
         data = json.loads(reg.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         print(f"\n⚠️ agent-registry.json 解析失败({e}) → 跳过自动登记（手动加）", flush=True)
-        return
+        return None
     if any(a.get("name") == name for a in data.get("agents", [])):
         print(f"\n✅ agent-registry.json 已有 '{name}' → 跳过（幂等·没重复加）", flush=True)
-        return
+        return next(a for a in data.get("agents", []) if a.get("name") == name)
     stub = {"name": name, "machine": machine, "send_key": send_key, "open_id": oid or "",
             "at_name": f"@{name}", "repo": "", "shared": False, "runtime": runtime,
             "role": "", "verified": bool(oid)}
@@ -112,12 +114,13 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
     idx = text.rfind("\n  ]")                 # agents 数组闭合行 → 在它前插一条(保原格式·不整文件 reformat)
     if idx < 0:
         print("\n⚠️ agent-registry.json 结构异常(找不到 agents 闭合) → 跳过（手动加）", flush=True)
-        return
+        return None
     text = text[:idx].rstrip() + ",\n    " + json.dumps(stub, ensure_ascii=False) + text[idx:]
     reg.write_text(text, encoding="utf-8")
     print(f"\n✅ 已【自动】登记进 agent-registry.json：{name}"
           f"（machine={machine} · send_key={send_key} · open_id={oid or '❌现查失败·待补'} · verified={bool(oid)}）", flush=True)
     print("   ⚠️ 运行本脚本的 agent 请核对/补两字段：**repo**(它分管哪个仓·脚本不知道) + 必要时 **machine**；是共享仓则改 shared:true。", flush=True)
+    return stub
 
 
 def main():
@@ -125,9 +128,39 @@ def main():
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
     ap.add_argument("--bot", default=None,
                     help="bot 标识（如 ws2）→ 写 FEISHU_BRIDGE_<BOT>_APP_ID/SECRET；不给 = 默认键")
-    ap.add_argument("--runtime", choices=("claude", "codex"), default="claude",
-                    help="运行时写入 agent-registry stub（默认 claude；Codex bot 传 codex）")
+    ap.add_argument("--runtime", choices=("claude", "codex"), default=None,
+                    help="目标 runtime；不给时由 --profile 推导，无 profile 则兼容默认 claude")
+    ap.add_argument("--profile", default=None,
+                    help="Link16 agent profile（如 cck/cxp）；不给则取同 runtime 的本机默认")
     args = ap.parse_args()
+
+    requested = (args.profile or "").strip().lower()
+    if requested:
+        selected_profile = agent_runtime.profile_spec(requested)
+        runtime = args.runtime or selected_profile.runtime
+        if selected_profile.runtime != runtime:
+            ap.error(
+                f"--profile {selected_profile.name} 是 {selected_profile.runtime}，"
+                f"不能配 --runtime {runtime}"
+            )
+    else:
+        runtime = args.runtime or "claude"
+        inherited = (os.environ.get(agent_runtime.PROFILE_ENV) or "").strip().lower()
+        selected_profile = None
+        if inherited:
+            inherited_profile = agent_runtime.profile_spec(inherited)
+            if inherited_profile.runtime == runtime:
+                selected_profile = inherited_profile
+        if selected_profile is None:
+            selected_profile = agent_runtime.profile_spec(
+                agent_runtime.machine_default_profile(runtime)
+            )
+    doctor = agent_runtime.profile_doctor(selected_profile.name)
+    if not doctor["ok"]:
+        ap.error(
+            f"profile {selected_profile.name} 本机不可用："
+            + "；".join(doctor["errors"])
+        )
 
     if args.bot:
         b = args.bot.upper().replace("-", "_")   # env key 用下划线(连字符非法/巡检正则[A-Z0-9_]扫不到)·与名册约定一致
@@ -149,7 +182,21 @@ def main():
     print(f"\n✅ 应用「{args.name}」创建成功 · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
 
     # 自动登记进 agent-registry.json（登记协议自动化·不靠人记得回写）
-    append_registry_stub(app_id, secret, args.bot, args.name, args.runtime)
+    stub = append_registry_stub(app_id, secret, args.bot, args.name, runtime)
+    runtime_bot_name = (stub or {}).get("send_key") or args.bot or args.name
+    at_name = (stub or {}).get("at_name") or f"@{args.name}"
+    row = agent_runtime.upsert_runtime_bot(
+        runtime_bot_name,
+        id_key,
+        sec_key,
+        at_name,
+        selected_profile.name,
+    )
+    print(
+        f"\n✅ 已自动登记运行时名册：{row['name']} · profile={row['profile']} "
+        f"· {agent_runtime.profile_spec(row['profile']).runtime}",
+        flush=True,
+    )
 
     # 一键预置(40+)【不含】的【应用身份/tenant】权限——注册后【一条链全开】，免事后逐个手动补
     # (SSOT: feishu_docs.APP_IDENTITY_MANUAL_SCOPES = 云文档在线查看 drive:drive+docx:document(:create) + 群a2a im:chat + 收群@ + 听全群)。
@@ -171,7 +218,8 @@ def main():
 
     # 🔒 登记协议：建完必回写。§4 见 docs/SOP-120。agent-registry stub 上面已【自动】补·其余照单核对。
     print("\n📋 建完【必做登记】（④ 已自动 · 完整见 docs/SOP-120 §4）：\n"
-          "   ① bridge-bots.local.json 加一行（name / app_id_env / at_name·仓库bot不写cwd）—— 运行时 roster·桥靠它 spawn\n"
+          f"   ① ✅ bridge-bots.local.json 已自动登记（profile={selected_profile.name}）—— 运行时 roster·桥靠它 spawn\n"
+          "      换运行档案只改 profile（或飞书 `/account <profile>`）；不要再写 agent/home/account 重复字段。\n"
           "   ② 上面那【一条】链一次开齐 drive:drive + docx:document(:create) + im:chat + 群listen → 创版本并发布\n"
           "   ③ 人工把 bot 拉进共享群「交流水吧」（API 加不了·a2a 唯一人工闸）\n"
           "   ④ ✅ agent-registry.json 已【自动】补 stub（谁是谁·跨机目录）→ 你只需核对/补 repo + machine（脚本不知道它管哪个仓）\n"

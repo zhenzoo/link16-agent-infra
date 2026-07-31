@@ -4,9 +4,10 @@
 
 每个 bot **自己托管一个 wmux 会话**：
   手机飞书 @bot → 飞书云 →(WebSocket)→ 该 bot 的进程
-    · 没会话 → wmux_session.spawn 新建专属 workspace + 起 ccp + 等就绪 → 记进 per-bot 注册表
+    · 没会话 → 解析 bot profile → wmux_session.spawn 新建专属 workspace + 起对应 agent + 等就绪
+      → 把 workspace/pty/profile 记进 per-bot 注册表
     · 有会话 → 注入那个 pty（普通消息末尾缀 [飞书-<bot>] 标记 · slash command 原样透传不缀）→ worker 会话 hook(Stop/PostToolUse) 写 outbox → drainer 读 outbox 发回飞书（v8）
-    · slash command：bridge 自己认 /clear /cd /account /screen /stop /close /new /help；其余（/resume /rename /model …）verbatim 转发进 ccp
+    · slash command：bridge 自己认 /clear /cd /account /screen /stop /close /new /help；其余（/resume /rename /model …）verbatim 转发进当前 agent
       （/new = 起个全新【空】会话不注入任何文本·把「起会话」和「注入内容」拆开：先 /new 起空的 → 再自己发消息喂它）
     · 会话死了（你手关 workspace）→ 下次消息自动重生
 
@@ -14,9 +15,9 @@
   单进程多 channel 会撞 "This event loop is already running"）。所以 **run 只跑一个 bot**；
   **start 为 bridge-bots.json 里每个 bot 各起一个 `run --bot <name>` 隐藏进程**（管理仍是一套命令）。
 
-斜杠命令：/clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（看/切登录账号 cc/ccp/ccp2/ccw/ccw2/ccw3/cx/cxp·关旧会话用新号重起）· /screen 看现场 · /stop 打断 · /close 关会话
+斜杠命令：/clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（从 agent-profiles.json 动态列出/切换 profile，原子更新该 bot 名册项并关旧会话重起）· /screen 看现场 · /stop 打断 · /close 关会话
 per-bot 会话注册表：feishu/_state/bridge-session-<bot>.json（各进程自写自读 · 无多进程 race）
-配置：orchestrator/bridge-bots.json（每 bot {name, app_id_env, app_secret_env, at_name, cwd}）
+配置：feishu/bridge-bots.local.json（本机覆盖）或 feishu/bridge-bots.json（每 bot 只持久 profile + 传输/业务字段）
 子命令：start（默认·裸跑 `python feishu_bridge.py` 即把所有 bot 各起一隐藏进程） / run [--bot X]（前台调试单 bot） / stop（停全部） / status / workspaces
 安全：ALLOWED_OPEN_IDS 白名单（全 bot 共享）。
 """
@@ -159,16 +160,55 @@ def _load_allowed():
 ALLOWED_OPEN_IDS = _load_allowed()
 
 
+def _apply_roster_defaults(spec, defaults):
+    """Apply per-runtime machine profile defaults without overriding bot identity.
+
+    New shape: defaults.profiles.{claude,codex}.  Legacy defaults are accepted
+    only when the bot itself has no profile/account/provider-home identity.
+    """
+    if not defaults:
+        return spec
+    identity_keys = {"profile", "account", "claude_config_dir", "codex_home"}
+    runtime = str(spec.get("agent") or spec.get("runtime") or "claude").lower()
+    merged = {
+        k: v for k, v in defaults.items()
+        if k not in identity_keys and k != "profiles" and not k.startswith("_")
+    }
+    merged.update(spec)
+    if any(spec.get(k) for k in identity_keys):
+        return merged
+    profiles = defaults.get("profiles")
+    if isinstance(profiles, dict) and profiles.get(runtime):
+        merged["profile"] = profiles[runtime]
+        return merged
+    # Compatibility with pre-ARCH-120 machine rosters.
+    if runtime == "codex":
+        if defaults.get("codex_home"):
+            merged["codex_home"] = defaults["codex_home"]
+    else:
+        if defaults.get("account"):
+            merged["account"] = defaults["account"]
+        if defaults.get("claude_config_dir"):
+            merged["claude_config_dir"] = defaults["claude_config_dir"]
+    return merged
+
+
 def load_bots():
     """返回 bot 列表。机器本地 bridge-bots.local.json 存在则【整盘覆盖】committed(每台机各管各名册+cwd·跨机零冲突)；
-    否则 committed bridge-bots.json；都没有则单 bot 回退。密钥按 *_env 从 .env 解析。"""
+    否则 committed bridge-bots.json；都没有则单 bot 回退。密钥按 *_env 从 .env 解析。
+    名册顶层 `defaults`（本机统一默认·如账号）先兜底进每个 spec，bot 自己写的键优先。"""
     cfg = bots_config_path(PROJECT)
+    defaults = {}
     if cfg.exists():
-        specs = (json.loads(cfg.read_text(encoding="utf-8")).get("bots")) or [DEFAULT_BOT]
+        raw = json.loads(cfg.read_text(encoding="utf-8"))
+        specs = raw.get("bots") or [DEFAULT_BOT]
+        defaults = raw.get("defaults") or {}
     else:
         specs = [DEFAULT_BOT]
     bots = []
     for s in specs:
+        s = _apply_roster_defaults(s, defaults)
+        profile = agent_runtime.profile_name(s, required=False)
         id_env = s.get("app_id_env", "FEISHU_BRIDGE_APP_ID")
         sec_env = s.get("app_secret_env", "FEISHU_BRIDGE_APP_SECRET")
         creds = load_env(id_env, sec_env)
@@ -188,10 +228,9 @@ def load_bots():
             "at_name": s.get("at_name", f"@{name}"),
             "marker": f"[飞书-{name}]",
             "cwd": cwd,
-            "agent": s.get("agent") or s.get("runtime") or "claude",
+            "profile": profile,
+            "agent": agent_runtime.runtime_name(s),
             "display_name": s.get("display_name"),
-            "claude_config_dir": s.get("claude_config_dir"),  # 名册账号覆盖(如 ~/.claude-work2)·漏拷会让默认账号永远回退 personal·只 /account 临时切才生效
-            "codex_home": s.get("codex_home"),
             "codex_transport": s.get("codex_transport"),
             "delivery_contract": s.get("delivery_contract"),
             "agent_cmd": s.get("agent_cmd"),
@@ -673,12 +712,14 @@ def _reuse_check(bot, rec):
       · reusable=False·ws_present=True  → pty 还在但不可复用(daemon 重启 / 死壳) → 先 close 再全新 spawn。
       · reusable=False·ws_present=False → pty 没了(会话被关) → 直接 spawn(无需 close)。
 
-    三道闸全过才复用（任一不过即重生）：
+    四道闸全过才复用（任一不过即重生）：
       ① pty 仍在 workspace.list（pty_state alive）。
-      ② daemon 未在本会话之后重启过（daemon_fingerprint 主闸·根治「关机重开后 wmux 把同一个 pty id
+      ② 会话记录的 profile 与 bot 当前 profile 完全相同。老记录没有 profile 也 fail closed，
+         防止 roster 从 cx 切到 cxp 后复用旧账号 shell。
+      ③ daemon 未在本会话之后重启过（daemon_fingerprint 主闸·根治「关机重开后 wmux 把同一个 pty id
          + 屏幕 buffer 一起恢复 → pty_alive 误判活 → 注进死壳」·2026-06-18 实证根因）。
          指纹缺失(读不到 / 老记录无 daemon_fp)→ 不据此判死(跳过该闸·零回归)。
-      ③ 不是 agent 死壳（agentName 软闸·辅）：agentName 非空 = 有 agent 在跑直接放行；agentName 空才
+      ④ 不是 agent 死壳（agentName 软闸·辅）：agentName 非空 = 有 agent 在跑直接放行；agentName 空才
          再读一眼屏(_agent_live)双印证——空 + 屏为裸 shell 才判死壳。agentName 标签偶抖(实测会把 Claude
          误标 Codex CLI)，故只用「空 vs 非空」+ 读屏兜底，绝不靠它单独误杀活会话。
     """
@@ -687,6 +728,11 @@ def _reuse_check(bot, rec):
     alive, agent_name = wmux_session.pty_state(rec["pty"])
     if not alive:
         return False, False, "pty 已不在(会话被关)"
+    expected_profile = agent_runtime.profile_name(bot, required=True)
+    recorded_profile = str(rec.get("profile") or "").strip().lower()
+    if recorded_profile != expected_profile:
+        previous = recorded_profile or "<missing>"
+        return False, True, f"profile 不一致({previous}→{expected_profile})"
     cur_fp = wmux_session.daemon_fingerprint()
     rec_fp = rec.get("daemon_fp")
     if cur_fp and rec_fp and cur_fp != rec_fp:
@@ -739,7 +785,9 @@ def ensure_session(bot):
             raise RuntimeError(f"{agent_runtime.display_name(bot)} 会话起不来（两次都没就绪）——可能 wmux 卡了 / 首启 trust 提示挡住,@ 我发 /screen 看现场")
     newj = _detect_new_jsonl(bot, before)
     jsonl = str(newj) if newj else None
-    _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl, "agent": agent_runtime.runtime_name(bot),
+    _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl,
+                                 "profile": agent_runtime.profile_name(bot, required=True),
+                                 "agent": agent_runtime.runtime_name(bot),
                                  "daemon_fp": wmux_session.daemon_fingerprint(),  # 钉死起这会话时的 daemon 实例·下次复用前比对(变了=daemon 重启过=会话已死)
                                  "cwd": cwd})  # 记当前目录(给 /cd 列子目录 + 自愈重生复用)
     return ws, pty, True, jsonl
@@ -1498,7 +1546,7 @@ def run(bot_name=None):
                     "🤖 **可用命令**\n"
                     "· `/cd` — 列【当前目录】子目录带编号 → 回数字【选中目录】（不立刻起会话）\n"
                     "· `/cd ..` 上一级 · `/cd <名字/路径>` 选别处（子目录/书签/任意路径·同样只选不起）\n"
-                    "· `/account ccw2` — 【选】登录账号（cc/ccp/ccp2/ccw/ccw2/ccw3/cx/cxp·临时·不立刻起）\n"
+                    "· `/account ccw2` — 【选】登录账号（cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp·直改默认·不立刻起）\n"
                     "· `/account ccw2 <目录>` — 一条命令同时选【账号+目录】（目录写法同 `/cd`）\n"
                     "· 💡 `/cd` 选目录、`/account` 选账号都【只是选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录+账号冷启）\n"
                     "· `/clear` — 清空当前会话上下文\n"
@@ -1517,16 +1565,23 @@ def run(bot_name=None):
                     await reply(chat_id, md=(
                         f"🔑 **当前账号** `{cur}`（{agent_runtime.display_name(bot)}）· **名册默认** `{default_acc}`\n"
                         f"**可切**：{lst}\n"
-                        f"`/account ccw2` —— **选**新号（临时·关旧会话；**不立刻起新会话**）。\n"
+                        f"`/account ccw2` —— **选**新号（**直改名册默认**·关旧会话；**不立刻起新会话**）。\n"
                         f"`/account ccw2 <目录>` —— 一条命令同时**选账号 + 选目录**（目录写法同 `/cd`：子目录名/书签/`..`/绝对路径）。\n"
                         f"💡 **懒启动**：`/cd` 选目录、`/account` 选账号都只是【选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录 + 账号冷启·十几秒）。\n"
-                        f"恢复：`/close`（关会话）或整桥重启 → 切回默认 `{default_acc}`；账号临时切·`/clear` 保留。")); return
+                        f"整桥重启/`/close` 都落在名册默认 `{default_acc}`（`/account` 改的就是它·要换再 `/account` 一次即可）。")); return
                 # 拆 `<账号> [目录]`：第二段=可选目录（解析同 /cd）→ 一次重起里同时换账号+换目录，省掉「切完账号又得切目录、各重起一次」
                 parts = arg.split(None, 1)
                 al = parts[0].strip().lower()
                 dir_arg = parts[1].strip() if len(parts) > 1 else ""
                 if al not in aliases:
                     await reply(chat_id, f"❓ 没有账号别名「{al}」。可选：{lst}"); return
+                doctor = await asyncio.to_thread(agent_runtime.profile_doctor, al)
+                if not doctor["ok"]:
+                    await reply(
+                        chat_id,
+                        f"⛔ profile `{al}` 本机不可用，未切账号、未关闭当前会话："
+                        + "；".join(doctor["errors"]),
+                    ); return
                 if al == cur and not dir_arg:
                     await reply(chat_id, f"✅ 已经在 `{al}` 账号上了，无需切换（要顺带换目录就 `/account {al} <目录>`）"); return
                 cur_dir = await asyncio.to_thread(current_cwd, bot)   # 当前所在目录（可能 /cd 过）
@@ -1554,14 +1609,23 @@ def run(bot_name=None):
                     _outstanding = await asyncio.to_thread(load_cd_pending, bot["name"])
                     if _outstanding:
                         cd_pending = _outstanding
-                # ② 切账号（原地改 bot dict）+ 关旧会话
+                # ② 先持久化 profile；失败则保持当前 bot/session 原样。
+                try:
+                    await asyncio.to_thread(agent_runtime.persist_account, bot["name"], al)
+                except Exception as _pe:
+                    await reply(
+                        chat_id,
+                        f"⛔ profile `{al}` 名册写入失败，未切账号、未关闭当前会话：{_pe}",
+                    ); return
+                # ③ 持久化成功后再关旧会话并切内存对象。
                 if alive:
                     await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 label = agent_runtime.apply_account(bot, al)          # 原地改 bot dict 账号/runtime
-                # ③ 目录歧义：账号已切·存编号待选 → 你回数字时走 _do_cd，用【新账号】在选中目录起会话（bot dict 已被 apply_account 改）
+                account_default.clear(); account_default.update(agent_runtime.account_snapshot(bot))  # /close 也切回【新】默认
+                # ④ 目录歧义：profile 已切·存编号待选 → 回数字时用新 profile。
                 if cd_pending is not None:
                     # 账号已选·列编号待选 → 回数字走 _do_cd 暂存目录(用新账号在选中目录懒启动)·都【不起会话】
-                    _merge_session(bot["name"], {"account": al, "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
+                    _merge_session(bot["name"], {"profile": al, "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
                     await asyncio.to_thread(save_cd_pending, bot["name"], cd_pending)
                     lines = "\n".join(f"`{i}` · {h}" for i, h in enumerate(cd_pending, 1))
                     _src = (f"目录「{dir_arg}」匹配到 {len(cd_pending)} 个" if dir_arg
@@ -1570,9 +1634,8 @@ def run(bot_name=None):
                         f"🔑 账号已选 `{al}`（{label}）· **会话还没起**。{_src}，回一个数字选目录，再发你的正式消息就用新账号在那儿起会话：\n{lines}\n\n"
                         f"（不挑目录就直接发消息，我在当前目录用新账号 `{al}` 起）")); return
                 await asyncio.to_thread(clear_cd_pending, bot["name"])   # 防旧编号待选残留误用
-                # ④ 只暂存账号(+ 带目录参则连目录一起)·【不起会话】——发下一条正式消息时 ensure_session 在这冷启(懒启动)。
-                #    无目录参时 patch 只覆盖 account/runtime 字段、保留之前 `/cd` 暂存的 cwd（=「切完账号不清除已选目录」）。
-                patch = {"account": al, "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None}
+                # ⑤ 只暂存 profile(+ 带目录参则连目录一起)·【不起会话】。
+                patch = {"profile": al, "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None}
                 if dir_arg:
                     patch["cwd"] = str(target_dir).replace("\\", "/")
                 _merge_session(bot["name"], patch)
@@ -1580,7 +1643,7 @@ def run(bot_name=None):
                 moved = bool(dir_arg) and not _same_dir(target_dir, cur_dir)
                 await reply(chat_id, (
                     f"🔑 已选账号 `{al}`（{label}）· 目录 `{staged_dir}`{'（新目录）' if moved else ''} · **会话还没起** —— "
-                    f"发下一条正式消息我就用它起会话。临时切·`/close` 切回默认 `{default_acc}`")); return
+                     f"发下一条正式消息我就用它起会话。**已写入名册 profile**（`/close`/整桥重启都落在 `{al}`）")); return
             # 非 bridge 命令 → 当 agent CLI 自己的 slash command 转发进会话。
             # Codex 兼容：只有 `/name` 确实命中一个已安装 skill 时，才转成 `$name`；
             # /resume /rename /model /compact 等 Codex 原生命令仍 verbatim。

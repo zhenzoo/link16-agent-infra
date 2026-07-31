@@ -4,43 +4,49 @@
 > **适用**：在任意机器新建一个由 **Codex CLI**（而非 Claude Code）驱动的飞书智能体。
 > 缘起：2026-07-21 tb24 上线 GPT 5.6 Codex bot 时，发现建 Codex bot 的流程散在 ARCH-110 §2.4.1（机制）+ SOP-120（OAuth）两处、没有一份照做清单 → 合成本 SOP。
 
-## 前置（Codex 专属 · 每台机一次性 · 非每 bot）
+## 前置（Codex 专属 · 统一由 govctl 治理）
 
-Codex bot 依赖一个隔离的 Codex home + 装好桥 hook；同一台机所有 Codex bot 共用这一套：
+Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史按 profile 隔离；工作习惯由同一套治理入口对齐：
 
-1. **隔离 Codex home 就绪**：`~/.codex-personal` 已 bootstrap（`codex login` + `config.toml`）——见 [`SOP-160 §Bootstrap from zero`](SOP-160-codex-personal-migration.md)。
-2. **桥 hook 装进 `CODEX_HOME/hooks.json`**（每个 codex-home 装一次）：
+1. **目标 Codex home 已登录**：至少有 `auth.json` 或 `config.toml`。`codex login` 仍需人工完成，认证文件不参与同步。
+   新开 profile 不再手搓目录：先运行
+   `govctl.ps1 mirror .codex-<name> -Apply` 生成统一 overlay，再按命令提示设置 `CODEX_HOME` 执行 `codex login`。
+2. **运行唯一治理入口**：
    ```powershell
-   python feishu/install_codex_bridge_hooks.py --codex-home "$HOME\.codex-personal"          # 默认 dry-run
-   python feishu/install_codex_bridge_hooks.py --codex-home "$HOME\.codex-personal" --write   # 写入（合并·保留已有 hook）
+   $govShell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
+   & $govShell -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync
+   & $govShell -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync -Apply
    ```
-   Codex 从 `CODEX_HOME` 发现 hook（不像 Claude 走 per-process `--settings`）。hook 脚本自身用 `FEISHU_BRIDGE_SESSION` 守门 → 只对**桥 spawn 的** Codex 会话写 outbox；普通 Codex 会话 env 不命中即 no-op，全局安装也安全。
+   一次 sync 同时完成：Claude skill/command 分发、`~/.agents/skills` 的 Codex adapters、Link16 hooks/MCP overlay，以及 registry 声明的用户级 `AGENTS.md`/`CLAUDE.md` 和 shell wrapper。入口文档由 `$agent-profile-governance` 生成；Codex configurator 不再覆盖它。全流程保留无关 hook/config 键，且不改 `auth.json`、sessions、history、模型选择或项目 trust。
+
+> Codex skills 不复制进每个 `CODEX_HOME`。用户级 adapters 只住 `~/.agents/skills`，天然被 `cx`、`cxp` 和未来新 profile 共同发现；每个 profile 的 `skills/` 只保留 Codex 自带或明确的 profile-local 能力。
 
 ## 建 bot（增量步 · 其余照 SOP-120）
 
-1. **注册应用 → 传 `--runtime codex`**：
+1. **注册应用 → 显式选择成熟 CXP profile**：
    ```powershell
-   python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --runtime codex
+   python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile cxp
    ```
-   OAuth 扫码 / 自动写 `.env` / 自动补 `agent-registry.json` stub 全同 SOP-120；`--runtime codex` 让 stub 的 `runtime` 字段写成 `codex`（默认 `claude`）。
+   OAuth 扫码 / 自动写 `.env` / 自动补 `agent-registry.json` stub 全同 SOP-120；脚本先从 Link16 registry 解析 `cxp` 为 Codex 并 doctor，注册成功后自动 upsert 本机运行名册。
 
-2. **运行时名册 `bridge-bots.local.json` 加行 → 带 5 个 Codex 字段**（`register` 脚本**不写**这个 · 手动加）：
+2. **核对运行时名册**（注册脚本已自动写；身份只允许一个 `profile`）：
    ```jsonc
    {
-     "name": "<key>",
-     "app_id_env": "FEISHU_BRIDGE_<KEY>_APP_ID",
-     "agent": "codex",                          // ← 桥用 Codex runtime 起（省略 = 默认 claude）
-     "codex_home": "~/.codex-personal",          // ← 指隔离 home（省略 = ~/.codex-personal）
-     "cwd": "<workspace 绝对路径>",               // ← 该 bot 的工作目录
-     "codex_transport": "app-server-canary",     // ← typed-event 干净卡（省略也是它·见下「默认 canary」）
-     "delivery_contract": "milestone-v1"         // ← 投递契约
+      "name": "<key>",
+      "app_id_env": "FEISHU_BRIDGE_<KEY>_APP_ID",
+      "profile": "cxp",                          // ← runtime/home/launcher 全由 registry 派生
+      "cwd": "<workspace 绝对路径>",               // ← 该 bot 的工作目录
+      "codex_transport": "app-server-canary",     // ← typed-event 干净卡（省略也是它·见下「默认 canary」）
+      "delivery_contract": "milestone-v1"         // ← 投递契约
    }
    ```
-   > 后两个字段**照写**（桥的 app-server 就绪信号目前仍认字面值，写了多一路 ready 信号；漏写也能跑，只是少一路）。**别写 `cli-legacy`** —— 那是已弃用的应急回退口。
+   > `codex_transport` / `delivery_contract` 是投递协议，不是账号身份；可保留。禁止再加 `agent/account/codex_home`。**别写 `cli-legacy`** —— 那是已弃用的应急回退口。
 
-3. **其余全照 [`SOP-120 §4`](SOP-120-feishu-register.md) 清单**：开 `drive:drive` + `im:chat`（★群 a2a 必开）权限（勾选 → 创版本 → 发布）、拉进共享群、互换 open_id、双机各配 `.env`、核对 `agent-registry.json` 的 `repo`/`machine`。
+3. **运行一次 `$agent-profile-governance` doctor**；如果这是新 profile，先注册到 Link16 registry，再 `docs --apply` / `wrappers --apply`。日常 CXP 应全部显示 unchanged。
 
-4. **重启桥**（只起这一只即可）：
+4. **其余全照 [`SOP-120 §4`](SOP-120-feishu-register.md) 清单**：开 `drive:drive` + `im:chat`（★群 a2a 必开）权限（勾选 → 创版本 → 发布）、拉进共享群、互换 open_id、双机各配 `.env`、核对 `agent-registry.json` 的 `repo`/`machine`。
+
+5. **重启桥**（只起这一只即可）：
    ```powershell
    python feishu/feishu_bridge.py start --bot <key>
    ```
@@ -48,11 +54,11 @@ Codex bot 依赖一个隔离的 Codex home + 装好桥 hook；同一台机所有
    ```
    CODEX_HOME=... FEISHU_CODEX_EVENT_STREAM=1 python feishu/codex_app_server_worker.py --bot <key> --cwd <cwd> ...
    ```
-   最终回复仍靠 Codex 官方 **Stop hook 的 `last_assistant_message`**（`codex_bridge_stop.py`）；进度卡由 typed-event observer 产出（工具类型 / 次数 / 仓库相对路径，**不带命令原文**）。worker 起时带 `FEISHU_CODEX_EVENT_STREAM=1`，`codex_bridge_posttool.py` 读到就自动让路 → **不会双投、也不用卸 hook**。
+   最终回复和进度卡都由 typed-event observer 产出：前者取 `agentMessage.phase=final_answer`，后者只保留工具类型 / 次数 / 仓库相对路径（**不带命令原文**）。worker 起时带 `FEISHU_CODEX_EVENT_STREAM=1`，`codex_bridge_stop.py` 与 `codex_bridge_posttool.py` 读到就自动让路 → **不会双投，也不依赖当前 `CODEX_HOME` 是否安装 hooks**。
 
 ## 验收
 
-- 群里 `@<新 codex bot>` 一句 → 能回（走 Codex Stop hook）。
+- 群里 `@<新 codex bot>` 一句 → 能回（默认走 app-server typed final；`cli-legacy` 才走 Stop hook）。
 - 在该 bot 会话里 `python feishu/whoami.py` → 身份卡显示该 bot（`FEISHU_BRIDGE_SESSION` 钉的身份）。
 - 让它 `send_feishu_msg` @ 另一台机的 bot → 能送达（a2a 通）。
 

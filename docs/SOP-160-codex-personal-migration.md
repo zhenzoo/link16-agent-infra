@@ -8,7 +8,7 @@
 
 | Surface | Claude Personal source | Codex Personal destination | Strategy |
 |---|---|---|---|
-| User rules | `~/.claude-personal/CLAUDE.md` | `~/.codex-personal/AGENTS.md` | Codex-specific maintained template |
+| User rules | 经同一语义治理的 Claude runtime source + Codex runtime source | `~/.codex{,-personal}/AGENTS.md` | `$agent-profile-governance` 先分类公共规则/runtime 适配，再由 renderer 生成带 source hash 的实体入口 |
 | Skills | `~/.claude-personal/skills/*` | `~/.agents/skills/claude-compat-*` | Thin adapter; upstream read at runtime |
 | Legacy commands | `~/.claude-personal/commands/*.md` | Same adapter namespace | `/name` becomes `$name` |
 | MCP | Claude settings | `~/.codex-personal/config.toml` | Re-register/authenticate per profile |
@@ -17,10 +17,10 @@
 | Authentication | Claude account homes | `~/.codex-personal/auth.json` | Completely separate |
 | gstack | Official source checkout | Generated Codex skill overlays | Official setup + controlled publish |
 
-Nothing under `~/.claude-personal` is written by this workflow. Adapters load
-the current upstream `SKILL.md`, scripts, references, and assets at invocation
-time, so Claude remains the source of truth and edits are immediately visible
-to Codex.
+The adapter publisher does not edit Claude sources. The explicit
+`$agent-profile-governance` workflow is the one authorized writer for generated
+user entry documents and shell wrapper marker blocks; it never touches auth,
+sessions, history, model selection, or secrets.
 
 The adapter body is live, but Codex discovery metadata is generated. Changes
 to workflow bodies are visible immediately; adding, renaming, deleting a
@@ -29,9 +29,10 @@ the adapters.
 
 ## Bootstrap from zero (fresh machine, no `~/.codex-personal` yet)
 
-`configure_personal.py` **edits** an isolated Codex home; it does not create one
-from scratch (it aborts if `config.toml` is absent). On a machine that has never
-run the Personal profile, initialize the home first, then run Install/refresh.
+`configure_personal.py` can seed minimal MCP/hook overlay files, but it does not
+create authentication. On a machine that has never run the profile, initialize
+the home and run `codex login` under that `CODEX_HOME`; afterward use Link16
+profile wrappers for daily sessions.
 
 ```powershell
 # 0a. Update Codex first — older CLIs may not know the target model string.
@@ -74,13 +75,13 @@ Notes:
 ## Install or refresh
 
 ```powershell
-# 1. Personal rules and MCP wrappers (self-seeds config.toml if 0d was skipped)
+# 1. MCP wrappers/hooks overlay (AGENTS.md is intentionally not touched here)
 python codex-personal/configure_personal.py
 python codex-personal/configure_personal.py --apply
 
-# 2. Claude work environments + Codex adapters (one public entry)
-powershell -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync
-powershell -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync -Apply
+# 2. Claude environments + Codex adapters + generated entry docs/wrappers
+pwsh -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync
+pwsh -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync -Apply
 
 # 3. gstack generated Codex skills
 powershell -ExecutionPolicy Bypass -File codex-personal/refresh_gstack_codex.ps1
@@ -107,8 +108,9 @@ powershell -NoProfile -File scripts/govctl.ps1 sync -Apply
 Its `post-commit` and `post-merge` hooks run apply mode only when
 `skills/`, `commands/`, or `governance/` changed; `post-rewrite` covers the
 less common rebase path. `govctl sync` first refreshes Claude environments and
-then invokes Link16's Codex adapter publisher exactly once. Hook failures are
-warn-first and never block a commit, pull, or rebase.
+then invokes Link16's Codex adapter publisher, Codex overlay configurator, and
+agent-profile entry/wrapper sync. Hook failures are warn-first and never block
+a commit, pull, or rebase.
 
 Ordinary sync creates and updates only. Deletion is explicit and shared across
 both runtimes: after reviewing dry-run candidates, use `sync -Apply -Prune`.
@@ -150,7 +152,7 @@ runtime instead of silently pretending the APIs are identical.
 ```text
 Feishu message
   -> feishu_bridge.py
-  -> wmux Codex session (CODEX_HOME=~/.codex-personal)
+  -> profile=cxp -> registry derives CODEX_HOME=~/.codex-personal
   -> UserPromptSubmit pins this turn's reply route
   -> PostToolUse writes progress records
   -> Stop writes the answer record
@@ -166,7 +168,7 @@ PLAN-915 canary uses an explicit machine-local bot flag:
 ```json
 {
   "name": "tb25-link16-codex",
-  "agent": "codex",
+  "profile": "cxp",
   "codex_transport": "app-server-canary",
   "delivery_contract": "milestone-v1"
 }
@@ -196,10 +198,9 @@ already-running bot needs.
 ## Verification
 
 ```powershell
-$env:CODEX_HOME="$HOME\.codex-personal"
-codex --version
-codex doctor --summary --no-color
-codex mcp list
+python feishu/agent_profile_cli.py doctor --profile cxp
+python feishu/agent_profile_cli.py command --profile cxp --cwd .
+python "$HOME\.claude-personal\skills\agent-profile-governance\scripts\profile_governance.py" doctor
 python -m unittest discover -s tests -v
 python feishu/feishu_bridge.py status --bot tb25-link16-codex
 python feishu/bridge_scope_audit.py --bot tb25-link16-codex

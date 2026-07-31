@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Apply Link16's isolated Codex Personal configuration.
+"""Apply Link16's managed overlay to one or every local Codex profile.
 
-The script only writes under CODEX_HOME (default: ~/.codex-personal). It copies
-maintained templates from this repository, removes inline Mattermost secrets,
-and points wmux at the newest installed application bundle. Claude Code's
-configuration remains read-only.
+Authentication, sessions, history, caches, model selection, project trust, and
+AGENTS.md remain profile-local. AGENTS.md is generated separately by
+$agent-profile-governance from the Link16 profile registry. This configurator
+owns only bridge hook entries, the Mattermost runtime wrapper, and the
+wmux/Mattermost MCP tables.
 """
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = REPO_ROOT / "codex-personal"
+sys.path.insert(0, str(REPO_ROOT))
+from feishu.install_codex_bridge_hooks import bridge_hooks, load_json, merge_hooks  # noqa: E402
 
 # Minimal config.toml written when an isolated home has none yet. Kept to the
 # bare essentials on purpose (see SOP-160 "Bootstrap from zero"): copying an
@@ -58,26 +63,41 @@ def newest_wmux_bundle() -> Path | None:
     return max(candidates, default=(None, None), key=lambda item: item[0])[1]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--codex-home", default=str(Path.home() / ".codex-personal"))
-    parser.add_argument("--apply", action="store_true")
-    args = parser.parse_args()
+def discover_codex_homes(home: Path | None = None) -> list[Path]:
+    """Find live top-level Codex profiles without treating backups as profiles."""
+    home = (home or Path.home()).expanduser().resolve()
+    profiles = []
+    for candidate in home.glob(".codex*"):
+        if not candidate.is_dir():
+            continue
+        lowered = candidate.name.lower()
+        if any(token in lowered for token in ("backup", "migration", ".old", ".tmp", "cache")):
+            continue
+        if not ((candidate / "config.toml").is_file() or (candidate / "auth.json").is_file()):
+            continue
+        profiles.append(candidate.resolve())
+    return sorted(profiles, key=lambda path: path.name.lower())
 
-    codex_home = Path(args.codex_home).expanduser().resolve()
+
+def _same_bytes(left: Path, right: Path) -> bool:
+    try:
+        return left.read_bytes() == right.read_bytes()
+    except OSError:
+        return False
+
+
+def configure_profile(
+    codex_home: Path,
+    *,
+    wmux: Path,
+    apply: bool,
+) -> dict:
+    """Plan or apply the managed overlay for exactly one CODEX_HOME."""
+    codex_home = codex_home.expanduser().resolve()
     config = codex_home / "config.toml"
-    agents = codex_home / "AGENTS.md"
     wrapper = codex_home / "scripts" / "start_mattermost_mcp.ps1"
+    hooks = codex_home / "hooks.json"
     seeding = not config.exists()
-    if seeding:
-        print(
-            f"[bootstrap] no config.toml at {config}; will seed a minimal one. "
-            f"Remember to run `codex login` under CODEX_HOME={codex_home} for auth."
-        )
-
-    wmux = newest_wmux_bundle()
-    if wmux is None:
-        raise SystemExit("No installed wmux MCP bundle found")
 
     powershell = Path("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     mattermost_table = "\n".join([
@@ -100,28 +120,97 @@ def main() -> None:
     original = SEED_CONFIG if seeding else config.read_text(encoding="utf-8")
     updated = replace_table_family(original, "mcp_servers.mattermost", mattermost_table)
     updated = replace_table_family(updated, "mcp_servers.wmux", wmux_table)
+    updated = updated.rstrip() + "\n"
+    merged_hooks = merge_hooks(load_json(hooks), bridge_hooks(REPO_ROOT))
+    hooks_text = json.dumps(merged_hooks, ensure_ascii=False, indent=2) + "\n"
+
+    changes = []
+    if not config.exists() or config.read_text(encoding="utf-8") != updated:
+        changes.append(("config.toml", config))
+    if not _same_bytes(SOURCE_DIR / "start_mattermost_mcp.ps1", wrapper):
+        changes.append(("scripts/start_mattermost_mcp.ps1", wrapper))
+    try:
+        hooks_current = hooks.read_text(encoding="utf-8")
+    except OSError:
+        hooks_current = ""
+    if hooks_current != hooks_text:
+        changes.append(("hooks.json", hooks))
 
     print(f"Codex home: {codex_home}")
     print(f"Mattermost: runtime .env loader -> {wrapper}")
     print(f"wmux: {wmux.parent.parent.parent.name}")
-    print(f"AGENTS: {SOURCE_DIR / 'AGENTS.personal.md'} -> {agents}")
-    if not args.apply:
+    print("AGENTS: managed by $agent-profile-governance (not touched here)")
+    print("Bridge hooks: merged (unrelated hooks preserved)")
+    if seeding:
+        print(
+            f"[bootstrap] no config.toml at {config}; will seed a minimal one. "
+            f"Remember to run `codex login` under CODEX_HOME={codex_home} for auth."
+        )
+    if not changes:
+        print("[unchanged] managed overlay already aligned")
+        return {"changed": False, "changes": [], "backup": None}
+    print("Changes: " + ", ".join(name for name, _ in changes))
+    if not apply:
         print("[dry-run] no files written")
-        return
+        return {"changed": True, "changes": [name for name, _ in changes], "backup": None}
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = codex_home / "backups" / f"link16-personal-{stamp}"
-    backup.mkdir(parents=True, exist_ok=False)
-    if not seeding:  # nothing to back up on a fresh, seeded home
-        shutil.copy2(config, backup / "config.toml")
-    if agents.exists():
-        shutil.copy2(agents, backup / "AGENTS.md")
+    existing = [(name, path) for name, path in changes if path.exists()]
+    if existing:
+        backup.mkdir(parents=True, exist_ok=False)
+        for name, path in existing:
+            destination = backup / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+    else:
+        backup = None
 
+    codex_home.mkdir(parents=True, exist_ok=True)
     wrapper.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SOURCE_DIR / "start_mattermost_mcp.ps1", wrapper)
-    shutil.copy2(SOURCE_DIR / "AGENTS.personal.md", agents)
     config.write_text(updated, encoding="utf-8")
-    print(f"Applied. Backup: {backup}")
+    hooks_tmp = hooks.with_suffix(".json.tmp")
+    hooks_tmp.write_text(hooks_text, encoding="utf-8")
+    os.replace(hooks_tmp, hooks)
+    print(f"Applied. Backup: {backup or '(new files; no backup needed)'}")
+    return {
+        "changed": True,
+        "changes": [name for name, _ in changes],
+        "backup": str(backup) if backup else None,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--codex-home",
+        action="append",
+        help="profile to configure; repeatable (default: ~/.codex-personal)",
+    )
+    parser.add_argument(
+        "--all-profiles",
+        action="store_true",
+        help="discover every live ~/.codex* profile and align its managed overlay",
+    )
+    parser.add_argument("--apply", action="store_true")
+    args = parser.parse_args()
+
+    homes = []
+    if args.all_profiles:
+        homes.extend(discover_codex_homes())
+    homes.extend(Path(raw).expanduser().resolve() for raw in (args.codex_home or []))
+    if not homes:
+        homes = [(Path.home() / ".codex-personal").resolve()]
+    homes = list(dict.fromkeys(homes))
+
+    wmux = newest_wmux_bundle()
+    if wmux is None:
+        raise SystemExit("No installed wmux MCP bundle found")
+    for index, codex_home in enumerate(homes):
+        if index:
+            print()
+        configure_profile(codex_home, wmux=wmux, apply=args.apply)
 
 
 if __name__ == "__main__":

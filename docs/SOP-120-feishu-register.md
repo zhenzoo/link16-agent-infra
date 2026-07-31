@@ -12,8 +12,8 @@
 
 ```bash
 # 1. 一键建应用（官方扫码 · 自动写 .env）
-python feishu/register_feishu_app.py --name "<显示名>" --bot <key>
-# 2. 名册加一行 → feishu/bridge-bots.json（见 §1）
+python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <profile>
+# 2. 脚本按 profile doctor 后自动 upsert 本机运行名册；只核对非身份字段（见 §1）
 # 3. 开权限（一键预置不含的，手动·见 §2）：
 #    ② drive:drive（在线查看 send --doc）   ③ 群消息接收 scope（a2a 关键！）
 #    每个都要：开发者后台勾选 → 创建版本 → 发布 才生效
@@ -31,9 +31,38 @@ python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
 - 默认 bot：`FEISHU_BRIDGE_APP_ID` / `FEISHU_BRIDGE_APP_SECRET`
 - 第 N 个：`--bot <key>` → `FEISHU_BRIDGE_<KEY>_APP_ID` / `_SECRET`
 
+> 🔌 **代理坑（2026-07-28 实证 · 已在脚本里堵死）**：飞书是**国内端点**，注册轮询**必须直连**。本机开着 Clash（`http(s)_proxy=127.0.0.1:7897` + Windows 注册表系统代理）时，OAuth 轮询会在跑了 10 分钟、**123 次正常轮询之后**突然拿回一个 HTML 错误页 → SDK `resp.json()` 抛 `JSONDecodeError`、整个注册崩、device_code 作废、授权链接得重开。→ `register_feishu_app.py` 开头现在**在进程内**清 `http(s)_proxy/ALL_PROXY` **并**设 `NO_PROXY=feishu.cn,…`（Windows 上 requests 还会读注册表系统代理，光清环境变量不够，得靠 `no_proxy` 才绕得掉）。只影响该进程，不动系统代理。**症状认领**：注册跑一半报 `JSONDecodeError: Expecting value: line 1 column 1` = 这个。
+
 **名册** = `feishu/bridge-bots.json`（committed · 当前 7 bot：default/arch/explore/twitter/config/social_media/podcast）。每 bot 一行：`name` + `app_id_env` + `app_secret_env` + `at_name`（+ 可选 `cwd`）。**密钥不在这里**（在 `.env`，这里只存键名）。
 - ⚠️ **cwd 机器无关铁律**：仓库类 bot **不写 cwd**（自动落本仓库根，任何机/盘自适应）；只有非本仓库目录的 bot 才写 `cwd`，且用 `~/...`（各机自己 home，绝不写死盘符/用户名）。
 - 改名册后 **重启桥**（stop→start）生效。
+
+### § 1.1 · 🔒 Agent Profile 铁律（2026-07-31）
+
+**规矩**：profile→runtime/home/launcher 只存在于
+[`agent-profiles.json`](../feishu/agent-profiles.json)。本机名册只选择 profile；
+主 session 注入 `LINK16_AGENT_PROFILE`，其独立 wmux worker 必须继承同一值。
+
+```jsonc
+{
+  "defaults": {
+    "profiles": { "claude": "ccp2", "codex": "cxp" }
+  },
+  "bots": [
+    { "name": "默认 Claude bot", "...": "不写身份字段" },
+    { "name": "Codex bot", "profile": "cxp" }
+  ]
+}
+```
+
+- **本机默认**：只写 `defaults.profiles.{claude,codex}` 一次；每台机可不同。
+- **bot 例外**：只写一个 `"profile": "<name>"`；禁止新写
+  `agent/account/claude_config_dir/codex_home`。
+- **注册**：显式 `--profile` 最清楚；省略时只继承同 runtime 主 session 的
+  `LINK16_AGENT_PROFILE`，否则取本机 runtime 默认。OAuth 前必须 doctor。
+- **换号**：飞书 `/account <profile>`；成功后只持久化 `profile`，失败时保持当前
+  session 不动。
+- **新 profile / 新 bot / 新用户入口**：统一调用 `$agent-profile-governance`。
 
 ---
 
@@ -172,10 +201,10 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 >
 > **🔒 登记协议（Publisher 2026-06-20 定规 · 硬规则 · 2026-07-04 大部分已自动化）**：每次用 `register_feishu_app.py` 建新 bot、**或**给任何 bot 开/关权限之后都要回写登记。**register 现在【自动】把新 bot 补进 [`agent-registry.json`](../feishu/agent-registry.json)（目录名单·open_id 现查填好）** → 运行的 agent 只需**核对/补 `repo`**；开/关权限后再跑 auditor 刷新 §2.2 能力矩阵。§2.1 名单已收口为 `agent-registry.json` 的指针·**不再手抄**。`register_feishu_app.py` 跑完会打印这份清单提醒。
 
-- [ ] **注册** `register_feishu_app.py --name X --bot key`
-- [ ] **运行时名册** `bridge-bots.local.json`（+ committed `bridge-bots.json`）加行（name / app_id_env / at_name·仓库类不写 cwd）—— 桥靠它 spawn（决定跑哪些 bot）
+- [ ] **注册** `register_feishu_app.py --name X --bot key --profile <profile>`（OAuth 前 profile doctor）
+- [ ] **运行时名册** — ✅ 注册脚本自动 upsert `bridge-bots.local.json`；核对 name/app_id_env/at_name/cwd/profile，禁止 legacy identity 字段
 - [ ] **跨机目录名册** `agent-registry.json` —— ✅ **`register_feishu_app.py` 已【自动】补 stub**（name/machine/send_key/open_id/at_name/verified 现查填好）→ 你只需**核对/补 `repo`**（分管哪个仓·脚本不知道）+ 必要时 machine，共享仓则 `shared:true`。查名册 tool / repo-sync 路由 / 方案B 按名喊全靠它
-- [ ] **默认账号**（可选）：该 bot 要默认走**非个人号**（如公司号 work2）才需做——名册条目加 `"claude_config_dir": "~/.claude-work2"`（codex bot 用 `"codex_home"`）。`register_feishu_app.py` **不会自动写**这字段，不写 = 默认 `~/.claude-personal`。机制 + 别名表见 [`ARCH-101 §4.2`](ARCH-101-feishu-bridge.md)。
+- [x] **默认 profile** — 本机 `defaults.profiles` 只写一次；例外 bot 只写 `profile`。机制见 [`ARCH-120`](ARCH-120-agent-profile-runtime.md) 与 [`ARCH-110 §4.2`](ARCH-110-feishu-bridge.md)。
 - [ ] **②** 开 `drive:drive`（register 末尾的链）→ 创版本 → 发布
 - [ ] **③** 开 `im:chat`（获取与更新群组信息）→ 创版本 → 发布 ★**默认必开**（群 a2a 关键）
 - [ ] **拉进共享群** + 互换 open_id（`bot/v3/info`）
@@ -204,7 +233,7 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 
 ## 关联
 
-- [`ARCH-101`](ARCH-101-feishu-bridge.md) · 运行时桥（spawn/收发/回传/自愈）· 本文的运行时对侧
+- [`ARCH-110`](ARCH-110-feishu-bridge.md) · 运行时桥（spawn/收发/回传/自愈）· 本文的运行时对侧
 - `feishu/register_feishu_app.py` · 一键建应用
 - `feishu/bridge-bots.json` · 名册（+ `.local` 整盘覆盖）
 - `feishu/send_feishu_msg.py` / `send_feishu_file.py` · a2a 主动喊话 / 发文件原语

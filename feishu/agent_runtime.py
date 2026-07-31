@@ -8,9 +8,15 @@ outbox records, and the drainer sends them to Feishu.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
+import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -55,11 +61,16 @@ class RuntimeSpec:
     pins_jsonl: bool = False
 
 
-def runtime_name(bot) -> str:
+def _raw_runtime_name(bot) -> str:
     raw = ""
     if isinstance(bot, dict):
         raw = bot.get("agent") or bot.get("runtime") or ""
     return (raw or "claude").strip().lower().replace("_", "-")
+
+
+def runtime_name(bot) -> str:
+    profile = resolve_profile(bot, required=False)
+    return profile.runtime if profile else _raw_runtime_name(bot)
 
 
 def display_name(bot) -> str:
@@ -92,26 +103,33 @@ def pins_jsonl(bot) -> bool:
 
 
 def _claude_config_dir(bot) -> Path:
-    """CLAUDE_CONFIG_DIR for this bot. 默认 ~/.claude-personal·可被 bot 名册里的
-    claude_config_dir 覆盖(如 ~/.claude-work2 走另一个账号)。~ 各机自己 home 展开·
-    绝不写死盘符/用户名(跨机铁律)。"""
+    """Resolve Claude home from profile; legacy roster fields are migration input only."""
+    profile = resolve_profile(bot, required=False)
+    if profile:
+        if profile.runtime != "claude":
+            raise ValueError(f"profile {profile.name} 不是 Claude runtime")
+        return profile.home_path
     if isinstance(bot, dict):
         raw = bot.get("claude_config_dir")
         if raw:
-            return Path(os.path.expanduser(raw))
-    return Path.home() / ".claude-personal"
+            return _expand_home(raw)
+    return profile_spec(default_profile("claude")).home_path
 
 
 def _codex_home(bot) -> Path:
+    profile = resolve_profile(bot, required=False)
+    if profile:
+        if profile.runtime != "codex":
+            raise ValueError(f"profile {profile.name} 不是 Codex runtime")
+        return profile.home_path
     if isinstance(bot, dict):
         raw = bot.get("codex_home")
         if raw:
-            return Path(os.path.expanduser(raw))
+            return _expand_home(raw)
     raw = os.environ.get("CODEX_HOME")
     if raw:
-        return Path(os.path.expanduser(raw))
-    personal = Path.home() / ".codex-personal"
-    return personal if personal.exists() else Path.home() / ".codex"
+        return _expand_home(raw)
+    return profile_spec(default_profile("codex")).home_path
 
 
 _CODEX_NATIVE_SLASH = {
@@ -171,47 +189,349 @@ def codex_skill_invocation(bot, text: str, cwd=None) -> str | None:
     return None
 
 
-# ---------- 账号别名（镜像 ~/.bashrc 的 cc/ccp/ccw* + cx/cxp · 给 /account 运行时切换用）----------
-# alias → (runtime, home)。home：claude 给 CLAUDE_CONFIG_DIR · codex 给 CODEX_HOME。
-# 加新账号别名：这里加一行 + 该账号目录下有 launch.sh（由 ~/.claude-personal 的 `govctl mirror` 生成）即可，
-# worker_cmd 会自动 source 它拿到模型后端 env（见下）。未来 ccg/ccq 同理。
-ACCOUNT_ALIASES = {
-    "cc":   ("claude", "~/.claude"),            # 默认号
-    "ccp":  ("claude", "~/.claude-personal"),   # 个人
-    "ccp2": ("claude", "~/.claude-personal2"),  # 个人第二号（母版镜像：skills/commands/memory 整目录 junction 回 ccp·CLAUDE.md 走 @import）
-    "cck":  ("claude", "~/.claude-kimi"),        # 个人·Kimi K3 1M 后端（母版镜像 + launch.sh 注入 ANTHROPIC_* · 2026-07-31）
-    "ccw":  ("claude", "~/.claude-work"),        # 公司
-    "ccw2": ("claude", "~/.claude-work2"),
-    "ccw3": ("claude", "~/.claude-work3"),
-    "cx":   ("codex",  "~/.codex"),              # codex 公司号（cx=work）
-    "cxp":  ("codex",  "~/.codex-personal"),     # codex 个人号（cxp=personal）
-}
+# ---------- Agent Profile SSOT (ARCH-120) ----------
+PROFILE_ENV = "LINK16_AGENT_PROFILE"
+PROFILE_REGISTRY_PATH = Path(__file__).resolve().with_name("agent-profiles.json")
+ROSTER_LOCAL_PATH = Path(__file__).resolve().with_name("bridge-bots.local.json")
+ROSTER_COMMITTED_PATH = Path(__file__).resolve().with_name("bridge-bots.json")
+_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_PROFILE_RUNTIMES = {"claude", "codex"}
+_PROFILE_LAUNCHERS = {"direct", "launch-sh"}
+
+
+@dataclass(frozen=True)
+class ProfileSpec:
+    name: str
+    runtime: str
+    home: str
+    launcher: str
+    label: str = ""
+    recommended: bool = False
+
+    @property
+    def home_path(self) -> Path:
+        return _expand_home(self.home)
+
+
+def _expand_home(raw) -> Path:
+    value = str(raw or "").replace("\\", "/")
+    if value == "~":
+        return Path.home()
+    if value.startswith("~/"):
+        return Path.home() / value[2:]
+    return Path(os.path.expandvars(value)).expanduser()
+
+
+def _profile_document(path=None) -> dict:
+    registry = Path(path) if path else PROFILE_REGISTRY_PATH
+    try:
+        data = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"profile registry 读失败：{registry}：{exc}") from exc
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise ValueError(f"profile registry version 必须是 1：{registry}")
+    profiles = data.get("profiles")
+    defaults = data.get("default_profiles")
+    if not isinstance(profiles, dict) or not isinstance(defaults, dict):
+        raise ValueError(f"profile registry 缺 profiles/default_profiles：{registry}")
+    return data
+
+
+def profile_specs(path=None) -> list[ProfileSpec]:
+    data = _profile_document(path)
+    defaults = data["default_profiles"]
+    result = []
+    for name, raw in data["profiles"].items():
+        if not _PROFILE_NAME_RE.fullmatch(str(name)):
+            raise ValueError(f"非法 profile 名：{name!r}")
+        if not isinstance(raw, dict):
+            raise ValueError(f"profile {name} 必须是 object")
+        runtime = str(raw.get("runtime") or "").strip().lower()
+        home = str(raw.get("home") or "").strip().replace("\\", "/")
+        launcher = str(raw.get("launcher") or "").strip().lower()
+        if runtime not in _PROFILE_RUNTIMES:
+            raise ValueError(f"profile {name} runtime 非法：{runtime!r}")
+        if launcher not in _PROFILE_LAUNCHERS:
+            raise ValueError(f"profile {name} launcher 非法：{launcher!r}")
+        if not (home == "~" or home.startswith("~/")):
+            raise ValueError(f"profile {name} home 必须是 home-relative：{home!r}")
+        result.append(ProfileSpec(
+            name=name,
+            runtime=runtime,
+            home=home,
+            launcher=launcher,
+            label=str(raw.get("label") or ""),
+            recommended=bool(raw.get("recommended")),
+        ))
+    known = {p.name: p.runtime for p in result}
+    for runtime in _PROFILE_RUNTIMES:
+        selected = defaults.get(runtime)
+        if selected not in known or known[selected] != runtime:
+            raise ValueError(f"default_profiles.{runtime} 不是合法 {runtime} profile：{selected!r}")
+    return result
+
+
+def profile_spec(name: str, path=None) -> ProfileSpec:
+    key = str(name or "").strip().lower()
+    for profile in profile_specs(path):
+        if profile.name == key:
+            return profile
+    raise KeyError(f"未知 agent profile：{key or '(empty)'}")
+
+
+def default_profile(runtime: str, path=None) -> str:
+    name = str(runtime or "").strip().lower()
+    data = _profile_document(path)
+    selected = data["default_profiles"].get(name)
+    profile = profile_spec(selected, path)
+    if profile.runtime != name:
+        raise ValueError(f"default profile {selected} 与 runtime {name} 不匹配")
+    return profile.name
+
+
+def _legacy_profile_name(bot: dict) -> str | None:
+    runtime = _raw_runtime_name(bot)
+    if runtime not in _PROFILE_RUNTIMES:
+        return None
+    raw_home = bot.get("codex_home") if runtime == "codex" else bot.get("claude_config_dir")
+    if raw_home:
+        home = _expand_home(raw_home)
+        for profile in profile_specs():
+            if profile.runtime == runtime and profile.home_path == home:
+                return profile.name
+    return None
+
+
+def profile_name(bot, *, required=False) -> str | None:
+    """Resolve one profile name.
+
+    `profile` is authoritative. `account` and provider-home fields are accepted
+    only as migration inputs. Bare legacy bots use the registry's runtime
+    default; standalone workers must call profile_from_env() and therefore fail
+    closed instead of taking this compatibility route.
+    """
+    if isinstance(bot, dict):
+        explicit = bot.get("profile") or bot.get("account")
+        if explicit:
+            return profile_spec(explicit).name
+        legacy = _legacy_profile_name(bot)
+        if legacy:
+            return legacy
+        runtime = _raw_runtime_name(bot)
+        if runtime in _PROFILE_RUNTIMES:
+            return default_profile(runtime)
+    if required:
+        raise ValueError("bot 没有可解析的 agent profile")
+    return None
+
+
+def resolve_profile(bot, *, required=False) -> ProfileSpec | None:
+    name = profile_name(bot, required=required)
+    return profile_spec(name) if name else None
+
+
+def profile_from_env(env=None) -> ProfileSpec:
+    source = os.environ if env is None else env
+    name = str(source.get(PROFILE_ENV) or "").strip().lower()
+    if not name:
+        raise ValueError(f"{PROFILE_ENV} 未设置；拒绝猜账号")
+    return profile_spec(name)
+
+
+def profile_public_dict(profile: ProfileSpec) -> dict:
+    return {
+        "name": profile.name,
+        "runtime": profile.runtime,
+        "home": profile.home,
+        "launcher": profile.launcher,
+        "label": profile.label,
+        "recommended": profile.recommended,
+    }
+
+
+def profile_doctor(name: str) -> dict:
+    profile = profile_spec(name)
+    errors = []
+    home = profile.home_path
+    if not home.is_dir():
+        errors.append(f"home 不存在：{profile.home}")
+    if not shutil.which(profile.runtime):
+        errors.append(f"CLI 不可用：{profile.runtime}")
+    launch = home / "launch.sh"
+    if profile.launcher == "launch-sh" and not launch.is_file():
+        errors.append(f"launch.sh 不存在：{profile.home}/launch.sh")
+    return {
+        **profile_public_dict(profile),
+        "ok": not errors,
+        "errors": errors,
+    }
+
+
+def _require_profile_available(profile: ProfileSpec) -> None:
+    result = profile_doctor(profile.name)
+    if result["errors"]:
+        raise ValueError(f"profile {profile.name} 本机不可用：" + "；".join(result["errors"]))
 
 
 def account_aliases() -> list:
-    return list(ACCOUNT_ALIASES)
+    """Backward-compatible name used by Feishu `/account` UI."""
+    return [profile.name for profile in profile_specs()]
+
+
+def machine_default_profile(runtime: str) -> str:
+    """Read the per-runtime machine default, falling back to the profile registry."""
+    name = str(runtime or "").strip().lower()
+    if ROSTER_LOCAL_PATH.is_file():
+        try:
+            data = json.loads(ROSTER_LOCAL_PATH.read_text(encoding="utf-8"))
+            defaults = data.get("defaults") if isinstance(data, dict) else {}
+            profiles = defaults.get("profiles") if isinstance(defaults, dict) else {}
+            selected = profiles.get(name) if isinstance(profiles, dict) else None
+            if selected:
+                profile = profile_spec(selected)
+                if profile.runtime != name:
+                    raise ValueError(
+                        f"机器默认 profile {selected} 与 runtime {name} 不匹配"
+                    )
+                return profile.name
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"本机 roster defaults 读失败：{exc}") from exc
+    return default_profile(name)
+
+
+@contextmanager
+def _roster_write_lock(timeout=10.0):
+    """Small cross-process lock for rare roster writes from parallel bot bridges."""
+    lock_path = ROSTER_LOCAL_PATH.with_suffix(".json.lock")
+    token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(token)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > 60:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"等待 roster 写锁超时：{lock_path}")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            if lock_path.read_text(encoding="utf-8") == token:
+                lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _update_local_roster(mutator):
+    """Read-after-lock, mutate, and atomically replace the machine-local roster."""
+    with _roster_write_lock():
+        src = ROSTER_LOCAL_PATH if ROSTER_LOCAL_PATH.is_file() else ROSTER_COMMITTED_PATH
+        data = json.loads(src.read_text(encoding="utf-8"))
+        bots = data.get("bots") if isinstance(data, dict) else data
+        if not isinstance(bots, list):
+            raise ValueError(f"{src.name} 结构不认识（bots 不是 list）·不敢写")
+        result = mutator(data, bots)
+        tmp = ROSTER_LOCAL_PATH.with_name(
+            f"{ROSTER_LOCAL_PATH.name}.{os.getpid()}.tmp"
+        )
+        tmp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.replace(tmp, ROSTER_LOCAL_PATH)
+        return result
+
+
+def persist_account(bot_name: str, alias: str, why: str = "") -> dict:
+    """Persist `/account` as the bot's single `profile` selection.
+
+    写机器本地 overlay `feishu/bridge-bots.local.json`（整盘覆盖 committed·gitignore·每机各管各）：
+    - 已有 local → 原地改该 bot 的 `profile`，并清掉 legacy 重复字段；
+    - 该机还没 local（在用 committed 名册）→ 先拿 committed `bridge-bots.json` 整盘种子出 local 再改——
+      【绝不写 committed 那本入 git 的共享名册】，账号是机器级状态。
+    原子写（tmp + os.replace；跨进程互斥在 S2.2 加固）。
+    返回 {alias, runtime, home, roster}。未知 alias 抛 KeyError · 名册里没有该 bot 抛 ValueError。
+    """
+    alias = (alias or "").strip().lower()
+    profile = profile_spec(alias)
+    def mutate(_data, bots):
+        hit = next(
+            (b for b in bots if isinstance(b, dict) and b.get("name") == bot_name),
+            None,
+        )
+        if hit is None:
+            raise ValueError(f"本机名册里没有 bot '{bot_name}'")
+        for key in ("agent", "runtime", "account", "claude_config_dir", "codex_home"):
+            hit.pop(key, None)
+        hit["profile"] = profile.name
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        hit["_account_why"] = (
+            f"{stamp} 飞书 /account {alias} 直改默认"
+            + (f"：{why}" if why else "")
+        )
+
+    _update_local_roster(mutate)
+    return {
+        "alias": profile.name,
+        "runtime": profile.runtime,
+        "home": profile.home,
+        "roster": ROSTER_LOCAL_PATH.name,
+    }
+
+
+def upsert_runtime_bot(
+    bot_name: str,
+    app_id_env: str,
+    app_secret_env: str,
+    at_name: str,
+    profile_name_: str,
+) -> dict:
+    """Create/update one machine-local runtime row after app registration."""
+    profile = profile_spec(profile_name_)
+
+    def mutate(_data, bots):
+        hit = next(
+            (b for b in bots if isinstance(b, dict) and b.get("name") == bot_name),
+            None,
+        )
+        if hit is None:
+            hit = {"name": bot_name}
+            bots.append(hit)
+        hit.update({
+            "app_id_env": app_id_env,
+            "app_secret_env": app_secret_env,
+            "at_name": at_name,
+            "profile": profile.name,
+        })
+        for key in ("agent", "runtime", "account", "claude_config_dir", "codex_home"):
+            hit.pop(key, None)
+        return dict(hit)
+
+    return _update_local_roster(mutate)
 
 
 def apply_account(bot: dict, alias: str) -> str:
-    """把 bot dict **原地**改成走 alias 对应的账号/runtime（只动账号相关键·不碰 cwd/凭据）。
-    供桥的 /account 调：改完 worker_cmd/transcript_root 自然走新账号。未知 alias 抛 KeyError。
-    返回人读 label。注意：bot dict 被原地改 → 自愈重生(ensure_session 读同一 bot 对象)沿用新账号；
-    整桥 stop→start 重读名册才回默认。"""
+    """Change an in-memory bot to one profile; do not duplicate provider homes."""
     alias = (alias or "").strip().lower()
-    runtime, home = ACCOUNT_ALIASES[alias]
-    bot.pop("claude_config_dir", None)   # 先清两边覆盖键·防 claude↔codex 互切残留串台
-    bot.pop("codex_home", None)
-    if runtime == "claude":
-        bot["agent"] = "claude"
-        bot["claude_config_dir"] = home
-    else:  # codex
-        bot["agent"] = "codex"
-        bot["codex_home"] = home
-    bot["account"] = alias               # 记当前账号（current_account / 显示用）
-    return f"{alias} · {display_name(bot)} · {home}"
+    profile = profile_spec(alias)
+    for key in ("account", "claude_config_dir", "codex_home", "runtime"):
+        bot.pop(key, None)
+    bot["profile"] = profile.name
+    bot["agent"] = profile.runtime  # derived compatibility field; roster does not persist it
+    return f"{profile.name} · {display_name(bot)} · {profile.home}"
 
 
-_ACCOUNT_KEYS = ("agent", "claude_config_dir", "codex_home", "account")
+_ACCOUNT_KEYS = ("profile", "agent", "runtime", "claude_config_dir", "codex_home", "account")
 
 
 def account_snapshot(bot) -> dict:
@@ -234,42 +554,74 @@ def reset_account(bot, snapshot: dict) -> None:
 
 
 def current_account(bot) -> str:
-    """bot 当前账号 alias：被 /account 改过取 bot['account']·否则按名册默认(config_dir/codex_home)反推·反推不出回 'default'。"""
-    if isinstance(bot, dict) and bot.get("account"):
-        return bot["account"]
-    name = runtime_name(bot)
-    home = (_codex_home(bot) if name == "codex" else _claude_config_dir(bot)).as_posix()
-    for al, (rt, h) in ACCOUNT_ALIASES.items():
-        if rt == name and Path(os.path.expanduser(h)).as_posix() == home:
-            return al
-    return "default"
+    """Return the effective profile name, including legacy roster inference."""
+    return profile_name(bot, required=False) or "default"
+
+
+def standalone_worker_cmd(
+    profile_name_: str,
+    cwd=None,
+    extra_env=None,
+    provider_args=None,
+) -> str:
+    """Return a provider-aware command for a non-Feishu main/worker session.
+
+    The caller must pass a profile selected by the parent session. This path
+    never reads provider-home variables as identity and never falls back.
+    """
+    profile = profile_spec(profile_name_)
+    _require_profile_available(profile)
+    env = {PROFILE_ENV: profile.name}
+    for key, value in (extra_env or {}).items():
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(key)):
+            raise ValueError(f"非法环境变量名：{key!r}")
+        env[str(key)] = str(value)
+    env_text = " ".join(f"{key}={_q(value)}" for key, value in env.items()) + " "
+    prefix = ""
+    if profile.launcher == "launch-sh":
+        prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
+    if profile.runtime == "claude":
+        command = (
+            prefix
+            + env_text
+            + f"CLAUDE_CONFIG_DIR={_q(profile.home_path.as_posix())} "
+            + "claude --dangerously-skip-permissions"
+        )
+    else:
+        command = (
+            prefix
+            + env_text
+            + f"CODEX_HOME={_q(profile.home_path.as_posix())} "
+            + "codex --dangerously-bypass-approvals-and-sandbox --search "
+            + "-c shell_environment_policy.inherit=all"
+        )
+        if cwd:
+            command += f" -C {_q(str(cwd))}"
+    if provider_args:
+        command += " " + " ".join(_q(str(arg)) for arg in provider_args)
+    return command
 
 
 def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
     """Return the agent launch command. The wmux spawn call owns the preceding cd."""
     spec = runtime_spec(bot)
+    profile = resolve_profile(bot, required=spec.name != "custom")
+    if profile:
+        _require_profile_available(profile)
     name = bot["name"] if isinstance(bot, dict) else str(bot)
     cwd = (cwd or (bot.get("cwd") if isinstance(bot, dict) else None) or str(project))
     cwd = str(cwd).replace("\\", "/")
     env = (
         f"FEISHU_BRIDGE_SESSION={name} "
         f"FEISHU_BRIDGE_OUTBOX_DIR={_q(autopilot.as_posix())} "
+        + (f"{PROFILE_ENV}={_q(profile.name)} " if profile else "")
     )
     if spec.name == "claude":
         hooks_json = (autopilot / "bridge-hooks.json").as_posix()
-        config_dir = _claude_config_dir(bot).as_posix()
-        # ⚠️ 只换 CLAUDE_CONFIG_DIR **换不了模型后端**：那只是换配置目录，bot 仍然打 Anthropic 官方端点。
-        # 第三方后端（Kimi/GLM/千问…）要的是一串 ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY / ANTHROPIC_MODEL…
-        # 环境变量 → 统一放在【账号目录自己的 launch.sh】里，这里 source 一下即可。
-        # launch.sh 由 ~/.claude-personal 的 `govctl mirror <账号> -Model <preset>` 生成
-        # （密钥是运行时从 $VIBECODING_ROOT/.env 读的 shell 片段，不落盘、不进 git）。
-        # 官方号（cc/ccp/ccp2…）的 launch.sh 只 export CLAUDE_CONFIG_DIR，source 了无副作用；
-        # 没有这个文件的账号（如另一台机还没建）完全按老路走 —— 向后兼容、零风险。
-        # spawn 是把 cd 和本命令**分行**发的，故这里的 `. x.sh;` 自成一句，不会跟 cd 的 && 纠缠。
+        config_dir = profile.home_path.as_posix()
         prefix = ""
-        launch_sh = Path(config_dir) / "launch.sh"
-        if launch_sh.is_file():
-            prefix = f". {_q(launch_sh.as_posix())}; "
+        if profile.launcher == "launch-sh":
+            prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
         return (
             prefix
             + env
@@ -277,7 +629,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
             + f"claude --dangerously-skip-permissions --settings {_q(hooks_json)}"
         )
     if spec.name == "codex":
-        codex_home = _codex_home(bot).as_posix()
+        codex_home = profile.home_path.as_posix()
         if uses_app_server(bot):
             worker = (project / "feishu" / "codex_app_server_worker.py").as_posix()
             return (

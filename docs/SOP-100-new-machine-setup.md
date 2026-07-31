@@ -27,7 +27,7 @@
 | 项 | 怎么查 / 怎么配 |
 |---|---|
 | **`VIBECODING_ROOT` 环境变量** | 指向 `.env` 所在的 VibeCoding 根（如 `D:\410_VibeCoding`）。桥的 `.env` 路径靠它跨机解析（不写死盘符·见 ARCH-110 §4.1）。没设也有上溯/legacy 兜底，但建议设。 |
-| **`ccp` 别名（git-bash）** | `~/.bashrc` 里：`alias ccp='CLAUDE_CONFIG_DIR=~/.claude-personal claude --dangerously-skip-permissions'`。桥 spawn 会话时进 bash 打 `ccp` 起 Claude——没有它会话起不出 Claude。 |
+| **Link16 agent profile launcher** | `feishu/agent-profiles.json` 是账号映射 SSOT；运行 `python ~/.claude-personal/skills/agent-profile-governance/scripts/profile_governance.py wrappers --apply` 生成 Git Bash + PowerShell 5/7 的动态 wrapper，再跑 `doctor`。禁止手写 `CLAUDE_CONFIG_DIR`/`CODEX_HOME` alias。 |
 | **node** | `node --version`（`~/wmux-rpc.js` 要 node 跑）。 |
 | **仓库 clone** | `git clone git@github.com:zhenzoo/link16-agent-infra.git` 到本机（惯例位置 `$VIBECODING_ROOT\Post\link16-agent-infra`；`zhenz`/`D:` 那台历史上多一层 `Post\tools\`）。 |
 
@@ -138,7 +138,7 @@ cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json
 python feishu/feishu_bridge.py start      # 给名册里每个 bot 各起一隐藏进程
 python feishu/feishu_bridge.py status     # 看进程/会话活没活
 ```
-群里 `@ 你的 bot` 说句话 → 桥 `workspace.new` + 起 ccp + 回话。通了 = 全链路 OK。
+群里 `@ 你的 bot` 说句话 → 桥 `workspace.new` + 按名册 profile 启动 + 回话。回复中的账号标识必须等于名册解析出的 profile；通了 = 全链路 OK。
 
 ---
 
@@ -152,6 +152,7 @@ python feishu/feishu_bridge.py status     # 看进程/会话活没活
 |---|---|---|
 | **wmux**（GUI） | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `wmux` 项 | wmux 安装程序**自己写好**，一般不用管，§9.1 只是核对 |
 | **飞书桥**（Python） | 计划任务 **`FeishuBridge-Autostart`** | **要手动建**，见 §9.2 |
+| **看门狗**（Python · 全机限流自愈） | 计划任务 **`AutopilotWatchdog-Autostart`** | **要手动建**，见 §9.5（桥挂了没人管 ≠ 会话卡了没人管 —— 这是**第二层**保护） |
 
 > 🚨 **别把触发器改成「开机时（不等登录）」——那是个看着更强、实际全废的陷阱。** 两个硬理由：
 > 1. **wmux 是 Electron 桌面应用**（进程带 `--type=renderer` / `--type=gpu-process`），必须有**交互式桌面会话**才活得了。没登录 = 没 wmux = 桥虽然连上了飞书，但收到消息时开不出面板，第一条消息就白扔。
@@ -233,6 +234,46 @@ tail -5 feishu/_logs/bridge-<某个bot>.log
 | 想临时停掉自启 | `Disable-ScheduledTask -TaskName FeishuBridge-Autostart`（重开 `Enable-`） |
 | 换了仓库路径 / 换了 Python | 重跑 §9.2 整段（带 `-Force`，直接覆盖旧任务） |
 
+### 9.5 · 建看门狗的计划任务（**全机限流自愈 · 第二层保护 · 2026-07-31 新增**）
+
+**为什么必须单独配**：桥自启只保证「消息能进来、面板能开出来」；它管不了**会话开出来之后卡住**。Claude 会话偶发撞 `API Error: 529 Overloaded` / 限流会**静止在那不动**，桥不知道、你也不知道，直到你去看才发现。**看门狗**（`xhs-card-gen/_autopilot/watchdog.py`）就是治这个：轮询 wmux **全部 workspace 的全部面板**，发现「有 API 错 + 静止 2 轮 + 没在自己重试」就往那个面板注一句「继续」+ 飞书报你去哪条线看。**覆盖全机所有 bot 线，不是只管写帖**（v0.11 起 · SSOT = `workspace.list` 实时拓扑，bot 增减自动跟随、零硬编码名单）。
+
+> 🩸 **2026-07-31 血泪**：桥有计划任务、看门狗没有 → 7-30 23:44 重启后桥 14 个 bot 全部自启，**看门狗没人拉**，全机裸奔 22 分钟；而它 7-30 17:45 才刚救过 `tb24-xhs-arch` 的同款 529。**两个都配，才叫配完了。**
+
+⚠️ **前提**：这台机得有 `xhs-card-gen` 仓（看门狗代码在那）。纯 link16 机器跳过本节。
+
+```powershell
+# ① 核对路径（照抄前先跑这三行确认都有值）
+$py   = (Get-Command pythonw).Source                     # 用 pythonw：无控制台窗口，每 10min 不闪黑框
+$repo = "$env:VIBECODING_ROOT\Post\xhs-card-gen"          # 看门狗所在仓（跨机路径靠这个 env 变量）
+$py; $repo; Test-Path "$repo\_autopilot\spawn_worker.py"  # 期望：两个路径 + True
+
+# ② 建任务（机器无关 · 两个触发器：登录快速上岗 + 每 10min 幂等自愈）
+$action  = New-ScheduledTaskAction -Execute $py -Argument "`"$repo\_autopilot\spawn_worker.py`" ensure-watchdog" -WorkingDirectory $repo
+$t1      = New-ScheduledTaskTrigger -AtLogOn -User "$env:COMPUTERNAME\$env:USERNAME"; $t1.Delay = "PT2M"   # 排在桥(PT1M)后面
+$t2      = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Minutes 10)
+$t2.Repetition.Duration = $null                          # 无限重复；**不挂在登录上**，所以本次会话内就生效
+$settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+$principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName "AutopilotWatchdog-Autostart" -Action $action -Trigger @($t1,$t2) `
+  -Settings $settings -Principal $principal -Description "全机看门狗常驻服务:限流/API错自愈,覆盖全部 wmux workspace" -Force
+
+# ③ 验收（不用重启）
+Start-ScheduledTask -TaskName "AutopilotWatchdog-Autostart"; Start-Sleep 10
+Get-ScheduledTaskInfo AutopilotWatchdog-Autostart | Select-Object LastRunTime,LastTaskResult,NextRunTime  # 期望 0 + NextRunTime 有值
+@(Get-CimInstance Win32_Process -Filter "Name like 'python%'" | ? { $_.CommandLine -match 'watchdog' }).Count  # 期望 1
+Get-Content "$repo\_autopilot\watchdog.log" -Tail 2                                                    # 期望见「上岗 v0.13」
+```
+
+**为什么一个任务同时是「开机自启」和「崩溃自愈」**：动作 `ensure-watchdog` 是**幂等**的——读 `watchdog.pid` 判活，**活着就 no-op、死了才起**。所以每 10 分钟无脑触发一次完全无害（实测连触发 2 次仍是同一个 pid、不双开），而且**不跑巡航时也保活**。
+
+| 症状 | 病因 / 修 |
+|---|---|
+| `NextRunTime` 空 | 只建了登录触发器、漏了 `$t2` → 重跑 ② |
+| 进程数 = 0 且 `LastTaskResult` 非 0 | `$py`/`$repo` 不对 → 重跑 ① |
+| 看门狗活着但从不注「继续」 | 正常且是好事：要「有 API 错 + 静止 2 轮(4min) + 没在 retry」三条同时满足才注入（防自激三道闸） |
+| 想临时停 | `Disable-ScheduledTask -TaskName AutopilotWatchdog-Autostart` + 手动 kill 看门狗进程（否则它还常驻着） |
+
 ---
 
 ## 附录 A · 排错速查
@@ -242,7 +283,7 @@ tail -5 feishu/_logs/bridge-<某个bot>.log
 | `ModuleNotFoundError: lark_channel` / 桥打印「缺依赖 pip install lark-channel-sdk」 | §2 没做 |
 | `node ~/wmux-rpc.js` 报找不到文件 / ENOENT | §3 第 2 步 `~/wmux-rpc.js` 没放 |
 | rpc `timeout` / `closed before response` / `no transport` | wmux daemon 没开（打开 wmux GUI）或 `~/.wmux-tcp-port` 缺 |
-| 桥起了会话但里面没出 Claude | §1 `ccp` 别名没配 |
+| 桥起了会话但里面没出 Claude/Codex | 跑 `agent_profile_cli.py doctor --profile <name>`；检查 registry、本机 profile home/CLI 与名册 `profile`，不要补裸 alias |
 | 桥连不到 `.env` / 凭证空 | `VIBECODING_ROOT` 没设且上溯找不到 `.env`（§1）；或 §6 没 register |
 | 手动开的 wmux 终端不是 git-bash / 目录不对 | §4 GUI 设置（不是改 config.json） |
 | 开机后桥没自己起来 / 每次都要手动 `start` | §9 开机自启没配（或任务被禁用）→ 见 §9.4 |

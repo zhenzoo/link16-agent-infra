@@ -4,16 +4,18 @@
 > 用途：让另一个 Claude（尤其是**在新开的 wmux workspace 里、可能能拿到身份**的那个）照着把这套并行多窗口编排接着跑/验证。
 >
 > **🔄 UPDATE 2026-06-08 晚(wmux 升 2.17.1）**：本文下面的失败记录是 **wmux 2.9.1** 上的。**升到 2.17.1 后核心 bug 已修**：git bash 面板里现在**有** `WMUX_WORKSPACE_ID`（实测非空 `ws-fc5b37fd-…`）→ § 2 那道 "Workspace identity unknown" 闸，**原生 in-pane MCP `terminal_*` 现可过**。两个新注意点：① **MCP 路径含版本号**——下文出现的 `app-2.9.1` 现一律应读作 `app-2.17.1`；wmux 升级会让旧路径失效、wmux 只自动重指 `~/.claude.json`，`~/.claude-personal/.claude.json` 要手动重指。② **`wmux-rpc.js` 在 2.17.1 daemon 上仍照常工作**，且免身份免 MCP，仍是最稳的外部驱动路。
+>
+> **🔒 ACTIVE OVERRIDE 2026-07-31**：本文的裸 `ccp` 示例只代表 2026-06 历史实验，不能再用于生产。当前账号 SSOT = [`ARCH-120`](ARCH-120-agent-profile-runtime.md)：独立 pane 必须继承父 session 的 `LINK16_AGENT_PROFILE`，只经 `agent_profile_cli.py` 或内容仓 `spawn_worker.py` 启动；缺变量在 split 前失败。
 
 ---
 
 ## 0. TL;DR（给下一个 Claude 的 30 秒须知）
 
 - 🚨 **最重要 · 必读 §8（确切信号）**：`read` 读屏对【刚 spawn 的空闲面板】**不可靠**——只返回 banner、读不到 `❯`，**但面板其实活着**（`LEN=46` 只 banner ≠ 死）。**判面板死活用 `spawn_worker.py probe`、派活用 `kickoff`（验 spinner）·别拿空闲 read 当心跳**（2026-06-25 巡航 P169 假「卡死」血泪：误判一整夜、还白清了 Chrome）。
-- **目标**：在 wmux 的多个终端窗口里各跑一个 Claude Code，由一个 orchestrator 程序化地「读屏 / 打字 / 回车 / 起 `ccp` / 派活 / 收结果」，实现并行写帖等生产。
-- **已跑通**：自建 CLI `%USERPROFILE%\wmux-rpc.js`（Node），**直连 wmux daemon 的命名管道说 JSON-RPC**，绕过 MCP 外壳。读屏 ✅ 打字 ✅ 回车 ✅ `ccp` 起 Claude Code ✅ 派活拿回复 ✅，全部实测过。
+- **目标**：在 wmux 多 pane 中运行 Claude/Codex，由 orchestrator 程序化读屏、派活和收结果；每个独立 worker 与主 session 使用同一个 Link16 profile。
+- **已跑通**：wmux RPC 负责 pane I/O，Link16 public launcher 负责 profile/runtime/home；两层不互相猜账号。
 - **没跑通**：wmux 自带的 **MCP `terminal_*` 工具**，全报 `Workspace identity unknown`（缺 env `WMUX_WORKSPACE_ID`）。
-- **你要验证的假设（用户提出）**：如果 orchestrator 这个 Claude 本身是**从 wmux pane 里用 `ccp` 起的**（即在某个 workspace 内部运行），MCP 就能拿到 `WMUX_WORKSPACE_ID`，原生 `terminal_*` 工具应该直接能用，不再需要 CLI。**见 § 6 测试清单。**
+- **当前事实**：主 session 从受管 profile wrapper 在 wmux pane 内启动时会同时继承 `WMUX_WORKSPACE_ID` 与 `LINK16_AGENT_PROFILE`；前者给 wmux 身份，后者给账号身份，两者不可互相替代。
 
 ---
 
@@ -29,9 +31,8 @@
 | `daemon-8b29ed66` | 起了 Claude Code worker #3 |
 | `daemon-c5b63e58` | 留作纯 PowerShell 自由终端 |
 
-- `ccp` = 一个 PowerShell 函数/alias，干三件事：`$env:HTTPS_PROXY/HTTP_PROXY="http://127.0.0.1:7897"` → `$env:CLAUDE_CONFIG_DIR="$HOME\.claude-personal"` → 跑 `claude`。
-- ~~**裸 `claude` 不在 PATH**~~（2026-06-08 已修：`.local\bin` 进 User PATH + PowerShell profile）→ 现在 PowerShell 直接 `claude` / `ccp` 都行；git bash 也有 `ccp`。
-- `ccp` 不会自动 cd，所以起 worker 前要先 `cd E:\410_VibeCoding\Post\xhs-card-gen`。
+- `cc/ccp/ccp2/cck/ccw*/cx/cxp` 现在都是动态 profile wrapper：启动时读取 Link16 registry 并注入 `LINK16_AGENT_PROFILE`；wrapper 自身不含 provider home 映射。
+- 内容仓 spawner 在 split、reuse、kickoff、probe 各阶段校验 pane metadata 的 `custom.link16.agentProfile`。
 
 ---
 
@@ -127,14 +128,11 @@ env 可覆盖：`WMUX_AUTH_TOKEN` / `WMUX_SOCKET_PATH` / `WMUX_WS`(workspaceId)�
 node wmux-rpc.js split-here vertical          # ✅ 同 workspace · race-safe → 打印 {workspaceId, pty}
 # ❌ 别用裸 `rpc pane.split`：只劈全局活动面板、多 bot 会串台，已被硬闸拦（见 § 3 / § 3.1）
 ```
-**起一个 worker**（窗口先在干净提示符 · git bash 也有 `ccp`，无需切 PowerShell）：
+**起一个 worker**：首选目标内容仓自己的 `spawn_worker.py`，它会在 split 前 fail closed 并记录 profile metadata。只有诊断时才手工启动：
 ```powershell
-node wmux-rpc.js send  <pty> "cd E:\410_VibeCoding\Post\xhs-card-gen"
-node wmux-rpc.js key   <pty> enter
-node wmux-rpc.js send  <pty> "ccp"
-node wmux-rpc.js key   <pty> enter
-# 等 ~6-8s，Claude Code 启动到 ">" 提示符
-node wmux-rpc.js read  <pty> 14    # 确认看到 "Claude Code v2.1.168 … >"
+node wmux-rpc.js send <pty> 'python "$LINK16_AGENT_INFRA_ROOT/feishu/agent_profile_cli.py" run --profile "$LINK16_AGENT_PROFILE" --cwd "$PWD"'
+node wmux-rpc.js key  <pty> enter
+# ready/needs-trust 必须继续调用同一 profile CLI；不得用固定 Claude banner 判断 Codex
 ```
 **派活**：
 ```powershell
@@ -162,7 +160,7 @@ node wmux-rpc.js key   <pty> enter
 
 **结论分支**：
 - **若 1-3 全过** → 原生 MCP `terminal_*` 直接可用，本 CLI 退居备用（但 CLI 仍有价值：可从 wmux 外部/脚本/CI 驱动，无需身份）。
-- **若仍报 identity unknown** → 说明该 Claude 也没继承到 env（可能 `ccp`/启动方式没透传）→ 继续用 § 3 的 CLI。
+- **若仍报 identity unknown** → 说明 wmux 身份没继承；检查受管 profile wrapper 和 `WMUX_WORKSPACE_ID`。账号变量另查 `LINK16_AGENT_PROFILE`，禁止靠 provider home 反推。
 
 ---
 

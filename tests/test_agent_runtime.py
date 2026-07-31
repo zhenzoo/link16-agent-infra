@@ -1,7 +1,9 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,6 +36,219 @@ class CodexSkillInvocationTests(unittest.TestCase):
         self.assertIsNone(agent_runtime.codex_skill_invocation(bot, "/model gpt-5.6-sol"))
         self.assertIsNone(agent_runtime.codex_skill_invocation(bot, "/not-installed"))
         self.assertIsNone(agent_runtime.codex_skill_invocation({"agent": "claude"}, "/envsync"))
+
+
+class AgentProfileTests(unittest.TestCase):
+    def test_registry_has_nine_profiles_and_cxp_is_codex_default(self):
+        profiles = agent_runtime.profile_specs()
+        self.assertEqual(len(profiles), 9)
+        self.assertEqual(agent_runtime.default_profile("codex"), "cxp")
+        self.assertEqual(agent_runtime.profile_spec("cxp").home, "~/.codex-personal")
+        self.assertEqual(agent_runtime.profile_spec("cck").launcher, "launch-sh")
+
+    def test_profile_wins_over_conflicting_legacy_runtime(self):
+        bot = {
+            "profile": "cxp",
+            "agent": "claude",
+            "claude_config_dir": "~/.claude-kimi",
+        }
+        self.assertEqual(agent_runtime.runtime_name(bot), "codex")
+        self.assertEqual(agent_runtime.current_account(bot), "cxp")
+
+    def test_standalone_commands_cover_claude_backend_and_codex_home(self):
+        with patch.object(agent_runtime, "_require_profile_available"):
+            kimi = agent_runtime.standalone_worker_cmd(
+                "cck", extra_env={"XHS_AUTOPILOT": "1"}
+            )
+            codex = agent_runtime.standalone_worker_cmd(
+                "cxp", cwd=ROOT, provider_args=["resume", "abc 123"]
+            )
+        self.assertIn(".claude-kimi/launch.sh", kimi)
+        self.assertIn('LINK16_AGENT_PROFILE="cck"', kimi)
+        self.assertIn('CLAUDE_CONFIG_DIR=', kimi)
+        self.assertIn('XHS_AUTOPILOT="1"', kimi)
+        self.assertNotIn("API_KEY", kimi)
+        self.assertIn('LINK16_AGENT_PROFILE="cxp"', codex)
+        self.assertIn(".codex-personal", codex)
+        self.assertIn("CODEX_HOME=", codex)
+        self.assertIn('"resume" "abc 123"', codex)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
+
+    def test_standalone_profile_is_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "LINK16_AGENT_PROFILE 未设置"):
+            agent_runtime.profile_from_env({})
+        with self.assertRaises(KeyError):
+            agent_runtime.profile_spec("does-not-exist")
+
+    def test_public_ready_probe_supports_claude_and_codex(self):
+        cli = ROOT / "feishu" / "agent_profile_cli.py"
+        samples = {
+            "cck": "Claude Code\n❯",
+            "cxp": "OpenAI Codex\npermissions: YOLO mode\n›",
+        }
+        for profile, screen in samples.items():
+            result = subprocess.run(
+                [sys.executable, str(cli), "ready", "--profile", profile],
+                input=screen,
+                text=True,
+                capture_output=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        not_ready = subprocess.run(
+            [sys.executable, str(cli), "ready", "--profile", "cxp"],
+            input="Do you trust the contents of this directory?\nPress enter to continue",
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(not_ready.returncode, 1)
+        trust = subprocess.run(
+            [sys.executable, str(cli), "needs-trust", "--profile", "cxp"],
+            input="Do you trust the contents of this directory?\nPress enter to continue",
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(trust.returncode, 0, trust.stderr)
+
+    def test_machine_defaults_are_per_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "bridge-bots.local.json"
+            committed = Path(tmp) / "bridge-bots.json"
+            local.write_text(json.dumps({
+                "defaults": {"profiles": {"claude": "ccp2", "codex": "cxp"}},
+                "bots": [],
+            }), encoding="utf-8")
+            committed.write_text('{"bots":[]}', encoding="utf-8")
+            with (
+                patch.object(agent_runtime, "ROSTER_LOCAL_PATH", local),
+                patch.object(agent_runtime, "ROSTER_COMMITTED_PATH", committed),
+            ):
+                self.assertEqual(agent_runtime.machine_default_profile("claude"), "ccp2")
+                self.assertEqual(agent_runtime.machine_default_profile("codex"), "cxp")
+
+    def test_roster_default_profile_does_not_override_bot_profile(self):
+        defaults = {"profiles": {"claude": "ccp2", "codex": "cxp"}}
+        self.assertEqual(
+            feishu_bridge._apply_roster_defaults(
+                {"name": "claude-bot", "agent": "claude"}, defaults
+            )["profile"],
+            "ccp2",
+        )
+        self.assertEqual(
+            feishu_bridge._apply_roster_defaults(
+                {"name": "codex-bot", "agent": "codex"}, defaults
+            )["profile"],
+            "cxp",
+        )
+        explicit = feishu_bridge._apply_roster_defaults(
+            {"name": "codex-bot", "profile": "cx"}, defaults
+        )
+        self.assertEqual(explicit["profile"], "cx")
+
+    def test_parallel_profile_writes_preserve_both_bots_and_remove_legacy_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "bridge-bots.local.json"
+            committed = Path(tmp) / "bridge-bots.json"
+            committed.write_text(json.dumps({
+                "defaults": {"profiles": {"claude": "ccp2", "codex": "cxp"}},
+                "bots": [
+                    {
+                        "name": "one",
+                        "agent": "claude",
+                        "account": "ccp",
+                        "claude_config_dir": "~/.claude-personal",
+                    },
+                    {
+                        "name": "two",
+                        "agent": "codex",
+                        "account": "cx",
+                        "codex_home": "~/.codex",
+                    },
+                ],
+            }), encoding="utf-8")
+            with (
+                patch.object(agent_runtime, "ROSTER_LOCAL_PATH", local),
+                patch.object(agent_runtime, "ROSTER_COMMITTED_PATH", committed),
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                futures = [
+                    pool.submit(agent_runtime.persist_account, "one", "cck"),
+                    pool.submit(agent_runtime.persist_account, "two", "cxp"),
+                ]
+                for future in futures:
+                    future.result()
+                data = json.loads(local.read_text(encoding="utf-8"))
+
+            bots = {row["name"]: row for row in data["bots"]}
+            self.assertEqual(bots["one"]["profile"], "cck")
+            self.assertEqual(bots["two"]["profile"], "cxp")
+            for row in bots.values():
+                for legacy in (
+                    "agent", "runtime", "account", "claude_config_dir", "codex_home"
+                ):
+                    self.assertNotIn(legacy, row)
+            self.assertFalse(local.with_suffix(".json.lock").exists())
+            self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
+
+    def test_registration_upsert_uses_profile_as_only_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "bridge-bots.local.json"
+            committed = Path(tmp) / "bridge-bots.json"
+            committed.write_text(json.dumps({"bots": []}), encoding="utf-8")
+            with (
+                patch.object(agent_runtime, "ROSTER_LOCAL_PATH", local),
+                patch.object(agent_runtime, "ROSTER_COMMITTED_PATH", committed),
+            ):
+                row = agent_runtime.upsert_runtime_bot(
+                    "new-bot",
+                    "FEISHU_BRIDGE_NEW_APP_ID",
+                    "FEISHU_BRIDGE_NEW_APP_SECRET",
+                    "@new-bot",
+                    "cxp",
+                )
+            self.assertEqual(row["profile"], "cxp")
+            self.assertNotIn("agent", row)
+            self.assertNotIn("codex_home", row)
+            persisted = json.loads(local.read_text(encoding="utf-8"))["bots"][0]
+            self.assertEqual(persisted, row)
+
+    def test_session_reuse_requires_exact_recorded_profile(self):
+        bot = {"name": "codex-bot", "profile": "cxp"}
+        base = {
+            "workspace_id": "ws-1",
+            "pty": "pty-1",
+            "daemon_fp": "daemon-1",
+        }
+        with (
+            patch.object(
+                feishu_bridge.wmux_session,
+                "pty_state",
+                return_value=(True, "codex"),
+            ),
+            patch.object(
+                feishu_bridge.wmux_session,
+                "daemon_fingerprint",
+                return_value="daemon-1",
+            ),
+        ):
+            reusable, present, why = feishu_bridge._reuse_check(
+                bot, {**base, "profile": "cxp"}
+            )
+            self.assertTrue(reusable)
+            self.assertTrue(present)
+            self.assertEqual(why, "")
+
+            for recorded in (None, "cx"):
+                rec = dict(base)
+                if recorded:
+                    rec["profile"] = recorded
+                reusable, present, why = feishu_bridge._reuse_check(bot, rec)
+                self.assertFalse(reusable)
+                self.assertTrue(present)
+                self.assertIn("profile 不一致", why)
+                self.assertIn("cxp", why)
 
 
 class CodexCanaryRuntimeTests(unittest.TestCase):

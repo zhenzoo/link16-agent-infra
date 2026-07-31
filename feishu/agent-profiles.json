@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "default_profiles": {
+    "claude": "ccp",
+    "codex": "cxp"
+  },
+  "entry_documents": {
+    "claude_source_profile": "ccp",
+    "managed_profiles": [
+      "cc",
+      "ccp",
+      "ccp2",
+      "cck",
+      "cx",
+      "cxp"
+    ]
+  },
+  "profiles": {
+    "cc": {
+      "runtime": "claude",
+      "home": "~/.claude",
+      "launcher": "direct",
+      "label": "Claude Code 默认号"
+    },
+    "ccp": {
+      "runtime": "claude",
+      "home": "~/.claude-personal",
+      "launcher": "direct",
+      "label": "Claude Code Personal 母版"
+    },
+    "ccp2": {
+      "runtime": "claude",
+      "home": "~/.claude-personal2",
+      "launcher": "launch-sh",
+      "label": "Claude Code Personal 2"
+    },
+    "cck": {
+      "runtime": "claude",
+      "home": "~/.claude-kimi",
+      "launcher": "launch-sh",
+      "label": "Claude Code Kimi"
+    },
+    "ccw": {
+      "runtime": "claude",
+      "home": "~/.claude-work",
+      "launcher": "direct",
+      "label": "Claude Code Work"
+    },
+    "ccw2": {
+      "runtime": "claude",
+      "home": "~/.claude-work2",
+      "launcher": "direct",
+      "label": "Claude Code Work 2"
+    },
+    "ccw3": {
+      "runtime": "claude",
+      "home": "~/.claude-work3",
+      "launcher": "direct",
+      "label": "Claude Code Work 3"
+    },
+    "cx": {
+      "runtime": "codex",
+      "home": "~/.codex",
+      "launcher": "direct",
+      "label": "Codex 默认号"
+    },
+    "cxp": {
+      "runtime": "codex",
+      "home": "~/.codex-personal",
+      "launcher": "direct",
+      "label": "Codex Personal（生产推荐）",
+      "recommended": true
+    }
+  }
+}

@@ -1,7 +1,7 @@
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
 > **职责**：Publisher 手机/飞书 ↔ 电脑上 Claude 会话的**双向对话**。每个智能体（bot）= 飞书群里一个**常驻身份** + 桥**自己托管的一个 wmux 会话**。你在手机上 @ 它，它就把活交给它在电脑上专属的那个 Claude。
-> **取代**：[`ARCH-100-orchestrator.md`](ARCH-100-orchestrator.md)（Telegram · 需代理 · superseded）。
+> **取代**：历史 `ARCH-100-orchestrator.md`（Telegram · 需代理 · superseded；该旧文件已移出活跃文档树）。
 > **本文档涵盖**（飞书相关问题先来这里找）：① bot 怎么收你的话、怎么把活交给电脑上的 Claude（§2）② **回复怎么回到飞书（v8 · hook→outbox→drainer · 2026-06-16 重构）**（§2.5）③ **回复用什么格式发给你**——飞书互动卡片 / 进度合并 / 长文分条 / 必达兜底（§2.6）④ **怎么监控、出问题去哪查日志**（§2.7）⑤ 自愈/配置/验收（§3-§5）⑥ bot 的自助能力（§7）⑦ **多媒体通道：你发图/文件 ↔ 我发图（§2.9）** ⑧ **在线查看：本地 md/HTML → 飞书云文档链接（§2.11）**。
 > **状态（v8 · 2026-06-16 已部署 + 真机验证）**：回传从「轮询 jsonl + 单线程发送」重构为 **hook→outbox→drainer 事件驱动 push + doctor 机械自愈**（§2.5）——根治长 turn 队头阻塞 / 10min 卡片死 / autopilot 永不结束 / background-shell 唤醒轮丢失 / 补发淹没。早前（2026-06-15 P140）：**owned-session 多 bot 已实现跑通**（每 bot 一进程一飞书长连接 · 会话死自动重生 · 桥重启自恢复）。本轮（P140）补齐并上线三件生产级能力：**① 回复用飞书「互动卡片」流式发**（实时进度 + 最终答案 + 过程小结·§2.6）**② jsonl 钉死防串台**（多会话同目录不再读错文件·§2.5）**③ 必达发送 + trace 日志监控**（四级降级绝不丢 + 每道闸有痕迹·§2.6/§2.7）。
 > **启动**：`python feishu/feishu_bridge.py`（裸跑即把所有 bot 各起一隐藏进程后台常驻 · `stop`/`status` 管理）。
@@ -51,34 +51,35 @@
   - `/stop` → `ctrl+c` 打断当前 turn
   - `/close` → `workspace.close` 干净撤掉这个 bot 的会话 + **清注册表（含 `/cd` 过的 `cwd`）+ 账号切回名册默认** → **下次 @ 用名册默认账号 + 默认目录重建**。起会话/关会话/自愈重生的飞书提示都打印「账号 + 目录」并各自标注「（默认）/（已切·默认 X）」，让你一眼看出用哪个号、在哪个目录起的。
   - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
-  - `/account <别名> [目录]` → **切登录账号**（临时·关旧会话·可叠加 `/cd` 目录·懒启动：发下条正式消息才真起）。别名 `cc/ccp/ccp2/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义 · `ccp2` = 个人第二号，母版镜像：skills/commands/memory 整目录 junction 回 `~/.claude-personal`、`CLAUDE.md` 走 `@import`）。
+  - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。先跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
-  - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进 ccp 会话**（verbatim·**绝不缀 `[飞书]` 标记**·否则行首不是 `/` → CC 不认成 slash command）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
+  - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进当前 profile 会话**（verbatim·**绝不缀 `[飞书]` 标记**）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
 
 ---
 
 ## § 2.4 · 桥起会话的 spawn 命令 = 给 bot「戴装备」（解码 · 2026-06-17）
 
-> 2026-06-18 更新：桥已支持 **runtime registry**（`feishu/agent_runtime.py`）作为 CLI 差异的单一真相源。bot 配置 `agent` / `runtime` 省略时默认 `claude`，加 `"agent":"codex"` 则起 Codex；以后 Kimi/Gemini/Antigravity 也应按同一 registry + outbox 合约接入，不在桥主流程里散落硬编码。
+> 2026-07-31 更新：桥以 **agent profile registry**（`feishu/agent-profiles.json`）作为账号/runtime/home/launcher 的单一真相源。名册只选择 `profile`；`agent/account/claude_config_dir/codex_home` 仅作迁移期兼容输入，不再写入新名册。
 
-> 一句话：桥起一个 bot 会话**不是裸 `ccp`**，而是 `cd <cwd>` 后敲一条「带 env + flag」的长命令（`_worker_cmd`，在 `feishu_bridge.py`）——给这个 claude 会话戴上「记录仪 + 对讲机」（hook 回传）并告诉它「中转文件放哪」。**看到终端飞一长串 = 正常，不是 bug。**
+> 一句话：桥起一个 bot 会话**不是裸 alias**，而是把 bot 的 `profile` 交给 Link16 runtime driver，生成带 `LINK16_AGENT_PROFILE`、provider home 和 bridge hooks 的命令。Claude 与 Codex 的启动差异只在 driver 内。
 
 **完整命令**（以 config 为例）：
 ```
-FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR=".../_autopilot" CLAUDE_CONFIG_DIR="$HOME/.claude-personal" claude --dangerously-skip-permissions --settings ".../_autopilot/bridge-hooks.json"
+LINK16_AGENT_PROFILE=ccp FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR=".../_autopilot" CLAUDE_CONFIG_DIR="$HOME/.claude-personal" claude --dangerously-skip-permissions --settings ".../_autopilot/bridge-hooks.json"
 ```
 
 **5 段逐段解码**：
 
 | 段 | 干嘛 | 为什么需要 |
 |---|---|---|
-| `FEISHU_BRIDGE_SESSION=<bot>` | 标记「这是桥起的会话」 | hook 靠它判断该不该动——**只对桥会话动**，绝不泄漏到你日常 ccp（env 不命中即 `exit 0`） |
+| `LINK16_AGENT_PROFILE=<profile>` | 钉死会话账号身份 | 主 session 与其独立 wmux worker 只继承这一值；provider home 由 registry 派生 |
+| `FEISHU_BRIDGE_SESSION=<bot>` | 标记「这是桥起的会话」 | hook 靠它判断该不该动——**只对桥会话动**，不泄漏到日常 session（env 不命中即 `exit 0`） |
 | `FEISHU_BRIDGE_OUTBOX_DIR=<repo>/_autopilot` | 告诉 hook 回传中转文件写哪 | drainer 从那读 → 发飞书（见下「为什么 _autopilot」） |
-| `CLAUDE_CONFIG_DIR=$HOME/.claude-personal` | 用哪套 claude 配置 | 桥会话统一走 personal 配置（**按用户/配置归类·与工作目录无关**） |
+| `CLAUDE_CONFIG_DIR=<registry-derived home>` | Claude driver 的派生输入 | 不在名册/仓库/worker 再写一份映射 |
 | `claude --dangerously-skip-permissions` | 跳过「允许用此工具吗」弹窗 | bot 无人值守、没人在键盘点「允许」→ 必须跳。**开机那句权限警告 = 这个 flag 的提示**，正常 |
 | `--settings "<repo>/_autopilot/bridge-hooks.json"` | 给【这个会话】挂 Stop + PostToolUse 两个 hook | v8 回传的核心，见下 |
 
-> 为什么不再是裸 `ccp`：v7 回传靠轮询（不挂 hook）；v8 改「hook 主动推」→ hook 必须在**会话 spawn 那一刻**用 `--settings` 挂上 → 命令就长了。是 v8 的必要代价。
+> 为什么不再是裸 alias：profile launcher 既要注入唯一身份，也要在 spawn 时挂 bridge hooks；长命令由 driver 生成，不由文档/名册复制。
 
 **`_autopilot/bridge-hooks.json` 是什么**：给 claude 的一份**只对桥会话生效的额外「规矩单」**（`--settings` 临时挂，**绝不进**全局 `~/.claude/settings.json` 或项目 `.claude/settings.json`）。`write_hooks_settings()` 运行时生成，就 2 条 hook：
 - **Stop**（matcher `*`，每轮触发）→ 跑 `hooks/bridge_stop.py` → 把这轮最终回复写进 outbox。
@@ -97,8 +98,9 @@ FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR=".../_autopilot" CLAUDE_CO
 
 | 层 | SSOT | 说明 |
 |---|---|---|
-| bot 选择哪个 CLI | `feishu/bridge-bots*.json` 的 `agent` / `runtime` 字段 | 默认 `claude`；Codex 写 `"agent":"codex"`；本机私有 bot 仍放 `bridge-bots.local.json` |
-| CLI 启动命令 / ready / live / transcript 策略 | `feishu/agent_runtime.py` | Claude、Codex、future/custom 的唯一分叉点 |
+| bot 选择哪个 profile | `bridge-bots.local.json` 的 `profile` / `defaults.profiles` | 只选 profile，不写 provider home；本机私有 bot 仍放 local roster |
+| profile→runtime/home/launcher | `feishu/agent-profiles.json` | 无密钥、跨机、唯一映射 |
+| CLI 启动命令 / ready / live / transcript 策略 | `feishu/agent_runtime.py` | Claude、Codex、future/custom 的唯一 driver 分叉点 |
 | 回传格式 | `_autopilot/bridge-outbox-<bot>.jsonl` | `answer/progress/ask` 记录是跨 CLI 合约；飞书发送层不关心来源 |
 | Claude hook | `_autopilot/bridge-hooks.json` + `feishu/hooks/bridge_*.py` | Claude 支持 per-session `--settings`，所以桥 spawn 时临时挂 hook |
 | Codex hook | `CODEX_HOME/hooks.json` + `feishu/hooks/codex_bridge_*.py` | Codex 从 CODEX_HOME / project `.codex` 发现 hook；用 `install_codex_bridge_hooks.py --write` 合并安装 |
@@ -106,12 +108,12 @@ FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR=".../_autopilot" CLAUDE_CO
 **Codex 启动命令**（由 `agent_runtime.py` 生成，不手写到多处）：
 
 ```bash
-FEISHU_BRIDGE_SESSION=<bot> FEISHU_BRIDGE_OUTBOX_DIR="<repo>/_autopilot" CODEX_HOME="<home>" codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --no-alt-screen -C "<cwd>"
+LINK16_AGENT_PROFILE=cxp FEISHU_BRIDGE_SESSION=<bot> FEISHU_BRIDGE_OUTBOX_DIR="<repo>/_autopilot" CODEX_HOME="<registry-derived-home>" codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --no-alt-screen -C "<cwd>"
 ```
 
 注意：`--dangerously-bypass-approvals-and-sandbox` **不要**再叠 `-a never` / `-s danger-full-access`，Codex CLI 会拒绝这种组合。`--dangerously-bypass-hook-trust` 只跳过 hook trust，不跳过项目目录 trust；首次进新目录若出现 `Do you trust the contents of this directory?`，桥会自动按一次 Enter 继续。
 
-**Codex 回复解析**：不要复刻 Claude JSONL parser。Codex 官方 hook Stop payload 有 `last_assistant_message`，`codex_bridge_stop.py` 直接以它为最终回复；PostToolUse 用 `tool_name/tool_input` 写 compact progress。这样不会依赖 Codex transcript JSONL 的非稳定格式，也不会影响 Claude 的 race-guard JSONL 解析。
+**Codex 回复解析**：不要复刻 Claude JSONL parser。默认 app-server 路径由 typed observer 直接把 `agentMessage.phase=final_answer` 写成最终回复；`cli-legacy` 才使用官方 Stop payload 的 `last_assistant_message`。两条路都不依赖 Codex transcript JSONL 的非稳定格式，也不会影响 Claude 的 race-guard JSONL 解析。
 
 **安装 Codex hooks**（默认 dry-run，`--write` 才写全局 Codex 配置）：
 
@@ -133,10 +135,10 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 - TUI 仍是官方 TUI，wmux 注入、slash command、resume 体验不由 Link16 重写。
 - `app-server-canary` 的 remote TUI 就绪以 Codex composer 标记（`› Use /skills` 或空 `›`）为准，不强制依赖普通 CLI 首屏的 `OpenAI Codex` banner；普通 Codex CLI 仍保留 banner + composer 双确认。若把 remote TUI 误判为未就绪，补发逻辑会把 worker 启动命令投进已经运行的 composer，并在第二次超时后误关活 workspace。
 - observer 只接 root thread 的 typed item；collab child thread 不进入主人卡，root collab item 只渲完成度。
-- `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 只写脱敏 ledger，最终答案仍由 Stop hook 单路投递。
+- `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 同时写脱敏 ledger 和 answer outbox，typed observer 是 app-server 模式的唯一最终回复 producer。
 - `reasoning`、命令全文、tool input/output、等待 UI、token transport 事件全部丢弃。命令字段只允许在 producer 内存中做一次保守分类，raw 值不得进入 ledger、outbox、progress-state 或卡片。
 - 相邻工具输出实际调用数、类别计数和安全路径摘要；plan 以同一 event id 增 revision，原位更新。
-- app-server canary 中 PostToolUse hook no-op，避免工具双写；Stop hook 核对 root thread，排除子 agent final。
+- app-server canary 中 PostToolUse 与 Stop hook 都 no-op，避免工具/最终回复双写；observer 只接 root thread，因此子 agent final 不会进入主人卡。这样切换 `CODEX_HOME` 时即使新账号没有安装 hooks，最终回复也不会丢。
 - canary flag 只允许放机器本地 `bridge-bots.local.json`。未标 flag 的 Codex/Claude 启动与 producer 完全不变。
 
 共享 envelope：`contract=milestone-v1, runtime, session, root_turn, steps[{event_id,revision,kind,label,...safe_metadata}], route`。生产协议依赖 app-server typed item，不依赖 Codex session JSONL。
@@ -149,7 +151,8 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 - plan step 可携带 `plan_completed/plan_total`，供 header 显示“计划 2/3”；renderer 不从中文 label 反向解析结构数据。
 - event ledger、progress outbox、`bridge-progress-state-<bot>.json` 和最终卡片是同一防泄漏边界，四层都必须通过 raw command/output/absolute-home/secret-marker=0 的回归。
 
-详细 rollout 见 [`docs/_plans/PLAN-2026-06-18-bridge-multi-agent-runtime.md`](_plans/PLAN-2026-06-18-bridge-multi-agent-runtime.md)。
+当时 rollout 记录 `PLAN-2026-06-18-bridge-multi-agent-runtime.md` 已归档并移出活跃文档树；
+当前运行契约以本 ARCH 和 `ARCH-120-agent-profile-runtime.md` 为准。
 
 ---
 
@@ -563,52 +566,49 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 2. `python feishu/register_feishu_app.py --name 本机助手 --bot local1` → **你扫码**（凭据写进本机 `.env` 的 `FEISHU_BRIDGE_LOCAL1_APP_ID/SECRET`）
 3. 编辑 `bridge-bots.local.json`：`cwd` 指向本机要驱动的仓库绝对路径（驱动哪个本地仓库就填哪个·不限 xhs）
 4. `python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start` 重启桥
-5. 群里 `@本机助手` 说话 → 桥在本机 `workspace.new` + 起 ccp 落在该 cwd → 驱动本机仓库
+5. 群里 `@本机助手` 说话 → 桥在本机 `workspace.new` + 按名册 profile 启动主 session 落在该 cwd → 驱动本机仓库
 
 > **注**：`/cd` 书签（`bridge-cd-bookmarks.json`）暂仍 committed 指另一台机；本机要本地化它，同样放 `bridge-cd-bookmarks.local.json`（已 gitignore·目前桥未读 local 版·需要时再补一行解析）。挂本地 bot 不依赖 `/cd` 书签——cwd 在 bot 名册里直接指定。
 
 ---
 
-## § 4.2 · bot 默认登录账号（`claude_config_dir` · 多 Claude 账号切换 · 2026-06-24）
+## § 4.2 · bot 默认登录账号（Agent Profile SSOT · 2026-07-31）
 
-> 一句话：一个 bot 默认用哪个 Claude 登录账号（`~/.claude-personal` / `~/.claude-work2` …），由它**名册条目里的 `claude_config_dir` 字段**决定；不写 = 默认 `~/.claude-personal`。**改默认账号 = 改这一个字段 + 重启桥**，就这一处。
+> 一句话：名册只选择 `profile`；`feishu/agent-profiles.json` 唯一决定该 profile 的 runtime、home 和 launcher。任何 bot、手工主 session、独立 wmux worker 都不再自己映射账号路径。
 
 **机制链（spawn 时账号怎么定）**：
-名册 `bridge-bots.local.json` 的 bot 条目 `claude_config_dir`
-→ `feishu_bridge.load_bots()` 把该字段拷进内存 bot dict
-→ `agent_runtime._claude_config_dir(bot)`（取不到则回退 `~/.claude-personal`）
-→ spawn 命令注入 `CLAUDE_CONFIG_DIR=<dir>`（见 §2.4）
-→ 该会话所有 Claude 操作（登录态 / 凭据 / transcript）落在那个 config dir。
+`bridge-bots.local.json` 的 bot `profile`（或 `defaults.profiles.<runtime>`）
+→ `feishu_bridge.load_bots()` 校验 profile
+→ `agent_runtime.profile_spec()` 从 registry 派生 runtime/home/launcher
+→ spawn 注入 `LINK16_AGENT_PROFILE=<profile>` 和 provider 所需 home
+→ 该主 session 后续 spawn 的独立 wmux worker 继续使用完全相同的 profile。
 
-**账号别名**（`agent_runtime.ACCOUNT_ALIASES` · 既是 `/account` 运行时切换的参数 · 也是 `claude_config_dir` 该填的值）：
+```jsonc
+{
+  "defaults": {
+    "profiles": { "claude": "ccp2", "codex": "cxp" }
+  },
+  "bots": [
+    { "name": "tb24-xhs-arch", "cwd": "...省略其他非身份字段..." },
+    { "name": "tb24-xhs-autopilot", "cwd": "...", "profile": "cxp" }
+  ]
+}
+```
 
-| alias | runtime | config dir | 用途 |
-|---|---|---|---|
-| `cc` | claude | `~/.claude` | 默认号 |
-| `ccp` | claude | `~/.claude-personal` | 个人（不写字段时的兜底） |
-| `ccw` / `ccw2` / `ccw3` | claude | `~/.claude-work{,2,3}` | 公司号 |
-| `cx` / `cxp` | codex | `~/.codex{,-personal}` | Codex（改默认用 `codex_home` 字段） |
-
-**改一个 bot 的默认账号**（例：让 `tb25-yoach` 永远走公司号 work2）：
-1. 编辑 `feishu/bridge-bots.local.json`，给该 bot 条目加一行（路径用 `~` · 绝不写死盘符/用户名 · 跨机铁律）：
-   ```json
-   { "name": "tb25-yoach", "...": "...", "cwd": "...", "claude_config_dir": "~/.claude-work2" }
-   ```
-2. `python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start` 重启桥（**必须**——名册只在桥启动时载入内存，不热加载）。
-3. 之后 @ 该 bot 起的每个会话默认就走新账号，**无需再敲 `/account`**。
-
-**`/account` 是运行时临时覆盖**（≠ 改默认）：群里 `/account ccw2` 会**就地关旧会话、把账号【选好暂存】**（懒启动·见下条），只对当前会话有效，`/close` 或桥重启后切回名册默认。它通过 `apply_account()` 直接硬写内存 dict、**绕过名册** —— 所以名册字段失效时它仍好使（见下方坑）。
+- 默认 bot 不写任何身份字段；provider 默认只在 `defaults.profiles` 写一次。
+- 例外 bot 只写一个 `"profile": "<name>"`。禁止新写 `agent/account/claude_config_dir/codex_home`。
+- `cxp` 是本机推荐/默认 Codex profile；`cx` 保留为独立可选 profile。
+- `/account <profile>` 先做 registry + 本机可启动 doctor，失败不关当前会话；成功后用加锁原子写只持久化 `profile`，并清理旧 identity 字段。
+- 新 profile、新 bot、用户级入口或仓库 worker 统一走 `$agent-profile-governance`。
 
 **懒启动（lazy launch）：`/cd` `/account` 都【只选·不起会话】，发第一条正式消息才冷启（2026-06-26 改）**。
 - **动机**：旧模型里 `/cd` 选目录、`/account` 切账号都【各自立刻起一个会话】，且 `/account` 还会把 `/cd` 的选择清掉 → 想「又切账号、又走 `/cd` 交互选目录」时，先输哪个哪个就先起会话、另一个被冲掉，根本没法叠加。
-- **新模型（与「没有任何命令、直接发第一条消息就自动起会话」对齐）**：`/cd <选中>` / `/account <号>` 只做**暂存**——关旧会话 + 把 `cwd`（`/cd`）/ `account`（`apply_account` 改内存 dict + 注册表标记）写进会话注册表、并清掉 runtime 字段（`pty/workspace_id/jsonl/daemon_fp` 置空），**都不 `spawn`**。真正起会话**推迟到你发下一条正式消息**：`on_message → ensure_session` 读 `current_cwd(bot)`（=暂存的 `cwd`）+ bot dict 的账号，一次冷启。
-- **互不清除**：两个选择落在注册表**不同字段**（`cwd` vs `account`），`_merge_session` 只覆盖给定键 → 先 `/cd 74` 选目录、再 `/account cc` 切号，**74 的目录被保留**（这正是用户要的）。`/cd` 列了编号还没回数字时 `/account` 也不清菜单：账号暂存到那份 `bridge-cd-pending` 待选上，回数字再 `_do_cd` 暂存目录，下一条正式消息用新账号在选中目录冷启。
+- **新模型（与「没有任何命令、直接发第一条消息就自动起会话」对齐）**：`/cd <选中>` / `/account <profile>` 只做**暂存**——关旧会话 + 分别持久化 `cwd` / `profile` 并清掉 runtime 字段，**都不 `spawn`**。真正起会话推迟到下一条正式消息，由 `ensure_session` 一次冷启。
+- **互不清除**：目录和 profile 是不同字段；先 `/cd 74`、再 `/account cxp`，下一条正式消息仍在目录 74 用 CXP 冷启。
 - **不挑就直接发消息** → `ensure_session` 在「当前（暂存的或默认）目录 + 当前账号」冷启，零额外步骤。`/close` 仍清空全部暂存 + 账号回名册默认。
 - **代价**：~15s 冷启从「`/account` 后台预热」挪到「发消息之后」；换来「切目录 + 切账号任意叠加、互不抢起空会话」。没有任何后台 watchdog/doctor 会主动 spawn 无会话的 bot（实证：`spawn`/`ensure_session` 只在 `on_message` 触发），故暂存态不会被提前点火。
 
-**注册新 bot 不会自动带账号**：`register_feishu_app.py` 只写凭据 + 提示往名册加 `{name/app_id_env/app_secret_env/at_name/cwd}`，**不写 `claude_config_dir`**。要新 bot 默认走非个人号，建完**手动**往它名册条目补这一行再重启桥（见 ARCH-102 §登记表）。
-
-> ⚠️ **2026-06-24 修过的坑（防 regress）**：`load_bots()`（`feishu_bridge.py`）用白名单逐 key 重建 bot dict，**曾漏拷 `claude_config_dir`** → 名册配的默认账号永远到不了 spawn、每次回退 `~/.claude-personal`，只有 `/account ccwN`（硬写内存）才生效（`tb25-yoach` / `tb25-lab-3` 双双中招）。已补 `"claude_config_dir": s.get("claude_config_dir")` 透传。**以后给 `load_bots` 的 bot dict 加任何账号 / spawn 相关字段，记得在这白名单里也加一行，否则名册配了也是哑的。**
+**注册新 bot 自动选 profile**：`register_feishu_app.py --profile <name>` 在 OAuth 前 doctor，并在注册成功后 upsert 本机名册。未显式传时只继承同 runtime 主 session 的 `LINK16_AGENT_PROFILE`，否则用 `defaults.profiles.<runtime>`；绝不从 provider home 反推。
 
 ---
 

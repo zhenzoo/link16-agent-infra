@@ -65,10 +65,10 @@ python codex-personal/configure_personal.py
 python codex-personal/configure_personal.py --apply
 ```
 
-This installs the maintained `AGENTS.md`, moves Mattermost credentials out of
-`config.toml` into a runtime `.env` loader, and selects the newest local wmux
-bundle. It only writes under `~/.codex-personal` and creates a timestamped
-backup before applying.
+This aligns the Mattermost runtime loader, wmux MCP table, and Link16 hooks
+without touching `AGENTS.md`, auth, sessions, history, models, or project trust.
+User-level `AGENTS.md` files are physical generated entries owned by
+`$agent-profile-governance`, with CXP as the mature Codex template.
 
 ## Updates and authentication
 
