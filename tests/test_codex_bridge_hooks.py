@@ -101,7 +101,7 @@ class HookPayloadTests(unittest.TestCase):
             self.assertEqual(records[1]["route"], route)
             self.assertIn("done", records[1]["text"])
 
-    def test_event_stream_disables_raw_posttool_and_filters_child_stop(self):
+    def test_event_stream_disables_raw_hooks_and_uses_typed_final_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)
             (state / "bridge-codex-app-thread-test-codex.json").write_text(
@@ -127,10 +127,7 @@ class HookPayloadTests(unittest.TestCase):
                 state,
                 extra,
             )
-            text = (state / "bridge-outbox-test-codex.jsonl").read_text(encoding="utf-8")
-            self.assertIn("ROOT FINAL", text)
-            self.assertNotIn("CHILD FINAL", text)
-            self.assertNotIn("SECRET", text)
+            self.assertFalse((state / "bridge-outbox-test-codex.jsonl").exists())
 
 
 if __name__ == "__main__":

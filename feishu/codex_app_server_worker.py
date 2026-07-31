@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Canary Codex TUI backed by app-server with a safe milestone observer.
+"""Canary Codex TUI backed by app-server with a safe event observer.
 
 The official TUI remains the terminal frontend.  A private app-server owns the
 thread, while this wrapper's second websocket connection receives typed item
-notifications and writes sanitized milestone snapshots to the Link16 outbox.
-Only bots with ``codex_transport=app-server-canary`` launch this wrapper.
+notifications and writes sanitized progress plus final answers to the Link16
+outbox. Only bots with ``codex_transport=app-server-canary`` launch this
+wrapper.
 """
 from __future__ import annotations
 
@@ -41,6 +42,22 @@ def _load_route(state_dir: Path, bot: str) -> dict | None:
         return route if isinstance(route, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def _answer_record(event: dict, *, session: str, route: dict | None) -> dict | None:
+    text = str((event.get("payload") or {}).get("text") or "").strip()
+    if not text or text == WARMUP_MARKER:
+        return None
+    record = {
+        "kind": "answer",
+        "ts": int(time.time()),
+        "session": session,
+        "anchor": event.get("turn"),
+        "text": text + "\n\n---\n✅ 已完成",
+    }
+    if isinstance(route, dict):
+        record["route"] = route
+    return record
 
 
 class RpcConnection:
@@ -106,6 +123,7 @@ class MilestoneObserver:
         self.state_dir = state_dir
         self.workspace_root = workspace_root
         self.accumulator = MilestoneAccumulator()
+        self.final_event_ids: set[str] = set()
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
 
@@ -138,9 +156,19 @@ class MilestoneObserver:
                 **event,
             }
             _append_jsonl(ledger, ledger_record)
-            # Stop hook is the single final-answer path.  The typed final item
-            # is ledger evidence only, so observer + hook cannot double-send.
             if event.get("event_type") == "final":
+                event_id = str(event.get("event_id") or "")
+                if event_id and event_id in self.final_event_ids:
+                    continue
+                record = _answer_record(
+                    event,
+                    session=self.root_thread,
+                    route=_load_route(self.state_dir, self.bot),
+                )
+                if record:
+                    _append_jsonl(outbox, record)
+                    if event_id:
+                        self.final_event_ids.add(event_id)
                 continue
             if self.accumulator.apply(event):
                 record = self.accumulator.progress_record(

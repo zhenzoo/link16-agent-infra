@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Codex Stop hook: write the final assistant message to the bridge outbox.
+"""Legacy Codex Stop hook: write the final assistant message to the outbox.
 
 Codex exposes `last_assistant_message` in the Stop hook payload. Use that stable
-hook contract instead of parsing Codex JSONL transcripts.
+hook contract instead of parsing Codex JSONL transcripts. App-server workers
+use their typed final item instead and suppress this hook.
 """
 import json
 import os
@@ -21,24 +22,17 @@ def main():
     except Exception:  # noqa: BLE001
         return
 
-    outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (Path.cwd() / "_autopilot"))
     if os.environ.get("FEISHU_CODEX_EVENT_STREAM") == "1":
-        # Subagent hooks inherit the root environment.  Only the app-server
-        # thread selected by the Link16 wrapper may publish the user-facing
-        # final answer; child turns remain collab milestones.
-        try:
-            root = json.loads(
-                (outdir / f"bridge-codex-app-thread-{bot}.json").read_text(encoding="utf-8")
-            ).get("thread_id")
-        except (OSError, ValueError, AttributeError):
-            root = None
-        if root and inp.get("session_id") != root:
-            return
+        # The app-server observer receives the authoritative typed final item.
+        # Suppress both root and child Stop hooks so account-specific hook
+        # configuration cannot cause either final loss or duplicate delivery.
+        return
 
+    outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (Path.cwd() / "_autopilot"))
     text = (inp.get("last_assistant_message") or "").strip()
     if not text:
         return
-    if os.environ.get("FEISHU_CODEX_EVENT_STREAM") == "1" and text == "LINK16_APP_SERVER_READY":
+    if text == "LINK16_APP_SERVER_READY":
         return
 
     text += "\n\n---\n✅ 已完成"
