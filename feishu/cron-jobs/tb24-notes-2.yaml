@@ -5,6 +5,8 @@ jobs:
   desc: 每天 09:00 触发 notes 仓「回评论」SOP：读 X/Threads/小红书三平台新评论 → 逐条起草回复 → 汇成一个飞书在线文档发我确认（先不真回复，等我看过点头）
   cron: 0 9 * * *
   tz: Asia/Shanghai
-  enabled: true
+  enabled: false
   prompt: 回评论：请执行本仓 docs/SOP-020-reply-to-comments.md 的每日回评论流程 —— 读 X / Threads / 小红书三平台的新评论，逐条用我的 taste
     起草回复，汇成一个飞书在线文档发我确认。先只出草稿、别真回复，等我看过文档点头后再按平台发（X/Threads 我确认后你用 API 发，小红书我自己手动贴）。
+  disabled_reason: 主人手动暂停（2026-07-27 02:16 北京时间 · 经 tb24-ccp-config 执行）· 非故障 / 非自动停用 / 非跑挂了 —— 主人主动喊停全部定时任务。恢复：python
+    feishu/bridge_cron.py enable --bot <bot> --name <name>
