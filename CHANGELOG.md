@@ -3,6 +3,22 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.9.0 — Agent Profile 单一真相源 + 主从 session 账号严格继承（2026-07-31）
+
+**WHY**：飞书 Bridge、wmux worker、Claude/Codex 启动别名此前各自保存 runtime 与 home 映射；同一 workspace 新开 pane 时，worker 可能回退到写死的 `ccp` / `ccp2` / `cx`，造成跨账号限流、上下文与计费串线。用户级 `CLAUDE.md` / `AGENTS.md` 也缺少跨 runtime、跨账号、跨仓库的一致治理入口。
+
+**WHAT**
+
+- 新增 `feishu/agent-profiles.json`，统一登记 profile → runtime / home / launcher；默认 Codex 生产档案定为 `cxp`。`agent_profile_cli.py` 提供 list / show / doctor / command / run / ready / needs-trust，启动命令不输出密钥，第三方 Claude 后端只在子 shell source 对应 `launch.sh`。
+- Bridge 运行时名册只保存 `profile`；`/account` 先 doctor、再原子持久化本机 overlay，随后关闭旧会话。session 记录 profile，复用时必须与当前 profile 完全一致；旧记录缺 profile 也 fail closed。
+- 独立 worker 统一继承进程级 `LINK16_AGENT_PROFILE`；缺失、未知、本机不可用或目标 pane metadata 不同均在写入 composer 前拒绝，不再根据 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / cwd 猜账号。
+- Codex Personal 配置器改为发现所有本机 Codex profile，只同步 MCP / hooks 等共享 overlay，保留每个 profile 自己的 `auth.json`、模型配置与入口文档。
+- 新增 `ARCH-120`、注册/装机/迁移 SOP 和 `PLAN-922`，明确 registry、机器本地 roster、进程变量、pane metadata、session record 四层职责；用户级入口语义治理交给 `$agent-profile-governance`，不机械互抄 Claude/Codex 文档。
+
+**验证**：Link16 聚焦单元测试 **21 passed**；XHS worker **10 passed**；tennis worker **10 passed**；profile governance **7 passed**；6 个受管用户档案 doctor 全 OK，二次渲染 `writes=0`。生产 Bridge 已按新 profile 配置重启并通过进程巡检。
+
+---
+
 ## v0.8.0 — 在线文档链接默认「任何人可读」+ 注入不再重复入队 + 卡片不再吞引用（2026-07-29）
 
 **WHY**：三个各自独立、但都属于「桥发出去的东西对不对」的缺口，一次收口。最要紧的一个是主人当场点的：桥造的**飞书在线文档链接只有他自己打得开**——转给别人、别的智能体（a2a）拿去读，全是「无权限」，每次还得他手动进文档点一遍分享设置。他拍板：**本桥产出的文档链接一律公开，拿到就能看，别再设那些权限。**
