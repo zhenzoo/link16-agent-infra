@@ -19,9 +19,11 @@ python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile 
 #    每个都要：开发者后台勾选 → 创建版本 → 发布 才生效
 # 4. 把 bot 拉进群；各 bot 互报 open_id（跨机靠 bot/v3/info · 群成员 API 不列 bot · 见 §3）
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
-# 6. 重启桥生效
-python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start
+# 6. 重启桥生效（只加了新 bot 就【单起它】·别全局 stop/start 把在跑的会话全杀了）
+python feishu/feishu_bridge.py start --bot <新bot>
 ```
+
+> **🔌 代理：注册【一律直连飞书】—— 脚本已内建，调用方不用管（2026-07-28/29 两机各撞一次 · 见 §1 注 + §6.4）。** 飞书是国内端点，塞进翻墙代理会被掐死。`register_feishu_app.py` 在 `import lark_oapi` 之前就清掉 `HTTP(S)_PROXY` 六个变量、并把 `feishu.cn,larksuite.com,larkoffice.com,localhost,127.0.0.1` 写进 `NO_PROXY`，**不需要**再在命令行前面 `unset` 代理。
 
 ---
 
@@ -228,6 +230,13 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 1. ✅ **已做（2026-06-20）**：`register_feishu_app.py` 注册末尾现在默认也打印 `im:chat` 开通链（+ 提示「拉群只能人工」+「听全群另需 `im:message.group_msg`」）。建新 bot 不再漏开。
 2. ~~③ 精确 scope code 待核对~~ → ✅ 已确认 = **`im:chat`**（Publisher 2026-06-20）。
 3. `/cd` 书签（`bridge-cd-bookmarks.json`）暂仍 committed 指某台机；本机本地化放 `.local` 版（`ARCH-101 §4.1` 注）。
+4. ✅ **已做（注册必直连飞书 · 两机各撞一次才补齐）**：`register_feishu_app.py` 曾是**全仓唯一没有绕代理 guard 的飞书脚本**（`feishu_bridge` / `send_feishu_msg` / `send_feishu_file` / `bridge_scope_audit` 早就有）。**同一个根因、两台机两种死法**：
+   - **tb24 · 2026-07-28**（`tb24-video-studio` 注册）：轮询 **123 次、跑了 10 分钟之后**突然拿回 HTML 错误页 → SDK `resp.json()` 抛 `JSONDecodeError: Expecting value: line 1 column 1` → device_code 作废、授权链要重开。
+   - **tb25 · 2026-07-29**（`tb25-phd-taoci-5` 注册）：轮询中途被掐成 `SSLError(UNEXPECTED_EOF_WHILE_READING)` → 进程直接死、授权链同样作废。
+   - **最终实现**（见脚本 `import lark_oapi` 之前那段）：清 6 个 proxy 环境变量 + `NO_PROXY = no_proxy = "feishu.cn,larksuite.com,larkoffice.com,localhost,127.0.0.1"`（**整条覆盖**，不是并入）。只影响本进程，不动系统代理。
+   - ⚠️ **为什么必须显式写 `NO_PROXY`、光清环境变量不够（Windows 专属）**：`urllib.getproxies()` = `getproxies_environment() or getproxies_registry()` —— env 全清空时会 **fallback 回注册表**里 Clash 存的 `http://127.0.0.1:7897`（tb25 实测注册表确实有）。写了 `NO_PROXY` 才两头都堵死。
+   - ⚠️ **别用 `setdefault("NO_PROXY", …)` 打这个补丁**：机器上 `NO_PROXY` 常已有值（tb25 是 `localhost,127.0.0.1,.local`），`setdefault` 会整条跳过 → 飞书域名根本没进 bypass 名单、补丁形同虚设。要么整条覆盖（现行做法），要么合并进去。
+   - 🔎 **遗留**：那 4 个 sibling 脚本仍是 `setdefault("NO_PROXY", …)`（在已设 `NO_PROXY` 的机器上 = no-op），目前靠各自的 `ProxyHandler({})` 直连 opener 兜住、没出过事；要彻底统一就把它们也改成覆盖写法。
 
 ---
 
