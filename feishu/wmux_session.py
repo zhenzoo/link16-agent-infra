@@ -27,13 +27,49 @@ from bridge_env import resolve_wmux_rpc  # noqa: E402
 WMUX_RPC = resolve_wmux_rpc(PROJECT)   # ~/wmux-rpc.js 优先·兜底仓库副本 orchestrator/wmux-rpc.js·WMUX_RPC_PATH 可 override
 
 
+# ---- 瞬时故障重试（2026-07-31）------------------------------------------------
+# 现象：`workspace.list` 偶发 `ERR: RPC timeout: workspace.list (5000ms)` → on_message 的
+#   except 分支把消息**丢掉**并只回一句「❌ bridge 错误」（实证：tb25-phd-taoci 收 698 条
+#   消息撞 5 次 ≈ 0.7%，两份 a2a 交接报告因此没进队长的会话）。
+# 根因：这条 RPC 最终由 wmux 的【窗口进程】回答（daemon 转 ipcMain→renderer·超时常量 5e3
+#   写死在 wmux 里），窗口被一堆 agent 的终端输出压住时就应答不及；wmux 自己的日志也印证
+#   （`[hooks] … 67% slow/failed workspace.list, maxFetch 1512ms`）。属**秒级瞬时拥堵**，
+#   隔一两秒重试基本必中 → 把「丢消息」降级成「晚几秒」。
+#
+# ⚠️ 只重试【只读/幂等】调用：超时 ≠ 没生效。重发 `workspace.new` 会凭空多开一个
+#   workspace、重发 `send`/`enter` 会把同一段文字**注入两次**（用户看到重复派活）——
+#   这类一律不重试，宁可报错。
+_RETRY_ERR_MARKS = ("RPC timeout", "closed before response", "ECONNRESET", "EPIPE")
+_IDEMPOTENT_RPC = {"workspace.list", "workspace.current", "pane.list", "surface.list"}
+_IDEMPOTENT_CMD = {"read", "surfaces", "panes"}
+_RETRY_TRIES = 3          # 首次 + 2 次重试
+_RETRY_SLEEP = (1.0, 2.0)  # 退避：第 1 次重试前 1s、第 2 次前 2s
+
+
+def _retryable(args, stderr) -> bool:
+    """这次失败该不该重试：① 错误是瞬时拥堵类 ② 调用本身幂等（重放无副作用）。"""
+    if not any(m in stderr for m in _RETRY_ERR_MARKS):
+        return False
+    if not args:
+        return False
+    if args[0] == "rpc":
+        return len(args) > 1 and args[1] in _IDEMPOTENT_RPC
+    return args[0] in _IDEMPOTENT_CMD
+
+
 def _wmux(*args):
-    r = subprocess.run(["node", str(WMUX_RPC), *args],
-                       capture_output=True, text=True, encoding="utf-8", timeout=30,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢鼠标焦点
-    if r.returncode != 0:
-        raise RuntimeError(f"wmux-rpc {' '.join(args[:2])} failed: {r.stderr.strip()}")
-    return r.stdout
+    last_err = ""
+    for attempt in range(_RETRY_TRIES):
+        r = subprocess.run(["node", str(WMUX_RPC), *args],
+                           capture_output=True, text=True, encoding="utf-8", timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢鼠标焦点
+        if r.returncode == 0:
+            return r.stdout
+        last_err = r.stderr.strip()
+        if attempt == _RETRY_TRIES - 1 or not _retryable(args, last_err):
+            break
+        time.sleep(_RETRY_SLEEP[attempt])
+    raise RuntimeError(f"wmux-rpc {' '.join(args[:2])} failed: {last_err}")
 
 
 def _rpc(method, params=None):
