@@ -28,6 +28,16 @@ import re
 import sys
 from pathlib import Path
 
+# 🔌 飞书 = 国内端点 → 本进程强制【直连·不走代理】。
+# 为什么（2026-07-28 tb24-video-studio 注册实证）：本机开着 Clash（http(s)_proxy=127.0.0.1:7897 +
+# Windows 注册表系统代理），OAuth 轮询前 123 次都正常，第 124 次代理回了个 HTML 错误页 →
+# SDK 的 resp.json() 抛 JSONDecodeError 整个注册崩掉、device_code 作废、链接得重开。
+# 两条都要清：① 环境变量 ② no_proxy（requests 在 Windows 还会读注册表系统代理，靠 no_proxy 才绕得掉）。
+# 只影响本进程，不动系统设置。下面 _bot_identity() 早就单独绕代理，这里是把同一条规矩铺到整个注册流程。
+for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(_pk, None)
+os.environ["NO_PROXY"] = os.environ["no_proxy"] = "feishu.cn,larksuite.com,larkoffice.com,localhost,127.0.0.1"
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bridge_env import resolve_env_path  # noqa: E402
 import agent_runtime  # noqa: E402
