@@ -3,6 +3,22 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.10.0 — wmux 升到 3.38.1 + 幂等 RPC 重试不再吞消息 + Codex 终答单一路径 + 注册流接 Profile（2026-07-31）
+
+**WHY**：v0.9.0 把 Profile SSOT 立起来之后，同一晚上收掉四件「桥还在漏」的事。最要紧的是主人这边直接可感的一条：**飞书消息偶发被吞**——`workspace.list` 撞 `RPC timeout (5000ms)` 时，`on_message` 的 except 分支把整条消息丢掉、只回一句「❌ bridge 错误」。实证 tb25-phd-taoci 收 698 条撞 5 次（≈0.7%），两份 a2a 交接报告因此根本没进队长的会话。根因在 wmux 侧：这条 RPC 最终由**窗口进程**回答（daemon 转 ipcMain→renderer），窗口被一堆 agent 的终端输出压住时应答不及；而本机 wmux 还停在 3.8.0，落后上游 30 个版本、正好错过一串并发与内存修复。
+
+**WHAT**
+
+- **wmux 3.8.0 → 3.38.1**，并把这次升级沉淀成 `docs/SOP-010-wmux-upgrade.md`：先认准是哪个 wmux（`openwong2kim/wmux` 3.x 有 daemon；GitHub 上另有同名 `amirlehmam/wmux` 0.x 纯 Electron 无 daemon，**装错 = 全舰队桥当场失联**）→ 列全我们依赖的契约（`~/.wmux-auth-token` 裸 UUID · `\\.\pipe\wmux-<用户名>` · NDJSON 帧 · 5 个方法 · `ptyIds`/`metadata.agentName` · `daemon.pid` 指纹）→ 两条升级路（应用内 / `gh release download` + sha256 必校验）→ 四步验收（重点验新版 capability 门是否仍放行我们这种不带 `clientName` 的裸客户端）→ 十分钟回退。命中的上游修复：`v3.32.0` detached 会话永不回收、`v3.25.0` 每 agent pane 省 ~50MB、`v3.31.0` Scale to 30+ concurrent sessions、`v3.37.2` Windows node-pty 误报 pane 退出。
+- **`wmux_session.py` 的 `_wmux()` 加幂等重试**：命中瞬时错误特征（RPC timeout / closed before response / ECONNRESET / EPIPE）**且**调用本身幂等（`workspace.list` / `workspace.current` / `pane.list` / `surface.list` / `read` / `surfaces` / `panes`）才重试，退避 1s → 2s。**写操作显式排除**——超时 ≠ 没生效，重发 `workspace.new` 会凭空多开 workspace、重发 `send`/`enter` 会把同一段话注入两次。效果：把「丢消息」降级成「晚几秒」。
+- **Codex app-server 终答收敛成唯一路径**：typed final item 现在真正产出 answer 记录写进 outbox（正文 + 完成尾 + 路由信封）并按 `event_id` 去重；`FEISHU_CODEX_EVENT_STREAM=1` 时 legacy Stop hook 整条 return。此前两条路径并存 → 同一条回复可能发两次，或按 hook 配置两条都哑 → 终答丢失。只影响 `codex_transport=app-server-canary` 的 bot。
+- **注册流接 Profile + 全程强制直连飞书**：`register_feishu_app.py` 新增 `--profile`（与 `--runtime` 互校，选定后先跑 profile doctor，本机不可用直接拒绝注册），注册成功自动把新 bot upsert 进本机 `bridge-bots.local.json`（只写 `profile`，不再手抄 agent/home）；进程启动即清代理并写死 `NO_PROXY`，根治两机同根因的两种死法（tb24 轮询 123 次后拿回 HTML 页 → JSONDecodeError；tb25 轮询中途 SSLError → 进程死）。
+- **名册与留痕**：登记 `tb25-phd-taoci-4/5/6` 与 `tb24-video-studio`（名册现 41 个 agent）、修掉三处陈旧 `ccw3`→`ccp`；三个 cron yaml 补 `disabled_reason` 记下主人 2026-07-27 手动喊停；新增 `SPEC-200` Cloudflare 资产登记表（Pages/D1/KV/R2/token 权限，数据由 API 实拉）。
+
+**验证**：升级后 `node ~/wmux-rpc.js rpc workspace.list` 正常返回、裸客户端仍被放行；`wmux_session.workspaces()` 走新重试路径实测通过；Codex worker 与 hook 契约测试 100 tests 全绿（v0.9.0 批次）；桥已按新 wmux 重启，全 bot 冷启新会话属预期副作用（`daemon.pid` 指纹变 → 旧会话按设计作废）。
+
+---
+
 ## v0.9.0 — Agent Profile 单一真相源 + 主从 session 账号严格继承（2026-07-31）
 
 **WHY**：飞书 Bridge、wmux worker、Claude/Codex 启动别名此前各自保存 runtime 与 home 映射；同一 workspace 新开 pane 时，worker 可能回退到写死的 `ccp` / `ccp2` / `cx`，造成跨账号限流、上下文与计费串线。用户级 `CLAUDE.md` / `AGENTS.md` 也缺少跨 runtime、跨账号、跨仓库的一致治理入口。
