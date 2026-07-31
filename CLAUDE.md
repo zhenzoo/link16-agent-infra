@@ -29,6 +29,7 @@
 | 文档 | 类型 · 内容 |
 |---|---|
 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) | **ARCH** · wmux 怎么驱动面板（daemon RPC / split-here / 守卫）+ **§8 确切信号**（probe/kickoff·判面板死活靠探针不靠读屏） |
+| [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) | **SOP** · 桥跑着几十个 bot 时**怎么把 wmux 安全升级**（认准是哪个 wmux / 我们依赖的 4 契约 5 方法 / 两条升级路 / 四步验收 / 10 分钟回退 / 「全 bot 冷启新会话」是正常副作用）|
 | [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) | **SOP** · 🆕 **新机器部署唯一入口**：clone 完从头装桥（依赖 / wmux+`wmux-rpc.js` / `.env` 凭据 / 本机名册 / 起桥验收）+ **§9 开机自启**（wmux 走 Run 键 · 桥走计划任务 `FeishuBridge-Autostart` · 整段机器无关可照抄 · 附「别改成不等登录」陷阱说明）|
 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) | **ARCH** · 飞书桥怎么搭（@bot→注入 / 回传 v8 hook→outbox→drainer / 多 bot 模型 / 自愈） |
 | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) | **ARCH** · **agent↔agent 通讯协议**（架在桥之上：send / 必回文字 / reply-wait 守望 / 一步读群 · 全靠结构化信号 + 工具 · 零硬编码 · 冷启动跳启动卡） |
