@@ -3,6 +3,23 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.11.0 — 定时任务复选菜单：主人自己开关，不用喊 agent（2026-08-02）
+
+**WHY**：主人要停 / 开定时任务时，一直得找一个 agent 帮忙跑 `bridge_cron.py enable/disable --bot X --name N`——**开关一个闹钟是纯确定性动作，却卡在"要先叫醒一个智能体"上**（2026-08-02 凌晨主人喊停全部定时任务，又一次走 agent 代跑）。而且 `disabled_reason` 没人维护：2026-07-27 停用时写下的原因，在任务被重新打开后仍留在 yaml 里，`enabled: true` + "主人手动暂停" 并存，下一个人读了只会更糊涂。
+
+**WHAT**
+
+- **新增 `feishu/cron.py`（人用门面）+ `bridge_cron.py menu`（菜单本体）**：一条 `python feishu/cron.py` 列出全舰队定时任务，↑↓/jk 选、空格勾开 / 勾关、`a` 全开、`n` 全关、`f` 立刻跑一次（要确认）、回车保存、`q` 放弃。`✓`=开着、`*`=改动未保存；只有回车才落盘。
+- **为什么多一个文件**：`bridge_cron.py` 裸跑必须保持 `status`——agent / 脚本常这么调，一旦改成默认进 TUI，wmux pane 里的 agent 跑一句"看看状态"会被卡在等键盘。所以人用短门面 `cron.py`（带参数则原样透传完整 CLI），机器用原名。
+- **`disabled_reason` 变成自动维护**：菜单关 → 写「主人手动关（时间戳）· 非故障 / 非跑挂了」+ 恢复命令；菜单开 → **清掉**旧原因，根治上面那条"开着却带着停用理由"的漂移。
+- **写回路径没另起炉灶**：仍走 `_load_bot_file`/`_save_bot_file` → `cron-jobs/<bot>.yaml`（提交前重新读盘、不拿内存旧副本覆盖并发改动），守护进程热读免重启，每笔改动照旧进 `_logs/bridge-cron.log` 留痕。保存后若「有任务开着但守护进程没跑」会当场问要不要 `start`。
+- **任何终端都能用**：真控制台走单键（Windows 下 ctypes 开 VT）；MinTTY / git-bash 的 stdin 是管道、读不了单键 → 自动退回行输入模式（敲序号 `1 3` + 回车）。中文 desc 按显示宽度（CJK 算 2 格）截断，不撑破画面。
+- **同时执行**：按主人要求把 4 条定时任务**全部停用**（`tb24-xhs-autopilot/daily-cruise`、`tb24-tennis-post/tennis-post-daily` 本是开着的，另两条自 7-27 起就是关的）。
+
+**验证**：25 项隔离测试全绿（把 `JOBS_DIR` 指到临时目录，真 `cron-jobs/` 与守护进程零影响）——覆盖载入 / 两种模式渲染 / 切换写盘 / 只动被改的那条 / `disabled_reason` 开关两向 / `prompt`·`desc` 不丢 / `q` 放弃不写盘 / 非法输入不崩 / 中文宽度截断；另实测 `bridge_cron.py` 裸跑仍是 `status`、`cron.py board` 透传正常、EOF 干净退出不挂。
+
+---
+
 ## v0.10.0 — wmux 升到 3.38.1 + 幂等 RPC 重试不再吞消息 + Codex 终答单一路径 + 注册流接 Profile（2026-07-31）
 
 **WHY**：v0.9.0 把 Profile SSOT 立起来之后，同一晚上收掉四件「桥还在漏」的事。最要紧的是主人这边直接可感的一条：**飞书消息偶发被吞**——`workspace.list` 撞 `RPC timeout (5000ms)` 时，`on_message` 的 except 分支把整条消息丢掉、只回一句「❌ bridge 错误」。实证 tb25-phd-taoci 收 698 条撞 5 次（≈0.7%），两份 a2a 交接报告因此根本没进队长的会话。根因在 wmux 侧：这条 RPC 最终由**窗口进程**回答（daemon 转 ipcMain→renderer），窗口被一堆 agent 的终端输出压住时应答不及；而本机 wmux 还停在 3.8.0，落后上游 30 个版本、正好错过一串并发与内存修复。
