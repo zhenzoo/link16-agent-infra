@@ -34,6 +34,24 @@ feishu/cron-jobs/
 `route=p2a` → 那个 bot 干完**回复恒回主人 DM**（不漏进群·不串台·ARCH-140 §3）。
 
 ## 5. 工具（CLI · 不用手改文件）
+
+### 5.1 主人自己开关：`python feishu/cron.py`（复选菜单 · 不用喊 agent）
+开 / 关一个定时任务是**纯确定性动作**，本不该每次找 agent 代跑 `enable`/`disable` → 给主人一个复选框：
+
+```
+python feishu/cron.py            # 列全部任务 · ↑↓/jk 选 · 空格 开/关 · a 全开 · n 全关
+                                 # f 立刻跑一次(要确认) · 回车 保存退出 · q 放弃退出
+python feishu/cron.py board      # 带参数 = 原样透传给 bridge_cron.py（board/status/add/fire/start…）
+```
+
+- **`✓`=开着**（到点自动派活）· **`*`=本次改动还没保存**；保存才落盘（`q` / Ctrl-C 一律不写）。
+- 写回仍走 `_save_bot_file` → `cron-jobs/<bot>.yaml`，**守护进程热读、免重启**；每笔改动进 `_logs/bridge-cron.log` 留痕。
+- **`disabled_reason` 自动维护**：关 → 写「主人手动关（时间）· 非故障 / 非跑挂了 + 恢复命令」；开 → **清掉**旧原因（否则留着会误导下一个人以为是崩了）。
+- 保存后若「有任务开着但守护进程没跑」→ 当场问一句要不要 `start`（开了却没闹钟 = 白开）。
+- **两种输入模式自动选**：真控制台（Windows Terminal / PowerShell / cmd）走单键；MinTTY / git-bash 那种 stdin 是管道、读不了单键 → 退回**行输入模式**（敲序号 `1 3` + 回车），功能一样。
+- **为什么单独一个 `cron.py`**：`bridge_cron.py` 裸跑必须保持 `status`（agent / 脚本常这么调，不能把它们卡进交互 TUI）→ 人用短门面、机器用原名。菜单本体是 `bridge_cron.py menu`。
+
+### 5.2 完整 CLI（agent / 脚本 / 高级操作）
 ```
 bridge_cron.py board                              # ⭐ 全舰队总览：每个 agent 排了啥·下次/上次·本机●/别机○
 bridge_cron.py add --bot X --name N --cron "0 9 * * *" --sop docs/SOP-xxx [--tz .. --desc ..]

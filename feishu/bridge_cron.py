@@ -23,6 +23,8 @@
 【多机】守护进程只【真触发】本机名册(bridge-bots.local.json)里的 bot 的任务 → cron-jobs/ 可共享、两机不撞、不写死 host。
 
 用法：
+  python cron.py                                    # ⭐⭐ 交互式复选菜单（空格开关 / 回车保存）—— 主人自己开关，不用喊 agent
+  python bridge_cron.py menu                        # 同上（cron.py 就是它的门面·裸跑 bridge_cron.py 仍是 status）
   python bridge_cron.py board                       # ⭐ 全舰队总览：每个 agent 排了啥·下次/上次·本机●/别机○
   python bridge_cron.py add --bot X --name N --cron "0 9 * * *" --sop docs/SOP-xxx   # 加：--sop 引到该仓 SOP（或 --prompt "…"）
   python bridge_cron.py rm | enable | disable --bot X --name N   # 删 / 启用 / 停用
@@ -498,9 +500,313 @@ def cmd_list(bot=None):
     print(json.dumps(jobs, ensure_ascii=False, indent=2))
 
 
+# ---------- 交互式复选菜单（`menu` / 裸跑 · 主人自己勾开关·不用喊 agent）----------
+# 【为什么】开 / 关一个定时任务本是纯确定性动作，却一直要找 agent 代跑 enable/disable → 这里给主人一个
+# 复选框 TUI：↑↓ 选、空格勾、回车保存。写回仍走 _save_bot_file（同一条路径·日志留痕·守护进程热读免重启）。
+# 【两种输入模式】真控制台（Windows Terminal / PowerShell / cmd）走单键；MinTTY / git-bash 那种管道 stdin
+# 读不了单键 → 自动退回【行输入模式】（敲序号 + 回车），功能一样，任何终端都能用。
+def _enable_vt():
+    """Windows 控制台开 VT（让 ANSI 转义生效）· 成功 True。非 Windows 默认支持。"""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)                        # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(k.SetConsoleMode(h, mode.value | 0x0004))   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
+def _stdin_is_console():
+    """stdin 是不是【真控制台】—— 决定能否读单键（MinTTY / git-bash 是管道 → 必须走行输入模式）。"""
+    if not sys.stdin.isatty():
+        return False
+    if os.name != "nt":
+        try:
+            import termios, tty                        # noqa: F401
+            return True
+        except ImportError:
+            return False
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        mode = ctypes.c_uint32()
+        return bool(k.GetConsoleMode(k.GetStdHandle(-10), ctypes.byref(mode)))   # STD_INPUT_HANDLE
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
+def _getkey():
+    """读一个键 → 'up'/'down'/'enter'/'space'/'esc'/单个小写字符。"""
+    if os.name == "nt":
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):                     # 方向键 / 功能键前缀
+            return {"H": "up", "P": "down"}.get(msvcrt.getwch(), "")
+    else:
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                seq = sys.stdin.read(2)
+                return {"[A": "up", "[B": "down"}.get(seq, "esc")
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    if ch in ("\r", "\n"):
+        return "enter"
+    if ch == " ":
+        return "space"
+    if ch == "\x1b":
+        return "esc"
+    if ch == "\x03":                                   # Ctrl-C
+        raise KeyboardInterrupt
+    return ch.lower()
+
+
+def _dw(s):
+    """显示宽度（CJK 算 2 格）—— 中文 desc 不按宽度截会撑破框、光标乱跳。"""
+    return sum(2 if ord(c) > 0x2E7F else 1 for c in s)
+
+
+def _cut(s, width):
+    out, w = "", 0
+    for c in s:
+        cw = 2 if ord(c) > 0x2E7F else 1
+        if w + cw > width:
+            return out + "…"
+        out += c; w += cw
+    return out
+
+
+def _menu_load():
+    """菜单数据 = cron-jobs/<bot>.yaml 里的全部任务（可写回的那些）· 下次触发时间在这算一次、之后重画不再算。"""
+    rows = []
+    if yaml is None or not JOBS_DIR.is_dir():
+        return rows
+    roster, lastfire = _roster_bots(), _load_lastfire()
+    for p in sorted(JOBS_DIR.glob("*.yaml")):
+        for j in _load_bot_file(p.stem):
+            try:
+                nxt = (next_fires(j.get("cron", ""), j.get("tz", DEFAULT_TZ), n=1) or ["—"])[0]
+            except Exception:                          # noqa: BLE001
+                nxt = "(cron 错)"
+            on = bool(j.get("enabled", True))
+            rows.append({"bot": p.stem, "name": j.get("name", "?"), "cron": j.get("cron", ""),
+                         "desc": j.get("desc", "") or "", "next": nxt,
+                         "last": lastfire.get(j.get("name"), "—"),
+                         "mine": (not roster) or p.stem in roster, "was": on, "on": on})
+    return rows
+
+
+def _menu_render(rows, cur, msg="", raw=True):
+    """整帧重画（不做光标微操 → 任何终端都稳）。cur=光标行；raw=单键模式（显示 ❯ 而非序号提示）。"""
+    try:
+        import shutil
+        cols = max(60, min(shutil.get_terminal_size((110, 30)).columns, 140))
+    except Exception:                                  # noqa: BLE001
+        cols = 110
+    pids = _cron_pids()
+    daemon = f"守护进程 在跑 PID={','.join(pids)}" if pids else "⚠️ 守护进程没在跑"
+    out = ["", f"  ⏰ cron 定时任务 · {daemon}", ""]
+    last_bot = None
+    for i, r in enumerate(rows):
+        if r["bot"] != last_bot:
+            last_bot = r["bot"]
+            out.append(f"   {r['bot']}  {'●本机' if r['mine'] else '○别机(本机不触发)'}")
+        mark = "✓" if r["on"] else " "
+        chg = "*" if r["on"] != r["was"] else " "
+        head = ("❯ " if (raw and i == cur) else ("  " if raw else f"{i+1:>2}")) + f"[{mark}]{chg}"
+        out.append(f" {head} {_cut(r['name'], 26):<26} {r['cron']:<13} 下次≈{r['next']:<20} 上次={r['last']}")
+        if r["desc"]:
+            out.append(f"        {_cut(r['desc'], cols - 12)}")
+    out.append("")
+    if raw:
+        out.append("  ↑↓/jk 选 · 空格 开关 · a 全开 · n 全关 · f 立刻跑一次 · 回车 保存退出 · q 放弃退出")
+    else:
+        out.append("  输入序号切换（可多个 `1 3`）· a 全开 · n 全关 · f<序号> 立刻跑一次 · 回车 保存退出 · q 放弃")
+    out.append("  ✓=开着（到点自动派活） · *=本次改动未保存 · 保存后守护进程热读、免重启")
+    if msg:
+        out.append(f"\n  {msg}")
+    print("\n".join(out), flush=True)
+
+
+def _menu_clear(vt):
+    if vt:
+        print("\x1b[H\x1b[J", end="")
+    else:
+        os.system("cls" if os.name == "nt" else "clear")   # noqa: S605 — 固定字面量·无注入面
+
+
+def _menu_fire(rows, idx):
+    """菜单里【立刻跑一次】选中任务（真派活·要确认）。返回一行结果消息。"""
+    r = rows[idx]
+    job = next((j for j in load_jobs() if j.get("bot") == r["bot"] and j.get("name") == r["name"]), None)
+    if not job:
+        return f"❌ 找不到 {r['bot']}/{r['name']}"
+    if not r["mine"]:
+        return f"❌ {r['bot']} 不在本机名册 · 这台机器派不了活"
+    ok = fire(job)
+    return (f"🚀 已把 {r['name']} 派给 {r['bot']}（去飞书看它回你）" if ok
+            else f"❌ {r['name']} 派活失败 · 看 {LOG_PATH.name}")
+
+
+def _menu_commit(rows):
+    """把改动写回各 <bot>.yaml（每 bot 只写一次）· 顺带维护 disabled_reason：关→写原因、开→清掉过期原因。"""
+    changed = [r for r in rows if r["on"] != r["was"]]
+    if not changed:
+        print("（没有改动·原样退出）")
+        return 0
+    for bot in sorted({r["bot"] for r in changed}):
+        jobs = _load_bot_file(bot)                     # 重新读盘（别拿内存里的旧副本盖掉别处的改动）
+        want = {r["name"]: r["on"] for r in changed if r["bot"] == bot}
+        for j in jobs:
+            if j.get("name") in want:
+                on = want[j["name"]]
+                j["enabled"] = on
+                if on:
+                    j.pop("disabled_reason", None)     # 开了就清掉旧的停用说明（否则留着误导「是不是挂了」）
+                else:
+                    j["disabled_reason"] = (f"主人手动关（{_ts()} 北京时间 · 经 bridge_cron 菜单）· 非故障 / 非跑挂了。"
+                                            f"恢复：python feishu/bridge_cron.py 里空格打开，或 "
+                                            f"enable --bot {bot} --name {j['name']}")
+        _save_bot_file(bot, jobs)
+    for r in changed:
+        log(f"📝 手动{'启用' if r['on'] else '停用'} {r['bot']}/{r['name']}（bridge_cron 菜单·留痕）")
+    print(f"\n✅ 保存了 {len(changed)} 项改动：")
+    for r in changed:
+        print(f"   {'开 ✓' if r['on'] else '关 ✗'}  {r['bot']} / {r['name']}")
+    on_now = [r for r in rows if r["on"]]
+    print(f"\n现在开着的（{len(on_now)}/{len(rows)}）：" + ("、".join(f"{r['name']}({r['cron']})" for r in on_now) or "无"))
+    if on_now and not _cron_pids():                    # 开了任务但闹钟没跑 = 白开·当场问一句
+        print("\n⚠️ 有任务开着，但 cron 守护进程没在跑 → 到点不会触发。")
+        try:
+            if input("现在起守护进程？(y/N) ").strip().lower() == "y":
+                cmd_start()
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return len(changed)
+
+
+def _menu_raw(rows):
+    """单键模式（真控制台）：↑↓ 选 · 空格勾 · 回车保存。"""
+    vt = _enable_vt()
+    cur, msg = 0, ""
+    while True:
+        _menu_clear(vt)
+        _menu_render(rows, cur, msg, raw=True)
+        msg = ""
+        try:
+            k = _getkey()
+        except KeyboardInterrupt:
+            print("\n（Ctrl-C·放弃改动退出）")
+            return
+        if k in ("up", "k"):
+            cur = (cur - 1) % len(rows)
+        elif k in ("down", "j"):
+            cur = (cur + 1) % len(rows)
+        elif k == "space":
+            rows[cur]["on"] = not rows[cur]["on"]
+        elif k == "a":
+            for r in rows:
+                r["on"] = True
+        elif k == "n":
+            for r in rows:
+                r["on"] = False
+        elif k == "f":
+            _menu_clear(vt)
+            print(f"\n  立刻把 [{rows[cur]['name']}] 派给 {rows[cur]['bot']}？(y/n)\n")
+            if _getkey() == "y":
+                print()
+                msg = _menu_fire(rows, cur)
+                print("\n  按任意键回菜单…")
+                _getkey()
+            else:
+                msg = "（取消·没派活）"
+        elif k == "enter":
+            _menu_clear(vt)
+            _menu_commit(rows)
+            return
+        elif k in ("q", "esc"):
+            _menu_clear(vt)
+            if any(r["on"] != r["was"] for r in rows):
+                print("（放弃退出·改动没保存）")
+            return
+
+
+def _menu_lines(rows):
+    """行输入模式（MinTTY / git-bash 等读不了单键的终端）：敲序号 + 回车。"""
+    msg = ""
+    while True:
+        _menu_render(rows, -1, msg, raw=False)
+        msg = ""
+        try:
+            s = input("\n> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n（放弃退出·改动没保存）")
+            return
+        if s in ("q", "quit", "exit"):
+            print("（放弃退出·改动没保存）" if any(r["on"] != r["was"] for r in rows) else "（退出）")
+            return
+        if s == "":
+            _menu_commit(rows)
+            return
+        if s == "a":
+            for r in rows:
+                r["on"] = True
+            continue
+        if s == "n":
+            for r in rows:
+                r["on"] = False
+            continue
+        if s.startswith("f"):
+            try:
+                i = int(s[1:].strip()) - 1
+                assert 0 <= i < len(rows)
+            except (ValueError, AssertionError):
+                msg = "❌ 用法 f<序号>，如 f2"
+                continue
+            if input(f"立刻把 [{rows[i]['name']}] 派给 {rows[i]['bot']}？(y/N) ").strip().lower() == "y":
+                msg = _menu_fire(rows, i)
+            else:
+                msg = "（取消·没派活）"
+            continue
+        bad = []
+        for tok in s.replace(",", " ").split():
+            try:
+                i = int(tok) - 1
+                assert 0 <= i < len(rows)
+            except (ValueError, AssertionError):
+                bad.append(tok); continue
+            rows[i]["on"] = not rows[i]["on"]
+        if bad:
+            msg = f"❌ 无效序号：{' '.join(bad)}"
+
+
+def cmd_menu():
+    rows = _menu_load()
+    if not rows:
+        print("（还没有任何定时任务 · 用 `add --bot X --name N --cron \"0 9 * * *\" --sop <仓内SOP>` 加一个）")
+        return
+    n_legacy = len(load_jobs()) - len(rows)
+    if n_legacy > 0:                                   # legacy cron-jobs.json 里的任务改不了（本就该迁走）
+        print(f"（注意：另有 {n_legacy} 个旧 cron-jobs.json 任务不在菜单里·请先迁到 cron-jobs/<bot>.yaml）")
+    if not sys.stdin.isatty():                         # 被管道 / 重定向调用 → 不进交互，退回总览
+        print("（不是交互终端 → 只列总览。开关请在终端里跑 `python feishu/bridge_cron.py`）\n")
+        cmd_board()
+        return
+    (_menu_raw if _stdin_is_console() else _menu_lines)(rows)
+
+
 def main():
     argv = sys.argv[1:]
-    cmd = argv[0] if argv else "status"
+    cmd = argv[0] if argv else "status"                # 裸跑保持 status（agent / 脚本常这么调·别把它们卡进交互 TUI）
 
     def _opt(flag, default=None):                      # 取 --flag 的值（缺=default）
         return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else default
@@ -515,6 +821,8 @@ def main():
         cmd_status()
     elif cmd == "board":
         cmd_board()
+    elif cmd in ("menu", "ui", "tui"):
+        cmd_menu()
     elif cmd == "list":
         cmd_list(_opt("--bot"))
     elif cmd in ("add", "rm", "enable", "disable"):
