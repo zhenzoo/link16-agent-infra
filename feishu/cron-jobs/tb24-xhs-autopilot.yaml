@@ -4,9 +4,9 @@ jobs:
 - name: daily-cruise
   cron: 0 1 * * *
   tz: Asia/Shanghai
-  enabled: true
+  enabled: false
   desc: 每天 01:00（凌晨一点）开启 xhs 今天的巡航 · ~10h 跑完约 11:00 备好首档（2026-07-14 Publisher 改 02:00→00:00；2026-07-20
     主人推迟一小时 00:00→01:00）
   prompt: 开启今天的巡航
-  disabled_reason: 主人手动暂停（2026-07-27 02:16 北京时间 · 经 tb24-ccp-config 执行）· 非故障 / 非自动停用 / 非跑挂了 —— 主人主动喊停全部定时任务。恢复：python
-    feishu/bridge_cron.py enable --bot <bot> --name <name>
+  disabled_reason: 主人手动暂停（2026-08-02 00:52 北京时间 · 经 tb24-link16 执行）· 非故障 / 非自动停用 / 非跑挂了 —— 主人主动喊停全部定时任务（上一次同样的暂停在
+    2026-07-27，之后曾恢复过）。恢复：python feishu/bridge_cron.py enable --bot <bot> --name <name>

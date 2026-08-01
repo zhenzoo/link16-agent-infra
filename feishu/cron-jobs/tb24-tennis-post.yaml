@@ -7,7 +7,7 @@ jobs:
     的 01:00)
   cron: 5 2 * * *
   tz: Asia/Shanghai
-  enabled: true
+  enabled: false
   prompt: '开启今天的 tennis post 巡航：按本仓 CLAUDE.md「🚀 巡航触发」+ docs/ARCH-300 §2 主循环跑——你当【总控】、自己不写帖，串行开子面板、每篇一个全新
     headless 会话写帖，本次【固定写 2 篇】。别问确认、别自己写帖、别停。
 
@@ -27,8 +27,8 @@ jobs:
     异常自愈见 ARCH-300 §6：worker 限流/卡 → kickoff 注「继续」不 /clear；真路绝/欠费/断网 → 发我 DM 等我。
 
     '
-  disabled_reason: 主人手动暂停（2026-07-27 02:16 北京时间 · 经 tb24-ccp-config 执行）· 非故障 / 非自动停用 / 非跑挂了 —— 主人主动喊停全部定时任务。恢复：python
-    feishu/bridge_cron.py enable --bot <bot> --name <name>
+  disabled_reason: 主人手动暂停（2026-08-02 00:52 北京时间 · 经 tb24-link16 执行）· 非故障 / 非自动停用 / 非跑挂了 —— 主人主动喊停全部定时任务（上一次同样的暂停在
+    2026-07-27，之后曾恢复过）。恢复：python feishu/bridge_cron.py enable --bot <bot> --name <name>
 - name: comment-factcheck-daily
   cron: 0 9 * * *
   tz: Asia/Shanghai
