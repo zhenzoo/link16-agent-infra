@@ -4,6 +4,42 @@
 > keeping Claude Code fully operational and single-sourced. This is a
 > compatibility layer, not a destructive migration.
 
+## 升级 Codex（**必须剥代理直连 · 否则慢 100 倍**）
+
+`codex update` 内部就是 `npm install -g @openai/codex`（`codex doctor` 的 `update action` 一栏可见）。
+本机 `.bashrc` 全局 `export https_proxy=http://127.0.0.1:7897`，**npm 会继承它**，把 Codex 的平台
+二进制（tarball **151.7 MB** / 解包 **391 MB**）整个塞进 Clash 隧道 → 十几分钟。剥掉代理走直连
+只要几秒。
+
+```bash
+# Git Bash —— 只对这一条命令剥代理，不动系统/全局设置
+env -u https_proxy -u http_proxy -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY \
+    npm install -g @openai/codex@latest
+codex --version        # 核对升上去了
+```
+
+```powershell
+# PowerShell 等价写法（子作用域赋空，退出即恢复）
+$env:HTTPS_PROXY=''; $env:HTTP_PROXY=''; $env:ALL_PROXY=''
+npm install -g @openai/codex@latest
+codex --version
+```
+
+**实测三条路（2026-08-02 · 同一个 tarball · 各跑 20 秒看下了多少）**：
+
+| 路线 | 20 秒下载量 | 速度 | 结论 |
+|---|---|---|---|
+| 官方源 + **走代理**（默认，什么都不做就是它） | 5.6 MB | ~0.28 MB/s | ❌ 十几分钟 |
+| 官方源 + **直连** | **151.7 MB（5 秒全下完）** | **~30 MB/s** | ✅ **用这个** |
+| npmmirror 国内镜像 + 直连 | 66.6 MB | ~3.2 MB/s | 🟡 直连不通时的备选 |
+
+> **为什么直连反而最快**：npm registry 的 tarball 走 CDN，国内直连本身通畅；代理把 150 MB 全程
+> 中转，隧道带宽成了瓶颈。**只有被墙的服务才需要代理，npm 不是。**
+> 备选（万一哪天直连不通）：`npm install -g @openai/codex@latest --registry=https://registry.npmmirror.com`
+
+**升级时机注意**：`npm install -g` 会替换二进制，但**已经跑着的 Codex 进程仍用旧版**（进程持旧码）。
+飞书桥上的 Codex bot 要等各自会话重建才吃到新版；不必为升级专门重启整个桥。
+
 ## Boundary
 
 | Surface | Claude Personal source | Codex Personal destination | Strategy |
@@ -36,6 +72,8 @@ profile wrappers for daily sessions.
 
 ```powershell
 # 0a. Update Codex first — older CLIs may not know the target model string.
+#     ⚠️ 别直接用 `codex update` / 裸 npm —— 会走 Clash 代理，慢 100 倍。
+#        走直连的快命令见下面「升级 Codex」一节。
 codex update ; codex --version          # target: >= 0.144.x
 
 # 0b. Point every step at the isolated home for the whole session.

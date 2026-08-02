@@ -41,7 +41,86 @@ def _print_json(value) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+# selftest 的最后一级探针：走和真启动**完全同一条** shell+env+launcher 路径，
+# 但把 provider 参数换成 --version —— 秒退、不开 TUI、不留会话，却能真正证明
+# 「这个 profile 现在敲下去起得来」。纯静态检查做不到这一点（PLAN-923 · S3.2）。
+_SELFTEST_PROBE_ARGS = ["--version"]
+_SELFTEST_TIMEOUT = 180
+
+
+def _selftest_one(name: str) -> dict:
+    row = {"profile": name, "runtime": None, "registry": False, "doctor": False,
+           "command": False, "launch": False, "version": "", "error": ""}
+    try:
+        spec = agent_runtime.profile_spec(name)
+        row["runtime"] = spec.runtime
+        row["registry"] = True
+    except (KeyError, ValueError) as exc:
+        row["error"] = f"registry: {exc}"
+        return row
+
+    health = agent_runtime.profile_doctor(name)
+    row["doctor"] = health["ok"]
+    if not health["ok"]:
+        row["error"] = "；".join(health["errors"])
+        return row
+
+    try:
+        command = agent_runtime.standalone_worker_cmd(
+            name, cwd=os.getcwd(), provider_args=_SELFTEST_PROBE_ARGS
+        )
+        row["command"] = True
+    except (KeyError, OSError, ValueError) as exc:
+        row["error"] = f"command: {exc}"
+        return row
+
+    try:
+        done = subprocess.run(
+            [agent_runtime.resolve_shell(), "-lc", command],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=_SELFTEST_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        row["error"] = f"launch: {exc}"
+        return row
+
+    tail = [ln.strip() for ln in (done.stdout or "").splitlines() if ln.strip()]
+    row["version"] = tail[-1][:40] if tail else ""
+    row["launch"] = done.returncode == 0 and bool(row["version"])
+    if not row["launch"]:
+        stderr_tail = [ln.strip() for ln in (done.stderr or "").splitlines() if ln.strip()]
+        row["error"] = f"rc={done.returncode} {(stderr_tail[-1] if stderr_tail else '')}"[:160]
+    return row
+
+
+def _selftest(names: list[str], as_json: bool) -> int:
+    rows = [_selftest_one(name) for name in names]
+    if as_json:
+        _print_json({"ok": all(r["launch"] for r in rows), "rows": rows})
+    else:
+        mark = lambda flag: "✓" if flag else "✗"  # noqa: E731
+        print(f"{'profile':<9s} {'runtime':<8s} {'registry':<9s} {'doctor':<7s} "
+              f"{'command':<8s} {'launch':<7s} 版本 / 错误")
+        for r in rows:
+            detail = r["version"] if r["launch"] else (r["error"] or "—")
+            print(f"{r['profile']:<9s} {str(r['runtime'] or '—'):<8s} "
+                  f"{mark(r['registry']):<9s} {mark(r['doctor']):<7s} "
+                  f"{mark(r['command']):<8s} {mark(r['launch']):<7s} {detail}")
+        good = sum(1 for r in rows if r["launch"])
+        print(f"\n{good}/{len(rows)} 全绿" if good == len(rows)
+              else f"\n{good}/{len(rows)} 通过 —— 有 {len(rows) - good} 个起不来")
+    return 0 if all(r["launch"] for r in rows) else 1
+
+
 def main(argv=None) -> int:
+    # 所有子命令一律输出 LF：Windows 的 text-mode 会把 \n 翻成 \r\n，残留的 \r 会
+    # 打穿下游 shell wrapper（`read` 只吃 \n → unalias 拿到 "cc\r" 找不到别名 →
+    # 老 alias 存活 → 函数定义撞 alias 展开报语法错误）。在产出源头一次修干净，
+    # 比让每个消费端各自 tr -d '\r' 可靠。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(newline="\n")
+
     parser = argparse.ArgumentParser(description="Link16 agent profile resolver/launcher")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -59,6 +138,13 @@ def main(argv=None) -> int:
     p_command.add_argument("--cwd")
     p_command.add_argument("--env", action="append", default=[])
     p_command.add_argument("--json", action="store_true")
+
+    p_selftest = sub.add_parser(
+        "selftest", help="逐个 profile 体检：registry / doctor / 命令生成 / 真启动"
+    )
+    p_selftest.add_argument("--profile", action="append", default=[],
+                            help="只测指定 profile（可重复）；缺省测全部")
+    p_selftest.add_argument("--json", action="store_true")
 
     p_run = sub.add_parser("run", help="在当前终端运行指定 profile")
     p_run.add_argument("--profile")
@@ -91,6 +177,12 @@ def main(argv=None) -> int:
                     marker = " · recommended" if row["recommended"] else ""
                     print(f"{row['name']}: {row['runtime']} · {row['home']}{marker}")
             return 0
+
+        if args.command == "selftest":
+            names = [str(p).strip().lower() for p in args.profile if str(p).strip()]
+            if not names:
+                names = [p.name for p in agent_runtime.profile_specs()]
+            return _selftest(names, args.json)
 
         profile = _profile_arg(args.profile)
         if args.command == "show":
@@ -144,7 +236,7 @@ def main(argv=None) -> int:
             return 0
 
         cwd = str(Path(args.cwd).resolve()) if args.cwd else None
-        return subprocess.call(["bash", "-lc", command], cwd=cwd)
+        return subprocess.call([agent_runtime.resolve_shell(), "-lc", command], cwd=cwd)
     except (KeyError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

@@ -303,12 +303,17 @@ def _legacy_profile_name(bot: dict) -> str | None:
 
 
 def profile_name(bot, *, required=False) -> str | None:
-    """Resolve one profile name.
+    """Resolve one profile name from evidence only — never from a runtime default.
 
-    `profile` is authoritative. `account` and provider-home fields are accepted
-    only as migration inputs. Bare legacy bots use the registry's runtime
-    default; standalone workers must call profile_from_env() and therefore fail
-    closed instead of taking this compatibility route.
+    Two accepted sources, in order:
+      1. `profile` / `account` — authoritative, written in the roster.
+      2. provider-home fields (`claude_config_dir` / `codex_home`) — migration
+         input, matched against a registry home.
+
+    There is deliberately **no runtime-default tier** (PLAN-923 · S2.2): guessing
+    `claude → ccp` meant a registry edit could silently re-account every bare bot,
+    and any worker would faithfully inherit that wrong account. Unresolvable now
+    means None (or a raise when `required`), so the roster must say it out loud.
     """
     if isinstance(bot, dict):
         explicit = bot.get("profile") or bot.get("account")
@@ -317,11 +322,12 @@ def profile_name(bot, *, required=False) -> str | None:
         legacy = _legacy_profile_name(bot)
         if legacy:
             return legacy
-        runtime = _raw_runtime_name(bot)
-        if runtime in _PROFILE_RUNTIMES:
-            return default_profile(runtime)
     if required:
-        raise ValueError("bot 没有可解析的 agent profile")
+        name = bot.get("name") if isinstance(bot, dict) else bot
+        raise ValueError(
+            f"bot {name!r} 没有可解析的 agent profile；"
+            "请在 bridge-bots.local.json 给它补 \"profile\": \"<registry profile 名>\"（拒绝猜账号）"
+        )
     return None
 
 
@@ -349,6 +355,21 @@ def profile_public_dict(profile: ProfileSpec) -> dict:
     }
 
 
+def resolve_shell() -> str:
+    """Resolve the POSIX shell used to exec a generated command line.
+
+    Never hand a bare "bash" to subprocess on Windows: CreateProcess searches
+    System32 before PATH, and System32\\bash.exe is the WSL launcher, so the
+    command goes to a WSL distro instead of Git Bash (PLAN-923 · BUG-1).
+    shutil.which walks PATH in order and resolves the real Git Bash.  No
+    hard-coded interpreter path — $SHELL first, then PATH, then fail closed.
+    """
+    for candidate in (os.environ.get("SHELL"), shutil.which("bash"), shutil.which("sh")):
+        if candidate and Path(candidate).is_file():
+            return candidate
+    raise ValueError("找不到可用 shell：$SHELL 未设置且 PATH 里没有 bash/sh；拒绝猜解释器")
+
+
 def profile_doctor(name: str) -> dict:
     profile = profile_spec(name)
     errors = []
@@ -360,6 +381,12 @@ def profile_doctor(name: str) -> dict:
     launch = home / "launch.sh"
     if profile.launcher == "launch-sh" and not launch.is_file():
         errors.append(f"launch.sh 不存在：{profile.home}/launch.sh")
+    # 没有可用 shell 时，`run` 起不来但上面三项全绿 —— 正是 PLAN-923 之前
+    # 「doctor 全绿却启动失败」的盲区，所以把它纳入同一张体检表。
+    try:
+        resolve_shell()
+    except ValueError as exc:
+        errors.append(str(exc))
     return {
         **profile_public_dict(profile),
         "ok": not errors,
