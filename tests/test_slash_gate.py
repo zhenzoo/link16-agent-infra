@@ -193,3 +193,60 @@ class GateIdentifiesPeerViaStampTest(unittest.TestCase):
                 name_for_open_id=lambda *a, **k: None)}):
             ok, _ = feishu_bridge._gate_verdict(self.BOT, "ou_x", "/close", text)
         self.assertFalse(ok, "戳能认人 ≠ 有授权")
+
+
+class GrantCliEntrypointTest(unittest.TestCase):
+    """堵「测了功能、没测入口」那个洞（2026-08-03 · TB24 抓到）。
+
+    我原来所有单测都显式传 `state_dir=`，**恰好避开了唯一会崩的那条路径**：
+    `_state_dir()` 里 `from bridge_env import resolve_project_root` 引的是个**不存在的函数**，
+    于是 CLI 一跑就 ImportError —— 形状是「闸装上了，但开锁的钥匙是坏的」：
+    6 个破坏性命令被拦住，而唯一能解锁的 claim 跑不起来。桥的运行时闸反而没事
+    （has_cap 显式传 STATE_DIR → `state_dir or _state_dir()` 短路，压根不调）。
+    """
+
+    def test_state_dir_resolves_without_explicit_arg(self):
+        """判据①：不传 state_dir 也必须能解析（这正是 CLI 走的路）。"""
+        d = agent_grant._state_dir()          # 不传参 —— 修复前这里直接 ImportError
+        self.assertTrue(str(d), "解析不出 state_dir")
+
+    def test_state_dir_matches_the_bridge_state_dir(self):
+        """判据②（比①更要紧）：CLI 写授权的目录，必须就是桥读授权的目录。
+
+        若两者不一致，CLI 不报错、claim 也显示成功，但闸去另一个目录读 → 授权永远不生效。
+        这是比「CLI 崩了」更隐蔽的坏法：**看起来成功，实际没生效**。"""
+        self.assertEqual(
+            Path(agent_grant._state_dir()).resolve(),
+            Path(feishu_bridge.STATE_DIR).resolve(),
+            "claim 写到 A、闸去 B 读 —— 授权会静默失效")
+
+    def test_cli_status_runs_bare(self):
+        """判据①的端到端形态：真的把 CLI 当命令跑一遍，不带任何 --state-dir。"""
+        import subprocess
+        r = subprocess.run([sys.executable, str(ROOT / "feishu" / "agent_grant.py"), "status"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, f"CLI 裸跑失败：{r.stderr[-400:]}")
+        self.assertNotIn("ImportError", r.stderr)
+
+
+class RosterProfileResolvesAfterLoadTest(unittest.TestCase):
+    """TB24 的建议：光测「名册显式写死」不够，还要测「装载后真能解析」。
+
+    PLAN-923 把 profile_name() 改成 fail-closed（删掉 runtime 默认兜底），
+    `_reuse_check` 是带 required=True 调它的 ⇒ 解析不出 = 那个 bot 起不了会话。
+    而 `_apply_roster_defaults()` 会在 load_bots() 时注入 profile —— 只读裸 JSON 判断会误报
+    （我给 TB24 的检查方法就栽在这），所以这条闸必须跑**真 loader**。
+    本机名册 gitignored、每台机不同 → 没有名册就跳过。
+    """
+
+    def test_every_loaded_bot_resolves_a_profile(self):
+        import agent_runtime
+        if not (ROOT / "feishu" / "bridge-bots.local.json").exists():
+            self.skipTest("本机没有 bridge-bots.local.json（每机各自维护·gitignored）")
+        bad = []
+        for b in feishu_bridge.load_bots():
+            try:
+                agent_runtime.profile_name(b, required=True)
+            except Exception as e:  # noqa: BLE001
+                bad.append(f"{b.get('name')}: {e}")
+        self.assertEqual(bad, [], "这些 bot 解析不出 profile → 它们起不了会话")
