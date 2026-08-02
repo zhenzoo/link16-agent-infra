@@ -237,6 +237,16 @@ class RosterProfileResolvesAfterLoadTest(unittest.TestCase):
     而 `_apply_roster_defaults()` 会在 load_bots() 时注入 profile —— 只读裸 JSON 判断会误报
     （我给 TB24 的检查方法就栽在这），所以这条闸必须跑**真 loader**。
     本机名册 gitignored、每台机不同 → 没有名册就跳过。
+
+    ⚠️ **这条闸必须两台机各跑一次才算覆盖住**（2026-08-03 TB24 交叉验证发现）：
+    它要防的是「装载注入之后还能不能解析」，而**能不能跑到那条路径取决于本机名册的形状**——
+      · TB25：顶层 `defaults` 为空、32 个 bot 全部显式写 profile ⇒ 走的是「本来就显式」这条路，
+        **根本没验到注入**（单看 TB25 绿灯会误以为这条测试在起作用）。
+      · TB24：名册有 `defaults.profiles(claude→ccp2)`、9 个 bot 的 profile 靠
+        `_apply_roster_defaults()` 装载时注入 ⇒ 在那儿才真正验到盲区。
+    同理 PLAN-923 那条「名册显式写死」的持续闸，在 TB24 是唯一 fail、补完才绿，在 TB25 一直是绿的。
+    ⇒ 两台机的名册形状不同，**互为对方的盲区补全**。以后凡是跟本机 roster 相关的闸，
+    别只看一台机绿就下结论。
     """
 
     def test_every_loaded_bot_resolves_a_profile(self):
