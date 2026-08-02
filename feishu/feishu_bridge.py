@@ -516,19 +516,35 @@ def _owner_file(bot_name):
     return STATE_DIR / f"bridge-owner-{bot_name}.json"
 
 
-def load_owner(bot_name):
+def load_owner_record(bot_name):
+    """owner 文件全文 → dict（`{open_id, provisional?}`）。读不到/坏 → {}。"""
     f = _owner_file(bot_name)
     if f.exists():
         try:
-            return json.loads(f.read_text(encoding="utf-8")).get("open_id")
+            rec = json.loads(f.read_text(encoding="utf-8"))
+            return rec if isinstance(rec, dict) else {}
         except (OSError, json.JSONDecodeError):
-            return None
-    return None
+            return {}
+    return {}
 
 
-def save_owner(bot_name, open_id):
+def load_owner(bot_name):
+    return load_owner_record(bot_name).get("open_id")
+
+
+def save_owner(bot_name, open_id, provisional=False):
+    """写 owner。`provisional=True` = 【工具补写的·未经真 DM 证实】的临时 owner（2026-08-02）。
+
+    为什么要这个标：批量补 owner 时，open_id 只能靠「群成员 API 按名字查」推出来（open_id 是 per-app 的，
+    没法跨 bot 复制）。推对了当然好；**万一推错，`is_allowed` 就会拿它去比对、把真主人的 DM 挡在门外**——
+    而在补写之前，第一条 DM 本来是能自动认主的。也就是说「补 owner」这个善意动作会把
+    **能自愈的状态变成会锁死的状态**。加上这个标后：临时 owner 只用于【回信路由】，
+    一旦主人真发来 DM，无论对不对都以那条 DM 为准（对 → 转正；错 → 当场纠正），**绝不把人锁在门外**。"""
     STATE_DIR.mkdir(exist_ok=True)
-    _owner_file(bot_name).write_text(json.dumps({"open_id": open_id}, ensure_ascii=False), encoding="utf-8")
+    rec = {"open_id": open_id}
+    if provisional:
+        rec["provisional"] = True
+    _owner_file(bot_name).write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
 
 
 # ---------- per-turn 路由（回址焊进消息本体的信封·hook 从本条消息取【最末】信封解析·2026-06-30 删旁路便签）----------
@@ -547,6 +563,64 @@ def _load_turn_route(bot_name):
         return None
 
 
+# MSYS2/Git-Bash 会把【整个就是 /xxx 的参数】当 POSIX 路径改写成 Windows 路径：
+#   python send.py --text "/close"  →  进程实收 'C:/Program Files/Git/close'
+# 于是斜杠命令出门就不再是斜杠命令，对端只当普通文字读 —— **静默失效、无任何报错**
+# （2026-08-03 实证：taoci-3 输入框里躺着 `C:/Program Files/Git/close [飞书_from_…]`，
+#  tb25-phd-taoci 之前几次 /close 打空全是这个原因）。
+# 发信侧的正解是 `MSYS_NO_PATHCONV=1` 或走 PowerShell，但**发信侧有几十个调用点、还包括别的 agent
+# 手敲**，靠人人记得不现实 ⇒ 在【收信侧】按已知形状复原：行首是「盘符:/…/<斜杠命令名>」就还原成 /<命令>。
+# 只认我们自己认识的命令名，且必须在行首 ⇒ 正常聊天里提到 Windows 路径不会被误伤。
+# ⚠️ 路径段【允许含空格】——真实形态就是 `C:/Program Files/Git/close`（Git 默认装在 Program Files）。
+# 用 [^/\\]+ 而不是 [^/\\\s]+：后者遇到 "Program Files" 的空格直接不匹配（2026-08-03 被单测抓到）。
+_MANGLED_SLASH_RE = re.compile(
+    r"^[A-Za-z]:[/\\](?:[^/\\]+[/\\])*(close|clear|cd|account|acc|new|stop|screen|help)(?=\s|$)")
+
+
+def _unmangle_slash(text):
+    """把 Git-Bash 改写坏的斜杠命令还原（不匹配则原样返回）。"""
+    if not text:
+        return text
+    m = _MANGLED_SLASH_RE.match(text.strip())
+    return ("/" + m.group(1) + text.strip()[m.end():]) if m else text
+
+
+# ---------- 破坏性斜杠命令的授权闸（PLAN-930 · 2026-08-03 · 详见 feishu/agent_grant.py）----------
+# 受闸命令 = 会改变对方【会话/上下文/身份/位置】的那些。/screen /help 不闸（只读·不破坏）。
+_GATED_CAPS = {"close", "clear", "cd", "account", "acc", "账号", "new", "stop"}
+_CAP_ALIAS = {"acc": "account", "账号": "account"}       # /acc /账号 都归一到 account 这一项权限
+
+
+def _gate_verdict(bot, sender, cmd):
+    """群内破坏性命令放不放行 → (bool, 原因)。三条放行路径，其余一律拒：
+      ① 主人本人在群里下的（sender == 本 bot 的 owner）——他本来就是老大。
+      ② agent 关自己（sender 解析出来就是我）——自己关自己无风险，主人 2026-08-03 拍板永远放行。
+      ③ 发信 agent 持有对应授权（agent_grant·主人私聊授权后它自己 claim 的）。"""
+    cap = cmd.lstrip("/")
+    cap = _CAP_ALIAS.get(cap, cap)
+    if sender and sender == load_owner(bot["name"]):
+        return True, "主人本人"
+    try:
+        from registry import name_for_open_id
+    except ImportError:
+        try:
+            from feishu.registry import name_for_open_id
+        except ImportError:
+            name_for_open_id = None
+    who = name_for_open_id(sender, default=None) if (name_for_open_id and sender) else None
+    if who and who == bot["name"]:
+        return True, "自己关自己（永远放行）"
+    if not who:
+        return False, f"认不出发信人是哪个 agent（open_id={sender}）·拒绝"
+    try:
+        import agent_grant
+    except ImportError:
+        return False, "授权模块不可用·fail closed"
+    if agent_grant.has_cap(who, cap, STATE_DIR):
+        return True, f"{who} 持有 {cap} 授权"
+    return False, f"{who} 没有 `{cap}` 授权（主人私聊它一句、它自己 claim 即可）"
+
+
 def is_allowed(bot, sender):
     """放行规则：全局白名单（.env·兼容）OR 本 bot 的 owner。
     owner 未定 → 第一个 @ 它的人自动成 owner（bot 刚建只有你知道、你会先 @ → 就是你；之后只认你）。
@@ -555,9 +629,20 @@ def is_allowed(bot, sender):
         return False
     if sender in ALLOWED_OPEN_IDS:
         return True
-    owner = load_owner(bot["name"])
+    rec = load_owner_record(bot["name"])
+    owner = rec.get("open_id")
     if owner:
-        return sender == owner
+        if sender == owner:
+            if rec.get("provisional"):        # 临时 owner 被真 DM 证实 → 转正
+                save_owner(bot["name"], sender)
+                print(f"[{bot['name']}] 临时 owner 已被真 DM 证实 → 转正 owner={sender}", flush=True)
+            return True
+        if rec.get("provisional"):
+            # 工具补写的临时 owner 猜错了 → 以【真 DM】为准当场纠正（本分支只有私聊会走到·群消息不经 is_allowed 认主）。
+            print(f"[{bot['name']}] 临时 owner 猜错({owner}) → 按真 DM 纠正为 {sender}", flush=True)
+            save_owner(bot["name"], sender)
+            return True
+        return False
     save_owner(bot["name"], sender)
     print(f"[{bot['name']}] 自动认主人 owner={sender}（首个 @ 它的人）", flush=True)
     return True
@@ -1465,9 +1550,27 @@ def run(bot_name=None):
             _acc = agent_runtime.current_account(bot)
             await reply(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
-        async def handle_slash(chat_id, text):
+        async def handle_slash(chat_id, text, sender=None, from_group=False):
             cmd = text.split()[0].lower()
             arg = text[len(cmd):].strip()
+            # 🚧 破坏性命令授权闸（PLAN-930 · 2026-08-03）。
+            # 背景：群消息【完全跳过鉴权】(见 on_message 的 `not is_group and not is_allowed`)，
+            #   而任何 `/` 开头文本都会走到这里 ⇒ 同群任一 bot/真人本来就能对我下 6 个破坏性命令
+            #   （close 关会话 / clear 抹光我上下文 / cd 改我工作目录 / account 换我账号 / new / stop）。
+            #   这不是新开的口子，是**早就大敞、今天才装闸**。私聊(非群)不受影响：私聊已过 is_allowed=只有主人。
+            if from_group and cmd.lstrip("/") in _GATED_CAPS:
+                verdict, why = _gate_verdict(bot, sender, cmd)
+                if not verdict:
+                    blog(bot["name"], f"🚧 拒绝群内 {cmd}：{why}")
+                    receipt(bot["name"], {"tid": "gate", "kind": "slash_denied", "cmd": cmd,
+                                          "sender": sender, "reason": why, "delivered": False})
+                    await reply(chat_id, f"🚧 我拒绝了这条 `{cmd}`：{why}\n"
+                                         f"（破坏性命令需要主人授权 · 见 ARCH-140 · "
+                                         f"授权办法：主人私聊那个 agent 说一句，它自己跑 `agent_grant.py claim`）")
+                    return
+                blog(bot["name"], f"🚧 放行群内 {cmd}：{why}")
+                receipt(bot["name"], {"tid": "gate", "kind": "slash_allowed", "cmd": cmd,
+                                      "sender": sender, "reason": why, "delivered": True})
             rec = load_session(bot["name"])
             alive = bool(rec and rec.get("pty") and await asyncio.to_thread(wmux_session.pty_alive, rec["pty"]))
             if cmd == "/screen":
@@ -1789,8 +1892,9 @@ def run(bot_name=None):
             # 🔒 串行化：同一 bot 同时收到多条消息时一条一条处理，防「并发注入交错 + ensure_session race」
             # （Zara 式「运行中的消息排队下一轮」· 2026-06-15 实证：连发两条，第二条的回复被冲掉没发回）。
             async with msg_lock:
+                text = _unmangle_slash(text)      # 修 Git-Bash 把 /close 改写成 C:/Program Files/Git/close
                 if text.startswith("/"):
-                    await handle_slash(msg.chat_id, text)
+                    await handle_slash(msg.chat_id, text, sender=sender, from_group=is_group)
                     return
                 # /cd 编号待选：上条 `/cd` 列了编号清单 → 本条若是纯数字就切目录；非数字=改主意，清掉待选照常处理
                 _cdp = await asyncio.to_thread(load_cd_pending, bot["name"])
