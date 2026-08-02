@@ -591,11 +591,20 @@ _GATED_CAPS = {"close", "clear", "cd", "account", "acc", "账号", "new", "stop"
 _CAP_ALIAS = {"acc": "account", "账号": "account"}       # /acc /账号 都归一到 account 这一项权限
 
 
-def _gate_verdict(bot, sender, cmd):
+def _gate_verdict(bot, sender, cmd, text=None):
     """群内破坏性命令放不放行 → (bool, 原因)。三条放行路径，其余一律拒：
       ① 主人本人在群里下的（sender == 本 bot 的 owner）——他本来就是老大。
-      ② agent 关自己（sender 解析出来就是我）——自己关自己无风险，主人 2026-08-03 拍板永远放行。
-      ③ 发信 agent 持有对应授权（agent_grant·主人私聊授权后它自己 claim 的）。"""
+      ② agent 关自己（解析出来就是我）——自己关自己无风险，主人 2026-08-03 拍板永远放行。
+      ③ 发信 agent 持有对应授权（agent_grant·主人私聊授权后它自己 claim 的）。
+
+    ⚠️ 发信人怎么认（2026-08-03 上线当晚自查发现并修）：**open_id 是 per-app 的**——
+    `agent-registry.json` 里存的是【某一个应用视角】下的 open_id，跟「它发消息到**我这个**应用时」
+    的 open_id **根本不是同一个值**（实证：名册里 tb25-phd-taoci = ou_acd4e2d4…，它发给我时是
+    ou_3d12b059…）。所以 `name_for_open_id` 对 peer 恒查不到 ⇒ 初版闸会把【持有授权的 peer 也拒掉】，
+    等于「谁都关不了」。⇒ 认人退回 a2a 戳 `[飞书_from_<X>_to_<Y>]`（`a2a_from_name` 一直用它，
+    信封上的 from= 能显示正确名字靠的就是它）。
+    诚实的边界：戳是发信方自己写的、可伪造 ⇒ 这道闸防的是**误操作**，不是恶意冒名；
+    真正的防线是「主人没私聊过就 claim 不到授权」+ 放行/拒绝全量写 receipts（谁冒名也留痕）。"""
     cap = cmd.lstrip("/")
     cap = _CAP_ALIAS.get(cap, cap)
     if sender and sender == load_owner(bot["name"]):
@@ -608,16 +617,21 @@ def _gate_verdict(bot, sender, cmd):
         except ImportError:
             name_for_open_id = None
     who = name_for_open_id(sender, default=None) if (name_for_open_id and sender) else None
+    src = "open_id"
+    if not who and text:                       # 名册按 open_id 查不到（per-app 必然）→ 退 a2a 戳
+        stamped = a2a_from_name(text, None)
+        if stamped and not str(stamped).startswith("ou_"):
+            who, src = stamped, "a2a戳"
     if who and who == bot["name"]:
         return True, "自己关自己（永远放行）"
     if not who:
-        return False, f"认不出发信人是哪个 agent（open_id={sender}）·拒绝"
+        return False, f"认不出发信人是哪个 agent（open_id={sender}·消息里也没有 a2a 戳）·拒绝"
     try:
         import agent_grant
     except ImportError:
         return False, "授权模块不可用·fail closed"
     if agent_grant.has_cap(who, cap, STATE_DIR):
-        return True, f"{who} 持有 {cap} 授权"
+        return True, f"{who} 持有 {cap} 授权（认人来源：{src}）"
     return False, f"{who} 没有 `{cap}` 授权（主人私聊它一句、它自己 claim 即可）"
 
 
@@ -1559,7 +1573,7 @@ def run(bot_name=None):
             #   （close 关会话 / clear 抹光我上下文 / cd 改我工作目录 / account 换我账号 / new / stop）。
             #   这不是新开的口子，是**早就大敞、今天才装闸**。私聊(非群)不受影响：私聊已过 is_allowed=只有主人。
             if from_group and cmd.lstrip("/") in _GATED_CAPS:
-                verdict, why = _gate_verdict(bot, sender, cmd)
+                verdict, why = _gate_verdict(bot, sender, cmd, text)
                 if not verdict:
                     blog(bot["name"], f"🚧 拒绝群内 {cmd}：{why}")
                     receipt(bot["name"], {"tid": "gate", "kind": "slash_denied", "cmd": cmd,

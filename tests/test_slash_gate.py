@@ -150,3 +150,46 @@ class GrantClaimTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GateIdentifiesPeerViaStampTest(unittest.TestCase):
+    """open_id 是 per-app 的 → 名册按 open_id 恒查不到 peer；必须退 a2a 戳认人。
+
+    2026-08-03 上线当晚自查发现：初版闸只用 name_for_open_id，而名册里存的 open_id
+    是【另一个应用视角】下的值（实证 tb25-phd-taoci：名册 ou_acd4e2d4… vs 实际发来 ou_3d12b059…）
+    ⇒ 持有授权的 peer 也会被拒 = 闸装了等于谁都关不了。
+    """
+    BOT = {"name": "victim"}
+
+    def setUp(self):
+        self._prev = feishu_bridge.STATE_DIR
+        self._tmp = tempfile.TemporaryDirectory()
+        feishu_bridge.STATE_DIR = Path(self._tmp.name)
+        feishu_bridge.save_owner("victim", "ou_owner")
+        (Path(self._tmp.name) / "bridge-grant-tb25-phd-taoci.json").write_text(
+            json.dumps({"caps": ["close"], "expires_at": int(time.time()) + 3600}), encoding="utf-8")
+
+    def tearDown(self):
+        feishu_bridge.STATE_DIR = self._prev
+        self._tmp.cleanup()
+
+    def test_peer_recognized_by_stamp_when_open_id_lookup_fails(self):
+        text = "/close [飞书_from_tb25-phd-taoci_to_victim]"
+        with mock.patch.dict(sys.modules, {"registry": mock.MagicMock(
+                name_for_open_id=lambda *a, **k: None)}):   # 模拟 per-app 查不到
+            ok, why = feishu_bridge._gate_verdict(self.BOT, "ou_unmatched", "/close", text)
+        self.assertTrue(ok, f"持授权的 peer 应放行，实际被拒：{why}")
+        self.assertIn("a2a戳", why)
+
+    def test_still_denied_without_stamp_and_without_lookup(self):
+        with mock.patch.dict(sys.modules, {"registry": mock.MagicMock(
+                name_for_open_id=lambda *a, **k: None)}):
+            ok, _ = feishu_bridge._gate_verdict(self.BOT, "ou_unmatched", "/close", "/close")
+        self.assertFalse(ok, "既查不到又没戳 → 必须 fail closed")
+
+    def test_stamp_from_ungranted_peer_still_denied(self):
+        text = "/close [飞书_from_tb25-somebody-else_to_victim]"
+        with mock.patch.dict(sys.modules, {"registry": mock.MagicMock(
+                name_for_open_id=lambda *a, **k: None)}):
+            ok, _ = feishu_bridge._gate_verdict(self.BOT, "ou_x", "/close", text)
+        self.assertFalse(ok, "戳能认人 ≠ 有授权")
