@@ -564,6 +564,12 @@ def is_allowed(bot, sender):
 
 
 # ---------- wmux 读写（注入用 · 写操作带 --allow-ws）----------
+def _cmdline_units(s):
+    """字符串占多少个 UTF-16 单元 = Windows CreateProcess 命令行真正计的单位（SEND_MAX_CHARS 按它判）。
+    别用 len()：中文 1 字 = 1 单元没错，但 emoji 等星平面字符 1 字 = 2 单元，len() 会低估一半、闸放行后照炸。"""
+    return len(s.encode("utf-16-le")) // 2
+
+
 def wmux(*cmd_args):
     r = subprocess.run(["node", str(WMUX_RPC), *cmd_args], capture_output=True, text=True,
                        encoding="utf-8", timeout=30,
@@ -999,23 +1005,46 @@ async def _send_checked(channel, chat_id, payload, name, kind):
     return False, last, transient
 
 
-def _webhook_fallback(text, name):
+def _webhook_fallback(text, name, reason=None, intended=None):
     """最后一道兜底：scripts/notify.py webhook（纯标库绕代理 3 重试 · 但发到群不是 DM）。
-    返回 ok。webhook 喇叭机器人只能发文字（发不了图）。"""
+    返回 ok。webhook 喇叭机器人只能发文字（发不了图）。
+
+    ⚠️ 留痕（2026-08-02·根治「兜底成功了，所以没人知道 DM 是坏的」）：本函数是【降级投递】——
+    消息本该进 owner DM，却改投了群。旧版只 blog 一行、**outbox/receipts 零记录**，于是
+    「兜底成功」= 上层看到 ok → HWM 照推 → 长得跟正常送达一模一样，DM 已坏几十小时没人知道
+    （2026-08-02 实证：taoci-7 刷群 767 条才被主人肉眼发现）。现在：
+      ① `reason`(真实报错·如 230013) + `intended`(本该投的 DM 目标) 一律写进 receipts，
+      ② 并【印在发到群的正文头上】——谁看到刷屏，谁当场就知道为什么，不用再翻日志反推。"""
+    why = str(reason or "未知原因")[:160]
     if _notify is None:
-        blog(name, "webhook 兜底不可用（notify 未 import）")
+        blog(name, f"webhook 兜底不可用（notify 未 import）· 原因={why}")
+        receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": False,
+                       "via": None, "err": "notify_not_imported", "reason": why,
+                       "intended": intended, "len": len(text or "")})
         return False
     try:
         url = _notify.find_webhook_url()
         if not url:
-            blog(name, "webhook 兜底无 URL（.env FEISHU_XHS_WEBHOOK_URL 未配）")
+            blog(name, f"webhook 兜底无 URL（.env FEISHU_XHS_WEBHOOK_URL 未配）· 原因={why}")
+            receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": False,
+                           "via": None, "err": "no_webhook_url", "reason": why,
+                           "intended": intended, "len": len(text or "")})
             return False
-        body = f"[{name} · DM 回传失败转群兜底]\n" + (text or "")[:3500]
+        body = (f"[{name} · DM 回传失败转群兜底]\n"
+                f"⚠️ 降级原因：{why}" + (f"（本该私聊投给 {intended}）" if intended else "") + "\n"
+                + (text or "")[:3500])
         ok, detail = _notify.send_feishu(url, body)
-        blog(name, f"webhook 兜底 {'✅送达群' if ok else '❌仍失败:' + str(detail)[:120]}")
+        blog(name, f"webhook 兜底 {'✅送达群' if ok else '❌仍失败:' + str(detail)[:120]} · 原因={why}")
+        receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": bool(ok),
+                       "via": "webhook-group" if ok else None,
+                       "err": None if ok else str(detail)[:120], "reason": why,
+                       "intended": intended, "len": len(text or "")})
         return ok
     except Exception as e:  # noqa: BLE001
-        blog(name, f"webhook 兜底抛错: {str(e)[:120]}")
+        blog(name, f"webhook 兜底抛错: {str(e)[:120]} · 原因={why}")
+        receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": False,
+                       "via": None, "err": str(e)[:120], "reason": why,
+                       "intended": intended, "len": len(text or "")})
         return False
 
 
@@ -1024,10 +1053,10 @@ async def guaranteed_send(channel, chat_id, text, name):
     → 再失败：【瞬时网络错】返回 'failed'（**不 webhook**·交给上层耐心重投投【对的目标】）·【真失败】才退 webhook（到群）。
     绝不抛。返回 'markdown'|'text'|'webhook'|'failed'。"""
     text = (text or "").strip() or "（空回复）"
-    ok, _, _ = await _send_checked(channel, chat_id, {"markdown": text}, name, "markdown")
+    ok, err_md, _ = await _send_checked(channel, chat_id, {"markdown": text}, name, "markdown")
     if ok:
         return "markdown"
-    ok, _, transient = await _send_checked(channel, chat_id, {"text": text}, name, "text")
+    ok, err_tx, transient = await _send_checked(channel, chat_id, {"text": text}, name, "text")
     if ok:
         return "text"
     # 瞬时网络错（DNS/连接·会恢复）→ 【不走 webhook】·返回 'failed' → 上层 _deliver 抛 RetrySend → 桥现有耐心
@@ -1036,7 +1065,9 @@ async def guaranteed_send(channel, chat_id, text, name):
         blog(name, "send 全失败·瞬时网络错 → 不 webhook·交耐心重投(RetrySend)投对的目标")
         return "failed"
     # 真失败（非 retryable·如 230013 目标非法·重试没用）→ webhook 最后兜底（发到群·至少让人看到）
-    return "webhook" if await asyncio.to_thread(_webhook_fallback, text, name) else "failed"
+    # 把【真实报错】+【本该投的 DM 目标】一路带进兜底 → receipts 留痕 + 印在群消息头（2026-08-02·见 _webhook_fallback）。
+    return "webhook" if await asyncio.to_thread(
+        _webhook_fallback, text, name, (err_tx or err_md), chat_id) else "failed"
 
 
 # 裸 URL：到 空白/<>)] 即止，且排除 `*` 与所有非 ASCII —— 否则 `https://x**（中文…` 会把 **+后续正文整段吞进 href
@@ -1732,7 +1763,23 @@ def run(bot_name=None):
             tid = (msg.id or "")[-6:] or str(int(time.time()))[-6:]   # 贯穿本条消息全链路的 trace id
             blog(bot["name"], f"[{tid}] 收到 {sender}: {text[:80]!r}")
             # 持久化 DM 坐标（给主动推送 send CLI + 镜像器目标用 · _merge 不覆盖 pty/jsonl/mirror）
-            _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender, "chat_updated": int(time.time())})
+            # 🚨 只在【私聊】里存（2026-08-02 根治 taoci-7 刷群）：群消息的 sender 是【@我的那个人/那个 peer bot】，
+            #   把它当 DM 坐标存下来 = 给 mirror_target 埋雷 —— 它的兜底链是
+            #   `load_owner() or sess["open_id"] or sess["chat_id"]`，新 bot 没 owner 文件时就直接取到
+            #   【peer bot 的 open_id】→ bot 给 bot 发私聊 → 飞书 230013 "Bot has NO availability to this user"
+            #   （非 retryable）→ guaranteed_send 退 webhook → 消息全刷进群。实证：taoci-7/8/9/10 建号起就这样，
+            #   57720 次 230013、767 条刷进交流水吧；而 taoci-4/5/6 在主人 DM 过它们（2026-07-30 12:51 自动认主人）
+            #   之后 230013 当场归零 —— 同一份代码，差别只在「有没有 owner 文件」。
+            #   is_allowed 早就【绝不在群消息里 auto-claim owner】(2026-06-18 修)，但这条 _merge_session 是同一个坑的
+            #   后门：owner 文件守住了，会话 open_id 没守住，兜底链照样把 peer 当主人。这次把后门一起焊死。
+            #   群坐标一律不进 DM 坐标：三个消费方(mirror_target / send CLI / 文档授权)要的都是【主人的私聊坐标】。
+            if not is_group:
+                _merge_session(bot["name"], {"chat_id": msg.chat_id, "open_id": sender,
+                                             "chat_updated": int(time.time())})
+            elif not load_owner(bot["name"]):
+                # 群里被 @、却还没认过主人 → 说清楚（否则回信无处可投·只会静默降级刷群）。
+                blog(bot["name"], "⚠️ 本 bot 还没认主人(无 owner 文件)且只在群里被 @ 过 —— "
+                                  "普通回复(route=p2a)无处可投·请主人【私聊它一句】完成认主(SOP-125)")
             # 回信路由 per-turn：回址焊进消息末尾信封 + UserPromptSubmit hook 取【最末】信封→turn-route·不存 session 级 reply_dest（长 turn 交错会串台·见 ARCH-110 §2.5.1）
             try:
                 await channel.add_reaction(msg.id, "THUMBSUP")
@@ -1823,20 +1870,34 @@ def run(bot_name=None):
                             # 诚实：闭环校验没确认提交(可能卡确认屏/驱动没走完)→ 不再谎报「已提交」(2026-06-19 issue②c)。
                             await reply(msg.chat_id, "⚠️ 替你按了键但**没能确认提交成功**（可能卡在 Submit answers 确认屏）·去终端看一眼·或直接把答案重发一次")
                         return
-                    # 普通/长/多行文本一律由 _inject 直接注入（实测长消息不截断·不转文件）。仅一类必须落盘
-                    # byte-exact：含 TAB 的结构化数据（cookies/TSV）——Claude 输入框把 TAB 转空格、内联无法保
-                    # 原样（实测 3 TAB→0·对 cookie 致命）。其余绝不转文件（2026-06-23 干净重测推翻"长会截断"）。
-                    if text and "\t" in text:
+                    # 普通/长/多行文本一律由 _inject 直接注入（实测长消息不截断·不转文件）。**两类**必须落盘 byte-exact：
+                    #   ① 含 TAB 的结构化数据（cookies/TSV）——Claude 输入框把 TAB 转空格、内联无法保原样
+                    #      （实测 3 TAB→0·对 cookie 致命）。
+                    #   ② **超长文本**——marker 最终要作【node 命令行参】传给 wmux-rpc（wmux() 里 subprocess.run），
+                    #      Windows CreateProcess 的 lpCommandLine 硬上限 = 32767 个 UTF-16 单元，超了整个进程起不来，
+                    #      抛 [WinError 206]「文件名或扩展名太长」——**名字极具误导性，实际是命令行太长、跟文件名无关**。
+                    #      2026-08-02 实证：主人从手机飞书转发【整段客户聊天记录 + 8 张图】→ 连炸两次、文字全丢
+                    #      （图已落盘、正文没了），日志只留 "❌ 处理 … 出错: [WinError 206]"。
+                    #      复现实验：subprocess.run(['node','-e','0','x'*40000]) → 206；'x'*30000 → OK。
+                    #      ⚠️ SEND_MAX_CHARS 这道闸【2026-06-28 就写进常量、注释写明就是防这个 32767，却从没接进代码】
+                    #      （全仓引用数=1·只有定义那行）——典型「规矩写了但没长在流程里」。这次真接上。
+                    # 其余绝不转文件（2026-06-23 干净重测推翻"长会截断"）。
+                    _over = _cmdline_units(text or "") > SEND_MAX_CHARS
+                    if text and ("\t" in text or _over):
+                        _why = "超长·内联会撑爆命令行上限" if _over else "含制表符 TAB·内联会损坏"
                         try:
                             STATE_DIR.mkdir(exist_ok=True)
                             inbox = STATE_DIR / f"bridge-inbox-{bot['name']}-{tid}.txt"
                             inbox.write_text(text, encoding="utf-8")
                             _hint = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")[:50]
-                            blog(bot["name"], f"[{tid}] 📄 含 TAB 落盘转 Read {inbox.name}")
-                            text = (f"[桥转交·含制表符 TAB·内联会损坏] 已 byte-exact 存到：{inbox.as_posix()} "
-                                    f"——请 Read 它拿完整原文。首行：{_hint}…")
+                            blog(bot["name"], f"[{tid}] 📄 {_why} 落盘转 Read {inbox.name}（{_cmdline_units(text)} 单元）")
+                            text = (f"[桥转交·{_why}] 已 byte-exact 存到：{inbox.as_posix()} "
+                                    f"——请 Read 它拿完整原文（约 {len(text)} 字）。首行：{_hint}…")
                         except Exception as _e:  # noqa: BLE001 — 落盘失败退回直接注入(至少别更糟)
                             blog(bot["name"], f"[{tid}] ⚠️ 落盘失败(退直接注入)：{str(_e)[:120]}")
+                            if _over:   # 超长那类退不回「直接注入」——原样注入必再炸 206、消息又全丢 → 硬截断保底送达
+                                text = text[:SEND_MAX_CHARS // 2] + f"\n\n[⚠️ 桥：原文超长且落盘失败({str(_e)[:60]})·此处已截断·请让主人重发或分段发]"
+                                blog(bot["name"], f"[{tid}] ✂️ 超长+落盘失败 → 硬截断注入（保底送达·已在正文标明截断）")
                     # 标记 = 结构化元数据信封（2026-06-29 重构·把「回址」焊进消息本体，根治会过期的旁路便签）。
                     #   人读：from=<谁> to=<本bot> via=<DM|群>  ·  机器路由：route=<p2a|a2a>[ dest=<chat_id> at=<open_id>]
                     # hook(bridge_userprompt) 直接从【本条消息】解析 route → 每条消息自带回址、按消息原子化，
@@ -1933,7 +1994,11 @@ def run(bot_name=None):
             （owner 文件 / 会话 open_id / .env ALLOWED 首个·都没有→None=drainer 跳过）。"""
             if route and route.get("kind") in ("a2a", "p2a-ext") and route.get("dest"):
                 return route["dest"], route.get("at")   # 都是「回原群 + @发信人」·区别只在语义(bot vs 真人)
-            owner = mirror_target(bname) or (ALLOWED_OPEN_IDS[0] if ALLOWED_OPEN_IDS else None)
+            # ⚠️ ALLOWED_OPEN_IDS 是 set（_load_allowed 返回 set）→ 旧写法 `ALLOWED_OPEN_IDS[0]` 必抛
+            # TypeError: 'set' object is not subscriptable。这条【只在 mirror_target 为空时才走到】，
+            # 之前一直被「会话 open_id 兜底恒有值(哪怕是错的 peer bot)」挡着没暴露；把群坐标污染修掉后
+            # 它就是 no-owner 新 bot 的必经路 → 一并改成 next(iter(sorted(...)))（2026-08-02）。
+            owner = mirror_target(bname) or next(iter(sorted(ALLOWED_OPEN_IDS)), None)
             return owner, None
 
         def _reply_dest():
@@ -1998,15 +2063,28 @@ def run(bot_name=None):
         async def _send_plain(text, route=None):          # 最终 fallback·route 同 _new_card·返回送达布尔(给 drainer 判要不要重试·at-least-once)
             tgt, at = _route_to_dest(route) if route else _reply_dest()
             if not tgt:
+                receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": False,
+                                "via": None, "err": "no_target", "len": len(text or "")})
                 return False
             if str(tgt).startswith("oc_"):                 # 群 → 纯文字(+真@)
                 try:
                     await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
                                             tgt, (text or ""), at)
+                    receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": True,
+                                    "via": "group_text", "len": len(text or "")})
                     return True
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": False,
+                                    "via": None, "err": str(e)[:120], "len": len(text or "")})
                     return False
-            return await card_send(ch, tgt, text, bname) != "failed"
+            # ⚠️ 留痕（2026-08-02）：旧版这里【一行 return、零回执】—— card_send 回 'webhook' 时消息其实
+            #   降级投进了【群】，但这里只把它折成 True，drainer 照推 HWM、outbox 一片干净 → 「兜底成功了，
+            #   所以没人知道 DM 是坏的」。现在把 via 原样记下：webhook = 投错地方了，肉眼一看就知道。
+            via = await card_send(ch, tgt, text, bname)
+            receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": via != "failed",
+                            "via": via, "degraded": via == "webhook", "target": tgt,
+                            "len": len(text or "")})
+            return via != "failed"
 
         holder = {}
 
