@@ -34,8 +34,10 @@ GRANT_TTL_SEC = 24 * 3600          # 授权默认 24h 过期（别让权限无�
 
 
 def _state_dir():
-    from bridge_env import resolve_project_root  # noqa: PLC0415
+    # import 必须在 try 内：bridge_env 没有 resolve_project_root 时抛的是 ImportError，
+    # 搁在 try 外会直接掀桌，下面这条「回退到脚本自己的 _state」的兜底永远轮不到。
     try:
+        from bridge_env import resolve_project_root  # noqa: PLC0415
         return Path(resolve_project_root()) / "feishu" / "_state"
     except Exception:  # noqa: BLE001
         return Path(__file__).resolve().parent / "_state"
