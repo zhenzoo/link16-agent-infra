@@ -284,6 +284,10 @@ Get-Content "$repo\_autopilot\watchdog.log" -Tail 2                             
 | `node ~/wmux-rpc.js` 报找不到文件 / ENOENT | §3 第 2 步 `~/wmux-rpc.js` 没放 |
 | rpc `timeout` / `closed before response` / `no transport` | wmux daemon 没开（打开 wmux GUI）或 `~/.wmux-tcp-port` 缺 |
 | 桥起了会话但里面没出 Claude/Codex | 跑 `agent_profile_cli.py doctor --profile <name>`；检查 registry、本机 profile home/CLI 与名册 `profile`，不要补裸 alias |
+| 敲 `ccp`/`cxp` 冒 `wsl: …` + `execvpe(/bin/bash) failed`，直接回到提示符 | 命令被交给了 **System32 的 WSL bash**（`CreateProcess` 把 System32 排在 PATH 前）。执行处必须走 `agent_runtime.resolve_shell()`，绝不传裸名 `bash`。查：`python -c "import subprocess;subprocess.call(['bash','-lc','echo HI'])"` —— 打不出 `HI` 就是中招（PLAN-923 · BUG-1） |
+| 开新 Git Bash 冒一串 ``syntax error near unexpected token `('``，且 `type ccp` 显示 is aliased | CLI 输出带 `\r`，`unalias` 拿到 `cc<CR>` 删不掉老 alias → 函数定义撞 alias。查：`agent_profile_cli.py list --names \| od -c` 有没有 `\r`（PLAN-923 · BUG-2） |
+| 拿不准「现在到底哪些号能起」 | `python feishu/agent_profile_cli.py selftest` —— 一张矩阵 + `N/N 全绿`，比逐个 doctor 可靠（它会真启动一次） |
+| 升级 Codex 慢得要死（`codex update` / `npm i -g @openai/codex` 卡十几分钟） | npm 继承了 `.bashrc` 的全局 `https_proxy`，把 151.7 MB 二进制塞进 Clash。**剥代理直连快 100 倍**（实测 5 秒下完）：见 [`SOP-160` › 升级 Codex](SOP-160-codex-personal-migration.md#升级-codex必须剥代理直连--否则慢-100-倍) |
 | 桥连不到 `.env` / 凭证空 | `VIBECODING_ROOT` 没设且上溯找不到 `.env`（§1）；或 §6 没 register |
 | 手动开的 wmux 终端不是 git-bash / 目录不对 | §4 GUI 设置（不是改 config.json） |
 | 开机后桥没自己起来 / 每次都要手动 `start` | §9 开机自启没配（或任务被禁用）→ 见 §9.4 |

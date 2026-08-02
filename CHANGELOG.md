@@ -3,6 +3,26 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.12.0 — 新 bot 拿 peer 当主人刷群（根治）+ 降级投递必留痕 + 破坏性斜杠命令装闸（2026-08-03）
+
+**WHY**：主人肉眼发现 `tb25-phd-taoci-7` 反复往群里刷同一条消息，消息头标着「DM 回传失败转群兜底」。查下来是两个独立缺陷叠加，而**两个都属于「失败长得像成功」**——真实报错 `230013 Bot has NO availability to this user` 打了 18 万+ 次，没有任何一条告警、没有任何一条 outbox 记录，全靠人眼看见群刷屏才发现。
+
+**根因**：`on_message` 无条件把消息 sender 存成「DM 坐标」，但**群消息的 sender 是 @我的那个 peer bot**。新 bot 在主人私聊它之前没有 owner 文件，于是 `mirror_target` 的兜底链 `load_owner() or sess["open_id"]` **直接取到 peer bot** → bot 给 bot 发私聊 → 飞书 230013（非 retryable）→ `guaranteed_send` 判真失败退 webhook → 全部刷进群。`is_allowed` 早在 2026-06-18 就修过同一个坑（群消息绝不 auto-claim owner），但 `_merge_session` 是同一个坑的**后门**：owner 文件守住了，会话 open_id 没守住。
+
+**因果由自然实验钉死（不是代码走读）**：`taoci-4/5/6` 同一份代码、同样症状，主人 07-30 12:50:50 私聊过它们 → **12:51:11 自动认主写下 owner 文件 → 230013 当场归零、之后 3 天干净**。差别只有「有没有 owner 文件」。（另有一条时间上的巧合曾被怀疑是 PLAN-923 的 `.bashrc` 改动所致，实际 230013 最早出现在该改动前一天，机制上也不相干。）
+
+**WHAT**
+
+- **群坐标不再进 DM 坐标**：`_merge_session` 只在 `not is_group` 时写。三个消费方（`mirror_target` / `send` CLI / 文档授权）要的都是主人的私聊坐标。群里被 @ 但尚未认主 → 日志明说「请主人私聊它一句」，不再静默降级。
+- **降级投递必留痕**（根治「兜底成功了，所以没人知道 DM 是坏的」）：旧形状是 drainer 的 `_send_plain` 一行 return、零回执，`card_send` 回 `'webhook'`（=投错了地方）被折成 `True` → HWM 照推 → outbox 一片干净（taoci-7 的 4606 条回执全是 `new_card/delivered=false`，降级本身零记录）。现在 `_webhook_fallback` 收 `reason`(真实报错) + `intended`(本该投的目标)，成功失败都写 receipts，并把原因**印在发到群的那条消息头上**；`_send_plain` 补回执并标 `degraded`。
+- **PLAN-930 · 破坏性斜杠命令授权闸**：调研发现「agent 关别的 agent」**早就能做且零鉴权**——`if not is_group and not is_allowed(...)` 让群消息**完全跳过鉴权**，任何 `/` 开头文本直达 `handle_slash` ⇒ 同群任一 bot/真人可对任意 bot 下 6 个破坏性命令（`/close` 关会话 · `/clear` **抹光对方全部上下文** · `/cd` 改对方工作目录 · `/account` 换对方账号 · `/new` · `/stop`）。⇒ 本版**不是开新门，是给早就大敞的门装闸**：`handle_slash` 新增 sender/from_group（原先拿不到发信人 = 闸的承重点），三条放行路径（主人本人 / agent 关自己 / 持授权），其余一律拒，拒绝与放行都写 receipts；权限按能力分（有 close 权 ≠ 有 clear 权），24h 过期。
+- **`agent_grant.py`（新）**：主人零摩擦——只用自然语言说一句，agent 自己 `claim`；但 claim 必须核实【主人本人刚私聊过该 bot】（会话 `open_id == owner` 且 `chat_updated` 在 30 分钟窗内）才写授权。因群消息不写 DM 坐标、私聊必过 `is_allowed`，**该凭据 agent 无法自伪造**。
+- **修 Git-Bash 斜杠命令静默失效**：MSYS2 把【整个就是 `/xxx` 的参数】当 POSIX 路径改写，`--text "/close"` 进程实收 `C:/Program Files/Git/close`，对端只当普通文字、**无任何报错**（taoci-3 输入框里就躺着这一串，是 tb25-phd-taoci 之前几次 `/close` 打空的真因）。发信侧调用点太多 ⇒ 改在**收信侧**按已知形状复原（正则的路径段必须允许空格——"Program Files"，这点被单测抓到过一次）。
+- **`provisional` owner**：工具批量补写的 owner 若猜错，`is_allowed` 会拿它比对后把主人**挡在门外**（补写之前反而能自动认主）。加此标后，主人第一条真 DM 对则转正、错则当场纠正，绝不锁门。
+- **顺带修一个必炸的空指针**：`_route_to_dest` 的 `ALLOWED_OPEN_IDS[0]` —— 该常量是 `set`，取下标必抛 `TypeError`。它只在 `mirror_target` 为空时走到，此前一直被「会话 open_id 恒有值（哪怕是错的 peer）」挡着没暴露。
+- **注册流程补两步硬提示**（`register_feishu_app.py` + SOP-120）：第 7 步主人**私聊**新 bot 认主（群里 @ 不算）、第 8 步当场跑 envsync 同步凭据。今晚两起事故根因相同——注册完还有两件必做的事却从没写进流程。
+
+**规模与验证**：taoci-7/8/9/10 合计 230013 约 18 万次、刷进群 767 条；`tb25-xhs-card-gen` 47 万次（其失败目标按日志先后换过三次，最新一个正好等于当时的会话 open_id ⇒ 每来一个新 peer 在群里 @ 它就覆盖一次主人坐标）。全舰队审计发现 32 个 bot 中 7 个缺 owner 文件（5 个潜伏未爆），全部补齐。修复后 219 条回执**全部送达、0 条降级**。新增 `tests/test_dm_fallback_traceability.py`(9) + `tests/test_slash_gate.py`(16)，全仓 **130 passed**。另实测确认：**停/起飞书桥不会动 wmux 面板里的 Claude 会话**（两拨进程互不相干 + `_reuse_check` 复用），32 条桥重启期间活会话零丢失——该结论已用于安全地把修复铺到全舰队。
 ## v0.11.0 — 定时任务复选菜单：主人自己开关，不用喊 agent（2026-08-02）
 
 **WHY**：主人要停 / 开定时任务时，一直得找一个 agent 帮忙跑 `bridge_cron.py enable/disable --bot X --name N`——**开关一个闹钟是纯确定性动作，却卡在"要先叫醒一个智能体"上**（2026-08-02 凌晨主人喊停全部定时任务，又一次走 agent 代跑）。而且 `disabled_reason` 没人维护：2026-07-27 停用时写下的原因，在任务被重新打开后仍留在 yaml 里，`enabled: true` + "主人手动暂停" 并存，下一个人读了只会更糊涂。

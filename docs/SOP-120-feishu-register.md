@@ -21,7 +21,21 @@ python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile 
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
 # 6. 重启桥生效（只加了新 bot 就【单起它】·别全局 stop/start 把在跑的会话全杀了）
 python feishu/feishu_bridge.py start --bot <新bot>
+# 7. ⚠️ 必做：主人【私聊】新 bot 一句话，完成「认主」（见下方红字 · 漏了会刷群）
+# 8. ⚠️ 必做：跑 envsync skill 把新凭据同步到另一台电脑（不然那台机按名字喊不到这个新 bot）
 ```
+
+> 🔄 **第 8 步也不能省：注册完【当场】跑 `envsync`（2026-08-02 主人定）。**
+> 注册只往**本机** `.env` 写了 `FEISHU_BRIDGE_<KEY>_APP_ID` / `_APP_SECRET`；**另一台机的 `.env` 不会自己长出来**。
+> 不同步 → 那台机上的 agent 跑 `send_feishu_msg --to-agent <新bot>` 解析不到凭据 → **按名字喊不到新 bot**。
+> **当场跑、别攒着**——攒着必忘（主人原话：「不然的话老是会忘记那些 ID 同步」）。envsync 走**家庭局域网点对点**（SSH+scp·不上任何云），先出「新增/修改/删除/冲突」计划再动手，删改一律等确认。
+
+> 🚨 **第 7 步不能省：主人必须【私聊】新 bot 一次（2026-08-02 血的教训 · 见 [`ARCH-110 §2.5.3`](ARCH-110-feishu-bridge.md)）。**
+> bot 的 owner 是**第一个私聊 @ 它的人**自动认下的；**群里 @ 它不算**（群消息按设计**绝不** auto-claim owner，否则 peer bot 会夺 owner）。
+> 没认主 → 该 bot 的普通回复（`route=p2a` 要投主人 DM）**无处可投**，兜底链会退到「群里 @ 过它的那个 peer bot」→ bot 给 bot 发私聊 → 飞书 `230013` → 全部降级**刷进群**。
+> **实证**：`tb25-phd-taoci-7/8/9/10` 建号后只在群里被 @ 过、从没被私聊 → 合计 **18 万+ 次 230013**、往交流水吧刷了 **767 条**；而 `taoci-4/5/6` 主人私聊过 → 同一份代码**一次没犯**。
+> **补救**（bot 已在跑、不想重启）：`load_owner` 每次现读盘不缓存 → 直接补写 `feishu/_state/bridge-owner-<bot>.json` = `{"open_id": "<主人在该 app 下的 open_id>"}` 即**热生效**。
+> ⚠️ **open_id 是 per-app 的**——同一个人在每个应用下 open_id 不同，**不能跨 bot 复制**；用该 bot 自己的凭据查群成员 API（`_chat_members`）现取。
 
 > **🔌 代理：注册【一律直连飞书】—— 脚本已内建，调用方不用管（2026-07-28/29 两机各撞一次 · 见 §1 注 + §6.4）。** 飞书是国内端点，塞进翻墙代理会被掐死。`register_feishu_app.py` 在 `import lark_oapi` 之前就清掉 `HTTP(S)_PROXY` 六个变量、并把 `feishu.cn,larksuite.com,larkoffice.com,localhost,127.0.0.1` 写进 `NO_PROXY`，**不需要**再在命令行前面 `unset` 代理。
 

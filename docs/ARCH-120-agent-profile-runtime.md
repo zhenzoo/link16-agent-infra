@@ -97,12 +97,27 @@ launcher。新 pane 不依赖 wmux daemon 或 shell 碰巧继承父进程环境�
 Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用：
 
 - `list`：列 profile，默认不检查本机安装；
-- `show` / `doctor`：解析 profile 并检查本机 home、launcher、CLI；
+- `show` / `doctor`：解析 profile 并检查本机 home、launcher、CLI、**可用 shell**；
 - `run`：设置 provider 环境并执行 Claude/Codex；
-- `command`：给 wmux spawner 返回不含密钥的安全启动命令/JSON spec。
+- `command`：给 wmux spawner 返回不含密钥的安全启动命令/JSON spec；
+- `selftest`：逐个 profile 走 registry → doctor → 命令生成 → **真启动**（provider 参数换成
+  `--version`，秒退不开 TUI，但走的是和真启动完全同一条 shell+env+launcher 路径），
+  打印矩阵并以 `N/N 全绿` 收尾。**判「现在敲下去起不起得来」以它为准**，别只看 doctor。
 
 实现可以位于 `feishu/agent_profile_cli.py`，但 alias 解析和命令生成必须复用
 `feishu/agent_runtime.py`，不得再产生第二套 launcher 逻辑。
+
+### 5.1 两条输出/执行契约（PLAN-923 · 违反即整条链断）
+
+1. **CLI 的 stdout 一律 LF**。Windows text-mode 会把 `\n` 翻成 `\r\n`，残留的 `\r` 会被下游
+   shell wrapper 带进变量：`unalias "cc<CR>"` 找不到别名 → 老 alias 存活 → 函数定义撞上
+   alias 展开 → 语法错误、wrapper 整段失效。由 `agent_profile_cli.py` 入口
+   `reconfigure(newline="\n")` 在**产出源头**保证，消费端不必各自 `tr -d '\r'`。
+2. **执行生成的命令时，绝不把裸名 `bash` 交给 subprocess**。Windows `CreateProcess` 的搜索
+   顺序是「应用目录 → 当前目录 → **System32** → Windows → PATH」，而 `System32\bash.exe` 是
+   **WSL 启动器** —— 裸名会把命令送进 WSL 发行版而不是 Git Bash。统一走
+   `agent_runtime.resolve_shell()`：`$SHELL` → `shutil.which("bash")` → `shutil.which("sh")`
+   → 都没有就报错。`shutil.which` 按 **PATH 顺序**查找，绕开 System32 优先；全程零硬编码路径。
 
 公共 launcher 不把主 session 的 `FEISHU_BRIDGE_SESSION` 复制给普通内容 worker，
 避免多个 pane 共用一个飞书身份和 outbox。
@@ -116,10 +131,18 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 - registry 字段非法；
 - 本机 profile home 不存在；
 - `launcher: launch-sh` 但脚本不存在；
-- 对应 `claude` / `codex` CLI 不可用。
+- 对应 `claude` / `codex` CLI 不可用；
+- 找不到可用 shell（`$SHELL` 未设且 PATH 无 `bash`/`sh`）。
 
 禁止静默回退 `ccp`、`ccp2`、`cx` 或任何机器默认号。兼容迁移可以读旧字段并给出
 一次性迁移报告，但不得在新 worker 路径继续使用旧字段选号。
+
+**名册侧同样不许猜（PLAN-923 · S2.2）**：`profile_name()` 只认两条有据可依的来源 ——
+① 名册显式 `profile` / `account` ② provider-home 字段（`claude_config_dir` / `codex_home`）
+反推 registry。**「按 runtime 取 registry 默认号」这一档已删除**：它曾让 15 个裸条目 bot 静默
+解析成 `ccp`，改一次 `default_profiles` 就会把它们集体换号、而 worker 会忠实继承这个错账号。
+现在解析不出就是解析不出，报错直接指名「请给 <bot> 补 `profile`」。
+（`default_profiles` 键本身保留，仅供 `register_feishu_app.py` 建新 bot 时取推荐默认值。）
 
 ## 7. Roster 与 `/account`
 

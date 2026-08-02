@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -249,6 +250,80 @@ class AgentProfileTests(unittest.TestCase):
                 self.assertTrue(present)
                 self.assertIn("profile 不一致", why)
                 self.assertIn("cxp", why)
+
+
+class ProfileLaunchIntegrityTests(unittest.TestCase):
+    """PLAN-923 回归闸：账号解析不许猜，命令不许交给 WSL 的 bash。
+
+    BUG-1/BUG-2 本身是 Windows 平台行为（CreateProcess 的 System32 优先、
+    text-mode 的 \\r\\n 翻译），别的机器复现不了 —— 所以这里测的是**可移植的
+    那一层逻辑**：解析顺序、fail closed、输出契约。
+    """
+
+    def test_shell_prefers_env_then_path_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "my-bash.exe"
+            fake.write_text("", encoding="utf-8")
+
+            # $SHELL 指向真实文件时优先它，不去碰 PATH（PATH 上第一个 bash 在
+            # Windows 可能是 System32 的 WSL 存根）。
+            with patch.dict("os.environ", {"SHELL": str(fake)}, clear=False):
+                self.assertEqual(agent_runtime.resolve_shell(), str(fake))
+
+            # $SHELL 缺失或指向不存在的文件 → 退回 PATH 查找（按 PATH 顺序，
+            # 不是 CreateProcess 的 System32 优先）。
+            env_without_shell = {k: v for k, v in os.environ.items() if k != "SHELL"}
+            with patch.dict("os.environ", env_without_shell, clear=True):
+                with patch.object(agent_runtime.shutil, "which",
+                                  side_effect=lambda n: str(fake) if n == "bash" else None):
+                    self.assertEqual(agent_runtime.resolve_shell(), str(fake))
+
+                # 两条来源都没有 → 拒绝猜解释器，而不是退回裸名 "bash"。
+                with patch.object(agent_runtime.shutil, "which", return_value=None):
+                    with self.assertRaisesRegex(ValueError, "拒绝猜解释器"):
+                        agent_runtime.resolve_shell()
+
+    def test_doctor_flags_missing_shell(self):
+        with patch.object(agent_runtime, "resolve_shell",
+                          side_effect=ValueError("找不到可用 shell：测试")):
+            result = agent_runtime.profile_doctor("cxp")
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("找不到可用 shell" in e for e in result["errors"]))
+
+    def test_profile_name_has_no_runtime_default_tier(self):
+        # 显式 profile / provider-home 反推 —— 两条有据可依的路仍然通。
+        self.assertEqual(agent_runtime.profile_name({"profile": "cxp"}), "cxp")
+        self.assertEqual(
+            agent_runtime.profile_name({"agent": "claude", "claude_config_dir": "~/.claude-kimi"}),
+            "cck",
+        )
+        # 只有 runtime、无任何账号证据 —— 以前会猜成 registry 的运行时默认号，
+        # 现在必须交白卷（required 时报错并指名要补哪个字段）。
+        bare = {"name": "tb25-bare", "agent": "claude"}
+        self.assertIsNone(agent_runtime.profile_name(bare))
+        with self.assertRaises(ValueError) as caught:
+            agent_runtime.profile_name(bare, required=True)
+        self.assertIn("tb25-bare", str(caught.exception))
+        self.assertIn("profile", str(caught.exception))
+
+    def test_local_roster_records_every_profile_explicitly(self):
+        """本机名册不许再有『靠猜』的 bot（PLAN-923 · S2.1 的持续闸）。"""
+        roster = ROOT / "feishu" / "bridge-bots.local.json"
+        if not roster.is_file():
+            self.skipTest("本机没有 bridge-bots.local.json")
+        bots = json.loads(roster.read_text(encoding="utf-8"))["bots"]
+        unresolvable = [b.get("name") for b in bots
+                        if not agent_runtime.profile_name(b)]
+        self.assertEqual(unresolvable, [], f"这些 bot 解析不出账号：{unresolvable}")
+
+    def test_cli_stdout_is_lf_only(self):
+        """CLI 输出必须是 LF：残留的 \\r 会打穿 shell wrapper 的 unalias。"""
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "feishu" / "agent_profile_cli.py"), "list", "--names"],
+            capture_output=True, check=True,
+        )
+        self.assertNotIn(b"\r", done.stdout)
+        self.assertIn(b"cxp\n", done.stdout)
 
 
 class CodexCanaryRuntimeTests(unittest.TestCase):

@@ -198,6 +198,28 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 
 ---
 
+### § 2.5.3 · DM 目标怎么定 · 以及【降级投递必须留痕】（2026-08-02 根治「新 bot 把 peer 当主人 → 刷群」）
+
+> **一句话**：新 bot 在**主人私聊它一次之前**没有 owner；旧码会拿【群里 @ 过它的那个 peer bot】当主人发私聊 → 飞书拒收 → 全部降级刷进群。而降级**成功**时上层看不出任何异常——**「兜底成功了，所以没人知道 DM 是坏的」**。
+
+- **病（实证 2026-08-02 · tb25-phd-taoci-7 刷屏事故）**：`tb25-phd-taoci-7/8/9/10` 建号后**只在群里被 peer @ 过、主人从没私聊过**。
+  1. `on_message` 无条件 `_merge_session({chat_id, open_id: sender})` 存「DM 坐标」——但**群消息的 `sender` 是 @我的那个 peer bot**。
+  2. peer 派活带 a2a 戳 ⇒ 信封 `route=p2a`（§2.5.1 三极模型·**这是对的**，防 bot↔bot 环）⇒ 回信要投 owner DM。
+  3. `mirror_target` 的兜底链 `load_owner() or sess["open_id"] or sess["chat_id"]`：没 owner 文件 → **直接取到 peer bot 的 open_id**。
+  4. bot 给 bot 发私聊 → 飞书 **`230013 Bot has NO availability to this user`**（**非 retryable**）→ `guaranteed_send` 判「真失败」→ 退 `_webhook_fallback` → **投进群**。
+  - 规模：四个 bot 合计 **18 万+ 次 230013**；taoci-7 单独刷进交流水吧 **767 条**（另 3785 次连 webhook 都被喇叭的关键词闸 `19024 Key Words Not Found` 挡掉）。**主人是靠肉眼看群刷屏发现的。**
+  - **`is_allowed` 早在 2026-06-18 就修过同一个坑**（「群消息**绝不** auto-claim owner」，否则 peer 夺 owner → 回信不可达）；但 `_merge_session` 是**同一个坑的后门**——owner 文件守住了，**会话 open_id 没守住**，兜底链照样把 peer 当主人。
+  - **自然实验（钉死因果·非推测）**：`taoci-4/5/6` 同一份代码、同样症状，主人 2026-07-30 12:50:50 私聊它们 → **12:51:11 自动认主人写下 owner 文件 → 230013 当场归零、之后 3 天干净**。差别只有「有没有 owner 文件」。
+- **修**（`feishu_bridge.py`）：
+  1. **群坐标绝不进 DM 坐标**：`_merge_session` 只在 `not is_group` 时写。三个消费方（`mirror_target` / `send` CLI / 文档授权）要的都是**主人的私聊坐标**。群里被 @ 但还没认主 → 日志明说「请主人私聊它一句完成认主」，不再静默降级。
+  2. **降级必留痕**：`_webhook_fallback` 收 `reason`（真实报错）+ `intended`（本该投的 DM 目标），**成功/失败都写 receipts**，并把原因**印在发到群的那条消息头上**（`⚠️ 降级原因：…`）——看到刷屏的人当场知道为什么，不用翻日志反推。`guaranteed_send` 把 `_send_checked` 的真实错误一路带进来。
+  3. **drainer `_send_plain` 补回执**：旧版这里**一行 return、零回执**，`card_send` 回 `'webhook'`（=投错地方了）被折成 `True` → HWM 照推 → outbox 一片干净。现在把 `via` 原样记下并标 `degraded`。
+  4. **顺带修一个必炸的空指针**：`_route_to_dest` 的 `ALLOWED_OPEN_IDS[0]` —— 该常量是 **`set`**（`_load_allowed` 返回 set），取下标必抛 `TypeError: 'set' object is not subscriptable`。它**只在 mirror_target 为空时才走到**，此前一直被「会话 open_id 恒有值（哪怕是错的 peer）」挡着没暴露；修掉污染后它就是 no-owner 新 bot 的必经路 → 一并改成 `next(iter(sorted(...)), None)`。
+- **验**：① 单测 `tests/test_dm_fallback_traceability.py` 6 项（兜底成功也留痕 / 原因印进群消息 / 真实报错一路带到底 / owner 盖过被污染的 session）；全仓 111 项通过。② **线上热修**：`load_owner` 每次现读盘、**不缓存** → 直接补写 `bridge-owner-<bot>.json` 即**热生效、无需重启桥**。四个 bot 补写后最后一次 230013 都在补写**前 2–5 秒**，之后 **200 条回执全部 delivered、0 条降级**。
+- **预防（新 bot 上线清单）**：注册完 **主人必须私聊它一句**完成认主（同 `SOP-125` 改名后那条）。否则该 bot 的 `route=p2a` 回信无处可投。**只在群里 @ 它不算认主**（群消息按设计绝不 auto-claim owner）。
+
+---
+
 ## § 2.6 · 回复用什么格式发给你（统一卡片流 · v8.1 · 2026-06-16）
 
 > **一条铁律贯穿进度 + 回复**：内容都走飞书**互动卡片**；一张卡 `update_card` **原地长大** → 满 ~2800 字（`CARD_BUDGET`）**或 `update_card` 失败** 就冻结、开新卡接着写（**不截断·不重发**）。`guaranteed_send`(markdown) 降为「发卡彻底失败」的最终兜底（几乎不触发）。
