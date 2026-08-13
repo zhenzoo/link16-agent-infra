@@ -133,13 +133,13 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 `官方 Codex TUI --remote` ↔ `该 bot 私有 app-server` ↔ `Link16 typed-event observer` → `milestone-v1 outbox` → 共享 drainer。
 
 - TUI 仍是官方 TUI，wmux 注入、slash command、resume 体验不由 Link16 重写。
-- `app-server-canary` 的 remote TUI 就绪以 Codex composer 标记（`› Use /skills` 或空 `›`）为准，不强制依赖普通 CLI 首屏的 `OpenAI Codex` banner；普通 Codex CLI 仍保留 banner + composer 双确认。若把 remote TUI 误判为未就绪，补发逻辑会把 worker 启动命令投进已经运行的 composer，并在第二次超时后误关活 workspace。
+- `app-server-canary` 的 remote TUI 就绪接受三条等价可信路径：标准 composer（`› Use /skills` 或空 `›`）；新 thread 的精确 warmup 标记 `LINK16_APP_SERVER_READY`；以及 resumed thread 的**本轮 fresh worker ready 文件 + 可见 composer**。第三条必须按 `agent_runtime.uses_app_server()` 的统一语义判断，因而名册省略 `codex_transport`（默认 app-server）与显式 `app-server-canary` 完全等价；`cli-legacy` 和非 Codex runtime 不得消费该 ready 文件。普通 Codex CLI 仍保留 banner + composer 双确认。若把 remote TUI 误判为未就绪，补发逻辑会把 worker 启动命令投进已经运行的 composer，并在第二次超时后误关活 workspace。
 - observer 只接 root thread 的 typed item；collab child thread 不进入主人卡，root collab item 只渲完成度。
 - `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 同时写脱敏 ledger 和 answer outbox，typed observer 是 app-server 模式的唯一最终回复 producer。
 - `reasoning`、命令全文、tool input/output、等待 UI、token transport 事件全部丢弃。命令字段只允许在 producer 内存中做一次保守分类，raw 值不得进入 ledger、outbox、progress-state 或卡片。
 - 相邻工具输出实际调用数、类别计数和安全路径摘要；plan 以同一 event id 增 revision，原位更新。
 - app-server canary 中 PostToolUse 与 Stop hook 都 no-op，避免工具/最终回复双写；observer 只接 root thread，因此子 agent final 不会进入主人卡。这样切换 `CODEX_HOME` 时即使新账号没有安装 hooks，最终回复也不会丢。
-- canary flag 只允许放机器本地 `bridge-bots.local.json`。未标 flag 的 Codex/Claude 启动与 producer 完全不变。
+- `codex_transport` 只允许放机器本地 `bridge-bots.local.json`；Codex 省略字段即走默认 app-server，只有显式 `cli-legacy` 才回退旧路。Claude 不消费该字段。
 
 共享 envelope：`contract=milestone-v1, runtime, session, root_turn, steps[{event_id,revision,kind,label,...safe_metadata}], route`。生产协议依赖 app-server typed item，不依赖 Codex session JSONL。
 

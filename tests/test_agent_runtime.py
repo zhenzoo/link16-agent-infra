@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -508,24 +509,73 @@ class BridgeProcessSnapshotTests(unittest.TestCase):
 
 
 class AppServerReadySignalTests(unittest.TestCase):
-    def test_accepts_only_fresh_signal_for_explicit_app_server_bot(self):
-        bot = {
-            "name": "tb25-cartoonMV-codex",
-            "agent": "codex",
-            "codex_transport": "app-server-canary",
-        }
+    def _with_ready_file(self, bot, callback):
         with tempfile.TemporaryDirectory() as tmp:
             previous = feishu_bridge.STATE_DIR
             feishu_bridge.STATE_DIR = Path(tmp)
             try:
-                path = Path(tmp) / "bridge-codex-app-ready-tb25-cartoonMV-codex.json"
+                path = Path(tmp) / f"bridge-codex-app-ready-{bot['name']}.json"
                 path.write_text(json.dumps({"worker_pid": 123, "ts": 20}), encoding="utf-8")
-                self.assertTrue(feishu_bridge._app_server_ready_signal(bot, 10))
-                self.assertFalse(feishu_bridge._app_server_ready_signal(bot, 30))
-                self.assertFalse(feishu_bridge._app_server_ready_signal(
-                    {"name": bot["name"], "agent": "codex"},
-                    10,
-                ))
+                callback()
+            finally:
+                feishu_bridge.STATE_DIR = previous
+
+    def test_default_app_server_accepts_fresh_but_rejects_stale_signal(self):
+        bot = {"name": "test-default-codex", "agent": "codex"}
+        self._with_ready_file(bot, lambda: (
+            self.assertTrue(feishu_bridge._app_server_ready_signal(bot, 10)),
+            self.assertFalse(feishu_bridge._app_server_ready_signal(bot, 30)),
+        ))
+
+    def test_explicit_app_server_accepts_fresh_signal(self):
+        bot = {
+            "name": "test-explicit-codex",
+            "agent": "codex",
+            "codex_transport": "app-server-canary",
+        }
+        self._with_ready_file(
+            bot,
+            lambda: self.assertTrue(feishu_bridge._app_server_ready_signal(bot, 10)),
+        )
+
+    def test_legacy_and_non_codex_runtimes_reject_ready_signal(self):
+        legacy = {
+            "name": "test-legacy-codex",
+            "agent": "codex",
+            "codex_transport": "cli-legacy",
+        }
+        claude = {
+            "name": "test-claude",
+            "agent": "claude",
+            "codex_transport": "app-server-canary",
+        }
+        for bot in (legacy, claude):
+            self._with_ready_file(
+                bot,
+                lambda bot=bot: self.assertFalse(
+                    feishu_bridge._app_server_ready_signal(bot, 10)
+                ),
+            )
+
+    def test_wait_ready_accepts_default_app_server_resume_handshake(self):
+        bot = {"name": "test-resumed-codex", "agent": "codex"}
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = feishu_bridge.STATE_DIR
+            feishu_bridge.STATE_DIR = Path(tmp)
+            try:
+                path = Path(tmp) / "bridge-codex-app-ready-test-resumed-codex.json"
+                path.write_text(
+                    json.dumps({"worker_pid": 123, "ts": time.time() + 1}),
+                    encoding="utf-8",
+                )
+                with patch.object(
+                    feishu_bridge,
+                    "read_screen",
+                    return_value="OpenAI Codex\n› Summarize recent commits\n",
+                ):
+                    self.assertTrue(
+                        feishu_bridge._wait_agent_ready(bot, "test-pty", timeout=0.1)
+                    )
             finally:
                 feishu_bridge.STATE_DIR = previous
 

@@ -687,7 +687,7 @@ def read_screen(pty, tail=30):
 
 
 def _app_server_ready_signal(bot, since):
-    if not (isinstance(bot, dict) and bot.get("codex_transport") == "app-server-canary"):
+    if not agent_runtime.uses_app_server(bot):
         return False
     path = STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json"
     try:
