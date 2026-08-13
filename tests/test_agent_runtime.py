@@ -290,6 +290,88 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertTrue(any("找不到可用 shell" in e for e in result["errors"]))
 
+    def test_bridge_worker_command_ignores_bridge_process_execution_env(self):
+        """Scheduled Task env must not veto a command executed inside wmux."""
+        bot = {
+            "name": "test-codex-bot",
+            "agent": "codex",
+            "profile": "cxp",
+        }
+        with patch.object(agent_runtime.shutil, "which", return_value=None), \
+             patch.object(agent_runtime, "resolve_shell",
+                          side_effect=AssertionError("bridge must not resolve its own shell")):
+            command = agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
+
+        self.assertIn('LINK16_AGENT_PROFILE="cxp"', command)
+        self.assertIn("CODEX_HOME=", command)
+        self.assertIn("codex_app_server_worker.py", command)
+
+    def test_bridge_worker_command_still_rejects_missing_profile_assets(self):
+        """Skipping bridge env checks must not skip registry/home validation."""
+        bot = {"name": "test-codex-bot", "agent": "codex", "profile": "cxp"}
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(Path, "home", return_value=Path(tmp)):
+            with self.assertRaisesRegex(ValueError, "home 不存在"):
+                agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
+
+    def test_doctor_static_only_survives_scheduled_task_env(self):
+        """开机计划任务那份精简环境里，只查静态资产的体检必须仍然放行。
+
+        这是 `/account` 闸和 `worker_cmd()` 共用的判据（PLAN-924）：桥不执行命令，
+        所以「桥自己找不到 bash / CLI」不该判一个资产完好的 profile 死刑；
+        而 direct-run 那条路（自己 exec）必须继续 fail closed。
+        """
+        with patch.object(agent_runtime.shutil, "which", return_value=None), \
+             patch.object(agent_runtime, "resolve_shell",
+                          side_effect=ValueError("找不到可用 shell：测试")):
+            static_only = agent_runtime.profile_doctor("cxp", check_execution_env=False)
+            direct_run = agent_runtime.profile_doctor("cxp")
+        self.assertEqual(static_only["errors"], [])
+        self.assertTrue(static_only["ok"])
+        self.assertFalse(direct_run["ok"], "direct-run 那条路必须仍然 fail closed")
+
+    def test_bridge_never_gates_on_its_own_execution_env(self):
+        """桥里每一处 profile_doctor 都必须显式 check_execution_env=False。
+
+        2026-08-06 tb24 实证：PLAN-924 修好了 `worker_cmd()`，却漏了 `/account` 的闸
+        —— 同一个桥进程两条路一个放行一个卡死，主人 `/account ccp` 报「找不到可用
+        shell」切不了账号。tb25 的桥碰巧起在有 bash 的环境里，所以一直看不出来。
+
+        用 AST 扫调用点而不是驱动 `handle_slash`：它是嵌套闭包、无法单独导入。
+        `asyncio.to_thread(profile_doctor, ...)` 这种转手形态也要认，否则等于没测。
+        """
+        import ast
+
+        def _name(node):
+            return node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+
+        source = (ROOT / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8")
+        seen, offenders = 0, []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            # 直接调 profile_doctor(...)，或把它当参数转手给 to_thread / partial。
+            if not any(_name(t) == "profile_doctor" for t in [node.func, *node.args]):
+                continue
+            seen += 1
+            flag = next((k for k in node.keywords if k.arg == "check_execution_env"), None)
+            if flag is None or not (
+                isinstance(flag.value, ast.Constant) and flag.value.value is False
+            ):
+                offenders.append(node.lineno)
+        self.assertTrue(seen, "扫不到任何 profile_doctor 调用 —— 这条闸失效了，先修测试")
+        self.assertEqual(
+            offenders, [],
+            f"feishu_bridge.py 第 {offenders} 行拿桥自己的 SHELL/PATH 当判据；"
+            "桥只把命令写进 wmux 终端，不该用自己的执行环境否决 profile")
+
+    def test_standalone_worker_still_requires_current_process_shell(self):
+        """Direct launch keeps PLAN-923's fail-closed shell guarantee."""
+        with patch.object(agent_runtime, "resolve_shell",
+                          side_effect=ValueError("找不到可用 shell：测试")):
+            with self.assertRaisesRegex(ValueError, "找不到可用 shell"):
+                agent_runtime.standalone_worker_cmd("cxp", cwd=str(ROOT))
+
     def test_profile_name_has_no_runtime_default_tier(self):
         # 显式 profile / provider-home 反推 —— 两条有据可依的路仍然通。
         self.assertEqual(agent_runtime.profile_name({"profile": "cxp"}), "cxp")

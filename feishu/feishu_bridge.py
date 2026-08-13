@@ -1723,7 +1723,12 @@ def run(bot_name=None):
                 dir_arg = parts[1].strip() if len(parts) > 1 else ""
                 if al not in aliases:
                     await reply(chat_id, f"❓ 没有账号别名「{al}」。可选：{lst}"); return
-                doctor = await asyncio.to_thread(agent_runtime.profile_doctor, al)
+                # 同 worker_cmd（agent_runtime.py）：桥只把命令写进 wmux 终端、不自己执行，
+                # 所以开机计划任务那份精简 SHELL/PATH 不该否决一个静态资产完好的 profile。
+                # 真正的 CLI/shell 就绪由 wmux 终端 + ready probe 验（PLAN-924 契约）。
+                doctor = await asyncio.to_thread(
+                    agent_runtime.profile_doctor, al, check_execution_env=False
+                )
                 if not doctor["ok"]:
                     await reply(
                         chat_id,

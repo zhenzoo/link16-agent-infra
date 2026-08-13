@@ -119,6 +119,31 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
    `agent_runtime.resolve_shell()`：`$SHELL` → `shutil.which("bash")` → `shutil.which("sh")`
    → 都没有就报错。`shutil.which` 按 **PATH 顺序**查找，绕开 System32 优先；全程零硬编码路径。
 
+### 5.2 执行环境检查的唯一判据：**这个进程自己 exec 吗？**
+
+`profile_doctor()` 分成两层，用 `check_execution_env` 切换：**静态资产**（registry、home、
+`launch.sh`）任何调用者都必须查；**当前进程执行环境**（`$SHELL` / `PATH` 上的 CLI 与 shell）
+只有**自己会 exec 这条命令的调用者**才有资格查。
+
+| 调用点 | 自己 exec 吗 | 检查 |
+|---|---|---|
+| CLI `doctor` / `run` / `selftest` | 是（`subprocess` 亲自跑） | 完整 |
+| 桥 `worker_cmd()` | 否（只生成文本，wmux 终端执行） | 仅静态资产 |
+| 桥 `/account` 切号闸 | 否（同上，切完由 wmux 冷启） | 仅静态资产 |
+
+拿桥进程自身的 `$SHELL` / `PATH` 代替 wmux 终端的执行环境，会让同一条
+`feishu_bridge.py start` 从 Scheduled Task 自动启动时因环境较精简而被误判不可用，而从
+交互终端手动启动却正常。开机任务仍只需运行 `feishu_bridge.py start`，不维护第二套 shell 配置。
+
+> **2026-08-06 tb24 实证（PLAN-924 补漏）**：PLAN-924 只改了 `worker_cmd()`，漏了 `/account`
+> 的闸 ⇒ 同一个桥进程两条路结论相反 —— worker 起得来，但主人 `/account ccp` 被
+> 「找不到可用 shell：$SHELL 未设置且 PATH 里没有 bash/sh」挡住、切不了账号。
+> tb24 的持久 PATH 只有 `<Git>\cmd`（有 `git.exe`、无 `bash.exe`）且无 `SHELL` 变量，
+> 而 tb25 的桥起在能找到 bash 的环境里 ⇒ **同一份代码只在 tb24 犯**。
+> 回归闸 `test_bridge_never_gates_on_its_own_execution_env` 用 AST 扫
+> `feishu_bridge.py` 里每一处 `profile_doctor`（含 `asyncio.to_thread` 转手形态），
+> 强制它们都显式传 `check_execution_env=False`。
+
 公共 launcher 不把主 session 的 `FEISHU_BRIDGE_SESSION` 复制给普通内容 worker，
 避免多个 pane 共用一个飞书身份和 outbox。
 

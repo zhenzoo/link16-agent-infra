@@ -370,23 +370,31 @@ def resolve_shell() -> str:
     raise ValueError("找不到可用 shell：$SHELL 未设置且 PATH 里没有 bash/sh；拒绝猜解释器")
 
 
-def profile_doctor(name: str) -> dict:
+def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
+    """Check profile assets and, when requested, this process's launch environment.
+
+    ``agent_profile_cli.py run`` executes the generated command itself, so its
+    current PATH and POSIX shell are part of profile health.  The Feishu bridge
+    only writes a command into a wmux terminal; its scheduled-task environment
+    is not the terminal that will execute the command.
+    """
     profile = profile_spec(name)
     errors = []
     home = profile.home_path
     if not home.is_dir():
         errors.append(f"home 不存在：{profile.home}")
-    if not shutil.which(profile.runtime):
-        errors.append(f"CLI 不可用：{profile.runtime}")
     launch = home / "launch.sh"
     if profile.launcher == "launch-sh" and not launch.is_file():
         errors.append(f"launch.sh 不存在：{profile.home}/launch.sh")
-    # 没有可用 shell 时，`run` 起不来但上面三项全绿 —— 正是 PLAN-923 之前
-    # 「doctor 全绿却启动失败」的盲区，所以把它纳入同一张体检表。
-    try:
-        resolve_shell()
-    except ValueError as exc:
-        errors.append(str(exc))
+    if check_execution_env:
+        if not shutil.which(profile.runtime):
+            errors.append(f"CLI 不可用：{profile.runtime}")
+        # 没有可用 shell 时，`run` 起不来但静态资产全绿 —— 正是 PLAN-923 之前
+        # 「doctor 全绿却启动失败」的盲区，所以 direct-run 仍做完整体检。
+        try:
+            resolve_shell()
+        except ValueError as exc:
+            errors.append(str(exc))
     return {
         **profile_public_dict(profile),
         "ok": not errors,
@@ -394,8 +402,10 @@ def profile_doctor(name: str) -> dict:
     }
 
 
-def _require_profile_available(profile: ProfileSpec) -> None:
-    result = profile_doctor(profile.name)
+def _require_profile_available(
+    profile: ProfileSpec, *, check_execution_env: bool = True
+) -> None:
+    result = profile_doctor(profile.name, check_execution_env=check_execution_env)
     if result["errors"]:
         raise ValueError(f"profile {profile.name} 本机不可用：" + "；".join(result["errors"]))
 
@@ -634,7 +644,10 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
     spec = runtime_spec(bot)
     profile = resolve_profile(bot, required=spec.name != "custom")
     if profile:
-        _require_profile_available(profile)
+        # The bridge only generates text here. wmux's terminal executes it, so
+        # a Scheduled Task's reduced SHELL/PATH must not veto an otherwise valid
+        # profile before wmux gets a chance to run and probe the real command.
+        _require_profile_available(profile, check_execution_env=False)
     name = bot["name"] if isinstance(bot, dict) else str(bot)
     cwd = (cwd or (bot.get("cwd") if isinstance(bot, dict) else None) or str(project))
     cwd = str(cwd).replace("\\", "/")
