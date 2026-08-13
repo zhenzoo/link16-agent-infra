@@ -3,6 +3,22 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.12.1 — 授权闸从「装上了但谁都关不了」修到真能用 + 桥两处启动误判根治（2026-08-13）
+
+**WHY**：v0.12.0 的破坏性斜杠命令授权闸上线当晚自查就发现「闸装上了，但主人拿不到钥匙、闸也认不出 peer」——能力实际没生效；随后 TB24 又暴出桥的两处启动误判（计划任务起的桥判自己没 shell、resumed Codex thread 判未就绪）。三件事根因同一形状：**同一个判断在代码里有两套判据，且已经漂了**。本版全是修复与回归闸，无新能力。
+
+**WHAT**
+
+- **授权闸认不出 peer（`5800ce2`）**：闸只用 `name_for_open_id(sender)` 认发信人，但飞书 open_id 是 **per-app** 的——`agent-registry.json` 存的是某一个应用视角下的值，跟「它发消息到我这个应用时」的 open_id 不是同一个（实证：名册里 tb25-phd-taoci = `ou_acd4e2d4…`，发到 tb25-link16 时是 `ou_3d12b059…`）⇒ 对任何 peer 都查不到名字 → 走 fail-closed → **连持有授权的 peer 也一起拒**。改成 ① open_id 查得到就用 ② 查不到退 a2a 戳 `[飞书_from_<X>_to_<Y>]` 认人，两者都拿不到才拒；放行原因带「认人来源」写进 receipts。诚实边界写进 docstring：戳由发信方自己写、**可伪造** ⇒ 本闸防的是误操作、不是恶意冒名，真防线是「主人没私聊过就 claim 不到授权」+ 放行拒绝全量留痕。
+- **解锁闸的那把钥匙自己是坏的（`e372684`）**：`agent_grant.py` 里 `from bridge_env import resolve_project_root` 引用了不存在的函数，且那句 import 搁在 try **外面** ⇒ 写好的兜底永远轮不到，CLI 的 `status/claim/revoke` 不带 `--state-dir` 一跑就 ImportError。桥的运行时闸没事（显式传了 state_dir），坏掉的恰恰是 SOP 里写给主人的那条补救命令。import 挪进 try。
+- **补上本该拦住它的「入口」闸（`2bf79e3`）**：原有单测全部显式传 `state_dir=`，**恰好避开唯一会崩的那条路径**——典型的「测了功能、没测入口」。新增：不传参也能解析、**CLI 写授权的目录必须等于桥读授权的目录**（不等则 claim 显示成功而闸静默失效，比崩了更难发现）、真把 CLI 当命令 subprocess 跑一遍断言无 ImportError、跑真 loader 逐 bot `profile_name(required=True)` 不抛。
+- **跨机盲区写进测试本身（`b56ec9b`）**：`test_every_loaded_bot_resolves_a_profile` 在 TB25 上根本没跑到它要防的盲区（TB25 顶层 `defaults` 为空、32 bot 全显式写 profile），只有 TB24（有 `defaults.profiles`、9 bot 靠装载注入）才真验到 ⇒ 两台机名册形状不同、**互为对方的盲区补全**，这类闸别只看一台机绿就下结论。
+- **桥不再拿自己的 SHELL/PATH 否决 profile（`65059cb` · PLAN-924）**：开机计划任务起的桥冷启 worker，被自己的 `profile_doctor()` 用「找不到可用 shell」挡死，手动起桥却一切正常。判据用错了主体——桥在这里只【生成一段命令文本】写进 wmux 终端，真正 exec 的是那个终端。`profile_doctor()` 拆两层：【静态资产】（registry / home / `launch.sh`，任何调用者都必须查）与【当前进程执行环境】（PATH 上的 CLI + 可信 POSIX shell，只有自己会 exec 的调用者才有资格查）；桥的两个调用点（`worker_cmd()` 与 `/account` 切号闸）显式 `check_execution_env=False`，CLI 的 doctor/run/selftest 保持 PLAN-923 的 fail-closed。**承重事实**：tb24 持久 PATH 只有 `<Git>\cmd`（有 `git.exe`、无 `bash.exe`）且无 `SHELL` 变量，tb25 的桥恰好起在能找到 bash 的环境里 ⇒ 同一份代码只在 tb24 犯。回归闸升级成 **AST 扫全文件**：`feishu_bridge.py` 里每一处 `profile_doctor`（含 `asyncio.to_thread` 转手形态）都必须显式传 False。
+- **resumed Codex thread 不再被判未就绪（`53eebe7` · PLAN-925）**：wmux daemon 重启后，名册省略 `codex_transport` 的 Codex bot 续接旧 app-server thread，会被连判两次未就绪，主人得手动 `/close` 清 thread 才恢复。同一个「走不走 app-server」的问题两套判据且已漂——`codex_transport()` 对缺省字段返回 `app-server-canary`，而 `_app_server_ready_signal()` 裸比字符串、缺省一律 false，旧测试还把这个漂移当预期固化了。改为统一走 `agent_runtime.uses_app_server()`；`ARCH-110 §2.4.2` 立三条等价 ready 路径（标准 composer / 新 thread 的 `LINK16_APP_SERVER_READY` / resumed thread 的 fresh ready 文件 + 可见 composer）。误判的代价是把 worker 启动命令投进已经在跑的 composer、第二次超时后误关活 workspace。
+- **名册与巡航**：`agent-registry.json` 补登记 tb24-pressroom-2、tb24-voiceover 两只 Codex bot（此前只在本机名册，TB25 侧看不见、@ 不到）；`SPEC-200` 的 R2 栏落实为 `pressroom-assets`（两段式对象生命周期 `pending/<sha256>` 7 天过期 → `objects/<sha256>`，token 权限实测覆盖 put/get/promote/delete）；tennis-post 每日巡航从「一夜 2 篇」改成**固定 1 篇**、队列真源换 `PLAN-200 §2`、验收从 3 个闸扩到全套，并新增 GPT Image「每期最多 2 次、封顶后改本地 HTML/CSS 或确定性合成继续、**不停工**」的规则。
+
+**验证**：全仓 **145 passed**（v0.12.0 时 130），无新增 warning（仅剩 `bridge_outbox.py:186` 的既有 ResourceWarning）。PLAN-924 的桥重启后实测 `/account` 可切；PLAN-925 的运行态切换只 stop/start Bridge、不动 wmux：14/14 bot 重新在线，wmux daemon 指纹与 7 个 workspace 的 ID、名称、PTY 列表前后逐项一致，19 份 session record 零改写。
+
 ## v0.12.0 — 新 bot 拿 peer 当主人刷群（根治）+ 降级投递必留痕 + 破坏性斜杠命令装闸（2026-08-03）
 
 **WHY**：主人肉眼发现 `tb25-phd-taoci-7` 反复往群里刷同一条消息，消息头标着「DM 回传失败转群兜底」。查下来是两个独立缺陷叠加，而**两个都属于「失败长得像成功」**——真实报错 `230013 Bot has NO availability to this user` 打了 18 万+ 次，没有任何一条告警、没有任何一条 outbox 记录，全靠人眼看见群刷屏才发现。
