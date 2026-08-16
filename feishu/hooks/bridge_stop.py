@@ -69,7 +69,37 @@ def _asst_has_ask(rec):
         for b in c)
 
 
-def _final_turn_reply(tp, is_user, asst_texts):
+def _cursor_path(outdir, bot):
+    return Path(outdir) / f"bridge-stop-cursor-{bot}.json"
+
+
+def _read_cursor(outdir, bot, sid):
+    """上一次 Stop 已扫到哪一行（同 session 才算数）。读不到/换 session → 0（退回旧行为·纯 anchor）。"""
+    try:
+        d = json.loads(_cursor_path(outdir, bot).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(d, dict) or (d.get("session") and sid and d.get("session") != sid):
+        return 0
+    try:
+        return int(d.get("line") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_cursor(outdir, bot, sid, line):
+    try:
+        p = _cursor_path(outdir, bot)
+        p.parent.mkdir(exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"session": sid, "line": int(line), "ts": int(time.time())}),
+                       encoding="utf-8")
+        os.replace(tmp, p)                       # 原子落盘·无半写窗口
+    except OSError:
+        pass
+
+
+def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
     """竞态安全抽取本轮【收尾正文】= anchor(末条真用户消息)之后按记录序归三类 assistant 文本：
       ① 终结态消息(stop_reason ∈ _TERMINAL_STOP)的文本 = 最终 wrap-up（真收尾）；
       ② 紧贴 AskUserQuestion 之前那条 assistant 文本 = 「它问之前的收尾结论」——该文本在你回答前
@@ -89,45 +119,59 @@ def _final_turn_reply(tp, is_user, asst_texts):
       收尾独立成卡不被淹没；消息数封顶 ≈ _MID_TAIL_KEEP+1。短过渡旁白(< 阈值)仍不成卡(只走进度卡)。
     短轮询等终结态落盘(race guard)；到点仍无终结态但已抓到②/③正文 → 照发（铁律：正文必达·永不因竞态丢）。
     ⚠️ 前提：picker 真能提交让 turn 结束(否则 Stop 不开火·收尾结论丢)→ 根治在 _drive_picker 闭环校验。
-    返回 {cards: [按发送序的多张卡文本], anchor_line}。复用 SSOT is_user / asst_texts · 零硬编码 · 不碰 thinking。"""
+    **floor_line（2026-08-16 加·结构性防重发）**：上一次 Stop 已完整扫到的行号——本轮只看 `行号 > floor_line`
+    的记录。anchor 只是「turn 从哪开始」的启发式，会因 transcript 记录形状变化而失灵（实证：`/loop` 定时开火 +
+    a2a 注入不推进 anchor → anchor 冻住 → 每轮把几十轮的收尾拼成一张越滚越大的卡重发）。cursor 是硬保证：
+    **上一次 Stop 扫过的正文，永不会被下一次 Stop 再扫一遍**——与「什么算 turn 边界」的判据解耦。
+    返回 {cards, anchor_line, scan_line, complete}；complete=True 才表示这遍扫描等到了终结态（main 据此推进 cursor·
+    竞态超时不推进→下轮自愈补发·drainer 内容去重兜底）。复用 SSOT is_user / asst_texts · 零硬编码 · 不碰 thinking。"""
     anchor_ln = None
+    scan_ln = 0
     pre_blocks, term_texts = [], []                   # pre_blocks=非终结实质块(②问前结论+③中段正文·按文档序)·各自成卡; term=终结 wrap-up
+    consumed_fallback = floor_line                    # 竞态超时路径的 cursor 落点（只推到已取走正文那一行）
     for attempt in range(_POLL_TRIES):
         recs = _read_records(tp)
+        scan_ln = recs[-1][0] if recs else 0
         anchor_idx = None
         for idx, (ln, rec) in enumerate(recs):
             if is_user(rec):
                 anchor_idx, anchor_ln = idx, ln
         if anchor_idx is not None:
-            sub = [r for _ln, r in recs[anchor_idx + 1:]]
-            mid, term_texts, has_terminal = [], [], False    # mid=[{text, always}] 按文档序（②问前结论 always / ③中段旁白）
-            for i, rec in enumerate(sub):
+            sub = [(ln, r) for ln, r in recs[anchor_idx + 1:] if ln > floor_line]
+            mid, term, has_terminal = [], [], False          # mid=[{ln, text, always}] 按文档序（②问前结论 always / ③中段旁白）; term=[(ln,text)]
+            for i, (ln, rec) in enumerate(sub):
                 atxts = [t for t in asst_texts(rec) if t.strip()]
                 if not atxts:
                     continue
                 if (rec.get("message") or {}).get("stop_reason") in _TERMINAL_STOP:
-                    term_texts.extend(atxts)                 # ① 终结态 wrap-up（真收尾）
+                    term.extend((ln, t) for t in atxts)      # ① 终结态 wrap-up（真收尾）
                     has_terminal = True
                     continue
                 pre_ask = False                              # ② 其后第一条 assistant 是 AskUserQuestion → 问前收尾结论
-                for nxt in sub[i + 1:]:
+                for _nln, nxt in sub[i + 1:]:
                     if nxt.get("type") == "assistant":
                         pre_ask = _asst_has_ask(nxt)
                         break
                 # ②问前结论(always 留) 或 ③中段实质旁白(len≥阈值) → 收入 mid(按文档序)；短过渡旁白不收(只走进度卡)
                 if pre_ask or sum(len(t) for t in atxts) >= _SUBSTANTIVE_MIN:
-                    mid.append({"text": "\n\n".join(atxts).strip(), "always": pre_ask})
+                    mid.append({"ln": ln, "text": "\n\n".join(atxts).strip(), "always": pre_ask})
             # 🔑 防刷屏(2026-06-25)：问前结论全留 + 实质旁白只留最后 _MID_TAIL_KEEP 段·各自成卡；早段旁白弃(进度卡已实时滚过)
             subs = [j for j, m in enumerate(mid) if not m["always"]]
             keep = set(subs[-_MID_TAIL_KEEP:]) if _MID_TAIL_KEEP else set(subs)
-            pre_blocks = [m["text"] for j, m in enumerate(mid) if (m["always"] or j in keep) and m["text"]]
+            kept = [m for j, m in enumerate(mid) if (m["always"] or j in keep) and m["text"]]
+            pre_blocks = [m["text"] for m in kept]
+            term_texts = [t for _ln, t in term]
             # 装配：保留的中段块各自一张卡(保序) + 终结 wrap-up 合为最后一张卡 → 不丢末尾正文·收尾不被淹没·不刷屏
             cards = list(pre_blocks)
             term_card = "\n\n".join(term_texts).strip()
             if term_card:
                 cards.append(term_card)
+            # consumed = 本轮【真正被取走正文】的最后一行 → 下轮 cursor 只推到这·晚落盘的 wrap-up(行号更大)仍能被下轮补发
+            consumed = max([m["ln"] for m in kept] + [ln for ln, _t in term] + [floor_line])
             if cards and has_terminal:                       # 等到终结态再返回（race guard·防抓在 wrap-up 落盘前）
-                return {"cards": cards, "anchor_line": anchor_ln}
+                return {"cards": cards, "anchor_line": anchor_ln, "scan_line": scan_ln,
+                        "consumed_line": consumed, "complete": True}
+            consumed_fallback = consumed
         if attempt + 1 < _POLL_TRIES:
             time.sleep(_POLL_DELAY)
     # 到点仍无终结态：把已抓到的中段/问前实质正文照发（必达·不缺）；真没正文则 cards 空 → main 不发
@@ -135,7 +179,8 @@ def _final_turn_reply(tp, is_user, asst_texts):
     tc = "\n\n".join(term_texts).strip()
     if tc:
         cards.append(tc)
-    return {"cards": cards, "anchor_line": anchor_ln}
+    return {"cards": cards, "anchor_line": anchor_ln, "scan_line": scan_ln,
+            "consumed_line": consumed_fallback, "complete": False}
 
 
 def main():
@@ -159,7 +204,10 @@ def main():
         from jsonl_reply_extract import _is_real_user_message, _assistant_texts  # 复用 SSOT 解析
     except Exception:                             # noqa: BLE001
         return
-    r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts)
+    # outdir 先算出来：cursor(上轮扫到哪行) 和 outbox 同目录（FEISHU_BRIDGE_OUTBOX_DIR = 桥给每个 bot 钉的 _state/）
+    outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
+    floor = _read_cursor(outdir, bot, sid)
+    r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts, floor_line=floor)
     cards = [c.strip() for c in (r.get("cards") or []) if c and c.strip()]
     if not cards:
         return                                    # 终结态无文本（只工具/思考收尾）或竞态超时 → 不发
@@ -180,7 +228,6 @@ def main():
 
     # 每张卡各写一条 answer 记录（drainer 按 _ans_key=hash(text) 内容去重·不同卡内容不同→各自成卡·保序）
     anchor = r.get("anchor_line")
-    outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
     outbox = outdir / f"bridge-outbox-{bot}.jsonl"
     # per-turn 路由(2026-06-28)：Stop 时读 turn-route 钉进 answer 记录——此刻 turn-route = 本轮路由
     # （Claude 串行·下一轮 UserPromptSubmit 还没开火覆盖它）→ drainer 异步 drain answer 时按记录里钉死的 route
@@ -197,7 +244,10 @@ def main():
                        "anchor": anchor, "text": c, "route": route}
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
-        pass
+        return                                    # 没写成 outbox 就不推进 cursor（否则这轮正文永久蒸发）
+    # 正文已落 outbox → 推进 cursor 到「本轮真正取走正文的最后一行」：下一次 Stop 只看更后面的记录，
+    # 结构上杜绝「同一段正文被下一轮再拼一遍」（2026-08-16 tb24-voiceover 全量重发事故的硬保证）。
+    _write_cursor(outdir, bot, sid, r.get("consumed_line") or 0)
 
 
 if __name__ == "__main__":
