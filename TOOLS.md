@@ -17,6 +17,7 @@
 | `feishu/wmux_session.py` | 桥的 wmux 会话原语：spawn 新 workspace、执行 registry 派生的 profile command、pty_alive 探活 / close | （库 · 桥内部用） |
 | `feishu/bridge_outbox.py` | **v8 回传唯一发送引擎 drainer**：增量读 outbox → 发卡片 / 进度限流合并 / 去重；持久化本轮在线文档并在 final 列出原始 docx URL | （桥 runner 起的后台 task） |
 | `feishu/bridge_doctor.py` | 机械自愈：outbox 三态诊断 + 卡→自动重启 drainer | `python feishu/bridge_doctor.py [--bot X]` |
+| `feishu/bridge_resend_audit.py` ⭐ | **查「同一段正文被下一轮又发一遍」**（v0.12.2 事故的常备尺子·两台机同一把判据：同 anchor 连续出现且收尾卡逐轮变长；Codex bot 结构免疫→自动跳过）。**有发作 exit 1** → 可直接当巡航/CI 闸 | `python feishu/bridge_resend_audit.py`（全量）/ `--since 2026-08-17`（当闸）/ `--bot X --json` |
 | `feishu/hooks/bridge_stop.py`+`bridge_posttool.py`(+pretool, codex) | Claude 与 `cli-legacy` Codex 的 hook producer；app-server Codex 会自动 no-op | （桥 spawn 的会话自动调） |
 | `feishu/codex_app_server_probe.py` · `codex_app_server_worker.py` | Codex typed-event 只读探针；app-server worker（官方 TUI `--remote` + observer）= **所有 codex bot 的默认投递路**，typed commentary/tool 写进度、typed final 写答案，均不依赖账号 hooks | `python feishu/codex_app_server_probe.py`；生产由桥自动起（`agent_runtime.uses_app_server`·名册写 `codex_transport: cli-legacy` 才回退老路） |
 | `feishu/jsonl_reply_extract.py` | 从 transcript 提回复（`last_turn_reply` / `extract` / `progress`） | （Stop hook 用） |
