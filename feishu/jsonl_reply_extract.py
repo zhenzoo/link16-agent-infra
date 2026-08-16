@@ -32,11 +32,18 @@ def _is_real_user_message(rec):
     if rec.get("isCompactSummary"):
         return False   # 压缩摘要(「续上下文」记录)不是新 turn 边界：否则 extract/progress 走到它就提前
         # 收尾,把压缩**前**的残片当最终回复发出,压缩**后**的真答案永不发(2026-06-16 飞书桥 PORT 轮实证)
-    if rec.get("isMeta"):
+    if rec.get("isMeta") and rec.get("sourceToolUseID"):
         return False   # 技能/工具【注入】的"用户消息"(/toolify「Base directory for this skill:」·/explain 正文等·
         # isMeta=true + 带 sourceToolUseID·非人类键入)不是 turn 边界：否则它把 anchor 顶到「AskUserQuestion 问前
         # 结论」之后 → Stop 只扫 anchor 后、扫不到那段说明 → 问前说明永不发(2026-06-21 实证 content-to-exec 建 skill
-        # 轮·L598 toolify 注入夺锚·那段 3008 字说明一个字没到用户手机)。实测全部 isMeta 用户消息均注入·无 origin:human。
+        # 轮·L598 toolify 注入夺锚·那段 3008 字说明一个字没到用户手机)。
+        # ⚠️ 2026-08-16 收窄判据：旧版「isMeta 一律不算边界」把**真新 turn** 也挡了——`/loop` 定时开火
+        # (isMeta+promptSource=system+queuePriority·无 sourceToolUseID) 与 a2a 注入("Another Claude session
+        # sent a message: <agent-message …>"·同形状) 都是新 turn 起点，却不推进 anchor → anchor 冻在几十轮之前，
+        # Stop 把这期间【所有 end_turn 收尾】拼成一张越滚越大的卡、每轮重发一遍(实证 tb24-voiceover 08-16：
+        # anchor 冻在 L1210·收尾卡 1099→21176 字·21 轮全量重发)。判据改回注释里本来就写对的那条：
+        # **只有带 sourceToolUseID 的注入不算边界**；系统定时/ a2a 注入算边界。图片粘贴注记(无 src·无 promptSource)
+        # 紧贴人类那一轮·当边界无害。
     msg = rec.get("message") or {}
     content = msg.get("content")
     if isinstance(content, str):
