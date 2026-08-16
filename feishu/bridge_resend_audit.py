@@ -16,10 +16,17 @@
    结构上不可能拼接 → 直接跳过，不误报。）
 
 用法:
-  python feishu/bridge_resend_audit.py                      # 扫本机 _state 全部 bot
+  python feishu/bridge_resend_audit.py                      # 扫本机 _state 全部 bot（**全量读**）
   python feishu/bridge_resend_audit.py --since 2026-08-17   # 只看某日之后（当机械闸用）
   python feishu/bridge_resend_audit.py --bot tb24-voiceover --json
+  python feishu/bridge_resend_audit.py --tail-mb 200        # 只回看尾部 200MB（快·但会漏更早的·必打警告）
 退出码: 0 = 干净（窗口内零重发）· 1 = 有发作（可直接当 CI / 巡航闸）。
+
+⚠️ **不做静默截断**（2026-08-17 首版就栽在这·当场改）：首版为了快，默认只回看尾部 200MB，
+结果对 GB 级 outbox（xhs-autopilot 1.6GB）**把 7 月整段历史悄悄丢了** —— `--since 2026-07-01`
+报「9 次发作 / 30.3 万字」，全量重扫真实是「137 次 / 90.6 万字」，差 4.5 倍，而且输出上
+**看不出少扫了东西**。默认改成全量（1.6GB 实测 23 秒，够用）；要用 `--tail-mb` 提速，
+输出里会打「⚠️ 只扫了尾部 N MB」并在每行标 `(截断)`，JSON 里也带 `partial`。
 """
 import argparse
 import datetime
@@ -30,7 +37,6 @@ import sys
 from pathlib import Path
 
 ANSWER_HINT = '"kind": "answer"'          # 先做子串预筛，避免对 GB 级 outbox 逐行 json.loads
-TAIL_BYTES = 200 * 1024 * 1024            # 单文件最多回看这么多字节（够覆盖几个月·防 GB 级全读）
 
 
 def _state_dir():
@@ -40,13 +46,15 @@ def _state_dir():
     return Path(__file__).resolve().parent / "_state"
 
 
-def _turns(path, since_ts):
-    """outbox → [[ts, anchor, 收尾卡字数]]（同一秒的多张卡归一轮·取最长那张）。"""
+def _turns(path, since_ts, tail_bytes=0):
+    """outbox → ([[ts, anchor, 收尾卡字数]], partial)（同一秒的多张卡归一轮·取最长那张）。
+    partial=True 表示只读了尾部（更早的记录没扫）→ 调用方必须把它显式报出来，绝不静默。"""
     turns = []
     size = os.path.getsize(path)
+    partial = bool(tail_bytes) and size > tail_bytes
     with open(path, encoding="utf-8", errors="replace") as fh:
-        if size > TAIL_BYTES:
-            fh.seek(size - TAIL_BYTES)
+        if partial:
+            fh.seek(size - tail_bytes)
             fh.readline()                 # 丢掉半行
         for line in fh:
             if ANSWER_HINT not in line:
@@ -63,15 +71,15 @@ def _turns(path, since_ts):
                 turns[-1][2] = max(turns[-1][2], n)
             else:
                 turns.append([ts, rec.get("anchor"), n])
-    return turns
+    return turns, partial
 
 
-def audit(state_dir, bot=None, since_ts=None):
+def audit(state_dir, bot=None, since_ts=None, tail_bytes=0):
     out = []
     pattern = f"bridge-outbox-{bot}.jsonl" if bot else "bridge-outbox-*.jsonl"
     for f in sorted(glob.glob(str(Path(state_dir) / pattern))):
         name = os.path.basename(f)[len("bridge-outbox-"):-len(".jsonl")]
-        turns = _turns(f, since_ts)
+        turns, partial = _turns(f, since_ts, tail_bytes)
         episodes, run = [], []
         for t in turns:
             # anchor 必须是行号(int)：Codex hook 的 turn_id 是 str → 结构上不会拼接·跳过
@@ -87,6 +95,8 @@ def audit(state_dir, bot=None, since_ts=None):
             continue
         out.append({
             "bot": name,
+            "partial": partial,                            # True = 只扫了尾部·数字是下界
+            "covers_from": turns[0][0] if turns else None,  # 实际扫到的最早一轮（看覆盖够不够）
             "turns": len(turns),
             "episodes": len(episodes),
             "resends": sum(len(e) - 1 for e in episodes),
@@ -103,23 +113,29 @@ def main():
     ap.add_argument("--state-dir", default=None, help="默认 FEISHU_BRIDGE_OUTBOX_DIR 或 feishu/_state")
     ap.add_argument("--bot", default=None)
     ap.add_argument("--since", default=None, help="YYYY-MM-DD（本地时区）")
+    ap.add_argument("--tail-mb", type=int, default=0,
+                    help="只回看每个 outbox 尾部 N MB（提速·但会漏更早的·结果标 (截断)）；默认 0 = 全量读")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
     since_ts = None
     if args.since:
         since_ts = datetime.datetime.strptime(args.since, "%Y-%m-%d").timestamp()
-    rows = audit(args.state_dir or _state_dir(), args.bot, since_ts)
+    rows = audit(args.state_dir or _state_dir(), args.bot, since_ts,
+                 tail_bytes=args.tail_mb * 1024 * 1024)
     hit = [r for r in rows if r["episodes"]]
+    cut = [r for r in rows if r["partial"]]
 
     if args.json:
-        print(json.dumps({"clean": not hit, "rows": rows}, ensure_ascii=False, indent=2))
+        print(json.dumps({"clean": not hit, "partial_files": len(cut), "rows": rows},
+                         ensure_ascii=False, indent=2))
     else:
         fmt = lambda ts: datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")  # noqa: E731
         for r in rows:
             flag = "❌" if r["episodes"] else "✅"
             print(f'{flag} {r["bot"]:26s} {r["turns"]:5d} 轮 · 发作 {r["episodes"]:3d} 次 · '
-                  f'重发 {r["resends"]:3d} 轮 · 重发正文 {r["dup_chars"]/10000:.1f} 万字')
+                  f'重发 {r["resends"]:3d} 轮 · 重发正文 {r["dup_chars"]/10000:.1f} 万字'
+                  + (f'  ⚠️(截断·只扫到 {fmt(r["covers_from"])} 之后)' if r["partial"] else ""))
             for s in r["spans"][-5:]:                      # 只列最近 5 段·避免刷屏
                 print(f'      {fmt(s["from"])} → {fmt(s["to"])}  anchor=L{s["anchor"]} 冻 {s["turns"]} 轮 '
                       f'· 收尾卡 {s["grew"][0]} → {s["grew"][1]} 字')
@@ -127,6 +143,9 @@ def main():
         chars = sum(r["dup_chars"] for r in rows)
         print(f'\n合计：发作 {sum(r["episodes"] for r in rows)} 次 · 重发 {tot} 轮 · '
               f'重发正文 {chars/10000:.1f} 万字' + ("" if hit else "  ✅ 窗口内干净"))
+        if cut:
+            print(f'⚠️ {len(cut)} 个 outbox 被 --tail-mb {args.tail_mb} 截断 → 上面的数字是【下界】，'
+                  f'去掉 --tail-mb 重跑才是真实值')
     return 1 if hit else 0
 
 
