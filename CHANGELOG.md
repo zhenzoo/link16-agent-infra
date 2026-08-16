@@ -3,6 +3,26 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.12.2 — 主人一句话，bot 回一整条链的历史：Stop 的 turn 边界判据修正 + 加 turn cursor（2026-08-16）
+
+**WHY**：主人反馈「tb24-voiceover 发给我的信息有很多是重复的」。查下来不是 bot 话多——**它每句只说了一遍，是桥每轮把它说过的全部收尾重发一遍**。tb24-voiceover 挂在 `/loop` 上自跑，`bridge-outbox` 里 22 点前后的 answer 记录 anchor 全部冻在 `L1210`，收尾卡从 1099 字一路长到 22203 字、连发 21 轮；主人手机上看到的就是一句话换回一整条链的回放。
+
+**根因（两层·都在「什么算一轮的开始」上）**
+- `jsonl_reply_extract._is_real_user_message` 2026-06-21 为挡技能注入夺锚，写成「`isMeta:true` 一律不算 turn 边界」。但 Claude Code 的 **`/loop` 定时开火**与 **a2a 注入**同样是 `isMeta:true`（`promptSource:"system"` + `queuePriority`，**无** `sourceToolUseID`）——它俩是**真的新一轮**，却一起被挡了。该函数自己的注释本来就写对了判据（「isMeta + 带 sourceToolUseID」），实现漏掉了后半句。anchor 于是停在最后一条被认出的用户消息（本例是一条 `<task-notification>`）上，几十轮不动。
+- `bridge_stop._final_turn_reply` 把 anchor 之后**所有**终结态文本合成「最后一张卡」。设计假设是「anchor 之后只有一轮」；anchor 冻住后这个假设失效，卡越滚越大，且**内容每轮都变** → drainer 的 `_ans_key=hash(text)` 内容去重永远命不中 → 每轮全量重发。中段块有 `_MID_TAIL_KEEP` 防刷屏窗口，收尾块没有对应的闸。
+
+**WHAT**
+- **判据收窄回本意**：只把**带 `sourceToolUseID` 的注入**（技能/工具的伪用户消息）排除在 turn 边界外；定时开火与 a2a 注入恢复为真边界。顺带修好 a2a：此前 peer 发来的消息也不推进 anchor。
+- **加 turn cursor（结构性硬保证）**：Stop 每次只看 `行号 > cursor` 的记录，cursor = 上一次 Stop **真正取走正文的最后一行**，写 `_state/bridge-stop-cursor-<bot>.json`（与 outbox 同目录·原子落盘·换 session 自动作废）。**anchor 是启发式、会随 Claude Code 记录形状变化再次失灵；cursor 不依赖任何边界判据**——上一次扫过的正文，下一次结构上够不着。竞态超时那条路**不推进** cursor（晚落盘的 wrap-up 下轮照样补发，自愈不破）；outbox 没写成也不推进（正文不会因推进而蒸发）。
+- 文档：`ARCH-110 §2.5(2)` 补「turn cursor」与「turn 边界判据」两段。
+
+**验证**（三种异构覆盖）
+1. **真 transcript 重放**（tb24-voiceover 最后 10 个终结落点·旧码 vs 新码同一截断）：旧码 anchor 恒 `L1210`、每轮 3 卡合计 15945→24541 字且逐轮夹带往轮正文；新码 anchor 逐轮推进、每轮 825–1874 字、零夹带。
+2. **退化闸 · 逐字节回归重放**（video-studio / xhs-explore / ccp-config 三个健康 bot 的真 transcript·**每一个终结落点都比**，共 27 个）：25 个**逐字节相同**；2 个不同的都在 xhs-explore，且都被证明是**去重不是丢内容**——OLD 那张卡 = 「已发过的旧正文（854 / 941 字）」+「本轮新正文」，NEW 只发后半段（`old.endswith(new)` 成立，且多出来那段在新版链条里**上一轮已经发过**）。**「旧版发过而新版不发的新正文」= 0 张。** 顺带说明：非 loop 的普通 bot 也会中招（xhs-explore 这两次是 a2a / 系统注入推动的轮），只是量小看不出来。
+3. **live hook e2e**（子进程 + 真 env + 真 stdin）：首次 Stop 正常出卡 → 同一 transcript 重复开火不再重发 → transcript 长出下一轮后只发新一轮。
+4. 新增 `tests/test_stop_turn_cursor.py` 9 条（判据 5 条 + cursor 4 条，含「anchor 完全冻死时 cursor 仍挡得住」）；对旧码逐条失败（判据两条返回 False、卡长 368→738→1108 逐轮夹带）。全仓 **154 passed**（v0.12.1 时 145）。
+5. **生产实证**：hook 是每轮现起的进程 → 改完即生效，无需重启桥。tb24-voiceover 22:30 最后一次坏发（anchor 1210·22203 字）→ 22:37 起 anchor 变 2216/2281、每轮合计 1.4–1.6k 字，恢复正常。
+
 ## v0.12.1 — 授权闸从「装上了但谁都关不了」修到真能用 + 桥两处启动误判根治（2026-08-13）
 
 **WHY**：v0.12.0 的破坏性斜杠命令授权闸上线当晚自查就发现「闸装上了，但主人拿不到钥匙、闸也认不出 peer」——能力实际没生效；随后 TB24 又暴出桥的两处启动误判（计划任务起的桥判自己没 shell、resumed Codex thread 判未就绪）。三件事根因同一形状：**同一个判断在代码里有两套判据，且已经漂了**。本版全是修复与回归闸，无新能力。
