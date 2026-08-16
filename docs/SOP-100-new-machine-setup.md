@@ -239,14 +239,18 @@ tail -5 feishu/_logs/bridge-<某个bot>.log
 **为什么必须单独配**：桥自启只保证「消息能进来、面板能开出来」；它管不了**会话开出来之后卡住**。Claude 会话偶发撞 `API Error: 529 Overloaded` / 限流会**静止在那不动**，桥不知道、你也不知道，直到你去看才发现。**看门狗**（`xhs-card-gen/_autopilot/watchdog.py`）就是治这个：轮询 wmux **全部 workspace 的全部面板**，发现「有 API 错 + 静止 2 轮 + 没在自己重试」就往那个面板注一句「继续」+ 飞书报你去哪条线看。**覆盖全机所有 bot 线，不是只管写帖**（v0.11 起 · SSOT = `workspace.list` 实时拓扑，bot 增减自动跟随、零硬编码名单）。
 
 > 🩸 **2026-07-31 血泪**：桥有计划任务、看门狗没有 → 7-30 23:44 重启后桥 14 个 bot 全部自启，**看门狗没人拉**，全机裸奔 22 分钟；而它 7-30 17:45 才刚救过 `tb24-xhs-arch` 的同款 529。**两个都配，才叫配完了。**
+>
+> 🩸🩸 **2026-08-17 更狠的一条**：主人问「两台机的看门狗是不是都开着」，一查 **TB25 从来没有过**——仓在、`watchdog.py` 在（37KB·8-06 还改过）、但计划任务不存在、进程 0 个、`watchdog.log` 这个文件根本没被创建过 ⇒ **历史注入次数 0，18+ 个 bot 从上线起一直裸奔**。根因：v0.13（07-31）起唯一启动方式就是本节这个计划任务，在那之前靠 xhs 巡航总控 spawn，而 **TB25 从不跑 xhs 巡航** → 没有任何一条路径会拉起它。**「仓里有代码」≠「它在跑」——本节的验收第 ② ③ 步（进程数 / 日志有没有内容）就是为了戳穿这个，别只确认文件存在。**
 
 ⚠️ **前提**：这台机得有 `xhs-card-gen` 仓（看门狗代码在那）。纯 link16 机器跳过本节。
 
 ```powershell
-# ① 核对路径（照抄前先跑这三行确认都有值）
+# ① 探路径（**别写死** · 两台机布局不同：TB24 = <root>\Post\xhs-card-gen，TB25 = <root>\Post\tools\xhs-card-gen
+#    ——2026-08-17 TB25 实证：照抄写死那版在这里 Test-Path 返 False、注册不下去）
 $py   = (Get-Command pythonw).Source                     # 用 pythonw：无控制台窗口，每 10min 不闪黑框
-$repo = "$env:VIBECODING_ROOT\Post\xhs-card-gen"          # 看门狗所在仓（跨机路径靠这个 env 变量）
-$py; $repo; Test-Path "$repo\_autopilot\spawn_worker.py"  # 期望：两个路径 + True
+$repo = @("$env:VIBECODING_ROOT\Post\xhs-card-gen", "$env:VIBECODING_ROOT\Post\tools\xhs-card-gen") |
+        Where-Object { Test-Path "$_\_autopilot\watchdog.py" } | Select-Object -First 1
+$py; $repo; Test-Path "$repo\_autopilot\spawn_worker.py"  # 期望：两个路径 + True（$repo 空 = 这台没有该仓 → 跳过本节）
 
 # ② 建任务（机器无关 · 两个触发器：登录快速上岗 + 每 10min 幂等自愈）
 $action  = New-ScheduledTaskAction -Execute $py -Argument "`"$repo\_autopilot\spawn_worker.py`" ensure-watchdog" -WorkingDirectory $repo
@@ -272,6 +276,7 @@ Get-Content "$repo\_autopilot\watchdog.log" -Tail 2                             
 | `NextRunTime` 空 | 只建了登录触发器、漏了 `$t2` → 重跑 ② |
 | 进程数 = 0 且 `LastTaskResult` 非 0 | `$py`/`$repo` 不对 → 重跑 ① |
 | 看门狗活着但从不注「继续」 | 正常且是好事：要「有 API 错 + 静止 2 轮(4min) + 没在 retry」三条同时满足才注入（防自激三道闸） |
+| **对着同一个面板每 10min 注一次、注不停** | **已知缺陷（2026-08-17 · 待改三档闸）**：它只会「注继续」这一招，对**注了也没用**的错会永远空转 + 每次刷你一条飞书（实证 TB24 一个 401 面板 20:58→00:18 徒劳注 22 次）。四类错要分开对待：**① 可注**（`ECONNRESET` / `529` / `500` / `Connection closed·lost mid-response` / `Stream idle timeout`）**② 要人**（`401`/`403`/`Please run /login` → 只告警一次，说清去哪条线 `/login`）**③ 等时间**（`You've hit your weekly limit · resets <时间>` → 只告警一次 + 报恢复时刻）**④ 换会话**（`Prompt is too long` → 注继续照样炸，要 `/compact` 或开新会话）。⚠️ 两台机形状差很远：TB24 「注了没用」只占 8/145 = 5.5%（大头是 97 次 ECONNRESET），**TB25 占 30/72 = 42%**（周额度 24 + login 6）→ **TB25 上岗后近一半注入会是徒劳空转**，三档闸对它不是优化是必需品 |
 | 想临时停 | `Disable-ScheduledTask -TaskName AutopilotWatchdog-Autostart` + 手动 kill 看门狗进程（否则它还常驻着） |
 
 ---
