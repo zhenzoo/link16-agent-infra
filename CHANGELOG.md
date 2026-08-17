@@ -3,6 +3,36 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.13.1 — Claude 首启信任弹窗不再冒充就绪：新目录的第一条消息不再被吞（2026-08-17）
+
+**WHY**：主人从飞书给新仓 bot（`tuf19-agentic-cad`）发第一条消息，消息没进终端、会话停在
+Claude Code 开屏页，桥却回报「发送成功」。这不是偶发——**每个新 cwd 的第一条消息必丢**，
+而且 v0.13.0 刚把本仓推向公开，新用户 clone 后第一次起 bot **必然**命中。
+
+**根因（真机复现钉死 · Claude Code v2.1.233）**：目录信任弹窗**用和空输入框同一个 `❯`**
+画选择光标，把桥唯一的就绪判据整个骗过去。失效链：`--dangerously-skip-permissions`
+不跳目录信任 → 弹窗出现 → `is_ready` 3 秒误判就绪 → `_inject` 的正文被选择菜单整段吃掉
+（屏幕都不显示）→ 紧跟的回车选中默认项「Yes, I trust this folder」→ 目录被静默信任、
+Claude 空输入框启动 → `_composer_holds_paste` 在最后一个 `❯` 之后找不到 marker →
+判「已提交」→ **不重试、不喊人**。§2.12b 那套投递保证在这里正好反向失效。
+
+**WHAT**
+
+- **`is_ready()` 的 Claude 分支加闸**：命中信任文案、或屏上有启动弹窗 footer `Enter to confirm`
+  → 一律判未就绪。`needs_trust_confirmation()` 现在也认 Claude（原先只认 Codex），桥
+  `_wait_agent_ready` 已有的「按一次回车」分支天然生效，**桥侧零改动**。
+- **未知启动弹窗一律不放行**（如 CLAUDE.md external includes 审批）：判未就绪、超时 DM 喊人。
+  不知道哪个选项安全就绝不盲按——**宁可报错，绝不静默吞消息**。
+- **文案跨版本**：同时留老版 `Do you trust the files in this folder`（v2.1.233 已改成
+  `Yes, I trust this folder`），Claude Code 改措辞不至于把判据打漂。
+- **文档**：`docs/ARCH-110 §2.12a` 立契约，`docs/PLAN-927` 留完整实验记录。
+- **顺带**：`tests/test_sender_identity_gate.py` 与 ready 探针测试钉死子进程 `PYTHONIOENCODING`
+  —— 它们在 GBK 控制台的机器（tuf19）上此前必假红，网关与探针本身都是好的。
+
+**验证**：throwaway workspace + 两个 Claude 从没见过的新目录跑**真桥逻辑**红→绿 ——
+修前消息蒸发、`_inject` 却返回 True；修后弹窗自动按掉、**4.0s** 就绪在真 composer、
+注入落地、Claude 真答「● 信道通畅」。加 5 项异构单测（fixture = 真机抓的原屏）+ 全量 150 项回归。
+
 ## v0.13.0 — 第三台机接入 + 为公开做的上手改造：装前体检、入口文档分层、安全审查（2026-08-17）
 
 **WHY**：接第三台机（`tuf19` · ASUS TUF FX705GM · Windows 10）时，把它当成一次**真实的「新用户」实验**——
