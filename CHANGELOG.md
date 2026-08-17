@@ -180,6 +180,38 @@ Google / Slack token、Bearer 令牌、私钥、webhook URL **全部 0 命中**�
 **已知未完**（见 `docs/PLAN-926`）：S1 脱敏闸尚未执行（`agent-registry.json` 仍含 51 条真实 open_id、
 `SPEC-200` 含真实 Cloudflare account id、8 个文件共 32 行主机名/用户名）；33 篇历史文档仍缺 front matter；
 `cron-jobs/` 运营配置是否公开待主人定。**这些做完之前不要把仓库设为 public。**
+## v0.12.2 — 主人一句话，bot 回一整条链的历史：Stop 的 turn 边界判据修正 + 加 turn cursor（2026-08-16）
+
+**WHY**：主人反馈「tb24-voiceover 发给我的信息有很多是重复的」。查下来不是 bot 话多——**它每句只说了一遍，是桥每轮把它说过的全部收尾重发一遍**。tb24-voiceover 挂在 `/loop` 上自跑，`bridge-outbox` 里 22 点前后的 answer 记录 anchor 全部冻在 `L1210`，收尾卡从 1099 字一路长到 22203 字、连发 21 轮；主人手机上看到的就是一句话换回一整条链的回放。
+
+**根因（两层·都在「什么算一轮的开始」上）**
+- `jsonl_reply_extract._is_real_user_message` 2026-06-21 为挡技能注入夺锚，写成「`isMeta:true` 一律不算 turn 边界」。但 Claude Code 的 **`/loop` 定时开火**与 **a2a 注入**同样是 `isMeta:true`（`promptSource:"system"` + `queuePriority`，**无** `sourceToolUseID`）——它俩是**真的新一轮**，却一起被挡了。该函数自己的注释本来就写对了判据（「isMeta + 带 sourceToolUseID」），实现漏掉了后半句。anchor 于是停在最后一条被认出的用户消息（本例是一条 `<task-notification>`）上，几十轮不动。
+- `bridge_stop._final_turn_reply` 把 anchor 之后**所有**终结态文本合成「最后一张卡」。设计假设是「anchor 之后只有一轮」；anchor 冻住后这个假设失效，卡越滚越大，且**内容每轮都变** → drainer 的 `_ans_key=hash(text)` 内容去重永远命不中 → 每轮全量重发。中段块有 `_MID_TAIL_KEEP` 防刷屏窗口，收尾块没有对应的闸。
+
+**WHAT**
+- **判据收窄回本意**：只把**带 `sourceToolUseID` 的注入**（技能/工具的伪用户消息）排除在 turn 边界外；定时开火与 a2a 注入恢复为真边界。顺带修好 a2a：此前 peer 发来的消息也不推进 anchor。
+- **加 turn cursor（结构性硬保证）**：Stop 每次只看 `行号 > cursor` 的记录，cursor = 上一次 Stop **真正取走正文的最后一行**，写 `_state/bridge-stop-cursor-<bot>.json`（与 outbox 同目录·原子落盘·换 session 自动作废）。**anchor 是启发式、会随 Claude Code 记录形状变化再次失灵；cursor 不依赖任何边界判据**——上一次扫过的正文，下一次结构上够不着。竞态超时那条路**不推进** cursor（晚落盘的 wrap-up 下轮照样补发，自愈不破）；outbox 没写成也不推进（正文不会因推进而蒸发）。
+- 文档：`ARCH-110 §2.5(2)` 补「turn cursor」与「turn 边界判据」两段。
+
+**验证**（三种异构覆盖）
+1. **真 transcript 重放**（tb24-voiceover 最后 10 个终结落点·旧码 vs 新码同一截断）：旧码 anchor 恒 `L1210`、每轮 3 卡合计 15945→24541 字且逐轮夹带往轮正文；新码 anchor 逐轮推进、每轮 825–1874 字、零夹带。
+2. **退化闸 · 逐字节回归重放**（video-studio / xhs-explore / ccp-config 三个健康 bot 的真 transcript·**每一个终结落点都比**，共 27 个）：25 个**逐字节相同**；2 个不同的都在 xhs-explore，且都被证明是**去重不是丢内容**——OLD 那张卡 = 「已发过的旧正文（854 / 941 字）」+「本轮新正文」，NEW 只发后半段（`old.endswith(new)` 成立，且多出来那段在新版链条里**上一轮已经发过**）。**「旧版发过而新版不发的新正文」= 0 张。** 顺带说明：非 loop 的普通 bot 也会中招（xhs-explore 这两次是 a2a / 系统注入推动的轮），只是量小看不出来。
+3. **live hook e2e**（子进程 + 真 env + 真 stdin）：首次 Stop 正常出卡 → 同一 transcript 重复开火不再重发 → transcript 长出下一轮后只发新一轮。
+4. 新增 `tests/test_stop_turn_cursor.py` 9 条（判据 5 条 + cursor 4 条，含「anchor 完全冻死时 cursor 仍挡得住」）；对旧码逐条失败（判据两条返回 False、卡长 368→738→1108 逐轮夹带）。全仓 **154 passed**（v0.12.1 时 145）。
+5. **生产实证**：hook 是每轮现起的进程 → 改完即生效，无需重启桥。tb24-voiceover 22:30 最后一次坏发（anchor 1210·22203 字）→ 22:37 起 anchor 变 2216/2281、每轮合计 1.4–1.6k 字，恢复正常。
+
+**发作史（两台机 · 同一把尺子 `feishu/bridge_resend_audit.py` · 窗口 07-01 → 08-17）**
+
+| | 发作 | 重发轮 | 重发正文 | 中招 bot | 大头 |
+|---|---:|---:|---:|---|---|
+| TB24 | 137 | 465 | **90.6 万字** | 7 / 21 | xhs-autopilot 53.2 万 · voiceover 29.1 万 · tennis-post 7.1 万 |
+| TB25 | 481 | 882 | **391.5 万字** | 17 / 29 | phd-taoci 一队 8 只占 **99%**（单只最高 109.4 万字） |
+| **合计** | **618** | **1347** | **482.1 万字** | 24 / 50 | 覆盖 TB24 2000 轮 + TB25 5522 轮 |
+
+- 最早 07-13。两台机都用**全量模式**跑过、零截断警告（TB25 复核：全量与截断版三个数字一字不差——本机唯一超 200MB 的 outbox 是 `agentic-cad-codex` 582MB，而 Codex bot 本就被跳过，**截断刚好只砸在唯一不参与统计的文件上；是运气不是没问题**，换个 bot 排布就中招）。
+- **单次最惨**：TB25 `phd-taoci-10` anchor=L5104 冻 6 轮 3837→17690 字；`phd-taoci-8` anchor=L4132 单卡 19008 字；TB24 voiceover anchor=L1210 冻 21 轮 1099→22203 字。
+- **集中在 `/loop` 那批**（TB25 的 phd-taoci 队、TB24 的 voiceover / xhs-autopilot 巡航自唤醒），但**非 loop 的普通 bot 也中过招**（a2a 推动的轮：TB24 xhs-explore 2 次、tb24-link16 自己 3 次、TB25 lab/coacho/link16 各若干）。
+- **两个「口径」教训（都当场付了学费）**：① TB25 先用「>8000 字的发送」粗筛估出 130 条 / 177 万字，与真实的 391.5 万差 **2.2 倍**——粗筛既漏掉「每张不到 8k 但一直在滚」的（典型 950→1820），又把本来就长的正常回复算进来 ⇒ **判据不统一就没法对账，尺子必须是同一把代码。** ② 那把尺子的首版自己就犯了「静默截断」：默认只回看 outbox 尾部 200MB，对 1.6GB 的 xhs-autopilot 把 7 月整段丢了，`--since 07-01` 报「9 次 / 30.3 万字」而真实是「137 次 / 90.6 万字」，**差 4.5 倍且输出上完全看不出少扫了**。已改默认全量（1.6GB 实测 15–23 秒），要提速得显式 `--tail-mb N`，届时每行标 `⚠️(截断)`、末尾提示「数字是下界」。
 
 ## v0.12.1 — 授权闸从「装上了但谁都关不了」修到真能用 + 桥两处启动误判根治（2026-08-13）
 
