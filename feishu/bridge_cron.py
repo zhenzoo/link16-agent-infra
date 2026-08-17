@@ -150,8 +150,20 @@ def next_fires(expr, tz=DEFAULT_TZ, n=5, horizon_min=60 * 24 * 40):
 
 
 # ---------- 登记表 / 状态 ----------
+_ROSTER_WARNED = False
+
+
 def _roster_bots():
-    """本机名册(bridge-bots.local.json)里的 bot 名集合 —— 守护进程只跑【本机 bot】的任务·多机零撞车·不写死 hostname。"""
+    """本机名册(bridge-bots.local.json)里的 bot 名集合 —— 守护进程只跑【本机 bot】的任务·多机零撞车·不写死 hostname。
+
+    ⚠️ 空集必须喊一嗓子（2026-08-18 · tb24 挖出 · PLAN-928 §补）：这是**第二个独立的名册加载器**，
+    不走 `feishu_bridge.load_bots()` 那条 fail-closed 的路。它以前两个文件都读不到就静默 `return set()`。
+    **失败形态不对称**：桥挂了 = 消息不通，主人几分钟就发现；**cron 静默不跑 = 该发生的事没发生，
+    零信号**——而且和「任务被主人关成 OFF」这个正常状态从外部看**一模一样**，两种原因同一种沉默。
+    这里不 fail closed（守护进程硬退等于把别的正常任务也停了），改成**只警告一次**：
+    保住基线、又不刷屏，操作者一看日志就知道该建本机名册。
+    """
+    global _ROSTER_WARNED
     for fn in ("bridge-bots.local.json", "bridge-bots.json"):
         try:
             d = json.loads((HERE / fn).read_text(encoding="utf-8"))
@@ -160,6 +172,17 @@ def _roster_bots():
                 return names
         except (OSError, ValueError, KeyError):
             continue
+    if not _ROSTER_WARNED:
+        _ROSTER_WARNED = True
+        print(
+            "⚠️ CRON 守护进程：本机名册里一个 bot 都没有 → **所有定时任务都不会跑**（但进程还活着，"
+            "所以从外面看和「任务被关掉」一模一样）。\n"
+            f"   读过：{HERE / 'bridge-bots.local.json'}\n"
+            f"   　　　{HERE / 'bridge-bots.json'}（committed 模板·恒空·不是可运行名册）\n"
+            "   怎么办：cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json，"
+            "只列本机要跑的 bot。体检：python feishu/preflight.py",
+            flush=True,
+        )
     return set()
 
 
