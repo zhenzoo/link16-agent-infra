@@ -511,8 +511,10 @@ def persist_account(bot_name: str, alias: str, why: str = "") -> dict:
 
     写机器本地 overlay `feishu/bridge-bots.local.json`（整盘覆盖 committed·gitignore·每机各管各）：
     - 已有 local → 原地改该 bot 的 `profile`，并清掉 legacy 重复字段；
-    - 该机还没 local（在用 committed 名册）→ 先拿 committed `bridge-bots.json` 整盘种子出 local 再改——
-      【绝不写 committed 那本入 git 的共享名册】，账号是机器级状态。
+    - 该机还没 local → 拿 committed `bridge-bots.json` 种子出 local 再改。**PLAN-928 之后 committed
+      已是空模板（`bots: []`），所以这一步只会种出一本空名册**——不再像事故当天那样把别人机器的
+      7 只真 bot 抄进来、连上对方的飞书应用。【绝不写 committed 那本入 git 的共享名册】，
+      账号是机器级状态。
     原子写（tmp + os.replace；跨进程互斥在 S2.2 加固）。
     返回 {alias, runtime, home, roster}。未知 alias 抛 KeyError · 名册里没有该 bot 抛 ValueError。
     """

@@ -48,11 +48,15 @@ def resolve_env_path(start=None):
 
 
 def bots_config_path(project_root):
-    """bot 名册路径：机器本地 `bridge-bots.local.json` 存在则用它（**整盘覆盖** committed · gitignore ·
-    每台机各管各的 bot + cwd · 不碰入了 git 的共享文件 · 跨机零冲突）；否则用 committed `bridge-bots.json`。
+    """bot 名册路径：机器本地 `bridge-bots.local.json`（gitignore · 每台机各管各的 bot + cwd · 跨机零冲突）。
 
     语义「present = 整盘接管」而非合并：本机若起桥，**只跑** local 文件里列的 bot —— 不会去连另一台机的
-    飞书应用（同一应用两台机各连一条 WS 会撞），也不会动 committed 文件。另一台机没有 local 文件 → 行为零变化。
+    飞书应用（同一应用两台机各连一条 WS 会互相抢消息），也不会动 committed 文件。
+
+    ⚠️ local 不存在时这里仍返回 committed 路径，但**那已经是一份空模板**（`bots: []`），
+    于是 `feishu_bridge.load_bots()` 会报错停住而不是兜底跑起来 —— 这是 2026-08-17 事故后的
+    刻意设计（PLAN-928）：committed 名册里曾躺着 7 只真 tb24 bot，任何没配本机名册的机器
+    一起桥就连上了别人的应用抢消息。**别再往 committed 名册里加真 bot。**
     """
     local = Path(project_root) / "feishu" / "bridge-bots.local.json"   # link16: 桥代码在 feishu/(原 orchestrator/)
     if local.exists():

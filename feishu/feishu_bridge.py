@@ -76,15 +76,11 @@ CARD_SEND_TIMEOUT = 15
 # (典型撞 auto-compact·上下文满时提交被压缩吃掉) → doctor 必达重投+通知。取 120s：远超正常轮（含纯思考），
 # 又远早于"用户干等到放弃"。doctor 每 30s 巡一次 → 实际恢复在 ~timeout+30s 内。
 PENDING_TIMEOUT_SEC = 120
-# 单 bot 回退默认（无 bridge-bots.json 时）
-DEFAULT_BOT = {
-    "name": "default",
-    "app_id_env": "FEISHU_BRIDGE_APP_ID",
-    "app_secret_env": "FEISHU_BRIDGE_APP_SECRET",
-    "at_name": "@tb24-xhs-autopilot",
-    "cwd": str(PROJECT),
-    "agent": "claude",
-}
+# ⚠️ 这里**故意没有**「单 bot 回退默认」。曾经有过一个 DEFAULT_BOT，写死
+# FEISHU_BRIDGE_APP_ID + @tb24-xhs-autopilot —— 而 .env 是跨机同步的，于是任何一台
+# 没配名册的机器一起桥就去连【别人机器的】飞书应用。2026-08-17 实证：tuf19 首次起桥
+# 劫持 tb24 七只 bot 6.5 小时（一个飞书应用只允许一条长连接，谁先连谁得）。
+# 现在没名册 = `load_bots()` 直接报错停住，见那里的说明。
 
 # 飞书国内端点直连绕代理
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -228,18 +224,47 @@ def _apply_roster_defaults(spec, defaults):
     return merged
 
 
+def _no_roster_error(cfg):
+    """没有可运行名册时的报错文案 —— 拒绝启动是**保护**，不是故障，所以要把话说清并给出下一步。"""
+    local = PROJECT / "feishu" / "bridge-bots.local.json"
+    why = ("本机名册在，但里面一个 bot 都没列" if cfg == local
+           else f"本机没有 {local.name}（读到的是 committed 模板，那里面永远是空的）")
+    return (
+        f"\n❌ 本机没有可运行的 bot 名册 —— 桥拒绝启动。\n"
+        f"   读到：{cfg}\n"
+        f"   原因：{why}\n\n"
+        f"   为什么不兜底跑起来：每 bot = 一个飞书应用，一个应用**只允许一条长连接**，谁先连谁得。\n"
+        f"   而 .env 是跨机同步的（每台机都握有全舰队的钥匙）→ 一旦让没配名册的机器\n"
+        f"   「兜底也能跑」，它就会连上【别人机器的】应用、把对方的消息抢走。\n"
+        f"   2026-08-17 实证：tuf19 首次起桥连上了 tb24 七只 bot 的应用，两台机各连一条 →\n"
+        f"   消息被分流抢走 6.5 小时（tb24 那边并没断线，所以更难发现：只是有些消息\n"
+        f"   莫名其妙没到，投到 tuf19 的那些在那边被静默拒绝了）。\n"
+        f"   所以本机跑哪些 bot **只认 bridge-bots.local.json**，没有就停住。\n\n"
+        f"   怎么办（两步）：\n"
+        f"     1) cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json\n"
+        f"     2) 编辑它，只列【本机】要跑的 bot；本机还没有 bot 就先留 \"bots\": []，\n"
+        f"        用 feishu/register_feishu_app.py 注册时会自动往里加。\n"
+        f"   装前体检：python feishu/preflight.py    完整步骤：docs/SOP-100-new-machine-setup.md\n"
+    )
+
+
 def load_bots():
-    """返回 bot 列表。机器本地 bridge-bots.local.json 存在则【整盘覆盖】committed(每台机各管各名册+cwd·跨机零冲突)；
-    否则 committed bridge-bots.json；都没有则单 bot 回退。密钥按 *_env 从 .env 解析。
-    名册顶层 `defaults`（本机统一默认·如账号）先兜底进每个 spec，bot 自己写的键优先。"""
+    """返回 bot 列表。**只认机器本地 bridge-bots.local.json**（每台机各管各名册+cwd·跨机零冲突）。
+
+    没有它 / 里面没 bot → `_no_roster_error` 报错停住，**绝不兜底**。committed 的
+    bridge-bots.json 只是模板（bots 恒为空），留着是给人看 schema 的，不是可运行名册。
+    密钥按 *_env 从 .env 解析；名册顶层 `defaults`（本机统一默认·如账号）先兜底进每个 spec，
+    bot 自己写的键优先。
+    """
     cfg = bots_config_path(PROJECT)
     defaults = {}
+    specs = []
     if cfg.exists():
         raw = json.loads(cfg.read_text(encoding="utf-8"))
-        specs = raw.get("bots") or [DEFAULT_BOT]
+        specs = raw.get("bots") or []
         defaults = raw.get("defaults") or {}
-    else:
-        specs = [DEFAULT_BOT]
+    if not specs:
+        raise SystemExit(_no_roster_error(cfg))
     bots = []
     for s in specs:
         s = _apply_roster_defaults(s, defaults)

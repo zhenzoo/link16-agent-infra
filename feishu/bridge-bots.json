@@ -1,55 +1,13 @@
 {
-  "_README": "飞书智能体桥 committed 名册（owned-session · ARCH-110/120）。每 bot = 一个飞书应用 + 一个托管 wmux 主 session。密钥只在 .env；本文件不选择 provider home。账号身份由 agent-profiles.json 与机器本地 defaults.profiles 派生，例外只写一个 profile；禁止新增 agent/account/claude_config_dir/codex_home。每台机用 gitignored bridge-bots.local.json 整盘选择自己运行的应用，避免双机同时连同一应用。",
+  "_README": "⚠️ 这是【模板】，不是可运行名册 —— `bots` 永远保持空数组，谁都不要往这里加真 bot。原因：.env 跨机同步（每台机都握有全舰队的应用钥匙），而每 bot = 一个飞书应用、一个应用只允许一条长连接。这份文件一旦躺着真 bot，任何没配本机名册的机器一起桥就会连上【别人机器的】应用、抢走对方的消息。2026-08-17 实证：tuf19 首次起桥连上了这里登记的 7 只 tb24 bot，抢了 6.5 小时消息（PLAN-928）。现在桥【只认】gitignored 的 bridge-bots.local.json，没有它就报错停住、绝不兜底。本文件只留给人看 schema。",
+  "_how_to": "新机器：cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json，然后只列【本机】要跑的 bot。装前先跑 python feishu/preflight.py。完整步骤见 docs/SOP-100-new-machine-setup.md。",
   "_example_add_bot": {
-    "name": "ws2",
-    "app_id_env": "FEISHU_BRIDGE_WS2_APP_ID",
-    "app_secret_env": "FEISHU_BRIDGE_WS2_APP_SECRET",
-    "at_name": "@xhs总控-ws2"
+    "name": "<机器代号>-<用途>",
+    "app_id_env": "FEISHU_BRIDGE_<SLUG>_APP_ID",
+    "app_secret_env": "FEISHU_BRIDGE_<SLUG>_APP_SECRET",
+    "at_name": "@<飞书里的显示名>",
+    "cwd": "$VIBECODING_ROOT/Post/<仓库>",
+    "profile": "<agent-profiles.json 里的 profile 名>"
   },
-  "bots": [
-    {
-      "name": "tb24-xhs-autopilot",
-      "app_id_env": "FEISHU_BRIDGE_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_APP_SECRET",
-      "at_name": "@tb24-xhs-autopilot"
-    },
-    {
-      "name": "tb24-xhs-arch",
-      "app_id_env": "FEISHU_BRIDGE_ARCH_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_ARCH_APP_SECRET",
-      "at_name": "@tb24-xhs-arch"
-    },
-    {
-      "name": "tb24-xhs-explore",
-      "app_id_env": "FEISHU_BRIDGE_EXPLORE_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_EXPLORE_APP_SECRET",
-      "at_name": "@tb24-xhs-explore"
-    },
-    {
-      "name": "tb24-notes",
-      "app_id_env": "FEISHU_BRIDGE_TWITTER_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_TWITTER_APP_SECRET",
-      "at_name": "@tb24-notes",
-      "cwd": "$PROJECT/../notes"
-    },
-    {
-      "name": "tb24-ccp-config",
-      "app_id_env": "FEISHU_BRIDGE_CONFIG_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_CONFIG_APP_SECRET",
-      "at_name": "@tb24-ccp-config",
-      "cwd": "~/.claude-personal"
-    },
-    {
-      "name": "tb24-xhs-xcom",
-      "app_id_env": "FEISHU_BRIDGE_SOCIAL_MEDIA_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_SOCIAL_MEDIA_APP_SECRET",
-      "at_name": "@tb24-xhs-xcom"
-    },
-    {
-      "name": "tb24-notes-2",
-      "app_id_env": "FEISHU_BRIDGE_PODCAST_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_PODCAST_APP_SECRET",
-      "at_name": "@tb24-notes-2"
-    }
-  ]
+  "bots": []
 }

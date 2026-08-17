@@ -636,7 +636,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 **② 机器本地 bot 名册**（`feishu/bridge-bots.local.json` · gitignore · `bridge_env.bots_config_path`）：
 - 该文件**存在 = 整盘接管**——桥**只跑**它列的 bot，整盘覆盖 committed `bridge-bots.json`（**不合并**）。理由：同一飞书应用两台机各连一条 WS 会撞，所以本机必须只连自己的 bot；且本机不碰入了 git 的共享文件 → **跨机零冲突**。
-- 该文件**不存在 = 行为零变化**——用 committed `bridge-bots.json`（另一台机/CI 永远走这条·不受影响）。
+- 该文件**不存在 = 桥拒绝启动**（2026-08-17 事故后改 · PLAN-928）。committed `bridge-bots.json` 已降级成**空模板**（`bots: []`），只给人看 schema，绝不能再放真 bot。旧行为是「没有 local 就拿 committed 兜底跑」，而 committed 里当时躺着 7 只真 tb24 bot + 真 `.env` 键名，`.env` 又是跨机同步的 → **新机器一起桥就连上别人的飞书应用抢消息**（tuf19 抢了 tb24 六个半小时才被发现）。现在没名册 = `load_bots()` 打印可照做的引导后停住。
 - 模板：`feishu/bridge-bots.local.example.json`（committed）。
 
 **这台机挂个本地 bot 的完整步骤**（不需要把桥拆成独立仓库）：

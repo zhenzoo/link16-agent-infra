@@ -66,9 +66,13 @@ last_reviewed: 2026-08-17
 ### 4.2 名册
 - 名册只持久化 `profile`（或 `defaults.profiles`）。
   legacy 的 `agent` / `account` / `claude_config_dir` / `codex_home` 是**只读迁移输入**，新行不得再写。
-- 🚨 **本机没有 `bridge-bots.local.json` 时不要直接注册 bot**：注册流会拿 committed 的
-  `bridge-bots.json` **整盘做种子**，把别的机器的 bot 抄进本机名册并被本机桥拉起——
-  而同一个飞书应用同时只允许一条长连接，等于**抢掉对方正在用的连接**。先落一本只含本机 bot 的名册。
+- 🚨 **本机跑哪些 bot 只认 `bridge-bots.local.json`（gitignored），没有它桥就报错停住**。
+  committed 的 `bridge-bots.json` 是**空模板**（`bots: []`），只给人看 schema。
+  **永远不要往它加真 bot**：`.env` 跨机同步（每台机都握有全舰队钥匙）＋ 一个飞书应用只允许一条长连接
+  ⇒ 模板里一旦有真 bot，任何没配本机名册的机器一起桥就会连上**别人机器的应用**、把对方消息抢走。
+  2026-08-17 实证：tuf19 首次起桥连上 committed 里登记的 7 只 tb24 bot，抢了 6.5 小时消息才被发现
+  （tb24 那边并没断线，所以更难察觉）。详见 `docs/PLAN-928`。
+  新机器：`cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json` 再按本机情况填；
   `python feishu/preflight.py` 会检查这一项。
 
 ### 4.3 发往飞书的内容
