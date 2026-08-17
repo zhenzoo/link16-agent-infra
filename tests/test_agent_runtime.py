@@ -552,6 +552,17 @@ class ClaudeStartupPromptTests(unittest.TestCase):
         self.assertFalse(agent_runtime.is_ready(self.CLAUDE, unknown))
         self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, unknown))
 
+    def test_trust_wording_in_scrollback_is_not_a_live_modal(self):
+        # 跨机隐患：正在讨论这个 bug 的 bot，滚屏里就有这句话。只有文案、没有菜单结构
+        # → 不是弹窗：既不能判未就绪，更不能往活会话里按回车。
+        chatter = (
+            "我刚查清楚了：弹窗那行写的是 Yes, I trust this folder，\n"
+            "和空输入框共用同一个箭头，所以就绪判据被骗了。\n"
+            "❯ "
+        )
+        self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, chatter))
+        self.assertTrue(agent_runtime.is_ready(self.CLAUDE, chatter))
+
     def test_codex_and_plain_claude_composer_unchanged(self):
         # 回归：Codex 两条路和最朴素的 claude 就绪屏都不受影响。
         self.assertTrue(agent_runtime.is_ready(self.CLAUDE, "some output\n❯ "))

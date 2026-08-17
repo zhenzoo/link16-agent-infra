@@ -34,6 +34,10 @@ CLAUDE_TRUST_TEXTS = (
 # footer. We do not know which option is safe to auto-pick, so treat it as not
 # ready and let the ready wait time out into a DM: reporting beats swallowing.
 CLAUDE_BLOCKING_PROMPT_FOOTER = "Enter to confirm"
+# The trust wording can also show up as plain scrollback text — a session that merely
+# discussed this bug would otherwise look like a live modal, and the bridge would press
+# Enter into a working composer. Require the surrounding menu structure too.
+_CLAUDE_TRUST_MENU_RE = re.compile(r"(?m)^\s*❯?\s*1\.\s")
 CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
 CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
 
@@ -717,7 +721,10 @@ def needs_trust_confirmation(bot, screen: str) -> bool:
     spec = runtime_spec(bot)
     screen = screen or ""
     if spec.name == "claude":
-        return any(t in screen for t in CLAUDE_TRUST_TEXTS)
+        if not any(t in screen for t in CLAUDE_TRUST_TEXTS):
+            return False
+        return (CLAUDE_BLOCKING_PROMPT_FOOTER in screen
+                or _CLAUDE_TRUST_MENU_RE.search(screen) is not None)
     if spec.name != "codex":
         return False
     return CODEX_TRUST_TEXT in screen and "Press enter to continue" in screen
