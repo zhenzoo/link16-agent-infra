@@ -1,3 +1,21 @@
+---
+doc_type: SOP
+doc_id: SOP-121
+title: 建一个 Codex 飞书 bot（SOP-120 之上的 Codex 增量）
+status: active
+purpose: 在通用注册流程之上，列出由 Codex CLI 驱动的 bot 需要额外做的那几处。
+owns:
+  - Codex 专属的 profile 选择与名册字段
+  - app-server typed progress 与 final 的取用
+  - cli-legacy hook 回退路径
+does_not_own:
+  - 通用注册步骤（见 SOP-120）
+  - Codex 运行时机制（见 ARCH-110 §2.4.1）
+  - Codex Personal 的迁移（见 SOP-160）
+read_when:
+  - 要新建一个 Codex（而非 Claude）飞书 bot
+last_reviewed: 2026-08-17
+---
 # SOP-121 · 建一个 Feishu Codex bot（SOP-120 之上的 Codex 增量）
 
 > **一句话**：建 Codex bot = 先按 [`SOP-120`](SOP-120-feishu-register.md) 那套建 Feishu bot（OAuth 应用 / 名册 / 权限 / 拉群 / 双机），**再叠下面这几处 Codex 专属增量**。运行时差异全收束在 `feishu/agent_runtime.py`（机制见 [`ARCH-110 §2.4.1`](ARCH-110-feishu-bridge.md)），本 SOP 只做「照做清单」，不重复讲机制。

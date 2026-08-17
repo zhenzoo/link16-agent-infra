@@ -1,3 +1,22 @@
+---
+doc_type: SOP
+doc_id: SOP-160
+title: Claude Personal → Codex Personal 兼容层
+status: active
+purpose: 让 Codex Personal 复用主人维护的 Claude workflow，同时保持 Claude Code 完全可用且单一真源。
+owns:
+  - 兼容适配器的生成与放置
+  - Codex 侧复用 Claude workflow 的读取方式
+  - 升级 Codex 时必须剥代理的操作
+does_not_own:
+  - Claude 侧的任何配置（不得修改）
+  - Codex bot 的注册（见 SOP-121）
+  - profile 注册（见用户级 $agent-profile-governance）
+read_when:
+  - 要让 Codex 复用 Claude 的 skill/workflow
+  - 升级 Codex CLI 很慢
+last_reviewed: 2026-08-17
+---
 # SOP-160 · Claude Personal → Codex Personal compatibility
 
 > Goal: make Codex Personal reuse the user's maintained Claude workflows while

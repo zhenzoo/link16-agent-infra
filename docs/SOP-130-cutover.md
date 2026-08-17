@@ -1,3 +1,20 @@
+---
+doc_type: SOP
+doc_id: SOP-130
+title: 飞书桥切流：xhs 旧桥 → link16 新桥（历史）
+status: archived
+purpose: 保留 2026-06 生产桥从 xhs-card-gen/orchestrator 切到本仓 feishu/ 的操作顺序与回退方案。
+owns:
+  - 切流的前置条件、两步切换与验收
+  - 30 秒回退路径
+does_not_own:
+  - 新机器部署（见 SOP-100）
+  - 桥的机制（见 ARCH-110）
+read_when:
+  - 回溯 2026-06 那次切流是怎么做的
+note: 切流已于 2026-06-29 完成，本文保留为历史执行记录。
+last_reviewed: 2026-08-17
+---
 # SOP-130 · 飞书桥切流（xhs 旧桥 → link16 新桥）
 
 > **干什么**：把生产飞书桥从 `xhs-card-gen/orchestrator/` 切到 `link16-agent-infra/feishu/`。

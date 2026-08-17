@@ -1,3 +1,25 @@
+---
+doc_type: SOP
+doc_id: SOP-100
+title: 把飞书桥装到一台新电脑（新机器部署 runbook）
+status: active
+purpose: 新机器从 clone 到桥跑起来并配好开机自启的唯一入口操作手册。
+owns:
+  - 依赖安装顺序与验证
+  - wmux 与 RPC 客户端的就位检查
+  - 本机 .env 凭据与 bot 名册的建立
+  - 起桥与验收
+  - 开机自启（桥的计划任务 + wmux 的 Run 键）
+  - 排错速查表
+does_not_own:
+  - 注册单个 bot 的细节（见 SOP-120）
+  - 桥的内部机制（见 ARCH-110）
+  - 账号 profile 的注册（见用户级 $agent-profile-governance）
+read_when:
+  - 在一台新电脑上部署本仓
+  - 桥装不起来 / 开机不自启需要排错
+last_reviewed: 2026-08-17
+---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
 > **用途**：在一台**新机器**上从零跑起 `feishu/feishu_bridge.py`（飞书桥），挂上能被手机飞书 @ 的本机 bot，并配好**开机自启**（§9）。

@@ -1,3 +1,23 @@
+---
+doc_type: ARCH
+doc_id: ARCH-150
+title: 给智能体排定时任务：闹钟与大脑分离
+status: active
+purpose: 解释定时派活的机制（几点、派给谁、发哪句）为何与任务内容（大脑）分离，以及多机不撞的实现方式。
+owns:
+  - cron 守护进程的触发模型与热读
+  - 每 bot 一个 cron-jobs/<bot>.yaml 的划分约定
+  - 守护进程只触发本机名册内 bot 的多机隔离
+does_not_own:
+  - 任务本身要干什么（在各 bot 自己仓的 SOP 里）
+  - 桥的注入机制（见 ARCH-110）
+  - 主人开关任务的操作（见 TOOLS.md 的 feishu/cron.py）
+read_when:
+  - 要给某个 bot 加/改/停定时任务
+  - 定时任务没触发或触发到了错误的机器
+  - 改动 bridge_cron.py
+last_reviewed: 2026-08-17
+---
 # ARCH-150 · 给智能体排定时任务（CRON）—— 闹钟 vs 大脑 · 每 bot 专属 · 零硬编码
 
 > **一句话**：到点把**一句触发词**注入某个 bot 的 Claude Code 会话（= 定时替你 @ 它派活）。机制（几点·派给谁·发哪句）在 `feishu/bridge_cron.py`；**真正的活（大脑）在那个 bot 自己仓里的一份 SOP**，触发词只是把它引过去。

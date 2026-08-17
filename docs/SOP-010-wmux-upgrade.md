@@ -1,3 +1,23 @@
+---
+doc_type: SOP
+doc_id: SOP-010
+title: 在挂着大量 bot 的情况下安全升级 wmux
+status: active
+purpose: 给出升级 wmux 桌面端与 daemon 的顺序、验收与回退，避免升级把全舰队会话打断且无法恢复。
+owns:
+  - 认准正确 wmux 项目（有同名项目）
+  - 升级前必须确认的契约与方法
+  - 两条升级路径的取舍
+  - 四步验收与 10 分钟回退
+does_not_own:
+  - wmux 怎么驱动面板（见 ARCH-010）
+  - wmux 本体的功能（第三方项目）
+  - 桥的重启步骤（见 SOP-100）
+read_when:
+  - 要升级 wmux
+  - 升级后面板行为异常需要回退
+last_reviewed: 2026-08-17
+---
 # SOP-010 · 升级 wmux（桌面端 + daemon）
 
 > 配套 [`ARCH-010-wmux-orchestration.md`](ARCH-010-wmux-orchestration.md)（wmux 怎么驱动面板）。

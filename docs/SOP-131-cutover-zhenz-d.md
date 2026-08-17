@@ -1,3 +1,18 @@
+---
+doc_type: SOP
+doc_id: SOP-131
+title: 切流的本机实例化清单（历史）
+status: archived
+purpose: 保留 SOP-130 在某台机器上的偏差修正与可照敲命令。
+owns:
+  - 该机与通用切流步骤的偏差点及其 patch
+does_not_own:
+  - 通用切流步骤（见 SOP-130）
+read_when:
+  - 回溯那台机的切流细节
+note: 切流已完成，本文保留为历史执行记录。
+last_reviewed: 2026-08-17
+---
 # SOP-131 · 本机版切流清单（zhenz / D: · xhs/orchestrator → link16/feishu）
 
 > **这是什么**：[`SOP-130-cutover.md`](SOP-130-cutover.md) 的**本机实例化**。SOP-130 是通用切流步骤（按 TB25 / `E:` / 无 `tools/` 层 写的）；本机（`zhenz` / `D:` / 有 `tools/` 层）与它有 **4 处偏差**，照搬 SOP-130 会踩坑 → 本文把偏差 patch 掉、把本机硬动作写成可照敲的确切命令。

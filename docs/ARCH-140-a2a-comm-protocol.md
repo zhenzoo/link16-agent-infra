@@ -1,3 +1,24 @@
+---
+doc_type: ARCH
+doc_id: ARCH-140
+title: Agent↔Agent 通讯协议（架在飞书桥之上）
+status: active
+purpose: 定义智能体之间怎么经飞书桥互相喊话、等回复、以及回信默认回给谁。
+owns:
+  - a2a 发送与「必回文字」约定
+  - reply-wait 守望语义
+  - 默认回主人、发 peer 靠主动带戳的路由模型
+  - 一步读群
+does_not_own:
+  - 桥本体的注入与回传（见 ARCH-110）
+  - bot 怎么注册与进群（见 SOP-120）
+  - 定时触发（见 ARCH-150）
+read_when:
+  - 要让一个 agent 去喊另一个 agent 干活
+  - 回信发错对象 / 等不到回复
+  - 改动 send_feishu_msg.py 的寻址或等待逻辑
+last_reviewed: 2026-08-17
+---
 # ARCH-140 · Agent↔Agent 通讯协议（a2a comm）—— 新模型「默认回主人 · 发 peer 靠主动带戳」
 
 > **类型**：ARCH（讲它怎么运转）· band 1xx = feishu 桥

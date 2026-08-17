@@ -1,3 +1,23 @@
+---
+doc_type: ARCH
+doc_id: ARCH-120
+title: Agent profile 运行档案与 worker 身份继承
+status: active
+purpose: 定义一个会话/worker 用哪个账号运行、身份从哪里来、以及为什么禁止从环境反推身份。
+owns:
+  - profile → runtime/home/launcher 的解析契约
+  - LINK16_AGENT_PROFILE 的继承规则与 fail-closed 时机
+  - 独立 wmux worker 与原生 subagent 的边界划分
+does_not_own:
+  - profile 的实际取值（见 feishu/agent-profiles.json）
+  - 注册新 profile 的步骤（见用户级 $agent-profile-governance）
+  - 桥的收发机制（见 ARCH-110）
+read_when:
+  - 新增账号 / 新增 worker 接入
+  - 出现「起错号」「串账号」类症状
+  - 改动 agent_runtime.py 或 agent_profile_cli.py
+last_reviewed: 2026-08-17
+---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
 > **状态**：v1 目标契约 · 2026-07-31 Publisher 拍板

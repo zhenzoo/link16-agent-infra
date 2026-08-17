@@ -1,3 +1,28 @@
+---
+doc_type: ARCH
+doc_id: ARCH-110
+title: 飞书桥：@bot 注入、v8 回传链、多 bot 模型与自愈
+status: active
+purpose: 解释一条飞书消息如何变成本机 agent 会话里的一次执行，以及执行结果如何回到飞书。
+owns:
+  - @bot → 会话注入的完整链路
+  - 回传 v8（hook → outbox → drainer）的事件驱动模型
+  - 回复呈现形态：互动卡片、进度合并、长文分条、必达兜底
+  - 多 bot 一进程一长连接的模型与会话重生
+  - 路由元数据信封（DM 回主人 vs 群回群）
+  - 媒体与在线文档通道
+does_not_own:
+  - 注册一个 bot 的操作步骤（见 SOP-120 / SOP-121）
+  - 装机步骤（见 SOP-100）
+  - agent 之间怎么对话（见 ARCH-140）
+  - 定时派活（见 ARCH-150）
+  - profile 怎么选（见 ARCH-120）
+read_when:
+  - 改动 feishu_bridge.py 或回传链任一环
+  - 飞书侧收不到 / 回复格式不对 / 卡片不更新
+  - 要理解某条消息为什么回给了这个人
+last_reviewed: 2026-08-17
+---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
 > **职责**：Publisher 手机/飞书 ↔ 电脑上 Claude 会话的**双向对话**。每个智能体（bot）= 飞书群里一个**常驻身份** + 桥**自己托管的一个 wmux 会话**。你在手机上 @ 它，它就把活交给它在电脑上专属的那个 Claude。
@@ -440,6 +465,37 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 **向后兼容**：`spawn(name, cmd, cwd, shell_init)` 签名 / 返回值不变 → autopilot（走 `spawn_worker.py` 的 split-here · 不经 `wmux_session.spawn`）零影响。
 
 **验证（2026-06-18）**：开新 workspace 真 claude 端到端 —— `cd "D:/410_VibeCoding/Yoach"` 独立一行、顶层 shell 与 claude 都落在 Yoach、就绪 **5.76s**（旧 bug 起步空等 66s）。
+
+---
+
+## § 2.12a · 新目录首启：Claude 的信任弹窗不能当就绪（2026-08-17 根治「新仓第一条消息必丢」· PLAN-927）
+
+> 一句话：Claude Code 的目录信任弹窗**用和空输入框同一个 `❯` 画选择光标**，桥的 ready 判据被它骗过 → 消息被弹窗吞掉、回车顺手把「信任」按了 → 会话停在开屏页、主人以为消息发出去了。现在 ready 判据先排除弹窗，桥自动按一次回车接受信任再等真 composer。
+
+**弹窗真容（v2.1.233 真机抓屏）**——注意实际文案是 `Yes, I trust this folder`，不是老版的 `Do you trust the files…`：
+
+```
+ Quick safety check: Is this a project you created or one you trust? …
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+ Enter to confirm · Esc to cancel
+```
+
+**为什么会静默丢消息**（每个新 cwd 的**第一条**必丢·确定性、非偶发）：
+
+1. `--dangerously-skip-permissions` **不跳目录信任**，新目录首启必弹。
+2. `is_ready()` 只认 `❯` → spawn 后 ~3s 就判就绪。
+3. `_inject()` paste 的正文被选择菜单整段吞掉（屏幕都不显示），紧跟的回车选中默认项「Yes, I trust this folder」→ 目录被静默信任、Claude 正常启动、**输入框空的**。
+4. `_inject()` 的闭环校验在最后一个 `❯` 之后找不到 marker → 判「已提交」→ **不重试、不喊人**（§2.12b 那套保证在这里正好反向失效）。
+
+**契约（SSOT 在 `agent_runtime.py`）**：
+
+- `is_ready(claude, screen)`：屏上有 `Enter to confirm` 这个弹窗 footer，或命中信任文案 → **一律不就绪**。
+- `needs_trust_confirmation(claude, screen)`：只认**信任弹窗**（默认项就是「信任」，按回车安全）。桥 `_wait_agent_ready` 已有的按一次回车分支对 Claude 天然生效，无需改桥。
+- **其它未知启动弹窗**（如 CLAUDE.md external includes 审批）→ 判未就绪、让它超时 DM 喊主人。**不知道哪个选项安全就绝不盲按**：宁可报错，绝不静默吞消息。
+- 文案匹配同时留了老版 `Do you trust the files in this folder`，Claude Code 改措辞不至于把判据打漂。
+
+**验证（2026-08-17 · throwaway workspace 真机红→绿）**：全新目录 A 用旧码 → 消息 `TRUSTLAB-PROBE` 人间蒸发、屏幕停在开屏页、`_inject` 却返回 True；全新目录 B 用新码 → 弹窗被自动按掉、4.0s 就绪在真 composer、注入落地、Claude 真回 `● 信道通畅`。
 
 ---
 

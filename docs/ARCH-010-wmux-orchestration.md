@@ -1,3 +1,24 @@
+---
+doc_type: ARCH
+doc_id: ARCH-010
+title: wmux 多窗口编排：daemon RPC、面板驱动与确切信号
+status: active
+purpose: 解释桥怎么经 wmux daemon 开出/驱动/判活终端面板，以及为什么判面板死活必须靠探针而不是读屏。
+owns:
+  - wmux daemon 的 RPC 调用面与 workspace 生命周期
+  - split-here 与跨 workspace 写的守卫
+  - probe/kickoff 确切信号原语与判活口径
+  - 历史失败记录（哪些路走不通及原因）
+does_not_own:
+  - wmux 本体的安装与升级步骤（见 SOP-010）
+  - 飞书侧的收发与回传（见 ARCH-110）
+  - 面板里跑哪个 agent 账号（见 ARCH-120）
+read_when:
+  - 改动 wmux_session.py 或任何面板驱动逻辑
+  - 面板起不来 / 判活不准需要定位
+  - 评估某个 wmux 新 API 能不能用
+last_reviewed: 2026-08-17
+---
 # WMUX 多窗口编排 · 交接文档（成功方案 + 失败记录）
 
 > 建档 2026-06-08 · 作者：orchestrator Claude（跑在 wmux 之外、拿不到 workspace 身份的那个 session）
