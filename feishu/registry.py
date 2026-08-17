@@ -24,7 +24,12 @@ import re
 import sys
 from pathlib import Path
 
-REGISTRY_PATH = Path(__file__).resolve().parent / "agent-registry.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bridge_env import registry_path  # noqa: E402  （路径解析唯一入口·local→committed→example）
+
+# 名册实际路径。**别再在别处自己拼这个路径** —— 2026-08-17(PLAN-926 §S1.1) 之前三个文件各拼各的，
+# 一旦 local 覆盖启用就会出现「写进 local、却从 committed 读」的错位。统一走 bridge_env.registry_path()。
+REGISTRY_PATH = registry_path()
 
 
 def load_registry() -> dict:
@@ -184,7 +189,21 @@ def _fmt_rows(agents: list[dict]) -> str:
     return "\n".join(out)
 
 
+def _force_utf8_stdout() -> None:
+    """中文 Windows 的控制台默认 GBK(cp936)，打不出表格里的 ✓/★ → UnicodeEncodeError 整个命令崩掉。
+    2026-08-17 在第三台 tuf19 实测：`registry.py peers <仓> --exclude-machine <机>` 直接抛异常，
+    而 /push 的 repo-sync 第 7 步正是调它 → 崩了就等于跨机通知链断掉。
+    这里把 stdout 顶成 UTF-8（errors=replace 兜底），跨机器、跨 shell(Git-Bash/PowerShell/cmd) 都稳。"""
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "")
+    if enc != "utf8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — 重配失败不该挡住查询本身
+            pass
+
+
 def _emit(obj, as_json: bool, human_render):
+    _force_utf8_stdout()
     if as_json:
         print(json.dumps(obj, ensure_ascii=False, indent=2))
     else:

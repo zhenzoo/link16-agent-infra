@@ -60,6 +60,37 @@ def bots_config_path(project_root):
     return Path(project_root) / "feishu" / "bridge-bots.json"
 
 
+def registry_path():
+    """跨机 agent 目录（谁是谁 / 在哪台机 / 分管哪个仓 / open_id）的**唯一路径解析入口**。
+
+    为什么要有这个函数（2026-08-17 · PLAN-926 §S1.1）：本仓准备设为 public，而
+    `agent-registry.json` 里是全舰队 51 条真实 open_id + 主机名 —— 公开等于把内网拓扑发出去。
+    解法照抄本文件上面 `bots_config_path` 已经验证过的「local 覆盖 committed」双层套路，
+    但**路径解析原先散在三处各拼各的**（`registry.py` / 本文件 `_may_send_as` / `register_feishu_app.py`），
+    三处不一致就会「读的和写的不是同一个文件」→ 登记完查不到。收到这里统一。
+
+    解析顺序（先命中先用）：
+      ① 环境变量 `LINK16_AGENT_REGISTRY` —— 显式 override（测试 / 特殊部署）
+      ② `feishu/agent-registry.local.json` —— **本机真数据**（gitignore · 跨机靠 envsync 同步，不靠 git）
+      ③ `feishu/agent-registry.json` —— committed 本（迁移期仍在；PLAN-926 §S1.1 阶段③ 会摘出 git）
+      ④ `feishu/agent-registry.example.json` —— 脱敏样例（让**陌生人 clone 完**不至于直接崩，
+         并且看得到 schema 长什么样；他自己 `cp` 一份成 local 就能用）
+
+    ⚠️ **语义是「整盘接管」不是合并** —— 与 `bots_config_path` 一致。不合并的理由：阶段③ 之后
+    committed 那本是**假数据样例**，一合并就会把样例里的假 bot 混进真舰队。
+    ⚠️ 迁移期安全性：另外两台机还没有 local 文件 → 命中 ③ → **行为与改动前完全一致、零风险**。
+    """
+    override = (os.environ.get("LINK16_AGENT_REGISTRY") or "").strip()
+    if override:
+        return Path(override)
+    here = Path(__file__).resolve().parent
+    for name in ("agent-registry.local.json", "agent-registry.json", "agent-registry.example.json"):
+        p = here / name
+        if p.exists():
+            return p
+    return here / "agent-registry.json"   # 都没有 → 回 committed 名，让调用方报「找不到」而不是报个怪路径
+
+
 def resolve_wmux_rpc(project_root):
     """wmux-rpc.js 路径（连 wmux daemon 的 node 客户端 · 桥/wmux_session 跑 `node <这个> rpc …`）。
 
@@ -101,7 +132,7 @@ def _may_send_as(me):
     留给将来编排者【合法】代发多 bot 的口子（职责·非冒用）；现状全空 = 严格等值。
     best-effort：名册缺失/格式异常/任何错 → 返回空集（从严·绝不因读名册失败而放宽闸）。"""
     try:
-        reg = Path(__file__).resolve().parent / "agent-registry.json"
+        reg = registry_path()          # 统一解析（local → committed → example）· 见本文件 registry_path()
         data = json.loads(reg.read_text(encoding="utf-8"))
         for a in data.get("agents", []):
             if _norm_bot(a.get("name")) == _norm_bot(me):

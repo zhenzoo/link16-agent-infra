@@ -1,6 +1,11 @@
 # 机器本地 bot 名册（每台机各管各的·整盘覆盖 committed bridge-bots.json）
 feishu/bridge-bots.local.json
 feishu/bridge-cd-bookmarks.local.json
+# 跨机 agent 目录的【真数据】（含全舰队 open_id + 主机名·本仓将设 public·绝不入库）
+# 样例见 feishu/agent-registry.example.json；解析顺序见 feishu/bridge_env.py 的 registry_path()
+# 迁移状态：PLAN-926 §S1.1 阶段① 已落（能力就位）；committed 的 agent-registry.json 仍是三台机的现役本，
+# 待三台机各自 cp 出 local（阶段②）后再 git rm --cached（阶段③）。跨机同步届时改走 envsync。
+feishu/agent-registry.local.json
 # 改名册前留的本机备份（含本机 cwd·跨机会打架·绝不入库）· 注：gitignore 不支持行尾注释，注释必须独占一行
 feishu/*.local.json.bak*
 

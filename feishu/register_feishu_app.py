@@ -25,6 +25,7 @@ Claude 注册完把它【发给 Publisher】，Publisher 点开 → **全部勾�
 import argparse
 import os
 import re
+import socket
 import sys
 from pathlib import Path
 
@@ -96,24 +97,59 @@ def _bot_identity(app_id, app_secret):
         return None, None
 
 
+def _resolve_machine(slug, name, machines):
+    """这条 bot 属于哪台机 —— 数据驱动，**不硬编码机器名**。
+
+    2026-08-17 接第三台 tuf19 时改：老代码是 `"tb24" if 名字像tb24 else "tb25"`，
+    等于把「世界上只有两台机」写死进逻辑；第三台注册出来会被默默登记成 tb25，
+    而 machine 字段是 repo-sync 跨机路由的依据（registry.py peers --exclude-machine），
+    登错 = /push 完通知错人。改成三级判定，加第 N 台机只需往 machines 加一条、不动代码：
+
+      ① bot 名 / slug 前缀命中 machines 的某个 key（惯例 `<machine>-<用途>`，如 tb25-link16 / tuf19-cad）
+      ② 命中不了 → 按本机 hostname 反查 machines[*].hostname
+      ③ 再不行 → 返回空串 + 让调用方警告，交人补；**绝不再瞎猜一台**
+    """
+    keys = sorted((machines or {}), key=len, reverse=True)   # 长 key 先比，防 "tb2" 误吃 "tb25"
+    lname = (name or "").lower()
+    for k in keys:
+        if lname.startswith(k.lower() + "-") or slug.startswith(k.upper().replace("-", "_") + "_"):
+            return k
+    host = socket.gethostname().lower()
+    for k, v in (machines or {}).items():
+        if str((v or {}).get("hostname") or "").lower() == host:
+            return k
+    return ""
+
+
 def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"):
     """建完【自动】往 agent-registry.json 补一条 stub —— 把「登记协议」从『靠人记得回写』变成『脚本自动做』。
     open_id/显示名现查·verified 按是否查到·幂等(已有同名跳过)。repo/machine 让运行的 agent 核对补全(脚本不知道它管哪个仓)。"""
     import json
-    reg = Path(__file__).resolve().parent / "agent-registry.json"
+    # 路径统一走 bridge_env.registry_path()（local→committed→example）——**别在这里自己拼**：
+    # 写进 committed、却从 local 读（或反过来）= 注册完查不到。见 PLAN-926 §S1.1。
+    from bridge_env import registry_path
+    reg = registry_path()
     if not reg.exists():
-        print("\n⚠️ 没找到 agent-registry.json → 跳过自动登记（请手动加一条）", flush=True)
+        print("\n⚠️ 没找到 agent 名册（agent-registry.local.json / .json / .example.json 都不在）"
+              " → 跳过自动登记（请手动加一条）", flush=True)
         return None
     oid, disp = _bot_identity(app_id, app_secret)
     name = disp or cli_name
     slug = (bot_arg or "").upper().replace("-", "_")
     send_key = slug.lower().replace("_", "-") if slug else (name or "")
-    machine = "tb24" if (slug.startswith("TB24") or name.startswith("tb24")) else "tb25"
     try:
         data = json.loads(reg.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         print(f"\n⚠️ agent-registry.json 解析失败({e}) → 跳过自动登记（手动加）", flush=True)
         return None
+    machines = data.get("machines", {})
+    machine = _resolve_machine(slug, name, machines)
+    if not machine:
+        print(f"\n⚠️ 判不出 '{name}' 在哪台机：bot 名前缀没命中 machines 的任何 key，"
+              f"本机 hostname '{socket.gethostname()}' 也没在名册登记过。"
+              f"\n   → machine 先留空，**请手工补**（已知机器：{', '.join(sorted(machines)) or '(空)'}）。"
+              f"\n   正解通常是把 bot 起成 `<machine>-<用途>`（如 tuf19-cad），或给本机那条补 hostname。",
+              flush=True)
     if any(a.get("name") == name for a in data.get("agents", [])):
         print(f"\n✅ agent-registry.json 已有 '{name}' → 跳过（幂等·没重复加）", flush=True)
         return next(a for a in data.get("agents", []) if a.get("name") == name)
