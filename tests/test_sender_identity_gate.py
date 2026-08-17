@@ -102,6 +102,9 @@ class GateIntegration(unittest.TestCase):
     def test_all_four_tools_block_impersonation(self):
         env = dict(os.environ)
         env["FEISHU_BRIDGE_SESSION"] = "tb25-link16"        # 我是 link16
+        # 管道里子进程按本机 locale 编码写（tuf19 是 GBK），这边按 utf-8 解 → 断言只拿到乱码。
+        # 钉死子进程的输出编码，这条测试才跨机器成立。
+        env["PYTHONIOENCODING"] = "utf-8"
         for tool, extra in _TOOLS.items():
             with self.subTest(tool=tool):
                 r = subprocess.run(
