@@ -3,6 +3,69 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.13.0 — 第三台机接入 + 为公开做的上手改造：装前体检、入口文档分层、安全审查（2026-08-17）
+
+**WHY**：接第三台机（`tuf19` · ASUS TUF FX705GM · Windows 10）时，把它当成一次**真实的「新用户」实验**——
+结果四个卡点里**只有一个是纯代码 bug，另外三个全是文档与防护缺口**，也就是说下一个人还会原样再踩一遍。
+与此同时主人决定把本仓**设为 public** 去对外推广，于是「上手门槛」和「能不能安全公开」变成同一件事的两面。
+本版全部是**上手性、健壮性与文档治理**，桥的运行时行为零改变。
+
+**WHAT**
+
+- **`feishu/preflight.py` —— 装桥【之前】的只读体检（新增）**：9 项逐个打勾并给可直接粘贴的修复命令，
+  覆盖 Python / lark 依赖 / node / **wmux 在不在跑** / **stdout 编码是不是 UTF-8** / `.env` 可达 /
+  **本机 bot 名册在不在** / agent 目录名册 / agent CLI。与 `bridge_doctor.py` 分工明确：那个管装好【之后】
+  的 outbox 诊断，这个管装【之前】的环境。它自身第一件事是把 stdout 顶成 UTF-8 并**先记下原始编码**，
+  否则会出现「体检工具被它要检查的编码坑搞崩」的鸡生蛋。
+- **名册播种陷阱变成机械检查**：本机没有 `bridge-bots.local.json` 时，`agent_runtime._update_local_roster`
+  会拿 committed 的 `bridge-bots.json` **整盘做种子**（`feishu/agent_runtime.py:474`）——而那里面是**另一台机的 7 只 bot**，
+  且 local 名册语义是「整盘接管」⇒ 它们会被本机桥拉起，**抢掉对方正在用的飞书长连接**（一个应用只允许一条）。
+  这次靠人工先落空名册才绕开；现已写进 preflight 的红项、`AGENTS.md` §4.2 和 README。
+- **名册路径解析收口（`feishu/bridge_env.py` 新增 `registry_path()`）**：原先
+  `registry.py` / `bridge_env._may_send_as` / `register_feishu_app.py` **三处各拼各的路径**，
+  一旦启用 local 覆盖就会出现「写进 local、却从 committed 读」的错位。统一为
+  `LINK16_AGENT_REGISTRY` → `agent-registry.local.json` → `agent-registry.json` → `agent-registry.example.json`。
+  **本版仅落地能力，三台机行为零变化**（local 文件尚未创建 → 仍命中 committed）。
+- **入口文档按 SPEC-010 重新分层**：`AGENTS.md` 原是 `Link16 Codex Guide`（Codex 专属口吻，违反
+  「AGENTS = runtime-neutral」），而 `CLAUDE.md` 把架构又写了一遍且与之不一致，**文档地图只有 CLAUDE.md 有
+  ⇒ Codex session 读 AGENTS.md 根本看不到文档在哪**。现改为：`AGENTS.md` = 共享正文的唯一家
+  （身份 / 结构 / 两个 registry 两本名册的分工 / 硬边界 / 验证 / 文档地图 / 文档规范）+ 末尾明确标记的
+  「Codex 适配层」；`CLAUDE.md` 瘦成 Claude 适配层并路由回 AGENTS.md，不再 fork 共享正文。
+- **`README.md` 重写**：原 34 行且**四处论断已作废**（「抽离进行中」「Phase 2A」「生产仍跑旧桥」「跨 2 台机」），
+  两个链接指向已改名的文件，且**零条命令**。新版补上：它到底解决什么问题（一张消息流向图）、
+  **wmux 是硬依赖**（仓库地址 + 官网 + 更新方式 + 挂着 bot 时的安全升级路）、5 步快速开始、
+  按「我想干什么」路由的文档地图、两本名册的区别与播种陷阱警告、Windows-only 等边界。
+- **`feishu/requirements.txt` 去过期**：原文写着 `orchestrator/` 路径、指向已不存在的 `SETUP-new-machine.md`、
+  声称 `wmux-rpc.js` 必须手动放（2026-06-17 已修成仓库自带）、还提早已被 profile launcher 取代的「ccp 别名」。
+  改为如实列出三样 pip 装不了的依赖（wmux / Node / agent CLI）并各自给地址与更新方式。
+- **`docs/PLAN-926-public-onboarding.md`（新增）**：对外开放前的改造计划 + 安全审查结论，含**公开前脱敏闸**。
+- **注册器机器判定修复的生产验证**（承 v0.12.x 的 `_resolve_machine`）：三只新 bot 全部被正确登记为
+  `machine=tuf19`——换作旧代码（写死「非 tb24 即 tb25」）会一律登记成 tb25，而 machine 字段是跨机
+  repo-sync 的路由依据，登错 = `/push` 后通知错机器。
+- **`agentic-cad` 登记为共享仓**：判据统一为「在云端账号上有远端仓库」，与几台机器上有它无关。
+
+**安全审查（为公开做的全量审查 · 2026-08-17）**
+
+扫描全部 150 个 commit 的所有 blob：**零凭据泄漏** —— 飞书 `APP_SECRET`、OpenAI / GitHub PAT /
+Google / Slack token、Bearer 令牌、私钥、webhook URL **全部 0 命中**，`.env` 类文件从未被提交过。
+命中的只有身份标识符：`cli_` app_id（2 个文件）与 `ou_` open_id（3 个文件）——**两者都不是凭据**，
+拿到无法认证或调用 API。**结论：泄漏面是拓扑不是权限 ⇒ 不重写历史、不另开仓库，只清当前树。**
+
+> ⚠️ **方法学教训（值得记住）**：第一遍扫描**全部返回 0**，差点误判「仓库很干净」。根因是在 `grep -E`
+> （扩展正则）里写了 `\{20,\}` 这种**基础正则**的花括号转义——ERE 下 `\{` 是字面花括号，于是**静默零命中**。
+> 是靠「阳性对照」（HEAD 里明知有 51 条 `ou_`，扫描却报 0）才戳穿的。
+> **任何『全绿』的安全扫描，必须先用一个已知阳性样本验证扫描器本身。**
+
+**验证**：全仓 **145 passed + 10 subtests**（与 v0.12.1 持平，无回归）；`feishu/` 下 **32 个模块逐个 import 零失败**；
+`preflight.py` 在 tuf19 上 **9/9 通过**；`registry.py` 的 `whois` / `peers` / `is-shared` / `list` 四条路径正常，
+`peers link16-agent-infra --exclude-machine tuf19` 仍能正确解析出另外两台机的 4 只 peer（跨机通知链未断）；
+`registry_path()` 解析结果仍是 `agent-registry.json`（= 与改动前读同一个文件，行为等价）；
+三只 bot 桥进程在跑、日志无 `Traceback`/`ERROR`，a2a 按名字解析 open_id 对三台机的 bot 全部成功。
+
+**已知未完**（见 `docs/PLAN-926`）：S1 脱敏闸尚未执行（`agent-registry.json` 仍含 51 条真实 open_id、
+`SPEC-200` 含真实 Cloudflare account id、8 个文件共 32 行主机名/用户名）；33 篇历史文档仍缺 front matter；
+`cron-jobs/` 运营配置是否公开待主人定。**这些做完之前不要把仓库设为 public。**
+
 ## v0.12.1 — 授权闸从「装上了但谁都关不了」修到真能用 + 桥两处启动误判根治（2026-08-13）
 
 **WHY**：v0.12.0 的破坏性斜杠命令授权闸上线当晚自查就发现「闸装上了，但主人拿不到钥匙、闸也认不出 peer」——能力实际没生效；随后 TB24 又暴出桥的两处启动误判（计划任务起的桥判自己没 shell、resumed Codex thread 判未就绪）。三件事根因同一形状：**同一个判断在代码里有两套判据，且已经漂了**。本版全是修复与回归闸，无新能力。
