@@ -110,9 +110,44 @@ def _ts():
     return time.strftime("%H:%M:%S")
 
 
+def _force_utf8_std():
+    """把 stdout/stderr 顶成 UTF-8 —— 桥的日志里全是 ✅❌⏳📌，中文 Windows 打不出来会【崩掉整条消息链】。
+
+    根因：`cmd_start` 把日志文件句柄交给子进程当 stdout，子进程（非 tty）按 locale 编码写 = cp936(GBK)，
+    于是 `blog()` 里一个 ❌ 就抛 UnicodeEncodeError。**实证不是理论风险**：tb24 的
+    `_logs/bridge-tb24-xhs-autopilot.log` 里，`blog()` 第 115 行抛 gbk 编码错 → 冒泡到
+    lark_channel 的 handler → 「FeishuChannel: handler for %r raised」= 那条飞书消息整个没处理。
+    连带 `_webhook_fallback` 也中招：日志抛错被它外层 except 吞成「兜底失败」，
+    **消息其实已经发出去了，却记成 delivered=False**。
+
+    改 stdout 而不是改每一处 print：`blog()` 只是众多出口之一，飞书 SDK 自己的 logger 也写 stderr，
+    逐个 print 打补丁堵不完。`reconfigure` 是**原地改**这两个流对象，所以早已持有引用的
+    logging handler 也一起生效。errors="replace" 兜底：真遇到编码不了的字符就打问号，绝不再崩。
+    与 `registry.py._force_utf8_stdout()` 同一套路（2026-08-17 PLAN-926 先在那边验过）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if enc == "utf8":
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):   # 重配失败不该挡住桥启动
+            pass
+
+
 def blog(name, msg):
-    """带时间戳的桥日志（flush · 给 bridge-<bot>.log）。"""
-    print(f"[{_ts()}][{name}] {msg}", flush=True)
+    """带时间戳的桥日志（flush · 给 bridge-<bot>.log）。**绝不因编码抛错**。
+
+    第二层保险：`main()` 已经把 stdout 顶成 UTF-8，但本模块也会被别的工具 import（那条路不过 main），
+    此时 stdout 可能仍是 GBK。日志抛错的代价太大——`_webhook_fallback` 会把它吞成「兜底失败」，
+    于是消息明明发出去了却记成没送达。所以这里降级成打问号，也绝不让一行日志掀翻调用方。
+    """
+    line = f"[{_ts()}][{name}] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        enc = (getattr(sys.stdout, "encoding", "") or "utf-8")
+        print(line.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 # a2a 消息里发信方自盖的戳 [飞书_from_<发>_to_<收>]（send_feishu_msg 盖·用【名字】非 open_id）。
@@ -2589,6 +2624,7 @@ def cmd_doctor(bot_filter=None):
 
 
 def main():
+    _force_utf8_std()          # 必须在任何输出 / SDK logger 建起来之前（见函数注释：tb24 真崩过）
     ap = argparse.ArgumentParser(description="飞书智能体桥（owned-session 多 bot · 每 bot 一进程 · ARCH-101）")
     ap.add_argument("cmd", nargs="?", default="start",
                     choices=["run", "start", "stop", "status", "workspaces", "send", "doctor"],
