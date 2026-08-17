@@ -84,6 +84,9 @@ class AgentProfileTests(unittest.TestCase):
 
     def test_public_ready_probe_supports_claude_and_codex(self):
         cli = ROOT / "feishu" / "agent_profile_cli.py"
+        # 屏幕样本带 `❯` / `›`：子进程按本机 locale 解 stdin（tuf19 是 GBK）会直接崩，
+        # 探针看起来「判未就绪」其实是根本没读到屏。钉死编码，这条测试才跨机器成立。
+        utf8_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         samples = {
             "cck": "Claude Code\n❯",
             "cxp": "OpenAI Codex\npermissions: YOLO mode\n›",
@@ -95,6 +98,7 @@ class AgentProfileTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 encoding="utf-8",
+                env=utf8_env,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
         not_ready = subprocess.run(
@@ -491,6 +495,69 @@ class CodexCanaryRuntimeTests(unittest.TestCase):
             remote,
             "OpenAI Codex\n› a real user draft\n",
         ))
+
+
+class ClaudeStartupPromptTests(unittest.TestCase):
+    """PLAN-927 · Claude 首启目录信任弹窗把 ready 判据骗过去 → 第一条消息被吞。
+
+    两段 screen 都是 2026-08-17 throwaway workspace 真机抓的原文（Claude Code v2.1.233）。
+    """
+
+    CLAUDE = {"name": "trustlab", "agent": "claude"}
+
+    TRUST_SCREEN = (
+        "───────────────────────────────────────────────────────────────\n"
+        " Accessing workspace:\n\n"
+        " C:\\Users\\ZhuZhen\\AppData\\Local\\Temp\\claude\\scratchpad\\trustlab-a\n\n"
+        " Quick safety check: Is this a project you created or one you trust?\n\n"
+        " Claude Code'll be able to read, edit, and execute files here.\n\n"
+        " ❯ 1. Yes, I trust this folder\n"
+        "   2. No, exit\n\n"
+        " Enter to confirm · Esc to cancel"
+    )
+
+    COMPOSER_SCREEN = (
+        "╭─── Claude Code v2.1.233 ──────────────────────────────╮\n"
+        "│                Welcome back Zyu Zan!                  │\n"
+        "╰───────────────────────────────────────────────────────╯\n"
+        "                                     ◉ xhigh · /effort\n"
+        "───────────────────────────────────────────────────────\n"
+        "❯ "
+    )
+
+    def test_trust_prompt_is_not_ready_even_though_it_paints_the_ready_mark(self):
+        # 这就是 bug 本体：弹窗的选择光标和空 composer 用的是同一个 `❯`。
+        self.assertIn(agent_runtime.CLAUDE_READY_MARK, self.TRUST_SCREEN)
+        self.assertFalse(agent_runtime.is_ready(self.CLAUDE, self.TRUST_SCREEN))
+        self.assertTrue(agent_runtime.needs_trust_confirmation(self.CLAUDE, self.TRUST_SCREEN))
+
+    def test_real_composer_after_trust_is_ready(self):
+        # 按完回车之后的真屏：判就绪，且不再要求按回车（否则会往活会话里空按）。
+        self.assertTrue(agent_runtime.is_ready(self.CLAUDE, self.COMPOSER_SCREEN))
+        self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, self.COMPOSER_SCREEN))
+
+    def test_older_trust_wording_is_also_caught(self):
+        # 老版本文案换过一次；ready 判据不该跟着 Claude Code 的措辞漂。
+        legacy = "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit"
+        self.assertFalse(agent_runtime.is_ready(self.CLAUDE, legacy))
+        self.assertTrue(agent_runtime.needs_trust_confirmation(self.CLAUDE, legacy))
+
+    def test_unknown_startup_modal_blocks_ready_but_never_auto_answers(self):
+        # 未知弹窗（如 CLAUDE.md external includes）：不知道哪个选项安全 →
+        # 判未就绪让它超时喊主人，绝不盲按回车、更不能当就绪把消息喂进去。
+        unknown = (
+            "Found external includes in CLAUDE.md\n"
+            " ❯ 1. Approve\n   2. Reject\n\n Enter to confirm · Esc to cancel"
+        )
+        self.assertFalse(agent_runtime.is_ready(self.CLAUDE, unknown))
+        self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, unknown))
+
+    def test_codex_and_plain_claude_composer_unchanged(self):
+        # 回归：Codex 两条路和最朴素的 claude 就绪屏都不受影响。
+        self.assertTrue(agent_runtime.is_ready(self.CLAUDE, "some output\n❯ "))
+        self.assertFalse(agent_runtime.is_ready(self.CLAUDE, "$ bash\n"))
+        self.assertFalse(agent_runtime.needs_trust_confirmation({"agent": "codex"}, self.TRUST_SCREEN))
+        self.assertTrue(agent_runtime.is_ready({"agent": "codex"}, "status\n› Use /skills"))
 
 
 class BridgeProcessSnapshotTests(unittest.TestCase):

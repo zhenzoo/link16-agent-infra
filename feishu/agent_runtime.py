@@ -21,6 +21,19 @@ from pathlib import Path
 
 
 CLAUDE_READY_MARK = "❯"
+# Claude Code's first-run directory-trust prompt renders its selection cursor as
+# the same "❯" the idle composer uses, so the bare ready mark cannot tell a live
+# composer from a modal that eats whatever the bridge types (PLAN-927). Match the
+# option label instead: it is the one string the prompt always paints, and it has
+# survived the wording change from the older "Do you trust the files…" headline.
+CLAUDE_TRUST_TEXTS = (
+    "Yes, I trust this folder",
+    "Do you trust the files in this folder",
+)
+# Any other startup modal (external-includes approval, future prompts) shares this
+# footer. We do not know which option is safe to auto-pick, so treat it as not
+# ready and let the ready wait time out into a DM: reporting beats swallowing.
+CLAUDE_BLOCKING_PROMPT_FOOTER = "Enter to confirm"
 CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
 CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
 
@@ -696,16 +709,26 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
 
 
 def needs_trust_confirmation(bot, screen: str) -> bool:
+    """Is the session parked on a trust prompt whose default option is safe to accept?
+
+    Both runtimes preselect "trust this folder", so a single Enter clears it. The
+    caller presses that Enter; everything else is left for a human.
+    """
     spec = runtime_spec(bot)
+    screen = screen or ""
+    if spec.name == "claude":
+        return any(t in screen for t in CLAUDE_TRUST_TEXTS)
     if spec.name != "codex":
         return False
-    return CODEX_TRUST_TEXT in (screen or "") and "Press enter to continue" in (screen or "")
+    return CODEX_TRUST_TEXT in screen and "Press enter to continue" in screen
 
 
 def is_ready(bot, screen: str) -> bool:
     spec = runtime_spec(bot)
     screen = screen or ""
     if spec.name == "claude":
+        if CLAUDE_BLOCKING_PROMPT_FOOTER in screen or needs_trust_confirmation(bot, screen):
+            return False
         return CLAUDE_READY_MARK in screen
     if spec.name == "codex":
         if needs_trust_confirmation(bot, screen):
