@@ -3,6 +3,27 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.13.2 — 推给舰队前的两道硬化：日志编码收口 + 信任判据不再被滚屏误触（2026-08-18）
+
+**WHY**：v0.13.1 要推给三台机之前做跨机风险自查，挖出两处**会真影响那两台**的问题。
+
+**WHAT**
+
+- **日志编码收口（tb24 生产实证 · 不是理论风险）**：`_logs/bridge-tb24-xhs-autopilot.log`
+  里实录 `feishu_bridge.py:115` 的 `blog()` 抛
+  `UnicodeEncodeError: 'gbk' codec can't encode '❌'` → 冒泡到 lark_channel →
+  「FeishuChannel: handler for %r raised」＝ **那条飞书消息整个没被处理**。
+  `_webhook_fallback` 同样中招：日志抛错被外层 `except` 吞成「兜底失败」，
+  **消息其实已送达却记成 `delivered=False`**。
+  根因是 `cmd_start` 把日志句柄交给子进程当 stdout，子进程按 locale 写＝cp936，
+  而桥日志里全是 ✅❌⏳📌。修法两层：`_force_utf8_std()` 在 `main()` 最开头把
+  stdout/stderr **原地** reconfigure 成 UTF-8（原地改，已建好的 logging handler 一起生效，
+  连飞书 SDK 自己的 logger 也覆盖到）＋ `blog()` 自身捕获降级（本模块被 import 时不过 `main`）。
+  **全量回归 151 项由此从长期 1 红转全绿**——那一红一直被当成夹具问题，其实是这个真 bug。
+- **信任判据加菜单结构约束**：v0.13.1 只匹配文案 `Yes, I trust this folder`，
+  而**正在讨论这个 bug 的 bot，滚屏里就有这句话** → 会被当成活弹窗、往正在干活的会话按回车。
+  现在文案命中后还要求看到弹窗结构（footer `Enter to confirm` 或选项行 `❯ 1.`）。
+
 ## v0.13.1 — Claude 首启信任弹窗不再冒充就绪：新目录的第一条消息不再被吞（2026-08-17）
 
 **WHY**：主人从飞书给新仓 bot（`tuf19-agentic-cad`）发第一条消息，消息没进终端、会话停在
