@@ -1,10 +1,26 @@
-# 飞书桥（orchestrator/feishu_bridge.py）的 Python 依赖
-# 装：pip install -r orchestrator/requirements.txt
-# 完整新机器流程见 orchestrator/SETUP-new-machine.md
+# 飞书桥（feishu/feishu_bridge.py）的 Python 依赖
+# 装：pip install -r feishu/requirements.txt
+# 完整新机器流程见 docs/SOP-100-new-machine-setup.md
+# 装之前 / 装完，都可以跑 `python feishu/preflight.py` 做一次只读体检（含下面这些非 pip 依赖）
 #
-# 注意：桥还依赖两样【不在 pip 里】的东西（见 SETUP 文档）：
-#   ① ~/wmux-rpc.js  —— 连 wmux daemon 的 node 客户端（仓库外·没提交·必须手动放）
-#   ② ccp 别名        —— git-bash 里起 Claude（CLAUDE_CONFIG_DIR=~/.claude-personal claude …）
+# ⚠️ 桥还依赖三样【pip 装不了】的东西 —— 缺任何一样桥都跑不起来或半残：
+#
+#   ① wmux（桌面应用 · 必装且必须开着）
+#      https://www.wmux.app   ·   https://github.com/openwong2kim/wmux
+#      它托管本机终端面板；桥收到飞书消息后靠它开面板、在里面起 Claude/Codex。
+#      **没有它：桥能连上飞书，但 @ 一句只会回「🛌 wmux 没开」——没有降级模式。**
+#      更新：wmux 自己自动更新。已挂着一堆 bot 时的安全升级流程见 docs/SOP-010-wmux-upgrade.md。
+#
+#   ② Node.js        https://nodejs.org/
+#      桥用 node 跑 wmux/wmux-rpc.js 跟 wmux daemon 通信。
+#      （wmux-rpc.js 本身**仓库自带**，2026-06-17 起不用再手动放到 home。）
+#
+#   ③ 一个 agent CLI：Claude Code 或 Codex CLI
+#      桥只负责把消息接进面板，面板里得有东西真的干活。
+#      https://claude.com/claude-code
+#
+# 凭据（app_id / app_secret）存在仓库【外面】的 .env，绝不进 git；
+# 位置由环境变量 VIBECODING_ROOT 解析，见 docs/SOP-100 §1。
 
 lark_oapi>=1.6.8            # 飞书官方 SDK · register_feishu_app.py 一键建应用 + 长连接底座
 lark-channel-sdk>=1.0.0     # 飞书 CardKit / WebSocket channel · feishu_bridge.py 收发消息(import lark_channel)
