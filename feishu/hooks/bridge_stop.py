@@ -226,7 +226,14 @@ def main():
     floor = _read_cursor(outdir, bot, sid)
     r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts, floor_line=floor)
     cards = [c.strip() for c in (r.get("cards") or []) if c and c.strip()]
-    _trace(f"bot={bot} outdir={outdir} floor={floor} anchor={r.get('anchor_line')} "
+    try:                       # tb25 2026-08-18 提的：少记这几项，a/b/c 三种因分不开
+        _st = os.stat(tp)
+        _tpinfo = "tp存在 size=%d mtime=%s" % (_st.st_size, time.strftime("%H:%M:%S", time.localtime(_st.st_mtime)))
+    except OSError as _e:
+        _tpinfo = "tp读不到! %s" % _e
+    _why = ("有卡" if cards else
+            ("竞态超时未等到终结态" if not r.get("complete") else "终结态无正文(只工具/思考收尾)"))
+    _trace(f"bot={bot} tp={tp} {_tpinfo} scan_line={r.get('scan_line')} 空卡原因={_why} outdir={outdir} floor={floor} anchor={r.get('anchor_line')} "
            f"cards={len(cards)} 字数={[len(c) for c in cards]} complete={r.get('complete')} consumed={r.get('consumed_line')}")
     if not cards:
         return                                    # 终结态无文本（只工具/思考收尾）或竞态超时 → 不发
