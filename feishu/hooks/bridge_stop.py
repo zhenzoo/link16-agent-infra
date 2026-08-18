@@ -150,7 +150,19 @@ def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
                 anchor_idx, anchor_ln = idx, ln
                 break
         if anchor_idx is not None:
-            sub = [(ln, r) for ln, r in recs[anchor_idx + 1:] if ln > floor_line]
+            # 边界怎么切：**floor 优先，anchor 只在冷启动兜底**（2026-08-18 · tb24 撤回并更正 · PLAN-929）
+            # 本函数注释第 122-125 行本来就写明了设计意图：「anchor 只是 turn 从哪开始的**启发式**，
+            # 会因 transcript 记录形状变化而失灵…cursor 是**硬保证**…与『什么算 turn 边界』的判据解耦」。
+            # 但实现里 `recs[anchor_idx+1:]` 让启发式压在了硬保证前面：只要在本轮收尾时又来一条用户消息，
+            # anchor 就跳到那条新消息上，本轮正文位置在【旧消息与新消息之间】→ 被结构性切掉 → 静默吞。
+            # 两个触发窗口：① 钩子开火前那条新消息已落盘 ② 在 12 秒轮询窗口里落盘。floor 优先两个都堵。
+            # ⚠️ 不能干脆删掉 anchor 那层：`_read_cursor` 明写「读不到 / 换 session → 0（退回旧行为·纯 anchor）」，
+            # floor==0 时（新会话冷启动、或 cursor 被移走）anchor 是**唯一**边界；删了会把整份 transcript
+            # 当新内容全量重发 —— 正是 v0.12.2 刚治好的那个（两机 618 次 / 482.1 万字）。所以是**条件化**。
+            if floor_line > 0:
+                sub = [(ln, r) for ln, r in recs if ln > floor_line]          # 有硬保证 → 只信行号，不信 anchor
+            else:
+                sub = [(ln, r) for ln, r in recs[anchor_idx + 1:]]            # 冷启动 → anchor 是唯一边界
             mid, term, has_terminal = [], [], False          # mid=[{ln, text, always}] 按文档序（②问前结论 always / ③中段旁白）; term=[(ln,text)]
             for i, (ln, rec) in enumerate(sub):
                 atxts = [t for t in asst_texts(rec) if t.strip()]
