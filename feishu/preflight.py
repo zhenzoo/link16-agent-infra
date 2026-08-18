@@ -105,18 +105,39 @@ def check_wmux():
 
 
 def check_encoding():
-    """今天最阴的一个坑：中文 Windows 默认 GBK(cp936)，脚本一打中文/emoji 就
-    UnicodeEncodeError 整条命令崩。而且它只在【某些 shell】犯，容易误判成『代码有 bug』。"""
-    enc = (_ORIGINAL_STDOUT_ENCODING or "?").lower().replace("-", "")
-    if enc in ("utf8", "utf8mb4"):
-        return Result("输出编码", OK, f"stdout = {_ORIGINAL_STDOUT_ENCODING}")
-    fix = ("给本机永久设 UTF-8 模式（改完【重开终端】生效）：\n"
-           "        PowerShell:  [Environment]::SetEnvironmentVariable('PYTHONUTF8','1','User')\n"
-           "        Git Bash  :  setx PYTHONUTF8 1\n"
-           "      （只想临时用：PowerShell `$env:PYTHONUTF8=1` / bash `export PYTHONUTF8=1`）")
-    return Result("输出编码", WARN,
-                  f"stdout = {_ORIGINAL_STDOUT_ENCODING or '未知'}（非 UTF-8 → 部分脚本打中文会崩）", fix)
+    """中文 Windows 默认 GBK(cp936)，脚本一打中文/emoji 就 UnicodeEncodeError 整条命令崩。
 
+    **2026-08-18 从 WARN 升为 FAIL**（tb24 与 tb25 一致建议）。理由不是"更严格"，是失败形态太阴：
+      · 它不是「崩给你看」，而是**吞掉消息**——桥的 hook 打一个 ❌ 抛编码错 → 冒泡到飞书 SDK →
+        那条消息整个没被处理；主人只看到「进度条在动、一句话收不到」。
+      · 它还会**吞掉证据**：08-17 那次名册劫持事故唯一的现场日志，就是被这个编码错吞掉的。
+      · 三台机各自"正常"的来源完全不同（tb25 = 系统 UTF-8 勾 / tb24 = PYTHONUTF8=1 / tuf19 = 都没有）
+        ⇒ 只能按**运行时实测**判，不能按机器名或某个变量假设。
+
+    判据用 locale.getpreferredencoding() 而不是 chcp：tb24 的 chcp 是 936 却完全免疫，
+    因为 PYTHONUTF8=1 改的正是这个。stdout 也一并看，任一非 UTF-8 都拦。
+    """
+    import locale
+    pref_raw = locale.getpreferredencoding(False)
+    pref = (pref_raw or "?").lower().replace("-", "")
+    out = (_ORIGINAL_STDOUT_ENCODING or "?").lower().replace("-", "")
+    ok = {"utf8", "utf8mb4", "cp65001"}
+    if pref in ok and out in ok:
+        return Result("输出编码", OK,
+                      f"getpreferredencoding = {pref_raw} · stdout = {_ORIGINAL_STDOUT_ENCODING}")
+    fix = chr(10).join([
+        "设 UTF-8 模式（改完**重开终端**；已在跑的桥/计划任务要重启才继承）：",
+        "        PowerShell:  [Environment]::SetEnvironmentVariable('PYTHONUTF8','1','User')",
+        "        Git Bash  :  setx PYTHONUTF8 1",
+        "      验收：python -c 'import locale;print(locale.getpreferredencoding(False))' 要回 UTF-8",
+        "      （tb24 实证：真 GBK 机器只靠这一个用户级变量就完全免疫，连计划任务里的 pythonw 都继承得到）",
+        "      （Win11 另一条路：设置→时间和语言→语言和区域→管理语言设置→更改系统区域设置→",
+        "        勾「Beta: 使用 Unicode UTF-8 提供全球语言支持」·需重启·tb25 走的这条）",
+    ])
+    return Result("输出编码", FAIL,
+                  f"getpreferredencoding = {pref_raw} · stdout = {_ORIGINAL_STDOUT_ENCODING or '未知'}"
+                  f" —— 非 UTF-8。这不是「打字难看」，是**桥会静默吞掉回复**（进度条照动、消息收不到）",
+                  fix)
 
 def check_env_file():
     """.env 存的是 bot 凭据（app_secret 等），在仓库【外面】，绝不进 git。"""
