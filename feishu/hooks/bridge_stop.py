@@ -69,11 +69,22 @@ def _asst_has_ask(rec):
         for b in c)
 
 
+def _norm_tp(path):
+    """transcript 路径归一化 —— Windows 大小写不敏感、斜杠混用、短路径/junction 都可能让同一份文件
+    长出不同写法。用 normcase(abspath) 归一，避免"同一份文件被判成两份"。空值原样返回空串。"""
+    if not path:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(str(path)))
+    except (OSError, ValueError, TypeError):
+        return str(path)
+
+
 def _cursor_path(outdir, bot):
     return Path(outdir) / f"bridge-stop-cursor-{bot}.json"
 
 
-def _read_cursor(outdir, bot, sid):
+def _read_cursor(outdir, bot, sid, tp=""):
     """上一次 Stop 已扫到哪一行（**同 session 才算数**）。读不到 / 换 session / 认不出 → 0（退回纯 anchor）。
 
     ⚠️ fail-open 缺陷修复（2026-08-18 · tb25 找到接缝 · tb24 认领 · PLAN-929）：
@@ -87,30 +98,42 @@ def _read_cursor(outdir, bot, sid):
     **拿不到证据就退回保守路径**，而不是"拿不到证据就假定安全"。
     代价对比也不对等：退回纯 anchor 最坏是重发一次（看得见、能改）；照用别人的 floor 是静默吞正文（看不见）。
     """
-    if not sid:
-        return 0                      # 认不出自己是谁 → 绝不敢用任何 cursor
     try:
         d = json.loads(_cursor_path(outdir, bot).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return 0
-    if not isinstance(d, dict) or not d.get("session") or d.get("session") != sid:
-        return 0                      # 无 session 字段 / 对不上 → 一律作废（不再短路放行）
+    if not isinstance(d, dict):
+        return 0
+    cur_tp = d.get("tp")
+    if cur_tp:
+        # 新格式：**以 transcript 路径当身份**。tp 是钩子每次必有的输入，sid 会缺 ——
+        # 用不会缺的凭据认身份，本来就比用会缺的更对（tb24 提，tb25 复核后附议）。
+        # sid 空但 tp 一致 ⇒ 就是同一份 transcript ⇒ cursor 可信，不必退回裸 anchor（避免质量退化）。
+        # sid 空且 tp 不同 ⇒ 正是 tuf19 那个场景 ⇒ 此时作废才是对的（本来就是另一份文件）。
+        if _norm_tp(cur_tp) != _norm_tp(tp):
+            return 0
+    else:
+        # 老格式（无 tp 字段）：**向后兼容按 session 比**。⚠️ 这条不能省：三台机现存 11 份 cursor
+        # 全是旧格式，若一刀切要求 tp 匹配，升级那一刻 11 份同时判无效 → 全舰队各吞/重发一轮。
+        # 老格式 + sid 缺失时仍然作废（那正是本次的病），但只需一轮：下次写出的就是带 tp 的新格式，自愈。
+        if not sid or not d.get("session") or d.get("session") != sid:
+            return 0
     try:
         return int(d.get("line") or 0)
     except (TypeError, ValueError):
         return 0
 
 
-def _write_cursor(outdir, bot, sid, line):
-    # 同一个 fail-open 的另一半：sid 空时若照写，落盘的 cursor 就没有 session 字段可比 —— 下次读又会
-    # 走"认不出"的老路。宁可不写（cursor 不推进，最坏重发一次），也不留一份谁都能误用的指针。
-    if not sid:
-        return
+def _write_cursor(outdir, bot, sid, line, tp=""):
+    # fail-open 的另一半：旧版落盘只带 session，sid 空时写出 {"session": ""} —— 那份 cursor 此后
+    # 对**任何** session 都生效（`d.get("session")` 恒 falsy → 判据短路）。现在一律**把 tp 一起写进去**，
+    # 让身份挂在"必有的凭据"上；sid 仍照写但只作老格式兼容用，不再是唯一判据。
     try:
         p = _cursor_path(outdir, bot)
         p.parent.mkdir(exist_ok=True)
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"session": sid, "line": int(line), "ts": int(time.time())}),
+        tmp.write_text(json.dumps({"session": sid or "", "tp": _norm_tp(tp),
+                                   "line": int(line), "ts": int(time.time())}),
                        encoding="utf-8")
         os.replace(tmp, p)                       # 原子落盘·无半写窗口
     except OSError:
@@ -266,7 +289,7 @@ def main():
         return
     # outdir 先算出来：cursor(上轮扫到哪行) 和 outbox 同目录（FEISHU_BRIDGE_OUTBOX_DIR = 桥给每个 bot 钉的 _state/）
     outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
-    floor = _read_cursor(outdir, bot, sid)
+    floor = _read_cursor(outdir, bot, sid, tp)
     r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts, floor_line=floor)
     cards = [c.strip() for c in (r.get("cards") or []) if c and c.strip()]
     try:                       # tb25 2026-08-18 提的：少记这几项，a/b/c 三种因分不开
@@ -317,7 +340,7 @@ def main():
         return                                    # 没写成 outbox 就不推进 cursor（否则这轮正文永久蒸发）
     # 正文已落 outbox → 推进 cursor 到「本轮真正取走正文的最后一行」：下一次 Stop 只看更后面的记录，
     # 结构上杜绝「同一段正文被下一轮再拼一遍」（2026-08-16 tb24-voiceover 全量重发事故的硬保证）。
-    _write_cursor(outdir, bot, sid, r.get("consumed_line") or 0)
+    _write_cursor(outdir, bot, sid, r.get("consumed_line") or 0, tp)
     _trace(f"OK bot={bot} 已写 {len(cards)} 条 answer → {outbox}")
 
 
