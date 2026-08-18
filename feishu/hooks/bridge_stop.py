@@ -129,13 +129,26 @@ def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
     scan_ln = 0
     pre_blocks, term_texts = [], []                   # pre_blocks=非终结实质块(②问前结论+③中段正文·按文档序)·各自成卡; term=终结 wrap-up
     consumed_fallback = floor_line                    # 竞态超时路径的 cursor 落点（只推到已取走正文那一行）
+    locked_anchor_ln = None                           # 本轮起点·第一遍锁死后不再随新消息移动（见循环内注释）
     for attempt in range(_POLL_TRIES):
         recs = _read_records(tp)
         scan_ln = recs[-1][0] if recs else 0
+        # ⚠️ anchor 必须【第一遍锁死】，绝不能每轮重算取最新（2026-08-18 · tb25 挖出 · PLAN-929）：
+        # 本循环最多轮询 12 秒等这一轮的收尾落盘。旧版每 0.2s 重读一次、每次都把「最后一条用户消息」
+        # 当本轮起点 → **只要这 12 秒里有新消息落进 transcript，anchor 就跳到那条新消息上**，
+        # 上一轮已经写好的正文被甩在 anchor 前面、永远进不了 sub → cards 空 → 静默 return → cursor 冻死。
+        # 四个症状全中、一个异常都不抛，而且**静态重放永远复现不出来**（重放时文件已写完，anchor 自然落对）。
+        # tuf19 01:21 那轮实证：钩子开火后 **0.05 秒** 下一条消息就落盘了，那一轮正文当场蒸发。
+        # 「等我自己这轮的收尾」和「跟着最新消息跑」是两个目标，旧代码把它们塞进了同一个变量。
+        if locked_anchor_ln is None:
+            for _idx, (ln, rec) in enumerate(recs):
+                if is_user(rec):
+                    locked_anchor_ln = ln
         anchor_idx = None
-        for idx, (ln, rec) in enumerate(recs):
-            if is_user(rec):
+        for idx, (ln, _rec) in enumerate(recs):   # 按锁死的行号重定位下标（记录只追加·行号稳定）
+            if ln == locked_anchor_ln:
                 anchor_idx, anchor_ln = idx, ln
+                break
         if anchor_idx is not None:
             sub = [(ln, r) for ln, r in recs[anchor_idx + 1:] if ln > floor_line]
             mid, term, has_terminal = [], [], False          # mid=[{ln, text, always}] 按文档序（②问前结论 always / ③中段旁白）; term=[(ln,text)]
