@@ -58,3 +58,17 @@
 
 - **代码位置**：桥 = 本仓 `feishu/feishu_bridge.py`；看门狗 = `xhs-card-gen/_autopilot/watchdog.py`（**故意不搬**：它的卡死检测/里程碑两个职责读 xhs 产物，拆开只换来更多进程和回归风险；启动权已移交计划任务 = 生命周期上它已经跟 xhs 巡航解绑，见 xhs `ARCH-310 §11.6`）。
 - **看门狗死了怎么办**：不用管，计划任务 10 分钟内自己补起。急用手动 `python <xhs>/_autopilot/spawn_worker.py ensure-watchdog`（幂等，随便跑）。
+
+---
+
+## 🧰 机器级 agent 工具链（桥不依赖 · 但缺了不报错，只会当场降级）
+
+装了桥的机器上，agent 干活还要用一批**不在桥运行路径上**的工具。它们的共同特点是
+**缺了桥照样跑、没有任何报错**，只在 agent 真要用时当场降级走回退路径——所以最容易漏配。
+
+| 工具 | 干什么 | 装 / 验收 |
+|---|---|---|
+| `jina-cli` | 单页抓取的主力：URL→markdown（能啃 SPA，AnySearch 抓不动的它能抓）+ search / embed / rerank | 已进 `feishu/requirements.txt`；**别直接调 `jina`，走轮换器** `~/.claude-personal/scripts/jina_rotate.py`。完整装法 / key / 验收见 [`docs/SOP-100 §2.1`](docs/SOP-100-new-machine-setup.md) |
+
+> 2026-08-18 tuf19 实证：`jina` 入口在、底层 CLI 没装 → 单页读取直接失败、只能退 AnySearch。
+> 这类「缺了不报错」的依赖必须写进新机器 SOP，否则每台机都要现场发现一次。

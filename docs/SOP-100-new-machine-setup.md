@@ -68,6 +68,37 @@ python -c "import lark_oapi; from lark_channel import FeishuChannel, OutboundIma
 ```
 > 报 `ModuleNotFoundError: No module named 'lark_channel'` / 桥打印 `缺依赖: pip install lark-channel-sdk` → 这步没做。
 
+### 2.1 · Jina infra（桥不依赖，但装了桥的机器一定用得上 · 2026-08-18 补）
+
+**为什么写进新机器 SOP**：`jina` 是 agent 抓单页的主力（URL→markdown，能啃 SPA，AnySearch 抓不动的它能抓）。
+它不在桥的运行路径上，所以**缺了桥照样跑、没有任何报错**——agent 只会在真要用的时候当场降级去走 AnySearch 回退。
+2026-08-18 在 tuf19 实证：`jina` 入口存在但底层 CLI 没装 → 单页读取直接失败。**这种"缺了不报错"的东西最该写进 SOP**，否则每台新机器都要现场发现一次。
+
+**装**（`§2` 那条 `pip install -r feishu/requirements.txt` 已经带上了；单独补装用下面这条）：
+```bash
+HTTPS_PROXY=http://127.0.0.1:7897 pip install -U jina-cli    # 墙外服务·必须走代理
+```
+
+**key**：`$VIBECODING_ROOT/.env` 里一行 `JINA_API_KEY=jina_xxxx`（多账号续 `JINA_API_KEY_2` / `_3` …，轮换器按顺序花）。
+没 key 也不是全废——`read` 能落匿名档照样抓。
+
+**⛔ 别直接调 `jina`，走轮换器**（多 key 顺序轮换 + 欠费自动落匿名档 + 自动配代理，参数和 `jina` 本体一模一样）：
+```bash
+JX="$HOME/.claude-personal/scripts/jina_rotate.py"
+python "$JX" read "<URL>"        # URL→markdown（会渲染 JS）
+python "$JX" search "查询词"      # 全网搜索
+```
+
+**验收**（两条都跑，别只跑 `--help` 就当装好了）：
+```bash
+python -c "import shutil; print(shutil.which('jina'))"           # 有绝对路径 = CLI 在 PATH 上
+python "$HOME/.claude-personal/scripts/jina_rotate.py" read "https://example.com" | head -3
+```
+出现 `Title: Example Domain` = 端到端通了。
+
+> **本机实测记录（tuf19 · 2026-08-18）**：`jina-cli 0.3.0` 装好，`read` ✅、`search` ✅（付费端点通 = key 有余额）。
+> ⚠️ 用户级 CLAUDE.md 里「两把 key 都欠费、只剩匿名 read」那段是 2026-07-29 的旧状态，**已过期**，以本机实测为准。
+
 ---
 
 ## 3 · wmux + handler（⚠️ 最易卡 · 见 §0 那段）

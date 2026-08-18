@@ -25,3 +25,14 @@
 lark_oapi>=1.6.8            # 飞书官方 SDK · register_feishu_app.py 一键建应用 + 长连接底座
 lark-channel-sdk>=1.0.0     # 飞书 CardKit / WebSocket channel · feishu_bridge.py 收发消息(import lark_channel)
                             # （requests-toolbelt 由 lark_oapi 自动带入·无需单列）
+
+# ── agent 工具链（桥本身【不 import】，但新机器必装：agent 干活要用）──────────────
+# 放这里的理由：这些是「装了桥的机器上，agent 一定会用到」的东西。少一个，agent 当场
+# 降级去走回退路径（2026-08-18 tuf19 实证：jina 缺失 → 单页读取失败 → 只能退 AnySearch）。
+# 装法与桥依赖同一条命令，不给新机器多加一步。
+jina-cli>=0.3.0             # Jina AI CLI：URL→markdown(read·抓 SPA) / search / embed / rerank
+                            # ⚠️ 墙外服务：装的时候要走代理
+                            #    HTTPS_PROXY=http://127.0.0.1:7897 pip install -U jina-cli
+                            # ⚠️ 别直接调 jina，走轮换器 ~/.claude-personal/scripts/jina_rotate.py
+                            #    （多 key 顺序轮换 + 欠费自动落匿名档 + 自动配代理·参数与 jina 本体一致）
+                            # 详见 docs/SOP-100 §2.1
