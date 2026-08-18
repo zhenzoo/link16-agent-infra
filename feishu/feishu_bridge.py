@@ -1499,7 +1499,8 @@ def _bridge_pids(exclude_self=True, bot=None):
     )
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
     except (OSError, subprocess.SubprocessError):
         return []
@@ -1540,7 +1541,7 @@ def _bridge_process_map():
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-        )
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         raw = (result.stdout or "").strip()
         if not raw:
             return {}
@@ -1554,7 +1555,8 @@ def _kill(pids):
     if pids:
         subprocess.run(["powershell", "-NoProfile", "-Command",
                         "Stop-Process -Id " + ",".join(pids) + " -Force"],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def _ensure_single_instance(bot_name):

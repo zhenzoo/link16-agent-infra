@@ -96,7 +96,8 @@ def transcode_to_opus(src: Path) -> Path:
            "-application", "voip", str(out)]
     # 读取侧规矩（PLAN-929）：ffmpeg 在中文 Windows 往 stderr 写 **GBK**；PYTHONUTF8=1 下 text=True
     # 按 UTF-8 解码会当场崩读线程。我们【往外写】强制 UTF-8，【读别人】一律 errors="replace"。
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0 or not out.exists():
         raise SystemExit(f"❌ ffmpeg 转码失败: {(r.stderr or '')[:300]}")
     return out
@@ -129,7 +130,8 @@ def _ffmpeg_probe_ms(src: Path) -> int:
     if not _which("ffmpeg"):
         return 0
     r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(src)], capture_output=True,
-                       text=True, encoding="utf-8", errors="replace")   # 同上：读 ffmpeg 的 GBK 不许崩
+                       text=True, encoding="utf-8", errors="replace",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))   # 同上：读 ffmpeg 的 GBK 不许崩
     m = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", r.stderr or "")
     if not m:
         return 0

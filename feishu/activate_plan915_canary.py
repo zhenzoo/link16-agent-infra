@@ -65,7 +65,7 @@ def _notify(bot: str, text: str, log):
         capture_output=True,
         text=True, encoding="utf-8", errors="replace",
         timeout=60,
-    )
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     log.write((result.stdout or "") + (result.stderr or ""))
     log.flush()
 

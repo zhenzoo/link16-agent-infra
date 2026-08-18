@@ -49,7 +49,8 @@ def _run(cmd, timeout=8):
     """跑一条命令拿 stdout；任何异常都吞掉返回 None（体检不该因为探测失败而崩）。"""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return (p.stdout or p.stderr or "").strip()
     except Exception:  # noqa: BLE001
         return None
