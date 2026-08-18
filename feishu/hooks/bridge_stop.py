@@ -74,13 +74,27 @@ def _cursor_path(outdir, bot):
 
 
 def _read_cursor(outdir, bot, sid):
-    """上一次 Stop 已扫到哪一行（同 session 才算数）。读不到/换 session → 0（退回旧行为·纯 anchor）。"""
+    """上一次 Stop 已扫到哪一行（**同 session 才算数**）。读不到 / 换 session / 认不出 → 0（退回纯 anchor）。
+
+    ⚠️ fail-open 缺陷修复（2026-08-18 · tb25 找到接缝 · tb24 认领 · PLAN-929）：
+    旧判据 `d.get("session") and sid and d.get("session") != sid` 里那个 **`and sid`**，
+    在 sid 为空串/None 时把整个条件短路成 False ⇒ **闸不触发 ⇒ 把【别的 session】的 floor 原样拿来用**。
+    而 sid 来自 `inp.get("session_id", "")` —— **拿不到就是空串**。
+    后果不是"多发一遍"，而是**一个字都不发**：floor 停在 1354、钩子读的那份 transcript 只有 1121 行 ⇒
+    `ln > 1354` 匹配数为 0 ⇒ cards 空 ⇒ 静默 return ⇒ cursor 永远不动。四轮全中、零异常。
+
+    **闸的本意是「认不出就作废」，实现成了「认不出就照用」。** 正确的默认是：
+    **拿不到证据就退回保守路径**，而不是"拿不到证据就假定安全"。
+    代价对比也不对等：退回纯 anchor 最坏是重发一次（看得见、能改）；照用别人的 floor 是静默吞正文（看不见）。
+    """
+    if not sid:
+        return 0                      # 认不出自己是谁 → 绝不敢用任何 cursor
     try:
         d = json.loads(_cursor_path(outdir, bot).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return 0
-    if not isinstance(d, dict) or (d.get("session") and sid and d.get("session") != sid):
-        return 0
+    if not isinstance(d, dict) or not d.get("session") or d.get("session") != sid:
+        return 0                      # 无 session 字段 / 对不上 → 一律作废（不再短路放行）
     try:
         return int(d.get("line") or 0)
     except (TypeError, ValueError):
@@ -88,6 +102,10 @@ def _read_cursor(outdir, bot, sid):
 
 
 def _write_cursor(outdir, bot, sid, line):
+    # 同一个 fail-open 的另一半：sid 空时若照写，落盘的 cursor 就没有 session 字段可比 —— 下次读又会
+    # 走"认不出"的老路。宁可不写（cursor 不推进，最坏重发一次），也不留一份谁都能误用的指针。
+    if not sid:
+        return
     try:
         p = _cursor_path(outdir, bot)
         p.parent.mkdir(exist_ok=True)
@@ -258,7 +276,7 @@ def main():
         _tpinfo = "tp读不到! %s" % _e
     _why = ("有卡" if cards else
             ("竞态超时未等到终结态" if not r.get("complete") else "终结态无正文(只工具/思考收尾)"))
-    _trace(f"bot={bot} tp={tp} {_tpinfo} scan_line={r.get('scan_line')} 空卡原因={_why} outdir={outdir} floor={floor} anchor={r.get('anchor_line')} "
+    _trace(f"bot={bot} sid={sid!r} tp={tp} {_tpinfo} scan_line={r.get('scan_line')} 空卡原因={_why} outdir={outdir} floor={floor} anchor={r.get('anchor_line')} "
            f"cards={len(cards)} 字数={[len(c) for c in cards]} complete={r.get('complete')} consumed={r.get('consumed_line')}")
     if not cards:
         return                                    # 终结态无文本（只工具/思考收尾）或竞态超时 → 不发
