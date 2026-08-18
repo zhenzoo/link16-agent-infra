@@ -13,6 +13,7 @@ register_feishu_app / bridge_feishu_probe / bridge_doctor）都走这里，跨�
 """
 import json
 import os
+import sys
 from pathlib import Path
 
 # legacy 兜底（老机器从没设 VIBECODING_ROOT 时的最后一根稻草 · 绝不破坏另一台机已跑通的行为）
@@ -45,6 +46,33 @@ def resolve_env_path(start=None):
             return cand
 
     return _LEGACY_ENV
+
+
+def force_utf8_std():
+    """把本进程的 stdout/stderr 顶成 UTF-8 —— **每个入口都必须在做任何事之前调一次**。
+
+    为什么这是仓库级的事（2026-08-18 · PLAN-929）：本仓的日志、卡片、报错文案里到处是
+    ✅❌⏳📌 和中文。中文 Windows 默认代码页是 cp936(GBK)，**这些字符一个都编码不出来**：
+      · 子进程（桥、hook、计划任务里的 pythonw）stdout 不是 tty → 按 locale 编码写 → 一个 ❌ 抛
+        UnicodeEncodeError → 冒泡到调用方 → 整条消息链挂掉（2026-08-17 tuf19 实证）
+      · 更阴的是它常常**只吞掉证据**：那次事故唯一的现场日志就是这么没的
+    判据是 `locale.getpreferredencoding()`，**不是 `chcp`** —— tb24 的 chcp 是 936 但设了
+    PYTHONUTF8=1，实际免疫；tb25 系统代码页本身是 cp65001，也免疫；只有没设过的机器真暴露。
+
+    `reconfigure` 是**原地改**这两个流对象，所以早已持有引用的 logging handler 也一起生效。
+    errors="replace" 兜底：真遇到编码不了的字符打问号，绝不再崩。
+
+    这只是第二道防线。第一道是 `PYTHONUTF8=1`（用户级环境变量，一次设好、全机所有 Python
+    进程受益，连计划任务里的 pythonw 也继承得到）—— `preflight.py` 会检查并给出设置命令。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if enc == "utf8":
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):   # 重配失败不该挡住调用方启动
+            pass
 
 
 def bots_config_path(project_root):

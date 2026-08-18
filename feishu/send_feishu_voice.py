@@ -94,7 +94,9 @@ def transcode_to_opus(src: Path) -> Path:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
            "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k",
            "-application", "voip", str(out)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    # 读取侧规矩（PLAN-929）：ffmpeg 在中文 Windows 往 stderr 写 **GBK**；PYTHONUTF8=1 下 text=True
+    # 按 UTF-8 解码会当场崩读线程。我们【往外写】强制 UTF-8，【读别人】一律 errors="replace"。
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0 or not out.exists():
         raise SystemExit(f"❌ ffmpeg 转码失败: {(r.stderr or '')[:300]}")
     return out
@@ -126,7 +128,8 @@ def _ffmpeg_probe_ms(src: Path) -> int:
     """回退：ffmpeg -i 把 `Duration: HH:MM:SS.xx` 打到 stderr·解析它（只需 ffmpeg·不需 ffprobe）。"""
     if not _which("ffmpeg"):
         return 0
-    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(src)], capture_output=True, text=True)
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(src)], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace")   # 同上：读 ffmpeg 的 GBK 不许崩
     m = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", r.stderr or "")
     if not m:
         return 0
@@ -220,4 +223,8 @@ def main():
 
 
 if __name__ == "__main__":
+    try:                       # PLAN-929：GBK 机器上 ✅❌ 打不出来会崩掉整条链，先把输出流顶成 UTF-8
+        from bridge_env import force_utf8_std as _f8; _f8()
+    except Exception:          # noqa: BLE001 — 顶不动也不许挡住本命令
+        pass
     main()

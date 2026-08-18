@@ -58,4 +58,11 @@ def main():
 
 
 if __name__ == "__main__":
+    try:                       # PLAN-929：同上。hooks/ 不在 sys.path 上，先把 feishu/ 加进去
+        import sys as _s
+        from pathlib import Path as _P
+        _s.path.insert(0, str(_P(__file__).resolve().parents[1]))
+        from bridge_env import force_utf8_std as _f8; _f8()
+    except Exception:          # noqa: BLE001
+        pass
     main()

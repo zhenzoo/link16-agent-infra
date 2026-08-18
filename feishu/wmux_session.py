@@ -61,7 +61,7 @@ def _wmux(*args):
     last_err = ""
     for attempt in range(_RETRY_TRIES):
         r = subprocess.run(["node", str(WMUX_RPC), *args],
-                           capture_output=True, text=True, encoding="utf-8", timeout=30,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢鼠标焦点
         if r.returncode == 0:
             return r.stdout
@@ -263,4 +263,8 @@ def main():
 
 
 if __name__ == "__main__":
+    try:                       # PLAN-929：GBK 机器上 ✅❌ 打不出来会崩掉整条链，先把输出流顶成 UTF-8
+        from bridge_env import force_utf8_std as _f8; _f8()
+    except Exception:          # noqa: BLE001 — 顶不动也不许挡住本命令
+        pass
     main()

@@ -63,7 +63,7 @@ def _notify(bot: str, text: str, log):
         [sys.executable, str(FEISHU / "feishu_bridge.py"), "send", "--bot", bot, "--text", text, "--json"],
         cwd=str(ROOT),
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         timeout=60,
     )
     log.write((result.stdout or "") + (result.stderr or ""))
@@ -223,4 +223,8 @@ def main():
 
 
 if __name__ == "__main__":
+    try:                       # PLAN-929：GBK 机器上 ✅❌ 打不出来会崩掉整条链，先把输出流顶成 UTF-8
+        from bridge_env import force_utf8_std as _f8; _f8()
+    except Exception:          # noqa: BLE001 — 顶不动也不许挡住本命令
+        pass
     main()
