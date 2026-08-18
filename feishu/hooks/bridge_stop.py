@@ -183,9 +183,24 @@ def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
             "consumed_line": consumed_fallback, "complete": False}
 
 
+def _trace(msg):
+    """黑匣子（2026-08-18·PLAN-929）：Stop hook 在真实会话里「跑了、零报错、却什么都没写」——
+    代码在实验室拿同一份 transcript + 同一个 cursor 能正常吐卡，所以差别只可能在真实运行环境。
+    这里把每次运行的关键量落一行到 feishu/_logs/stop-hook-trace.log，下一轮就能读到真相。
+    **绝不抛**：黑匣子坏了也不许连累正文投递（这正是本次要查的病）。"""
+    try:
+        d = Path(__file__).resolve().parents[2] / "feishu" / "_logs"
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "stop-hook-trace.log", "a", encoding="utf-8") as f:
+            print("[%s][pid%s] %s" % (time.strftime("%m-%d %H:%M:%S"), os.getpid(), msg), file=f)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
     bot = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not bot:
+        _trace("EXIT 无 FEISHU_BRIDGE_SESSION（非桥会话）")
         return                                    # 非桥会话 → 不管（env-scope 隔离）
     try:
         inp = json.load(sys.stdin)
@@ -194,6 +209,7 @@ def main():
     tp = inp.get("transcript_path")
     sid = inp.get("session_id", "")
     if not tp or not os.path.exists(tp):
+        _trace(f"EXIT bot={bot} transcript 不存在 tp={tp!r}")
         return                                    # 首轮 transcript 可能未落 → 跳过（下轮 Stop 再来）
 
     proj = _project_dir()
@@ -202,13 +218,16 @@ def main():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     try:
         from jsonl_reply_extract import _is_real_user_message, _assistant_texts  # 复用 SSOT 解析
-    except Exception:                             # noqa: BLE001
+    except Exception as _e:                       # noqa: BLE001
+        _trace(f"EXIT bot={bot} import jsonl_reply_extract 失败: {_e}")
         return
     # outdir 先算出来：cursor(上轮扫到哪行) 和 outbox 同目录（FEISHU_BRIDGE_OUTBOX_DIR = 桥给每个 bot 钉的 _state/）
     outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
     floor = _read_cursor(outdir, bot, sid)
     r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts, floor_line=floor)
     cards = [c.strip() for c in (r.get("cards") or []) if c and c.strip()]
+    _trace(f"bot={bot} outdir={outdir} floor={floor} anchor={r.get('anchor_line')} "
+           f"cards={len(cards)} 字数={[len(c) for c in cards]} complete={r.get('complete')} consumed={r.get('consumed_line')}")
     if not cards:
         return                                    # 终结态无文本（只工具/思考收尾）或竞态超时 → 不发
 
@@ -243,12 +262,21 @@ def main():
                 rec = {"kind": "answer", "ts": int(time.time()), "session": sid,
                        "anchor": anchor, "text": c, "route": route}
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError:
+    except OSError as _e:
+        _trace(f"EXIT bot={bot} 写 outbox 失败: {_e}")
         return                                    # 没写成 outbox 就不推进 cursor（否则这轮正文永久蒸发）
     # 正文已落 outbox → 推进 cursor 到「本轮真正取走正文的最后一行」：下一次 Stop 只看更后面的记录，
     # 结构上杜绝「同一段正文被下一轮再拼一遍」（2026-08-16 tb24-voiceover 全量重发事故的硬保证）。
     _write_cursor(outdir, bot, sid, r.get("consumed_line") or 0)
+    _trace(f"OK bot={bot} 已写 {len(cards)} 条 answer → {outbox}")
 
 
 if __name__ == "__main__":
+    try:                       # PLAN-929：同上。hooks/ 不在 sys.path 上，先把 feishu/ 加进去
+        import sys as _s
+        from pathlib import Path as _P
+        _s.path.insert(0, str(_P(__file__).resolve().parents[1]))
+        from bridge_env import force_utf8_std as _f8; _f8()
+    except Exception:          # noqa: BLE001
+        pass
     main()
