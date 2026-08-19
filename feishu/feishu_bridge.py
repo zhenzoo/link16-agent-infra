@@ -2367,21 +2367,29 @@ def cmd_start(bot_filter=None):
     script = str(Path(__file__).resolve())
     detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
     started = []
-    for b in bots:
+    total = len(bots)
+    # 逐个起、**逐行打**（2026-08-19 主人提）：子进程是 DETACHED_PROCESS·无窗口，屏幕上看不到任何动静；
+    # 34 个 bot 要起约 17 秒，一次性在末尾打一大串 = 这十几秒主人不知道有没有在动、卡在谁身上。
+    # 每起一个就 flush 一行（序号/名字/PID），把「正在发生」变成看得见的。flush=True 不能省：
+    # stdout 被管道接走时是块缓冲，不 flush 仍会攒到最后一次性吐，等于没改。
+    print(f"⏳ 正在启动 {total} 个 bot（各自脱离终端·关终端不死）…", flush=True)
+    for i, b in enumerate(bots, 1):
         nm = b["name"]
         # append 模式：保留历史（旧版 "w" 每次 start 截断 → 出问题无从复盘 · 2026-06-15 修）
         logf = open(LOG_DIR / f"bridge-{nm}.log", "a", encoding="utf-8")  # noqa: SIM115 — 句柄交给子进程
         logf.write(f"\n========== restart {time.strftime('%Y-%m-%d %H:%M:%S')} ==========\n")
         logf.flush()
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, script, "run", "--bot", nm],
             stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             creationflags=detached, cwd=str(PROJECT),
         )
         started.append(nm)
-        time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地
+        print(f"  [{i:>2}/{total}] ✅ {nm:<26} pid={proc.pid}", flush=True)
+        if i < total:
+            time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地（最后一个不用再等）
     _stop_hint = f"`stop --bot {bot_filter}` 停它" if bot_filter else "`stop` 停全部"
-    print(f"已后台启动 {len(started)} 个 bot 进程：{', '.join(started)}（脱离终端·关终端不死）"
+    print(f"\n已后台启动 {len(started)} 个 bot 进程。"
           f"\n日志：{LOG_DIR}\\bridge-<bot>.log · 用 `status` 查 · {_stop_hint}。")
     # 通用 CRON 守护进程随「整体 start」一起起（单 bot start --bot X 不带它 · 它是全局定时器不属某个 bot）。
     if not bot_filter:
