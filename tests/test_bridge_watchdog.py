@@ -371,5 +371,42 @@ def test_R1和R2用的是同一套计数_别只修一个():
     assert body.count("_bump(st,") >= 2, "R1 与 R2 必须共用同一套信号计数"
     assert "and static" not in body, "整屏 static 判据必须已被彻底移除"
 
+
+# ───── /handoff 的对齐版 prompt（与看门狗那版刻意相反）─────
+
+def test_align_prompt_必须要求先汇报再停下而不是接着干():
+    """主人 2026-08-21 定：`/handoff` 用于「context 快满、要开一条全新的重要线」。
+    这时主人**在场**，新会话还不知道他要什么 ⇒ **自作主张接着干是最坏的行为**。
+    与 `build_handoff_prompt`（看门狗半夜自动换号用·「别问我直接干」）刻意相反。"""
+    pack = {"transcript": "C:/x/y.jsonl", "session_id": "y", "cwd": "E:/p",
+            "at": "now", "background": {"procs": [], "files": []}}
+    p = w.build_align_prompt(pack)
+    for must in ("禁止一次性通读", "最后那几轮", "调研 code base", "停下来，等主人", "不要自作主张"):
+        assert must in p, f"align prompt 必须包含：{must}"
+    for must_not in ("不需要跟我确认", "不需要跟我对齐", "直接接着推进"):
+        assert must_not not in p, f"align prompt 绝不能包含：{must_not}（那是自动换号那版的口径）"
+
+
+def test_两版prompt口径必须相反():
+    """守住这两版别被后人「统一」成一个 —— 它们服务的是两种相反的处境。"""
+    pack = {"transcript": "t", "session_id": "s", "cwd": "c", "at": "now",
+            "old_profile": "ccp", "background": {"procs": [], "files": []}}
+    auto = w.build_handoff_prompt(pack, "ccp")
+    align = w.build_align_prompt(pack)
+    assert "不需要跟我确认" in auto and "不需要跟我确认" not in align
+    assert "停下来，等主人" in align and "停下来，等主人" not in auto
+
+
+def test_handoff_命令已接进桥且不切账号():
+    """/handoff 与 /close 的三处差别，缺一不可。"""
+    src = (HERE.parent / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8")
+    i = src.index('if cmd in ("/handoff"')
+    body = src[i:i + 3000]
+    assert "reset_account" not in body, "/handoff 绝不能切账号（那是 /close 干的）"
+    assert "snapshot_handoff" in body, "必须在关会话【之前】快照交接包"
+    assert body.index("snapshot_handoff") < body.index("wmux_session.close"), "快照必须在关会话之前"
+    assert "build_align_prompt" in body, "必须注入对齐版 prompt"
+    assert "ensure_session" in body, "必须主动起新会话（不像 /close 那样懒启动）"
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

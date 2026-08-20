@@ -7,7 +7,7 @@
     · 没会话 → 解析 bot profile → wmux_session.spawn 新建专属 workspace + 起对应 agent + 等就绪
       → 把 workspace/pty/profile 记进 per-bot 注册表
     · 有会话 → 注入那个 pty（普通消息末尾缀 [飞书-<bot>] 标记 · slash command 原样透传不缀）→ worker 会话 hook(Stop/PostToolUse) 写 outbox → drainer 读 outbox 发回飞书（v8）
-    · slash command：bridge 自己认 /clear /cd /account /screen /stop /close /new /help；其余（/resume /rename /model …）verbatim 转发进当前 agent
+    · slash command：bridge 自己认 /clear /cd /account /screen /stop /close /handoff /new /help；其余（/resume /rename /model …）verbatim 转发进当前 agent
       （/new = 起个全新【空】会话不注入任何文本·把「起会话」和「注入内容」拆开：先 /new 起空的 → 再自己发消息喂它）
     · 会话死了（你手关 workspace）→ 下次消息自动重生
 
@@ -15,7 +15,7 @@
   单进程多 channel 会撞 "This event loop is already running"）。所以 **run 只跑一个 bot**；
   **start 为 bridge-bots.json 里每个 bot 各起一个 `run --bot <name>` 隐藏进程**（管理仍是一套命令）。
 
-斜杠命令：/clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（从 agent-profiles.json 动态列出/切换 profile，原子更新该 bot 名册项并关旧会话重起）· /screen 看现场 · /stop 打断 · /close 关会话
+斜杠命令：/handoff(=/交接) 换全新 context 但让它先读懂历史再跟你对齐 · /clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（从 agent-profiles.json 动态列出/切换 profile，原子更新该 bot 名册项并关旧会话重起）· /screen 看现场 · /stop 打断 · /close 关会话
 per-bot 会话注册表：feishu/_state/bridge-session-<bot>.json（各进程自写自读 · 无多进程 race）
 配置：feishu/bridge-bots.local.json（本机覆盖）或 feishu/bridge-bots.json（每 bot 只持久 profile + 传输/业务字段）
 子命令：start（默认·裸跑 `python feishu_bridge.py` 即把所有 bot 各起一隐藏进程） / run [--bot X]（前台调试单 bot） / stop（停全部） / status / workspaces
@@ -1692,6 +1692,52 @@ def run(bot_name=None):
                 def_dir = default_cwd(bot)                               # 名册默认目录（下次重开用这个）
                 head = "🗑 已关闭会话" if alive else "🛌 本来就没有会话"
                 await reply(chat_id, f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）"); return
+            if cmd in ("/handoff", "/交接", "/接手"):
+                # `/close` 的进阶版（主人 2026-08-21 定）：**关掉当前会话 → 开一个全新 context →
+                # 让新会话先读懂历史、汇报、然后停下等你**。
+                #
+                # 与 `/close` 的差别（三处，缺一不可）：
+                #   ① **不切账号、不回默认目录** —— 你只是要换个干净 context，不是要换号搬家
+                #   ② **关之前先快照交接包**（transcript 路径 / session id / cwd / 屏尾 / 在途后台任务）
+                #      —— 关了就没了，这一步的顺序不能反
+                #   ③ **主动起新会话并注入接手 prompt**（不像 /close 那样等你下条消息才懒启动）
+                # 与看门狗自动换号的差别：那个是「别问我，直接接着干」（半夜撞限流、主人不在场）；
+                #   这个是「搞懂 → 汇报 → **停下等你**」（你在场，而且你要开的是全新的东西，猜你要什么最糟）。
+                #
+                # 典型场景：当前 context 快满了，但要在这条线上开一个全新的重大任务，
+                #   既要 fresh context，又不能丢掉前面聊出来的结论（尤其最后几轮那份还没定的方案）。
+                try:
+                    import bridge_watchdog as bw
+                except Exception as _e:                                    # noqa: BLE001
+                    await reply(chat_id, f"⛔ 交接失败：载不进 bridge_watchdog（{_e}）"); return
+                if not alive:
+                    await reply(chat_id, "🛌 当前没有会话可交接。直接发消息我就起一个新的。"); return
+                await reply(chat_id, "🔄 正在交接：快照上一轮 → 关会话 → 起全新 context → 让它先读懂历史……")
+                pack = await asyncio.to_thread(bw.snapshot_handoff, bot["name"], "主人手动 /handoff")
+                if not pack.get("transcript"):
+                    await reply(chat_id, "⚠️ 没找到上一个会话的 transcript —— 交接会缺历史，仍继续（它只能靠屏尾和 code base）。")
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
+                keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
+                await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
+                clear_codex_thread(bot["name"])                            # codex：清 thread 指针，确保真·新会话
+                _merge_session(bot["name"], {"cwd": keep_dir, "pty": None, "workspace_id": None,
+                                             "jsonl": None, "daemon_fp": None})   # 只清 runtime 指针·留账号与目录
+                try:
+                    ws2, pty2, _created, _ = await asyncio.to_thread(ensure_session, bot)   # ③ 主动起
+                except Exception as _e:                                    # noqa: BLE001
+                    await reply(chat_id, f"⛔ 新会话起不来：{_e}。发条消息我再试。"); return
+                marker = (bw.build_align_prompt(pack)
+                          + f"\n[飞书 from=host to={bot['name']} via=handoff · route=p2a]")
+                ok = await asyncio.to_thread(_inject, pty2, ws2, marker)
+                _bgn = len((pack.get("background") or {}).get("procs") or []) \
+                    + len((pack.get("background") or {}).get("files") or [])
+                await reply(chat_id, md=(
+                    f"{'✅' if ok else '⚠️'} **已交接给全新会话**（账号 `{agent_runtime.current_account(bot)}` 不变 · 目录 `{keep_dir}`）\n"
+                    f"· 上一轮 session `{pack.get('session_id')}` 的记录已交给它\n"
+                    f"· 在途工作线索 {_bgn} 条一并带过去了\n"
+                    f"· 它会**先读历史 + 调研 code base → 汇报 → 停下等你**，不会自作主张往下做\n"
+                    + ("· ⚠️ prompt 卡在输入框没提交，去面板按一下回车" if not ok else
+                       "\n读完它会回你一份「原任务 / 已完成 / 停在哪 / 哪些还没定」，然后你再提新需求。"))); return
             if cmd == "/new":
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /new=全新会话=撤销旧投递契约→清账（§2.13）
                 # 开一个【全新空会话·不注入任何文本】——与「正常发消息起会话」【同一 spawn 路径】(ensure_session)，
@@ -1763,6 +1809,10 @@ def run(bot_name=None):
                     "· `/screen` — 看现场\n"
                     "· `/stop` — 打断当前任务（顺手清空输入框）\n"
                     "· `/close` — 关会话（顺手把临时切的账号切回名册默认）\n"
+                    "· `/handoff`（=`/交接`）— **`/close` 的进阶版**：关掉当前会话 → 开一个**全新 context**\n"
+                    "   → 让它先读懂上一轮聊天记录 + 调研 code base → **汇报后停下等你**（账号、目录都不变）。\n"
+                    "   💡 用在「当前 context 快满了，但要在这条线上开一个全新的重要任务」——\n"
+                    "      既拿到干净上下文，又不丢前面聊出来的结论（尤其最后几轮那份还没定的方案）。\n"
                     "· `/new` — 起一个【全新空会话】·不注入任何文本（起在名册默认账号+目录·有活会话先关旧的）→ 停在就绪态，你自己发消息注入\n"
                     "· `/help` — 本帮助\n\n"
                     f"📂 **当前在** `{cur}`\n**书签**：{bm}（如 `/cd yoach` `/cd post`）")); return
