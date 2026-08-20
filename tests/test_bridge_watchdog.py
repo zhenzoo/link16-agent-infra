@@ -326,5 +326,50 @@ def test_换号配额_不因告警送达与否而改变():
     seg = body[i_rec:i_notify]
     assert "if " not in seg.replace(chr(10), " ")[:120], "配额记账不许被任何条件包住"
 
+
+# ───── 「屏在动」的卡死必须救得了（tuf19 现场逮到的真洞 · 2026-08-20）─────
+
+def test_屏在动但信号一直在_必须能累加到触发():
+    """🩸 tuf19 现场：那只 bot 挂着每分钟一次的 scheduled task、轮询 120s
+    ⇒ 每轮必进 2 条新记录 ⇒ **结构上不可能整屏 static**。
+    旧判据 `if (信号在 and 整屏hash没变)` 会让计数器永远归零 ⇒ 撞了限流也永远救不了。
+    **「屏死的会被救、屏在动的救不了」—— 而屏在动恰恰因为它在一遍遍白撞。**"""
+    banner = "  ⎿  You've hit your weekly limit · resets Aug 21, 6pm · progress saved"
+    st = {"lim_sig": None, "lim_stuck": 0}
+    for r in range(w.STUCK_CONFIRM):
+        text = banner + chr(10) + f"[scheduled] tick {r} 20:0{r}:00"   # 每轮都变 → 旧判据必归零
+        st["lim_stuck"] = w._bump(st, "lim", w.find_pane_limit(text))
+    assert st["lim_stuck"] >= w.STUCK_CONFIRM, "屏在动但横幅一直在 → 必须能累加到触发"
+
+
+def test_真跑起来了_信号消失后计数器自己归零():
+    """这条守的是「去掉整屏 static 之后，防误判还在不在」——
+    原顾虑「它其实还在用 usage-credits 跑」由**结构**覆盖：真跑起来新输出会把横幅顶出读窗。"""
+    st = {"lim_sig": None, "lim_stuck": 3}
+    running = chr(10).join(f"● 正在处理第 {i} 步…" for i in range(1, 45))
+    assert w.find_pane_limit(running) is None, "新输出应把横幅顶出读窗"
+    assert w._bump(st, "lim", w.find_pane_limit(running)) == 0
+
+
+def test_换成另一条错误_计数重新开始而不是接着累加():
+    """两次【不同】的故障不能被混算成「持续同一个故障」。"""
+    st = {"err_sig": None, "err_stuck": 0}
+    a = w.find_pane_error("● API Error: Connection lost")
+    b = w.find_pane_error("● API Error: 529 Overloaded")
+    st["err_stuck"] = w._bump(st, "err", a)
+    st["err_stuck"] = w._bump(st, "err", a)
+    assert st["err_stuck"] == 2
+    st["err_stuck"] = w._bump(st, "err", b)
+    assert st["err_stuck"] == 1, "换了一条不同的错误 = 新事件，重新从 1 开始"
+
+
+def test_R1和R2用的是同一套计数_别只修一个():
+    """tb25-link16 提醒：R1 有同一个洞。只修 R2 会留下
+    「限流能救、API 错救不了」的怪状态。这条守两边共用 `_bump`。"""
+    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
+    body = src[src.index("def cmd_run("):]
+    assert body.count("_bump(st,") >= 2, "R1 与 R2 必须共用同一套信号计数"
+    assert "and static" not in body, "整屏 static 判据必须已被彻底移除"
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

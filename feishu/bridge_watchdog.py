@@ -828,6 +828,37 @@ def _profile_of(bot_name, bot_obj=None):
     return None
 
 
+def _bump(st, kind, sig):
+    """「同一条信号连续出现了几轮」计数器。返回新的计数。纯函数（只改传进来的 st）。
+
+    🩸 2026-08-20 tuf19 现场逮到、tb25-link16 读码独立确认的真洞（这段是修法，别改回去）：
+      原来的判据是 `if (信号在 and static)`，而 `static = (整屏 hash 没变)`。
+      ⇒ **屏上任何一行变了，计数器就归零，永远到不了 STUCK_CONFIRM。**
+      tuf19 那只 bot 挂着每分钟一次的 scheduled task、轮询 120s ⇒ 每轮必进 2 条新记录
+      ⇒ **结构上不可能 static** ⇒ 撞了限流也永远救不了。
+      **「屏死的会被救、屏在动的救不了」—— 而屏在动恰恰是因为它在一遍遍白撞。**
+      判据把「空转烧重试」当成了「在干活」。
+
+    为什么整屏 static 是【冗余】的（不是我少加一道闸，是它本就不该在）：
+      · R2 已经是**双源**（屏命中限流横幅 AND 账号 API 判定=满），API 那一路天生不受屏抖动影响；
+      · STUCK_CONFIRM 的原意是「防它其实还在用 usage-credits 跑」——**这个顾虑结构上已经被覆盖**：
+        真跑起来了，新输出会把限流横幅顶出读窗 ⇒ `find_pane_limit` 不再命中 ⇒ 计数器自己归零。
+        （2026-08-20 实测：44 行新输出之后横幅确实不再命中。）
+        ⇒ **「同一条横幅连续 N 轮还在」这件事本身就携带了「它没在推进」的信息。**
+      · R1 那边「它其实在自愈」的顾虑另有 `RETRY_MARKERS` 单独兜着，static 在那儿同样冗余。
+
+    改成盯【信号本身】而不是【整屏】，比单纯删掉 static 更准：
+      · 无关行怎么变都不影响（治好 tuf19 那种「屏在动」的情形）
+      · 但**换了一条不同的错误/横幅 = 新事件**，计数重新从 1 开始，不会把两次不同的故障混算成"持续"
+    """
+    prev = st.get(f"{kind}_sig")
+    if not sig:
+        st[f"{kind}_sig"] = None
+        return 0
+    st[f"{kind}_sig"] = sig
+    return (st.get(f"{kind}_stuck", 0) + 1) if sig == prev else 1
+
+
 def cmd_run(auto=True):
     """守护循环 —— **一个循环 + 一张规则表**（主人 2026-08-20 定的形状）。
 
@@ -868,10 +899,8 @@ def cmd_run(auto=True):
                     continue                             # 自己的日志里有错误字样，不是卡住的会话
                 ws = (ws_by_pty or {}).get(pty) or "?workspace"
                 bot_name = bot_by_pty.get(pty)
-                st = states.setdefault(pty, {"hash": "", "err_stuck": 0, "lim_stuck": 0, "last_nudge": 0.0})
-                h = str(hash(text))
-                static = (h == st["hash"])
-                st["hash"] = h
+                st = states.setdefault(pty, {"err_sig": None, "err_stuck": 0,
+                                            "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0})
 
                 # ---- R3 · picker → 什么都不做 ----
                 if at_picker(text, bot_name):
@@ -881,7 +910,7 @@ def cmd_run(auto=True):
                 # ---- R2 · 撞额度上限 → 换号 + 接手 ----
                 prof = _profile_of(bot_name, bots.get(bot_name)) if bot_name else None
                 limited, why = is_limited(text, quota.get(prof)) if prof else (False, "认不出是哪个 bot")
-                st["lim_stuck"] = (st["lim_stuck"] + 1) if (limited and static) else 0
+                st["lim_stuck"] = _bump(st, "lim", find_pane_limit(text) if limited else None)
                 if st["lim_stuck"] >= STUCK_CONFIRM:
                     log(f"⚡ {ws}/{bot_name} 撞额度上限（{prof}）：{why}")
                     if auto:
@@ -894,7 +923,7 @@ def cmd_run(auto=True):
 
                 # ---- R1 · API/网络错 + 静止 2 轮 → 注「继续」----
                 err = find_pane_error(text)
-                st["err_stuck"] = (st["err_stuck"] + 1) if (err and static) else 0
+                st["err_stuck"] = _bump(st, "err", err)
                 if st["err_stuck"] >= STUCK_CONFIRM and (now - st["last_nudge"]) >= NUDGE_COOLDOWN:
                     nudge_pane(pty)
                     st["last_nudge"] = now

@@ -75,6 +75,12 @@ MUTATIONS = [
      "            ok = False",
      "test_告警_DM失败必须退webhook而不是静默"),
 
+    ("信号计数闸：退回「整屏没变才累加」",
+     FEISHU / "bridge_watchdog.py",
+     "    return (st.get(f\"{kind}_stuck\", 0) + 1) if sig == prev else 1",
+     "    return 0",
+     "test_屏在动但信号一直在_必须能累加到触发"),
+
     ("告警冷却闸：拆掉冷却",
      FEISHU / "bridge_watchdog.py",
      "        if time.time() - last < ALERT_COOLDOWN:",
