@@ -30,7 +30,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -943,11 +943,55 @@ def failover_readiness(rows=None):
     return out
 
 
+def _running_stale():
+    """跑着的守护进程是不是【还在跑旧代码】。返回 (是否陈旧, 说明)。
+
+    🩸 2026-08-20 tb25-link16 实测的操作坑（差点收工在一个骗人的绿灯上）：
+      他 `git pull` 完先跑 `status`，看到 claude ✅ 就差点收工 ——
+      但**跑着的看门狗进程还是拉取前的旧字节码**。
+      `status` 是当场新起的解释器（**新代码**），常驻进程是**旧的**，
+      两者会给出不一致的能力判断，而 status 那个 ✅ 是骗人的：
+      真撞限流时干活的是旧进程，照样按旧逻辑失败。
+
+    与「改得了名册文件、改不了跑着的桥进程内存」是**同一类失效**：
+      **外部看着对、进程里还是旧的。** 光靠 SOP 写一句「记得重启」挡不住，
+      所以这里做成机械检测：**源码 mtime 比进程启动时间新 ⇒ 当场报警。**
+    """
+    pids = _pids()
+    if not pids:
+        return False, ""
+    watched = [HERE / "bridge_watchdog.py", HERE / "agent_quota.py"]
+    newest = max((p.stat().st_mtime for p in watched if p.exists()), default=0)
+    ps = (f"@(Get-CimInstance Win32_Process -Filter \"ProcessId={pids[0]}\")"
+          ".CreationDate.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
+        raw = (r.stdout or "").strip().splitlines()[-1].strip()
+        started = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except Exception:                                    # noqa: BLE001
+        return False, ""                                 # 查不了就别乱报（宁可漏报不误报）
+    if newest > started:
+        gap = (newest - started) / 60.0
+        return True, (f"⚠️ **跑着的进程还在用旧代码**：源码比它新 {gap:.0f} 分钟"
+                      f"（进程起于 {datetime.fromtimestamp(started, TZ):%H:%M:%S}，"
+                      f"源码改于 {datetime.fromtimestamp(newest, TZ):%H:%M:%S}）。\n"
+                      f"     下面这些判断来自【新代码】，而真正干活的是【旧进程】—— **绿灯不算数**。\n"
+                      f"     先跑：python feishu/bridge_watchdog.py stop && python feishu/bridge_watchdog.py start"
+                      f"（只重启这一个部件即可，不用动桥和那些 bot）")
+    return False, ""
+
+
 def cmd_status(verbose=False):
     """必须报出三样（PLAN-931 Q8）：**在看护几个面板 · 上次巡检什么时候 · 最近注入过谁**。
     再加一段跨机自检（本机找不找得到 wmux / 名册 / 桥）—— 换台机器一跑就知道能不能用。"""
     pids = _pids()
     print(f"进程：{'✅ 在 pid=' + str(pids) if pids else '❌ 没在跑'}")
+
+    # ⚠️ 陈旧检测放最前面 —— 后面所有绿灯的可信度都取决于它
+    stale, why = _running_stale()
+    if stale:
+        print(why)
 
     # ① 在看护几个面板（真拓扑，不是名册条数）
     ws_by_pty, ptys = scan_topology()
@@ -1006,6 +1050,8 @@ def cmd_status(verbose=False):
         mark = "✅" if v["ok"] else "🔴"
         print(f"  {mark} {rt:7} 本机 {v['bots']:>2} 个 bot 在用 · 同 runtime 可切 {v['usable'] or '无'}"
               f" · 跨 runtime 可切 {v['cross_usable'] or '无'}")
+    if stale:
+        print("\n" + why)          # 长输出会把开头刷走，结尾再提一次
     dead = [rt for rt, v in ready.items() if not v["ok"]]
     if dead:
         print(f"  🔴 **{dead} 这些 runtime 撞限流时【切不动】** —— 所有候选号都『问不到』或『满』。")

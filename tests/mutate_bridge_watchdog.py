@@ -57,6 +57,12 @@ MUTATIONS = [
      'ok = [r for r in rows if r["profile"] not in set(exclude)]',
      "test_选号_问不到的绝不选"),
 
+    ("陈旧检测闸：源码比进程新也不报",
+     FEISHU / "bridge_watchdog.py",
+     "    if newest > started:",
+     "    if False:",
+     "test_陈旧检测_源码比进程新就必须报警"),
+
     ("告警冷却闸：拆掉冷却",
      FEISHU / "bridge_watchdog.py",
      "        if time.time() - last < ALERT_COOLDOWN:",

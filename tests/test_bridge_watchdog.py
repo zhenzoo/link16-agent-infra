@@ -215,5 +215,44 @@ def test_告警走的是DM而不是webhook():
     assert "send_feishu_msg.py" in body, "会话级告警必须走 bot 自己的 DM"
 
 
+
+def test_陈旧检测_源码比进程新就必须报警(monkeypatch):
+    """🩸 tb25-link16 2026-08-20 实测的操作坑：git pull 后先跑 status 看到绿灯就差点收工，
+    而**跑着的守护进程还是拉取前的旧字节码** —— status 是当场新起的解释器（新代码），
+    常驻进程是旧的，两者给出不一致的能力判断，那个绿灯是骗人的。
+    与「改得了名册文件、改不了跑着的桥进程内存」同族：**外部看着对、进程里还是旧的**。
+    光靠 SOP 写「记得重启」挡不住，所以做成机械检测 —— 这条用例守它别被改坏。"""
+    import datetime as _dt
+
+    class _R:
+        def __init__(self, o):
+            self.stdout = o
+    monkeypatch.setattr(w, "_pids", lambda: [12345])
+    # 进程起于一小时前，源码是现在的 mtime ⇒ 必须判陈旧
+    old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: _R(old + chr(10)))
+    stale, why = w._running_stale()
+    assert stale is True and "旧代码" in why
+
+    # 进程起于将来（= 比源码新）⇒ 不该报
+    new = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: _R(new + chr(10)))
+    assert w._running_stale()[0] is False
+
+
+def test_陈旧检测_查不出启动时间时不误报(monkeypatch):
+    """宁可漏报也别误报 —— 查不到就闭嘴。"""
+    monkeypatch.setattr(w, "_pids", lambda: [12345])
+    monkeypatch.setattr(w.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("ps 挂了")))
+    assert w._running_stale()[0] is False
+
+
+def test_陈旧检测_没进程在跑就不报():
+    """没跑就无所谓新旧。"""
+    import unittest.mock as _m
+    with _m.patch.object(w, "_pids", lambda: []):
+        assert w._running_stale()[0] is False
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
