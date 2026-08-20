@@ -63,6 +63,18 @@ MUTATIONS = [
      "    if False:",
      "test_陈旧检测_源码比进程新就必须报警"),
 
+    ("告警目标闸：拿掉 owner 文件兜底",
+     FEISHU / "bridge_watchdog.py",
+     "    owner = STATE_DIR / f\"bridge-owner-{bot_name}.json\"",
+     "    owner = STATE_DIR / f\"__nonexistent-{bot_name}.json\"",
+     "test_告警目标_三级兜底"),
+
+    ("告警送达闸：DM 失败不退 webhook",
+     FEISHU / "bridge_watchdog.py",
+     "            ok = notify_webhook(f\"[{bot_name}] {text}\")",
+     "            ok = False",
+     "test_告警_DM失败必须退webhook而不是静默"),
+
     ("告警冷却闸：拆掉冷却",
      FEISHU / "bridge_watchdog.py",
      "        if time.time() - last < ALERT_COOLDOWN:",

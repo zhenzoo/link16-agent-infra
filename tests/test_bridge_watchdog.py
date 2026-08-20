@@ -254,5 +254,57 @@ def test_陈旧检测_没进程在跑就不报():
     with _m.patch.object(w, "_pids", lambda: []):
         assert w._running_stale()[0] is False
 
+
+# ─────────────── 告警送达（唯一面向人的出口 · 不许静默失败）───────────────
+
+def test_告警目标_三级兜底(tmp_path, monkeypatch):
+    """🩸 tb25-link16 2026-08-20 在 TB25 第一次真实换号时抓到的自噬 bug：
+    告警目标只认 bridge-session-<bot>.json 的 chat_id，而**冷启的会话文件没有这个字段**。
+    更糟的是 failover 自己会关旧会话再冷启 ⇒ 第二条 handed 告警**必然**没 chat_id
+    ⇒ **换号越成功，越发不出告警**。TB25 20 个 session 里 7 个缺 chat_id；
+    本机 21 个全都有 —— 所以这个 bug 在 TB24 永远暴露不出来。"""
+    import json as _j
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    b = "botx"
+    # ① session 有 chat_id → 用它
+    (tmp_path / f"bridge-session-{b}.json").write_text(_j.dumps({"chat_id": "oc_AAA"}), encoding="utf-8")
+    assert w._alert_target(b) == "oc_AAA"
+    # ② session 没 chat_id、但有 owner → 退 owner 的 open_id
+    (tmp_path / f"bridge-session-{b}.json").write_text(_j.dumps({"pty": "x"}), encoding="utf-8")
+    (tmp_path / f"bridge-owner-{b}.json").write_text(_j.dumps({"open_id": "ou_BBB"}), encoding="utf-8")
+    assert w._alert_target(b) == "ou_BBB", "冷启会话必须能退到 owner 文件，否则换号成功=没人知道"
+    # ③ 两者都没有 → None（交给调用方退 webhook，**不许静默**）
+    (tmp_path / f"bridge-owner-{b}.json").unlink()
+    assert w._alert_target(b) is None
+
+
+def test_告警目标_必须用那个bot自己的owner文件(tmp_path, monkeypatch):
+    """⚠️ open_id 按 app 隔离：同一个人在不同 bot 眼里 id 不同
+    （tb25 实测主人在 tb25-ccp 是 ou_8b05…、在 tb25-link16 是 ou_9284…；
+    本机 22 个 owner 文件有 16 个不同 open_id）。拿错 bot 的 id 去发 = 发给不存在的对象。"""
+    import json as _j
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    for bot, oid in (("a", "ou_A"), ("b", "ou_B")):
+        (tmp_path / f"bridge-session-{bot}.json").write_text(_j.dumps({"pty": "x"}), encoding="utf-8")
+        (tmp_path / f"bridge-owner-{bot}.json").write_text(_j.dumps({"open_id": oid}), encoding="utf-8")
+    assert w._alert_target("a") == "ou_A"
+    assert w._alert_target("b") == "ou_B", "绝不能串到别的 bot 的 open_id"
+
+
+def test_告警_DM失败必须退webhook而不是静默(tmp_path, monkeypatch):
+    """告警是整套设计里【唯一面向人的出口】，它静默失败 = 干成了但没人知道。"""
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(w, "ALERTS_PATH", tmp_path / "a.json")
+    monkeypatch.setattr(w, "_alert_target", lambda b: None)
+    monkeypatch.setattr(w.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 1, "stderr": "没有可发目标", "stdout": ""})())
+    hit = []
+    monkeypatch.setattr(w, "notify_webhook", lambda t: hit.append(t) or True)
+    assert w.notify("botx", "handed", "换号成功") is True
+    assert hit, "DM 发不出时必须退回 webhook"
+    # webhook 也失败 → notify 必须如实返回 False，让调用方降级
+    monkeypatch.setattr(w, "notify_webhook", lambda t: False)
+    assert w.notify("botx", "handed", "再来一条") is False, "两条路都断了就必须如实报 False"
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

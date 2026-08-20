@@ -270,11 +270,47 @@ def _alerts_save(data):
 _STATEFUL_KINDS = {"limit"}
 
 
+def _alert_target(bot_name):
+    """告警发给谁 —— 三级兜底，**别只认 session 的 chat_id**。
+
+    🩸 2026-08-20 tb25-link16 抓到的自噬 bug（TB25 第一次真实换号时暴露）：
+      `send_feishu_msg` 不给 `--to` 时默认取 `bridge-session-<bot>.json` 的 `chat_id`，
+      而**冷启的会话文件压根没有这个字段**。于是：
+        21:27:52 [tb25-ccp] DM 告警 limit  → ❌ 没有可发目标
+        21:28:27 [tb25-ccp] DM 告警 handed → ❌ 没有可发目标
+        21:28:27 ✅ tb25-ccp ccp2 → ccp 换号 + 接手完成
+      **换号成功了，主人一个字都没收到。**
+      更糟的是它是个**自噬结构**：failover 自己会关掉旧会话再冷启，
+      所以第二条 `handed` 告警**必然**没有 chat_id ⇒ **换号越成功，越发不出告警**。
+      （TB25 实测 20 个 session 文件里 7 个缺 chat_id；本机 21 个全都有 —— 所以这个 bug
+      在 TB24 永远暴露不出来，又一条只有跨机才验得出的失效。）
+
+    ⚠️ **open_id 是按 app 隔离的**：同一个人在不同 bot 眼里 id 不同
+      （tb25 实测：主人在 tb25-ccp 眼里是 ou_8b055e1b…、在 tb25-link16 眼里是 ou_9284b2e6…；
+      本机 22 个 owner 文件有 16 个不同 open_id）。
+      ⇒ **必须读那个 bot 自己的 owner 文件**，绝不能拿别的 bot 的 open_id 去发。
+    """
+    rec = session_record(bot_name)
+    if rec.get("chat_id"):
+        return rec["chat_id"]
+    owner = STATE_DIR / f"bridge-owner-{bot_name}.json"
+    try:
+        oid = json.loads(owner.read_text(encoding="utf-8")).get("open_id")
+        if oid:
+            return oid                      # 该 bot 视角下的主人 open_id（DM 直达）
+    except Exception:                       # noqa: BLE001
+        pass
+    return None                             # 交给调用方退 webhook，别静默
+
+
 def notify(bot_name, kind, text):
     """发到【主人与这个 bot 的 DM】。用哪个 bot 发就等于说明是哪条线，主人不用猜。
 
     这是本 plan 相对旧看门狗最重要的一处改动：旧的调 xhs `scripts/notify.py`，
-    走的是**飞书自定义机器人 webhook**（另一个群）——所以主人在 DM 里永远看不到（实测）。"""
+    走的是**飞书自定义机器人 webhook**（另一个群）——所以主人在 DM 里永远看不到（实测）。
+
+    返回 True = **确认送出去了**（DM 或 webhook 任一成功）。调用方必须认这个返回值：
+    告警是整套设计里唯一面向人的出口，它失败而流程照打 ✅，就是又一个假绿灯。"""
     if kind in _STATEFUL_KINDS:
         alerts = _alerts_load()
         key = f"{bot_name}:{kind}"
@@ -294,13 +330,21 @@ def notify(bot_name, kind, text):
     #   这里显式清掉，让手动跑和守护进程跑走同一条路径。
     #   安全边界：它只发本文件里写死的告警模板、且只发关于【那个 bot 自己】的状态，不转发任意文本。
     env = {k: v for k, v in os.environ.items() if k != "FEISHU_BRIDGE_SESSION"}
+    target = _alert_target(bot_name)
+    args = [sys.executable, str(HERE / "send_feishu_msg.py"), "--bot", bot_name, "--text", text]
+    if target:
+        args += ["--to", target]
     try:
-        r = subprocess.run([sys.executable, str(HERE / "send_feishu_msg.py"),
-                            "--bot", bot_name, "--text", text],
-                           capture_output=True, text=True, encoding="utf-8",
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=90, cwd=str(PROJECT),
                            env=env, creationflags=NO_WINDOW)
         ok = r.returncode == 0
+        if not ok:
+            # 🩸 DM 发不出去时**必须退回 webhook**，绝不能只写日志就算了 ——
+            # 告警是整套设计里**唯一面向人的出口**，它静默失败 = 「干成了但没人知道」，
+            # 正是本 plan 立项时要根治的形状。
+            log(f"[{bot_name}] DM 发不出（{(r.stderr or r.stdout or '')[:100]}）→ 退回 webhook")
+            ok = notify_webhook(f"[{bot_name}] {text}")
         log(f"[{bot_name}] DM 告警 {kind} → {'✅' if ok else '❌ ' + (r.stderr or '')[:120]}")
         return ok
     except Exception as e:                             # noqa: BLE001
@@ -689,13 +733,32 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     _record_failover(bot_name)
     _bg = pack.get("background") or {}
     bgn = len(_bg.get("procs") or []) + len(_bg.get("files") or [])
-    notify(bot_name, "handed",
-           f"✅ {bot_name} 已切到 {tgt}，新会话已接手。\n"
-           f"· 原会话 session {pack.get('session_id')}（账号 {cur}）\n"
-           f"· 它已拿到那份 transcript，正在自己梳理进度并继续推进\n"
-           f"· 上个会话留下 {bgn} 个后台进程，已一并交接（要它先判死活）\n"
-           f"· {cur} 的额度 {curr.get('weekly_reset')} 恢复")
-    log(f"✅ {bot_name} {cur} → {tgt} 换号 + 接手完成")
+    told = notify(bot_name, "handed",
+                  f"✅ {bot_name} 已切到 {tgt}，新会话已接手。\n"
+                  f"· 原会话 session {pack.get('session_id')}（账号 {cur}）\n"
+                  f"· 它已拿到那份 transcript，正在自己梳理进度并继续推进\n"
+                  f"· 上个会话留下 {bgn} 条在途工作线索，已一并交接（要它先判死活）\n"
+                  f"· {cur} 的额度 {curr.get('weekly_reset')} 恢复")
+    # 🩸 告警送没送到，必须体现在最终结论里（tb25-link16 2026-08-20 提出 · 采纳）：
+    #   TB25 第一次真实换号时两条 DM 全失败，而最后一行照样打「✅ 换号 + 接手完成」——
+    #   **那个 ✅ 和刚干掉的「跑着旧代码却全绿」是同一类假绿灯**：
+    #   动作成了，但「唯一面向人的出口」断了，主人到那一刻都不知道自己的 bot 被换了号。
+    #   ⇒ 换号本身仍算成功（会话确实切过去了、活确实在推进，回滚它反而有害），
+    #     但结论必须**降级**成「成了，但没人被通知到」，并把它记进心跳账，
+    #     让 status / 评分器看得见。
+    if told:
+        log(f"✅ {bot_name} {cur} → {tgt} 换号 + 接手完成（已通知主人）")
+    else:
+        log(f"⚠️ {bot_name} {cur} → {tgt} 换号 + 接手【动作成功，但主人没被通知到】"
+            f" —— DM 与 webhook 都没送出去。去 {bot_name} 的面板看一眼确认。")
+        try:
+            alerts = _alerts_load()
+            alerts.setdefault("undelivered", []).append(
+                {"bot": bot_name, "at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                 "from": cur, "to": tgt})
+            _alerts_save(alerts)
+        except Exception:                              # noqa: BLE001
+            pass
     return True
 
 
@@ -1028,6 +1091,12 @@ def cmd_status(verbose=False):
         except Exception:                                # noqa: BLE001
             pass
     print(f"注入记录：累计动作 {total} 次 · 近 24h 自动换号 {fo or '无'}")
+    und = alerts.get("undelivered") or []
+    if und:
+        print(f"🔴 **有 {len(und)} 次换号【没通知到主人】**（动作成了但唯一面向人的出口断了）：")
+        for u in und[-3:]:
+            print(f"     {u.get('at')} {u.get('bot')} {u.get('from')}→{u.get('to')}")
+        print("     查：该 bot 的 feishu/_state/bridge-owner-<bot>.json 在不在、webhook 配了没")
 
     # ④ 跨机自检
     print("\n本机适配自检：")
