@@ -287,7 +287,66 @@ tail -5 feishu/_logs/bridge-<某个bot>.log
 | 想临时停掉自启 | `Disable-ScheduledTask -TaskName FeishuBridge-Autostart`（重开 `Enable-`） |
 | 换了仓库路径 / 换了 Python | 重跑 §9.2 整段（带 `-Force`，直接覆盖旧任务） |
 
-### 9.5 · 建看门狗的计划任务（**全机限流自愈 · 第二层保护 · 2026-07-31 新增**）
+### 9.5 · ⛔ 本节已作废 —— 看门狗不再需要计划任务（2026-08-20）
+
+> **不要再照下面的步骤注册 `AutopilotWatchdog-Autostart`。** 看门狗已迁进 Link16
+> （`feishu/bridge_watchdog.py`），**随飞书桥整体 `start`/`stop` 起停**，没有自己的计划任务。
+> 桥的自启脚本（§9.2）本来就是探测式的，所以看门狗**根本不需要知道自己装在哪** ——
+> 当年那条写死路径的注册命令正是 2026-08-17 在 TB25 `Test-Path` 返 False、装不上的原因，
+> 现在这个问题从源头消失了。运行时真源见 `docs/ARCH-160-agent-watchdog.md`。
+
+#### 9.5a · 【每台机各自都要做一次】停掉旧的那个（🩸 别以为别人替你停了）
+
+> 🩸 **2026-08-20 tb25 实证**：TB24 上 Disable 了旧任务并写进文档「本次已 Disable」，
+> 但 **TB25 那台照样 `State=Ready`、旧 watchdog 进程从 8-18 起一直常驻**。
+> **计划任务是每台机各自注册的本地对象，在一台机上 Disable 不会传播到另一台。**
+> 那台若直接重启桥 = **新旧双跑**：两个都全机轮询、都往同一批面板注「继续」，
+> 而且旧那个的结构化 picker 检查还是断的（TB25 实测名册命中 0/13）。
+> ⇒ 顺序必须是 **停旧 → 重启桥 → 验新**，且每台机都要走一遍。
+
+```powershell
+# ① 停旧计划任务（只 Disable 不 Unregister，可随时 Enable-ScheduledTask 回滚）
+$t = Get-ScheduledTask -TaskName "AutopilotWatchdog-Autostart" -ErrorAction SilentlyContinue
+if ($t) { "当前: $($t.State)"; Disable-ScheduledTask -TaskName "AutopilotWatchdog-Autostart" | Out-Null }
+else { "本机没有这个任务（新机器/纯 link16 机器 → 跳过）" }
+
+# ② kill 掉还在常驻的旧进程（任务停了不代表已跑起来的那个会退）
+Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
+  Where-Object { $_.CommandLine -match '_autopilot..watchdog' } |
+  ForEach-Object { "kill $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
+
+# ③ 重启桥（看门狗随它起）
+python feishu/feishu_bridge.py stop; python feishu/feishu_bridge.py start
+
+# ④ 验：四样都要看到
+python feishu/bridge_watchdog.py status
+#   进程 ✅ / 在看护 N 个面板（其中几个对得上 bot 名）/ 上次巡检时间 / 本机适配自检三行 ✅
+#   ⚠️ 还要看最后那段【换号能力】—— 三行全绿 ≠ failover 是活的，见 9.5b
+```
+
+#### 9.5b · 【每台机各自都要验一次】撞限流时到底切不切得动
+
+> 🩸 **2026-08-20 tb25 实证（这条最阴）**：那台 9 个 profile 有 **7 个「问不到」额度**
+> （ccp/ccp2 的 token 对额度端点是 **403 无权限**——**不是过期**；cc/cck/ccw* 没登录）。
+> 而 TB25 名册 34 个 bot 里 **25 个跑 ccp、2 个跑 ccp2**。
+> 按「问不到额度的号绝不选」这条设计，那 27 个 Claude bot **永远选不出可切的号**
+> ⇒ 限流自动换号在那台对 Claude 会话**完全不触发，而且是静默不触发**。
+> 更要命的是 `status` 前三行照样全绿（它只看进程/名册/桥）。
+> **不报错、看着正常、什么都没发生** —— 本仓最容易翻车的形状。
+
+```powershell
+python feishu/agent_quota.py          # 先看本机各号到底问不问得到（403 会带上原始 body，别按"过期"去查）
+python feishu/bridge_watchdog.py status   # 看末尾【换号能力】那段：每个 runtime 有没有可切的号
+```
+判据：**本机 bot 实际在用的每一个 runtime，都至少要有一个「够用/紧张」的候选号**（跨 runtime 也算数）。
+出现 🔴 就说明那类会话撞限流时切不动 —— 先解决额度问不到的问题，别指望自愈。
+
+---
+
+<details>
+<summary>📦 历史存档：旧的计划任务注册步骤（2026-08-20 前 · 仅供回滚参考，别照做）</summary>
+
+（**全机限流自愈 · 第二层保护 · 2026-07-31 新增**）
 
 **为什么必须单独配**：桥自启只保证「消息能进来、面板能开出来」；它管不了**会话开出来之后卡住**。Claude 会话偶发撞 `API Error: 529 Overloaded` / 限流会**静止在那不动**，桥不知道、你也不知道，直到你去看才发现。**看门狗**（`xhs-card-gen/_autopilot/watchdog.py`）就是治这个：轮询 wmux **全部 workspace 的全部面板**，发现「有 API 错 + 静止 2 轮 + 没在自己重试」就往那个面板注一句「继续」+ 飞书报你去哪条线看。**覆盖全机所有 bot 线，不是只管写帖**（v0.11 起 · SSOT = `workspace.list` 实时拓扑，bot 增减自动跟随、零硬编码名单）。
 
@@ -342,6 +401,8 @@ Get-Content "$repo\_autopilot\watchdog.log" -Tail 2                             
 | 想临时停 | `Disable-ScheduledTask -TaskName AutopilotWatchdog-Autostart` + 手动 kill 看门狗进程（否则它还常驻着） |
 
 ---
+
+</details>
 
 ## 附录 A · 排错速查
 

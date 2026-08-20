@@ -308,6 +308,36 @@ def c8_old_autostart(ctx):
 
 # ---------------------------------------------------------------- 质量度 Q1-Q8
 
+
+def c9_failover_reachable(ctx):
+    """**本机撞限流时到底切不切得动** —— 由 tb25-link16 2026-08-20 提出、采纳为正式判据。
+
+    🩸 为什么必须单列一维（这是最阴的一种失效）：
+      TB25 那台 9 个 profile 有 7 个「问不到」额度（ccp/ccp2 的 token 对额度端点是 403
+      **无权限、不是过期**；cc/cck/ccw* 没登录），而它名册 34 个 bot 里 25 个跑 ccp、2 个跑 ccp2。
+      按「问不到额度的绝不选」这条设计，那 27 个 Claude bot **永远选不出可切的号**
+      ⇒ 限流自动换号在那台对 Claude 会话完全不触发，**且是静默不触发**。
+      而 C1-C8 会全绿（它们只看进程 / 接口 / 名册 / 生命周期，**没有一维在问「有没有号可切」**）。
+      ⇒ **一整套东西装好了、看着正常、实际什么都不会发生。**
+    判据：本机 bot 实际在用的**每一个 runtime**，都至少有一个「够用/紧张」的候选号（跨 runtime 也算）。
+    """
+    if not ctx.watchdog.exists():
+        return 0, "部件还不存在，本维度无从求值"
+    code, out = _run([sys.executable, str(ctx.watchdog), "status"], timeout=120)
+    if code != 0:
+        return 0, f"status 跑不起来（exit={code}）"
+    if "换号能力" not in out:
+        return 0, "status 没报「换号能力」—— 这一维无从求值（先给 status 补上）"
+    seg = out.split("换号能力", 1)[1]
+    dead = [ln.strip() for ln in seg.splitlines() if ln.strip().startswith("🔴")]
+    alive = [ln.strip() for ln in seg.splitlines() if ln.strip().startswith("✅")]
+    if dead:
+        return 0, f"有 runtime 切不动：{dead[0][:100]}"
+    if not alive:
+        return 0, "status 里一个 runtime 都没列出来 —— 名册解析可能有问题"
+    return 1, f"每个在用 runtime 都有可切的号（{len(alive)} 个 runtime 全绿）"
+
+
 def q1_no_new_config(ctx):
     # 先确认「被评的东西真的存在」——否则空目录里什么都找不到，会被误判成「零配置=满分」。
     # （2026-08-19 self-test 抓到的摆设判据：不加这道闸，这一项对空仓也给满分。）
@@ -521,6 +551,7 @@ COMPLETION = [
     ("C6", "功能测试通过", c6_tests, True),
     ("C7", "xhs 已瘦身", c7_xhs_slim, True),
     ("C8", "旧自启已退役", c8_old_autostart, False),
+    ("C9", "撞限流切得动", c9_failover_reachable, False),
 ]
 
 QUALITY = [

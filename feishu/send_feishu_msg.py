@@ -258,22 +258,55 @@ def resolve_app_id(name):
 
 
 def _groups_of(name):
+    """该 bot 所在的群 id 列表；**本机没有它的凭据 → 返回 None（= 查不了）**。
+
+    ⚠️ `None`（查不了）与 `[]`（确实一个群都不在）**必须分开**，这是 2026-08-20 一次
+    静默误投的根因：原来两种情况都返回 `[]`，调用方无从区分，只能猜。
+    """
     creds = _creds_for(name)
-    return [g["chat_id"] for g in _bot_groups(*creds)] if creds else []
+    if not creds:
+        return None                      # 查不了 ≠ 不在任何群
+    return [g["chat_id"] for g in _bot_groups(*creds)]
 
 
 def shared_group(sender, target, override=None):
-    """找发送方与目标都在的群：交集 → 发送方唯一群 → 否则报错让 --in 指定。"""
+    """找发送方与目标都在的群。**查不到就报错，绝不猜。**
+
+    🩸 2026-08-20 事故（fail-open 根治）：原来的兜底是「交集为空 → 就用发送方的唯一群」。
+    当时 tb24-link16 只在一个群里、而 `tuf19-*` 的凭据**不在本机 .env**（跨机 bot），
+    于是 `_groups_of("tuf19-link16")` 返回 `[]`（其实是「查不了」），交集空 → 兜底命中
+    → 消息发进了 tb24↔tb25 那个群、@ 了一个不在群里的 open_id，
+    而脚本照样打印 **`✅ 已发 → tuf19-link16`**。
+    ⇒ 发送方以为通知到了，收件人根本没收到，**零报错**。本仓最典型的失效形状：
+    「跑了、没报错、什么都没送到」。
+
+    现在的规则（fail closed）：
+      · 有交集 → 用交集第一个（正常路径，不变）
+      · 目标群列表 = None（本机没它凭据、查不了）→ **拒绝**，让人补凭据或显式 `--in`
+      · 目标确实不在任何群 / 有群但无交集 → **拒绝**
+    宁可发不出去让人当场看见，也不要静默发错地方还报成功。
+    """
     if override:
         return override
-    tg = set(_groups_of(target))
+    target_groups = _groups_of(target)
     sender_groups = _groups_of(sender)
-    inter = [g for g in sender_groups if g in tg]  # 保序
+    if sender_groups is None:
+        raise SystemExit(f"❌ 本机没有发送方 {sender} 的凭据，发不了。")
+    if target_groups is None:
+        raise SystemExit(
+            f"❌ 本机【没有 {target} 的飞书凭据】（.env 里没有它的 FEISHU_BRIDGE_*_APP_ID/SECRET），"
+            f"因此查不到它在哪些群 —— **拒绝猜**。\n"
+            f"   · 跨机 bot 常见：它的凭据在它自己那台机上。\n"
+            f"   · 要发给它：① 在本机 .env 补上它的凭据，或 ② `--in <oc_群id>` 显式指定一个"
+            f"【它确实在里面】的群，或 ③ 让它那台机的 agent 代发。\n"
+            f"   （2026-08-20 之前这里会静默退回「发送方的唯一群」并报成功 —— 那是个 fail-open bug，已根治。）")
+    inter = [g for g in sender_groups if g in set(target_groups)]  # 保序
     if inter:
         return inter[0]
-    if len(set(sender_groups)) == 1:
-        return sender_groups[0]
-    raise SystemExit(f"❌ {sender} 与 {target} 无共享群（或 {sender} 在多个群）。用 --in <oc_群id> 指定。")
+    raise SystemExit(
+        f"❌ {sender} 与 {target} 没有共享群"
+        f"（{sender} 在 {len(sender_groups)} 个群 · {target} 在 {len(target_groups)} 个群，无交集）。"
+        f"用 `--in <oc_群id>` 指定，或先把它们拉进同一个群。")
 
 
 def main():

@@ -108,8 +108,17 @@ def _get_json(url, headers, use_proxy):
             body = e.read().decode("utf-8", "replace")[:160]
         except Exception:                              # noqa: BLE001
             pass
-        if e.code in (401, 403):
-            return None, f"凭据失效({e.code})·去该号跑一次让它刷新"
+        # 🩸 2026-08-20 tb25 实证：原来 401/403 一律写成「凭据失效·去该号跑一次让它刷新」
+        # **并且把 body 吞掉** —— 真实原因恰好被吞在唯一会误导人的那一档。
+        # 那台的 ccp token 其实好得很（今天刚写、还剩 139 小时），真实响应体是
+        # {"error":{"type":"forbidden","message":"Request not allowed"}}
+        # = 这台机上这个号的 token 就没有该端点的权限，跟"过期"毫无关系。
+        # tb25 照那句提示去查凭据，白花十分钟。⇒ **越是会误导的那一档，越要把原始证据带上。**
+        if e.code == 401:
+            return None, f"凭据过期(401)·去该号跑一次让它刷新 · {body}"
+        if e.code == 403:
+            return None, (f"该号无此端点权限(403)·**不是过期**（先看 body 再动手）· {body}"
+                          if body else "该号无此端点权限(403)·**不是过期**（服务端没给 body）")
         return None, f"HTTP {e.code} {body}"
     except Exception as e:                             # noqa: BLE001
         return None, f"{type(e).__name__}: {e}"
@@ -279,8 +288,14 @@ def _print_table(rows):
         s = "—" if r["session_percent"] is None else f"{r['session_percent']:.0f}%"
         w = "—" if r["weekly_percent"] is None else f"{r['weekly_percent']:.0f}%"
         mark = {"够用": "🟢", "紧张": "🟡", "满": "🔴", "问不到": "⚪"}[r["verdict"]]
+        # 说明里可能带着 API 的原始 JSON body（多行）—— **压成一行 + 截断只在这里做**，
+        # 数据层（collect()/--json）保持完整。同 eval_plan931._run 的教训：
+        # 截断只允许发生在展示层，否则会把证据本身砍掉、让结论建立在残缺数据上。
+        note = " ".join((r.get("note") or "").split())
+        if len(note) > 96:
+            note = note[:96] + "…（全文见 --json）"
         print(f"{r['profile']:8} {r['runtime']:7} {s:>6} {w:>6} "
-              f"{r['session_reset']:>12} {r['weekly_reset']:>12}  {mark}{r['verdict']:4} {r.get('note','')}")
+              f"{r['session_reset']:>12} {r['weekly_reset']:>12}  {mark}{r['verdict']:4} {note}")
 
 
 def main():

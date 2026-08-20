@@ -892,6 +892,42 @@ def cmd_stop():
     return 0
 
 
+def failover_readiness(rows=None):
+    """**本机的换号能力到底是活的还是死的** —— 按 runtime 分别回答。
+
+    🩸 为什么必须单独有这一维（tb25-link16 2026-08-20 提出 · 采纳）：
+      TB25 名册 34 个 bot 里 25 个跑 ccp、2 个跑 ccp2、7 个跑 cxp，
+      而那台机上 ccp / ccp2 的 token 对额度端点是 403（无权限，**不是过期**），
+      cc/cck/ccw* 压根没登录 ⇒ **9 个 profile 有 7 个「问不到」**。
+      按「问不到的绝不选」这条设计，那 27 个 Claude bot 在 TB25 **永远选不出可切的号**
+      —— 也就是说限流自动换号对 Claude 会话**完全不触发，而且是静默不触发**。
+      更要命的是 `status` 照样三行全绿（它只看进程 / 名册 / 桥，**不看"有没有号可切"**）。
+      这正是本仓最容易翻车的形状：**不报错、看着正常、什么都没发生。**
+
+    返回 {runtime: {"bots": n, "usable": [profile…], "ok": bool}}。"""
+    rows = rows if rows is not None else agent_quota.collect()
+    by_rt = {}
+    for r in rows:
+        by_rt.setdefault(r["runtime"], []).append(r)
+    in_use = {}
+    for bot in _iter_bots():
+        prof = _profile_of(bot["name"], bot)
+        if not prof:
+            continue
+        spec = next((r for r in rows if r["profile"] == prof), None)
+        rt = spec["runtime"] if spec else "?"
+        in_use.setdefault(rt, {"bots": 0})["bots"] += 1
+    out = {}
+    for rt, info in in_use.items():
+        usable = [r["profile"] for r in by_rt.get(rt, []) if r["verdict"] in ("够用", "紧张")]
+        # 换号至少要有 2 个可用号才有意义（撞了的那个会被排除）；
+        # 但跨 runtime 也算数 —— 主人已拍板跨 runtime 直接自动切。
+        cross = [r["profile"] for r in rows if r["verdict"] in ("够用", "紧张")]
+        out[rt] = {"bots": info["bots"], "usable": usable,
+                   "cross_usable": cross, "ok": len(cross) >= 1}
+    return out
+
+
 def cmd_status(verbose=False):
     """必须报出三样（PLAN-931 Q8）：**在看护几个面板 · 上次巡检什么时候 · 最近注入过谁**。
     再加一段跨机自检（本机找不找得到 wmux / 名册 / 桥）—— 换台机器一跑就知道能不能用。"""
@@ -942,8 +978,23 @@ def cmd_status(verbose=False):
     ba = bridge_alive()
     print(f"  飞书桥   : {'✅ 在' if ba is True else ('❌ 没在' if ba is False else '⚠️ 查不了')}")
 
+    rows = agent_quota.collect()
     print("\n各号额度：")
-    agent_quota._print_table(agent_quota.collect())
+    agent_quota._print_table(rows)
+
+    # ④.5 换号能力自检 —— status 三行全绿 ≠ failover 是活的（tb25 2026-08-20 提出）
+    print("\n换号能力（撞限流时到底切不切得动）：")
+    ready = failover_readiness(rows)
+    if not ready:
+        print("  ⚠️ 名册里没有能解析出 profile 的 bot —— 无从判断")
+    for rt, v in sorted(ready.items()):
+        mark = "✅" if v["ok"] else "🔴"
+        print(f"  {mark} {rt:7} 本机 {v['bots']:>2} 个 bot 在用 · 同 runtime 可切 {v['usable'] or '无'}"
+              f" · 跨 runtime 可切 {v['cross_usable'] or '无'}")
+    dead = [rt for rt, v in ready.items() if not v["ok"]]
+    if dead:
+        print(f"  🔴 **{dead} 这些 runtime 撞限流时【切不动】** —— 所有候选号都『问不到』或『满』。")
+        print("     自动换号对它们等于没装（且不会报错）。先跑 `python feishu/agent_quota.py` 看是谁问不到。")
     return 0
 
 
