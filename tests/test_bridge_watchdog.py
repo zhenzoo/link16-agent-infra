@@ -306,5 +306,25 @@ def test_告警_DM失败必须退webhook而不是静默(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "notify_webhook", lambda t: False)
     assert w.notify("botx", "handed", "再来一条") is False, "两条路都断了就必须如实报 False"
 
+
+def test_换号配额_不因告警送达与否而改变():
+    """🩸 tb25-link16 2026-08-20 的反论，采纳并锁死：
+    「告警没送达」和「切没切」是两件独立的事 —— 一次真发生的换号，**不管主人听没听见，
+    它都真的消耗了一个号、真的动了一个会话**，所以必须计入 24h 配额。
+
+    若改成「通知成功才计数」，就会长出**和刚修完的告警自噬一模一样的结构**：
+      告警链路越坏 → 越多换号不计数 → 越能无限切
+      = **故障把自己的刹车也一起关掉了。**
+
+    这条守的是【顺序】：`_record_failover()` 必须在 `notify(handed)` **之前**、且不受其返回值影响。
+    配额属于「动作」那一侧（客观事实），可信度标 ⚠️ 属于「结论」那一侧（主观判断），两者分开。"""
+    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
+    body = src[src.index("def failover("):]
+    i_rec = body.index("_record_failover(bot_name)")
+    i_notify = body.index('notify(bot_name, "handed"')
+    assert i_rec < i_notify, "配额必须在发 handed 告警【之前】就记下，不能等通知成功再记"
+    seg = body[i_rec:i_notify]
+    assert "if " not in seg.replace(chr(10), " ")[:120], "配额记账不许被任何条件包住"
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
