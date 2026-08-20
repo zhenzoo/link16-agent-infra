@@ -16,6 +16,8 @@
 | `feishu/bridge_cron.py` ⭐ | **给智能体排定时任务（CRON·闹钟 vs 大脑）**：到点把一句触发词注入某 bot 会话（大脑=该 bot 自己仓的 SOP·`route=p2a` 回主人）· **载体=每 bot 一个 `feishu/cron-jobs/<bot>.yaml`（专属划分·别混·bot 名=文件名）** + 旧 `cron-jobs.json` 向后兼容 · 守护进程**只真触发本机名册里的 bot**（多机同读一份不撞·零硬编码 host）· 热读免重启 · 随整体 `start`/`stop` 起停（不重启任何 bot 桥）· 详见 `docs/ARCH-150` | `python feishu/bridge_cron.py board`（总览）· `menu`（复选菜单·门面见上面 `cron.py`）· `add --bot X --name N --cron "0 9 * * *" --sop <仓内SOP>` · `rm`/`enable`/`disable`/`list [--bot X]`/`fire <name> --dry-run`/`start`/`stop` |
 | `feishu/wmux_session.py` | 桥的 wmux 会话原语：spawn 新 workspace、执行 registry 派生的 profile command、pty_alive 探活 / close | （库 · 桥内部用） |
 | `feishu/bridge_outbox.py` | **v8 回传唯一发送引擎 drainer**：增量读 outbox → 发卡片 / 进度限流合并 / 去重；持久化本轮在线文档并在 final 列出原始 docx URL | （桥 runner 起的后台 task） |
+| `feishu/bridge_watchdog.py` ⭐ | **看门狗（全机 agent 会话保活 + 撞额度上限自动换号接手）**：每 120s 扫【全部 workspace 全部面板】，按**规则表**处理各类中断——R1 API错→注「继续」· R2 撞限流→查额度选号→换号→把原任务交接给新会话 · R3 停在 picker→什么都不做 · R4 桥死→告警。**随桥整体 start/stop 起停**（没有自己的计划任务→跨机零路径问题）。详见 `docs/ARCH-160` | `python feishu/bridge_watchdog.py status [--verbose]`（在看护几个面板/上次巡检/注入记录+跨机自检）· `failover --bot X [--to ccp] [--dry-run]`（手动换号·破坏性·先预演） |
+| `feishu/agent_quota.py` ⭐ | **查各账号还剩多少额度（实时·唯一真源）**：Claude 走 `api.anthropic.com/api/oauth/usage`（直连绕代理）· Codex 走 `chatgpt.com/backend-api/codex/usage`（走代理）。**绝不读本地缓存**（实测会把 100% 的号报成 0%）| `python feishu/agent_quota.py`（表）· `--json` · `pick --exclude ccp2 --prefer-runtime claude`（该切哪个号） |
 | `feishu/bridge_doctor.py` | 机械自愈：outbox 三态诊断 + 卡→自动重启 drainer | `python feishu/bridge_doctor.py [--bot X]` |
 | `feishu/bridge_stop_replay.py` ⭐ | **改 Stop 装配前后的退化闸**：拿真实历史 transcript 逐个终结落点重放「旧码 vs 新码」，判**新码有没有少发旧码发过的正文**（少发=退化 exit 1；旧码把已发过的又拼一遍=去重，不算）。baseline 自动从 git 取（`--baseline <ref>`·默认 `v0.12.1`），不用手工备份旧码。**改 `bridge_stop.py` / `jsonl_reply_extract.py` 前后必跑**——比「等一天看它还犯不犯」快、且覆盖全部历史形状 | `python feishu/bridge_stop_replay.py --transcript <session.jsonl> [--transcript ...] [--baseline <ref>]` |
 | `feishu/bridge_resend_audit.py` ⭐ | **查「同一段正文被下一轮又发一遍」**（v0.12.2 事故的常备尺子·两台机同一把判据：同 anchor 连续出现且收尾卡逐轮变长；Codex bot 结构免疫→自动跳过）。**有发作 exit 1** → 可直接当巡航/CI 闸 | `python feishu/bridge_resend_audit.py`（全量）/ `--since 2026-08-17`（当闸）/ `--bot X --json` |
@@ -49,15 +51,23 @@
 
 ## 🖥️ 机器级常驻服务（开机自启 · 两个都要有才叫配完）
 
-这台机上「无人值守也能干活」靠**两个计划任务**，缺一个都会在你没注意的时候瘫掉一层。装机步骤见 [`docs/SOP-100-new-machine-setup.md §9`](docs/SOP-100-new-machine-setup.md)。
+这台机上「无人值守也能干活」靠**一个计划任务**（桥）——看门狗 2026-08-20 起挂在桥的生命周期上，
+**不再需要自己的计划任务**（它因此也不需要知道自己装在哪，跨机路径问题从源头消失；
+旧的 `AutopilotWatchdog-Autostart` 正是写死路径、2026-08-17 在 TB25 装不上，现已 Disable）。
+装机步骤见 [`docs/SOP-100-new-machine-setup.md §9`](docs/SOP-100-new-machine-setup.md)。
 
 | 服务 | 计划任务 | 它保证什么 · 它管不了什么 | 查活 |
 |---|---|---|---|
 | **飞书桥** | `FeishuBridge-Autostart`（登录+1min） | 保证**消息进得来、面板开得出**。管不了会话开出来之后卡住 | `Get-ScheduledTaskInfo FeishuBridge-Autostart`（`LastTaskResult`=0）· 进程数应 == 名册 bot 数 |
-| **看门狗** | `AutopilotWatchdog-Autostart`（登录+2min · **每 10min 幂等自愈**） | 保证**卡住的会话被捞回来**：轮询**全部 workspace 全部面板**，见「API 错 + 静止 2 轮 + 没在 retry」就注「继续」+ 飞书报是哪条线。**全机所有 bot 线，不只写帖**（v0.11+） | `Get-Content <xhs>/_autopilot/watchdog.log -Tail 3`（约 30min 一行心跳）· 进程数应 == 1 |
+| **看门狗** | **不需要单独配** —— 2026-08-20 起随飞书桥整体 `start`/`stop` 起停 | 保证**卡住的会话被捞回来**：每 120s 轮询全部 workspace 全部面板，按规则表处理 API 错 / 撞额度上限 / picker / 桥死。**全机所有 session agent 一视同仁**（xhs 只是被管对象之一） | `python feishu/bridge_watchdog.py status`· 日志 `feishu/_logs/watchdog.log`· 进程数应 == 1 |
 
-- **代码位置**：桥 = 本仓 `feishu/feishu_bridge.py`；看门狗 = `xhs-card-gen/_autopilot/watchdog.py`（**故意不搬**：它的卡死检测/里程碑两个职责读 xhs 产物，拆开只换来更多进程和回归风险；启动权已移交计划任务 = 生命周期上它已经跟 xhs 巡航解绑，见 xhs `ARCH-310 §11.6`）。
-- **看门狗死了怎么办**：不用管，计划任务 10 分钟内自己补起。急用手动 `python <xhs>/_autopilot/spawn_worker.py ensure-watchdog`（幂等，随便跑）。
+- **代码位置**：桥 = 本仓 `feishu/feishu_bridge.py`；看门狗 = 本仓 `feishu/bridge_watchdog.py`。
+  > ⚠️ 2026-08-20 **推翻**了此前「看门狗故意不搬、留在 xhs」那条决策（主人拍板 · 理由是 go public：
+  > 仓分给别人之后，「谁来管各个 session 的保活 / 限流 / 切号」必须有主，**不能再揉在两个仓库里**）。
+  > `xhs-card-gen/_autopilot/watchdog.py` 现在只剩**写帖巡航监工**（卡死检测 + 里程碑播报），由 xhs 自己管。
+  > 迁移记录见 `docs/PLAN-931`，运行时真源见 `docs/ARCH-160`。
+- **看门狗死了怎么办**：`python feishu/bridge_watchdog.py start`（幂等·会先顶掉残留）；
+  或整体重启桥，它跟着起来。
 
 ---
 

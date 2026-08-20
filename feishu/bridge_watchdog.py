@@ -54,7 +54,9 @@ POLL_SECONDS = 120           # 与 xhs 看门狗同频，别更密（读屏是�
 STUCK_CONFIRM = 2            # 面板「限流 + 静止」连续这么多轮才动手（防它其实还在用 usage-credits 跑）
 ALERT_COOLDOWN = 1800        # 状态类告警（撞限流）每 bot 30min 最多一条
 FAILOVER_MAX_PER_DAY = 2     # 同一 bot 24h 内最多自动换号次数
+HEARTBEAT_EVERY = 15         # 每这么多轮打一行心跳（约 30min · 减噪）
 TAIL_LINES = 40
+HEARTBEAT_PATH_NAME = "watchdog-heartbeat.json"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # 别闪黑窗抢焦点（4956aae 同款 bug 类）
 
 # ---- 限流的屏幕签名 ----
@@ -138,6 +140,115 @@ def is_limited(pane_text, quota_row):
     return False, "屏与账号都没有限流迹象"
 
 
+# ---------- R1 · API/网络错的判据（2026-08-20 从 xhs _autopilot/watchdog.py 原样搬来）----------
+#
+# ⚠️ 下面这三样是踩过坑才有的，**搬的时候一行不改**，改动前先读懂为什么：
+#
+#  ① 防误判：只认 Claude 【自己渲染】的错误签名 "API Error:" / "API Error ("，
+#     **不认正文里的话题词**。2026-06-18 xhs 实证（_test_watchdog_judge.py）：旧版用
+#     "rate limited"/"overloaded"/"api error" 这类广义词扫屏，正在写 AI 内容的 worker
+#     正文里含这些词就被误判成卡死、被注「继续」打断 —— 读屏无法区分「正文提到」和「真报错」。
+#  ② 防抢跑：屏上有 retrying / esc to interrupt 等 = Claude 自己在重试、会自愈 → 绝不碰。
+#  ③ 防自激：注入的文本**本身不含错误签名**（见 NUDGE_TEXT），否则下一轮读回来会把
+#     自己的注入当成错误，无限循环。
+_CLAUDE_ERR_RE = re.compile(r"api error\s*[:(]", re.I)
+_ERR_TYPE_MARKERS = ("overloaded_error", "rate_limit_error", "internal_server_error", "api_error")
+RETRY_MARKERS = ("retrying", "attempt ", "/10", "重试", "esc to interrupt")
+NUDGE_TEXT = "继续（刚才被限流/网络抖了一下，从上次停的地方接着做）"   # ← 不含任何错误签名（防自激）
+NUDGE_COOLDOWN = 600         # 同一面板两次注入至少隔 10min（防 spam · 给它时间真恢复）
+SELF_MARKER = "[watchdog "   # 自己面板上的日志前缀 → 绝不把自己当成卡住的会话
+
+
+def find_pane_error(text):
+    """屏上有 Claude 渲染的 API/网络错、且【没在 retry】→ 返回那一行；否则 None。纯函数。"""
+    if not text:
+        return None
+    low = text.lower()
+    if any(r in low for r in RETRY_MARKERS):
+        return None                       # Claude 自己在 retry → 别抢
+    if not (_CLAUDE_ERR_RE.search(low) or any(t in low for t in _ERR_TYPE_MARKERS)):
+        return None
+    for line in text.splitlines():
+        ll = line.lower()
+        if _CLAUDE_ERR_RE.search(ll) or any(t in ll for t in _ERR_TYPE_MARKERS):
+            return line.strip()[:120]
+    return None
+
+
+def is_self_pane(text):
+    """这块屏是不是看门狗自己的面板（自己的日志里有错误字样，不能当成卡住的会话）。"""
+    return SELF_MARKER in (text or "")
+
+
+# ---------- R3 · 交互 picker 的判据 ----------
+# 停在 AskUserQuestion 上【等主人回答】≠ 卡死；往那儿注回车会替主人乱选一个答案。
+# 两条路：结构化（桥落的 bridge-picker-<bot>.json·不读屏·免疫「高 picker 把页脚挤出读窗」）
+#        + 读屏兜底。两者导入失败都退化成「永不识别」（零回归·宁可不 nudge 也别乱选）。
+try:
+    from jsonl_reply_extract import find_ask_picker      # noqa: E402
+    from bridge_outbox import picker_load                # noqa: E402
+except Exception:                                        # noqa: BLE001
+    def find_ask_picker(_t):
+        return None
+
+    def picker_load(_d, _b, **_k):
+        return None
+
+
+def at_picker(pane_text, bot_name):
+    """该面板是否停在交互 picker。
+
+    ⚠️ **这里正是 xhs 那版烂掉两个月的地方**：它的 bot 名来自
+    `xhs-card-gen/_autopilot/bridge-session-*.json`，那份名册 2026-06-27 起就冻结了
+    （2026-08-20 实测命中活面板 **0/7**）⇒ `bot_name` 恒为 None ⇒ **结构化那条路永久短路**，
+    只剩读屏兜底。而结构化那路存在的唯一理由就是「免疫高 picker 把页脚挤出 25 行读窗」。
+    本实现直接用 Link16 真名册的 bot 名（调用方从 `feishu/_state/` 取），接缝自然消失。"""
+    if bot_name:
+        try:
+            if picker_load(str(STATE_DIR), bot_name):
+                return True
+        except Exception:                                # noqa: BLE001
+            pass
+    return bool(find_ask_picker(pane_text))
+
+
+# ---------- R4 · 飞书桥看护 ----------
+
+def bridge_alive():
+    """桥进程在不在。查不了（PS 超时等）返 None ≠ 死了，**不喊**（宁可漏报也别误报）。"""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "@(Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" "
+             "| Where-Object { $_.CommandLine -match 'feishu_bridge' }).Count"],
+            capture_output=True, text=True, timeout=25, creationflags=NO_WINDOW)
+        return int((r.stdout or "0").strip() or 0) > 0
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def _allow(pty):
+    """注入时带 --allow-ws：wmux-rpc 守卫默认只放行 workspace.list[0]，多 bot 环境不带会被 DENIED。"""
+    out = rpc(["rpc", "workspace.list", "{}"])
+    if out.startswith("__RPC_FAIL__"):
+        return []
+    try:
+        for w in json.loads(out or "[]"):
+            if pty in (w.get("ptyIds") or []):
+                return ["--allow-ws", w["id"]] if w.get("id") else []
+    except Exception:                                    # noqa: BLE001
+        pass
+    return []
+
+
+def nudge_pane(pty):
+    """往卡住的面板注「继续」。返回 True=注了。"""
+    allow = _allow(pty)
+    rpc(["send", pty, NUDGE_TEXT] + allow)
+    rpc(["key", pty, "enter"] + allow)
+    return True
+
+
 # ---------- 告警 ----------
 
 def _alerts_load():
@@ -195,6 +306,60 @@ def notify(bot_name, kind, text):
     except Exception as e:                             # noqa: BLE001
         log(f"[{bot_name}] DM 告警失败：{e}")
         return False
+
+
+def notify_webhook(text):
+    """**桥不可用时**的退路（飞书自定义机器人 webhook · 纯标准库 · 强制绕代理）。
+
+    为什么留这条：会话级事件（撞限流/换号/接手）一律走 bot 自己的 DM，主人才看得见；
+    但「桥自己死了」这类事件**恰恰发不出 DM**——双通道冗余的意义就只在这一种情况。
+    没配 webhook 就静默跳过（只记日志），**不因为缺一个可选通道而让守护进程报错**。"""
+    url = _webhook_url()
+    if not url:
+        log("（没配 webhook，桥级告警只进日志）")
+        return False
+    try:
+        import urllib.request
+        body = json.dumps({"msg_type": "text", "content": {"text": text}}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 国内端点·绕代理
+        with opener.open(req, timeout=15) as r:
+            ok = json.loads(r.read().decode("utf-8", "replace")).get("code") == 0
+        log(f"webhook 告警 → {'✅' if ok else '❌'}")
+        return ok
+    except Exception as e:                               # noqa: BLE001
+        log(f"webhook 告警失败：{e}")
+        return False
+
+
+def _webhook_url():
+    for key in ("FEISHU_WATCHDOG_WEBHOOK_URL", "FEISHU_XHS_WEBHOOK_URL"):
+        v = agent_quota._env_value(key)
+        if v and "PASTE_" not in v:
+            return v
+    return None
+
+
+def _heartbeat_write(panes, acted):
+    """把「上次巡检时间 / 在看护几个面板 / 本轮动作数」落盘 —— status 要报的三样之一。"""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        prev = {}
+        hp = STATE_DIR / HEARTBEAT_PATH_NAME
+        if hp.exists():
+            try:
+                prev = json.loads(hp.read_text(encoding="utf-8"))
+            except Exception:                            # noqa: BLE001
+                prev = {}
+        hp.write_text(json.dumps({
+            "at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "epoch": int(time.time()),
+            "panes": panes,
+            "acted_this_round": acted,
+            "acted_total": int(prev.get("acted_total") or 0) + acted,
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:                                    # noqa: BLE001
+        pass
 
 
 # ---------- 会话记录 / 交接包 ----------
@@ -530,37 +695,160 @@ def _iter_bots():
         return []
 
 
+def scan_topology():
+    """一次 RPC 拿回全机拓扑：({pty: workspace 名}, [pty…])。RPC 失败返 (None, None) → 本轮跳过。
+
+    SSOT = wmux `workspace.list` 实时拓扑：**bot 增减自动跟随、零硬编码名单**。
+    扫【全部 workspace 的全部面板】而不是只扫「有会话记录的 bot」——
+    因为 worker 面板（bot workspace 里 split 出来的那些）也会卡，它们没有自己的会话记录。"""
+    out = rpc(["rpc", "workspace.list", "{}"])
+    if out.startswith("__RPC_FAIL__"):
+        return None, None
+    ws_by_pty, ptys = {}, []
+    try:
+        for w in json.loads(out or "[]"):
+            wname = w.get("name") or (w.get("id", "") or "?")[:12]
+            for p in (w.get("ptyIds") or []):
+                ptys.append(p)
+                ws_by_pty[p] = wname
+    except Exception:                                    # noqa: BLE001
+        return None, None
+    return ws_by_pty, ptys
+
+
+def live_bot_by_pty():
+    """{pty: bot 名} —— 读 **Link16 真名册** `feishu/_state/bridge-session-*.json`。
+
+    ⚠️ 这一个函数就是 xhs 那版烂掉两个月的根：它读的是 `xhs-card-gen/_autopilot/` 下
+    2026-06-27 冻结的 7 个文件，实测命中活面板 **0/7**。桥搬进 Link16 那天这个接缝就断了，
+    而它**照常报警、只是标注是错的**——本仓「尺子坏了但输出正常」的典型。
+    这里直接读桥真正在写的那份，并且**读不到就明说读不到**，不静默降级。"""
+    out = {}
+    try:
+        for f in STATE_DIR.glob("bridge-session-*.json"):
+            bot = f.name[len("bridge-session-"):-len(".json")]
+            try:
+                pty = json.loads(f.read_text(encoding="utf-8")).get("pty")
+            except Exception:                            # noqa: BLE001
+                pty = None
+            if pty:
+                out[pty] = bot
+    except Exception as e:                               # noqa: BLE001
+        log(f"读名册失败：{e}")
+    return out
+
+
+def _profile_of(bot_name, bot_obj=None):
+    rec = session_record(bot_name) if bot_name else {}
+    if rec.get("profile"):
+        return rec["profile"]
+    if bot_obj is not None:
+        try:
+            return agent_runtime.current_account(bot_obj)
+        except Exception:                                # noqa: BLE001
+            pass
+    return None
+
+
 def cmd_run(auto=True):
-    log(f"看门狗启动 · 轮询 {POLL_SECONDS}s · 只管【限流接管】（API 错/静止仍归 xhs 那个看门狗）")
-    states = {}
+    """守护循环 —— **一个循环 + 一张规则表**（主人 2026-08-20 定的形状）。
+
+    主人原话：「看门狗只有一个作用，就是检测到任何类型的中断消息就去推送，
+    只是根据情况不同进行正则匹配，然后选择注入不同的消息。」
+
+    规则按顺序匹配，先命中先处理：
+      R3 停在交互 picker           → **什么都不做**（在等主人回答，注回车会替他乱选）
+      R2 撞额度上限（屏 + API 双源）→ 换号 + 把原任务交接给新会话
+      R1 API/网络错 + 静止 2 轮     → 注「继续」
+      R4 桥进程 活→死              → 告警（每轮一次·不针对面板）
+    要支持一种新的中断类型，就在这张表里加一行。"""
+    log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 限流换号 / R3 picker跳过 / R4 桥看护 · "
+        f"覆盖【全部 workspace 的全部面板】· 一视同仁")
+    states = {}                      # {pty: {"hash","err_stuck","lim_stuck","last_nudge"}}
+    bridge_seen_alive = False
+    bridge_alerted = False
+    tick = 0
     while True:
         try:
-            rows = agent_quota.collect()
-            by = {r["profile"]: r for r in rows}
-            for bot in _iter_bots():
-                name = bot["name"]
-                rec = session_record(name)
-                pty = rec.get("pty")
-                if not pty:
-                    continue
+            tick += 1
+            ws_by_pty, ptys = scan_topology()
+            if ptys is None:
+                log("wmux RPC 不通 → 本轮跳过（绝不据此动手）")
+                time.sleep(POLL_SECONDS)
+                continue
+            bot_by_pty = live_bot_by_pty()
+            bots = {b["name"]: b for b in _iter_bots()}
+            quota = {r["profile"]: r for r in agent_quota.collect()}
+            now = time.time()
+            acted = 0
+
+            for pty in ptys:
                 text = read_pane(pty)
                 if text is None:
-                    continue                            # 读不到 → 本轮跳过，绝不据此动手
-                prof = rec.get("profile") or agent_runtime.current_account(bot)
-                limited, why = is_limited(text, by.get(prof))
-                st = states.setdefault(name, {"hash": "", "stuck": 0})
+                    continue                             # 读不到 → 跳过这块屏
+                if is_self_pane(text):
+                    continue                             # 自己的日志里有错误字样，不是卡住的会话
+                ws = (ws_by_pty or {}).get(pty) or "?workspace"
+                bot_name = bot_by_pty.get(pty)
+                st = states.setdefault(pty, {"hash": "", "err_stuck": 0, "lim_stuck": 0, "last_nudge": 0.0})
                 h = str(hash(text))
                 static = (h == st["hash"])
                 st["hash"] = h
-                st["stuck"] = (st["stuck"] + 1) if (limited and static) else 0
-                if st["stuck"] >= STUCK_CONFIRM:
-                    log(f"⚡ {name} 撞限流（{prof}）：{why}")
+
+                # ---- R3 · picker → 什么都不做 ----
+                if at_picker(text, bot_name):
+                    st["err_stuck"] = st["lim_stuck"] = 0
+                    continue
+
+                # ---- R2 · 撞额度上限 → 换号 + 接手 ----
+                prof = _profile_of(bot_name, bots.get(bot_name)) if bot_name else None
+                limited, why = is_limited(text, quota.get(prof)) if prof else (False, "认不出是哪个 bot")
+                st["lim_stuck"] = (st["lim_stuck"] + 1) if (limited and static) else 0
+                if st["lim_stuck"] >= STUCK_CONFIRM:
+                    log(f"⚡ {ws}/{bot_name} 撞额度上限（{prof}）：{why}")
                     if auto:
-                        failover(name, reason="撞额度上限")
+                        failover(bot_name, reason="撞额度上限")
                     else:
-                        notify(name, "limit", f"🔴 {name} 撞额度上限（{prof}）· 自动换号已关，需要你处理")
-                    st["stuck"] = 0
-        except Exception as e:                          # noqa: BLE001
+                        notify(bot_name, "limit", f"🔴 {bot_name} 撞额度上限（{prof}）· 自动换号已关，需要你处理")
+                    st["lim_stuck"] = 0
+                    acted += 1
+                    continue
+
+                # ---- R1 · API/网络错 + 静止 2 轮 → 注「继续」----
+                err = find_pane_error(text)
+                st["err_stuck"] = (st["err_stuck"] + 1) if (err and static) else 0
+                if st["err_stuck"] >= STUCK_CONFIRM and (now - st["last_nudge"]) >= NUDGE_COOLDOWN:
+                    nudge_pane(pty)
+                    st["last_nudge"] = now
+                    st["err_stuck"] = 0
+                    acted += 1
+                    log(f"⚡ {ws}/{bot_name or 'worker 面板'} [{pty}] 卡在『{err[:46]}』"
+                        f"（没在 retry + 静止 {STUCK_CONFIRM} 轮）→ 已注「继续」")
+                    if bot_name:
+                        notify(bot_name, "nudged",
+                               f"🔧 {bot_name} 卡在『{err[:60]}』（API/网络错·没在自己重试）· 已自动注「继续」\n"
+                               f"面板 {ws} / {pty}｜还卡就去看一眼")
+
+            # ---- R4 · 桥进程活→死（每轮一次·不针对面板）----
+            ba = bridge_alive()
+            if ba is True:
+                if not bridge_seen_alive:
+                    log("飞书桥在线 · 开始看护")
+                bridge_seen_alive = True
+                if bridge_alerted:
+                    log("飞书桥已恢复在线 ✅")
+                    bridge_alerted = False
+            elif ba is False and bridge_seen_alive and not bridge_alerted:
+                log("⚠️ 飞书桥进程挂了（之前在线）")
+                bridge_alerted = True
+                # 桥挂了就发不出 DM → 这是双通道冗余存在的唯一理由，退回 webhook
+                notify_webhook("⚠️ 看门狗：飞书桥进程挂了（之前在线）· "
+                               "恢复：在 link16-agent-infra 仓跑 python feishu/feishu_bridge.py start")
+
+            _heartbeat_write(len(ptys), acted)
+            if tick % HEARTBEAT_EVERY == 0:
+                log(f"心跳 · 看护 {len(ptys)} 个面板 / {len(bot_by_pty)} 个有会话的 bot · 本轮动作 {acted}")
+        except Exception as e:                           # noqa: BLE001
             log(f"loop 异常（不拖垮守护进程）：{e!r}")
         time.sleep(POLL_SECONDS)
 
@@ -605,28 +893,57 @@ def cmd_stop():
 
 
 def cmd_status(verbose=False):
+    """必须报出三样（PLAN-931 Q8）：**在看护几个面板 · 上次巡检什么时候 · 最近注入过谁**。
+    再加一段跨机自检（本机找不找得到 wmux / 名册 / 桥）—— 换台机器一跑就知道能不能用。"""
     pids = _pids()
     print(f"进程：{'✅ 在 pid=' + str(pids) if pids else '❌ 没在跑'}")
-    lg = LOGS_DIR / "watchdog.log"
-    if lg.exists():
-        age = (time.time() - lg.stat().st_mtime) / 60
-        print(f"日志：{lg}（最后一行 {age:.0f} 分钟前）")
+
+    # ① 在看护几个面板（真拓扑，不是名册条数）
+    ws_by_pty, ptys = scan_topology()
+    bot_by_pty = live_bot_by_pty()
+    if ptys is None:
+        print("在看护：❌ wmux RPC 不通，拿不到拓扑")
     else:
-        print("日志：还没有")
-    watched = []
-    for bot in _iter_bots():
-        rec = session_record(bot["name"])
-        if rec.get("pty"):
-            watched.append((bot["name"], rec.get("profile"), rec.get("pty")))
-    print(f"在看护：{len(watched)} 个有活会话的 bot")
-    if verbose:
-        for n, p, t in watched:
-            print(f"  · {n:26} {p or '?':6} {t}")
+        hit = len(set(bot_by_pty) & set(ptys))
+        print(f"在看护：{len(ptys)} 个面板 · 其中 {hit} 个能对上 bot 名"
+              f"（名册 {len(bot_by_pty)} 条 · 命中活面板 {hit}）")
+        if verbose:
+            for p in ptys:
+                print(f"  · {(ws_by_pty or {}).get(p, '?'):26} {bot_by_pty.get(p) or '(worker 面板)':22} {p}")
+
+    # ② 上次巡检
+    hp = STATE_DIR / HEARTBEAT_PATH_NAME
+    if hp.exists():
+        try:
+            hb = json.loads(hp.read_text(encoding="utf-8"))
+            age = (time.time() - int(hb.get("epoch") or 0)) / 60
+            print(f"上次巡检：{hb.get('at')}（{age:.0f} 分钟前）· 那轮看护 {hb.get('panes')} 个面板")
+        except Exception:                                # noqa: BLE001
+            print("上次巡检：心跳文件读不动")
+    else:
+        print("上次巡检：还没巡检过（没跑起来过）")
+
+    # ③ 最近注入过谁
+    alerts = _alerts_load()
+    fo = {k.split(":")[0]: len(v) for k, v in alerts.items() if k.endswith(":failover_times") and v}
+    total = 0
+    if hp.exists():
+        try:
+            total = json.loads(hp.read_text(encoding="utf-8")).get("acted_total") or 0
+        except Exception:                                # noqa: BLE001
+            pass
+    print(f"注入记录：累计动作 {total} 次 · 近 24h 自动换号 {fo or '无'}")
+
+    # ④ 跨机自检
+    print("\n本机适配自检：")
+    rpc_path = _wmux_rpc()
+    print(f"  wmux-rpc : {'✅' if Path(rpc_path).exists() else '❌'} {rpc_path}")
+    print(f"  真名册   : {'✅' if bot_by_pty else '❌'} {STATE_DIR}（{len(bot_by_pty)} 条）")
+    ba = bridge_alive()
+    print(f"  飞书桥   : {'✅ 在' if ba is True else ('❌ 没在' if ba is False else '⚠️ 查不了')}")
+
     print("\n各号额度：")
     agent_quota._print_table(agent_quota.collect())
-    alerts = _alerts_load()
-    fo = {k.split(":")[0]: len(v) for k, v in alerts.items() if k.endswith(":failover_times")}
-    print(f"\n近 24h 自动换号：{fo or '无'}")
     return 0
 
 

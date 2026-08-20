@@ -118,6 +118,7 @@ python feishu/registry.py --json peers <仓名> --exclude-machine <本机代号>
 | profile / 多账号运行时 | [`docs/ARCH-120-agent-profile-runtime.md`](docs/ARCH-120-agent-profile-runtime.md) |
 | 智能体互相喊话（a2a） | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) |
 | 给智能体排定时任务 | [`docs/ARCH-150-agent-cron.md`](docs/ARCH-150-agent-cron.md) |
+| 会话卡住/撞额度上限怎么自愈 | [`docs/ARCH-160-agent-watchdog.md`](docs/ARCH-160-agent-watchdog.md) |
 | Cloudflare 上有什么 | [`docs/SPEC-200-cloudflare-inventory.md`](docs/SPEC-200-cloudflare-inventory.md) |
 | **对外开放前要做什么** | [`docs/PLAN-926-public-onboarding.md`](docs/PLAN-926-public-onboarding.md) |
 

@@ -2391,13 +2391,20 @@ def cmd_start(bot_filter=None):
     _stop_hint = f"`stop --bot {bot_filter}` 停它" if bot_filter else "`stop` 停全部"
     print(f"\n已后台启动 {len(started)} 个 bot 进程。"
           f"\n日志：{LOG_DIR}\\bridge-<bot>.log · 用 `status` 查 · {_stop_hint}。")
-    # 通用 CRON 守护进程随「整体 start」一起起（单 bot start --bot X 不带它 · 它是全局定时器不属某个 bot）。
+    # 两个全局守护进程随「整体 start」一起起（单 bot `start --bot X` 不带它们 ——
+    # 它们是全机级的，不属于某一个 bot；每次单起都多拉一个就成灾了）。
+    #   · bridge_cron     定时派活
+    #   · bridge_watchdog 全机保活 + 撞限流自动换号（PLAN-931：**它不再有自己的计划任务**，
+    #     生命周期完全绑桥 —— 这样它也不需要知道自己装在哪，跨机的路径问题从源头消失）
     if not bot_filter:
-        try:
-            subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "bridge_cron.py"), "start"],
-                           cwd=str(PROJECT), timeout=30)
-        except (OSError, subprocess.SubprocessError) as _e:  # noqa: BLE001
-            print(f"（cron 守护进程没起来·可手动 `python feishu/bridge_cron.py start`：{_e}）")
+        _here = Path(__file__).resolve().parent
+        for _name, _hint in (("bridge_cron.py", "cron 守护进程"), ("bridge_watchdog.py", "看门狗")):
+            try:
+                subprocess.run([sys.executable, str(_here / _name), "start"],
+                               cwd=str(PROJECT), timeout=30,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢焦点
+            except (OSError, subprocess.SubprocessError) as _e:  # noqa: BLE001
+                print(f"（{_hint}没起来·可手动 `python feishu/{_name} start`：{_e}）")
 
 
 def cmd_stop(bot_filter=None):
@@ -2405,13 +2412,16 @@ def cmd_stop(bot_filter=None):
     if bot_filter and bot_filter not in {b["name"] for b in load_bots()}:
         print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
         sys.exit(2)
-    # 整体 stop 也停通用 CRON 守护进程（单 bot stop --bot X 不动它）。
+    # 整体 stop 也停两个全局守护进程（单 bot `stop --bot X` 不动它们）。
     if not bot_filter:
-        try:
-            subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "bridge_cron.py"), "stop"],
-                           cwd=str(PROJECT), timeout=30)
-        except (OSError, subprocess.SubprocessError):  # noqa: BLE001
-            pass
+        _here = Path(__file__).resolve().parent
+        for _name in ("bridge_cron.py", "bridge_watchdog.py"):
+            try:
+                subprocess.run([sys.executable, str(_here / _name), "stop"],
+                               cwd=str(PROJECT), timeout=30,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢焦点
+            except (OSError, subprocess.SubprocessError):  # noqa: BLE001
+                pass
     pids = _bridge_pids(exclude_self=True, bot=bot_filter)
     if not pids:
         print(f"bot '{bot_filter}' 没在跑。" if bot_filter else "没有在跑的 bot 进程。")

@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""mutate_bridge_watchdog.py — 变异测试：把每道闸逐个改坏，验证对应用例【真的会变红】。
+
+为什么这是刚需而不是加分项（PLAN-931 · S9.2）：
+  视觉类任务能用眼睛确认分数对不对；**架构类任务看不见** —— 一排绿灯既可能是
+  「闸在守」，也可能是「用例根本没咬合」。唯一能分辨的办法就是把闸改坏、看它红不红。
+  **没有变异测试的绿灯 = 没验过。**
+
+跑法：  python tests/mutate_bridge_watchdog.py
+结果写进 feishu/_state/watchdog-mutation-record.json（评分器 Q5 读它）。
+每个变异都在 try/finally 里还原源码；中途 Ctrl-C 也会还原。
+"""
+
+import json
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+FEISHU = REPO / "feishu"
+TZ = ZoneInfo("Asia/Shanghai")
+
+# (名字, 哪个文件, 原文, 改坏成什么, 期望变红的用例)
+MUTATIONS = [
+    ("防误判闸：错误签名放宽成裸话题词",
+     FEISHU / "bridge_watchdog.py",
+     r'_CLAUDE_ERR_RE = re.compile(r"api error\s*[:(]", re.I)',
+     '_CLAUDE_ERR_RE = re.compile(r"api error", re.I)',
+     "test_r1_防误判_正文里提到这些词不算错"),
+
+    ("防抢跑闸：retry 标记清空",
+     FEISHU / "bridge_watchdog.py",
+     'RETRY_MARKERS = ("retrying", "attempt ", "/10", "重试", "esc to interrupt")',
+     'RETRY_MARKERS = ()',
+     "test_r1_防抢跑_它自己在retry就别碰"),
+
+    ("防自激闸：注入文本里混进错误签名",
+     FEISHU / "bridge_watchdog.py",
+     'NUDGE_TEXT = "继续（刚才被限流/网络抖了一下，从上次停的地方接着做）"',
+     'NUDGE_TEXT = "继续（刚才 API Error: 抖了一下，接着做）"',
+     "test_r1_防自激_注入文本本身不能命中错误判据"),
+
+    ("双源判据：退化成只看屏",
+     FEISHU / "bridge_watchdog.py",
+     "    if hit and not full:\n        return False,",
+     "    if hit and not full:\n        return True,",
+     "test_r2_四格真值表"),
+
+    ("选号闸：把「问不到」的号也放进候选",
+     FEISHU / "agent_quota.py",
+     'ok = [r for r in rows if r["verdict"] in ("够用", "紧张") and r["profile"] not in set(exclude)]',
+     'ok = [r for r in rows if r["profile"] not in set(exclude)]',
+     "test_选号_问不到的绝不选"),
+
+    ("告警冷却闸：拆掉冷却",
+     FEISHU / "bridge_watchdog.py",
+     "        if time.time() - last < ALERT_COOLDOWN:",
+     "        if False:",
+     "test_告警冷却_状态类会冷却_动作类必发"),
+]
+
+
+def _run_case(case):
+    r = subprocess.run([sys.executable, "-m", "pytest", str(HERE / "test_bridge_watchdog.py"),
+                        "-k", case, "-q", "--no-header"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=180, cwd=str(REPO))
+    return r.returncode, (r.stdout or "")[-300:]
+
+
+def main():
+    # ① 先确认基线是全绿的 —— 底子就红的话，「变红」证明不了任何事
+    base = subprocess.run([sys.executable, "-m", "pytest", str(HERE / "test_bridge_watchdog.py"),
+                           "-q", "--no-header"],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=300, cwd=str(REPO))
+    if base.returncode != 0:
+        print("❌ 基线就没全绿，先修好再做变异测试：")
+        print((base.stdout or "")[-1500:])
+        return 2
+    print(f"基线全绿 ✅  开始变异 {len(MUTATIONS)} 项\n")
+
+    results = []
+    for name, path, old, new, case in MUTATIONS:
+        src = path.read_text(encoding="utf-8")
+        if old not in src:
+            results.append({"mutation": name, "case": case, "ok": False,
+                            "detail": "❌ 锚点没匹配上（源码改过？）——本项无效，必须修锚点"})
+            print(f"[跳过] {name} —— 锚点没匹配上")
+            continue
+        try:
+            path.write_text(src.replace(old, new, 1), encoding="utf-8")
+            code, tail = _run_case(case)
+            went_red = code != 0
+            results.append({"mutation": name, "case": case, "ok": went_red,
+                            "detail": ("✅ 改坏后用例变红（闸有效）" if went_red
+                                       else "❌ 改坏了用例还是绿的 —— 这道闸【没被测到】")})
+            print(f"[{'✅' if went_red else '❌'}] {name}  →  {case}")
+        finally:
+            path.write_text(src, encoding="utf-8")          # 无论如何都还原
+
+    # ③ 还原后再跑一次，确认没留下污染
+    after = subprocess.run([sys.executable, "-m", "pytest", str(HERE / "test_bridge_watchdog.py"),
+                            "-q", "--no-header"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300, cwd=str(REPO))
+    restored = after.returncode == 0
+
+    passed = sum(1 for r in results if r["ok"])
+    rec = {
+        "at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "epoch": int(time.time()),
+        "total": len(MUTATIONS),
+        "passed": passed,
+        "restored_clean": restored,
+        "results": results,
+    }
+    out = FEISHU / "_state" / "watchdog-mutation-record.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    print(f"\n变异测试 {passed}/{len(MUTATIONS)} 通过 · 源码还原后基线{'仍全绿 ✅' if restored else '变红 ❌（有污染！）'}")
+    print(f"记录：{out}")
+    return 0 if (passed == len(MUTATIONS) and restored) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

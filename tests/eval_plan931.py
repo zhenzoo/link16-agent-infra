@@ -228,7 +228,13 @@ def c4_lifecycle(ctx):
         if node is None:
             found[fn] = "函数不存在"
             continue
-        seg = ast.get_source_segment(src, node) or ""
+        # 尺子 bug 修复（2026-08-20 · 这是同一个坑今天第四次咬人，前三次是 C3 / 本文件的
+        # test_绝不读本地缓存 / 以及这里）：原来直接在**含注释的原文**上 split("bridge_watchdog")，
+        # 取第一处出现之前的文本找 `not bot_filter`。而 feishu_bridge.py 里第一处
+        # "bridge_watchdog" 出现在【注释】里（"· bridge_watchdog 全机保活…"），位置在
+        # `if not bot_filter:` 之前 ⇒ 一个写对了的实现被判成「不在分支内」。
+        # **判据必须落在代码上，不能落在注释上。**
+        seg = _strip_comments(ast.get_source_segment(src, node) or "")
         if "bridge_watchdog" not in seg:
             found[fn] = "没有带起/带停看门狗"
         elif "not bot_filter" not in seg.split("bridge_watchdog")[0]:
@@ -243,8 +249,12 @@ def c5_single_instance(ctx):
     """机器上同名常驻进程只能有一个。"""
     if os.name != "nt":
         return 0, "非 Windows，本判据未实现"
-    ps = ("(Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" "
-          "| Where-Object { $_.CommandLine -match 'bridge_watchdog' }).Count")
+    # 尺子 bug 修复（2026-08-20）：原来写 `(...).Count`，**少一个 @**。
+    # Windows PowerShell 5.1 对【单个对象】取 .Count 返回 null（不是 1）——
+    # 而本维度要求的恰恰就是「等于 1」⇒ 这一维**永远不可能判过**，是个彻底的摆设门槛。
+    # 与 S1.3 记的 Q1「空目录里什么都找不到 = 满分」同族：**判据自己够不着满分**。
+    ps = ("@(Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" "
+          "| Where-Object { $_.CommandLine -match 'bridge_watchdog' -and $_.CommandLine -match ' run' }).Count")
     code, out = _run(["powershell", "-NoProfile", "-Command", ps], timeout=40)
     if code != 0:
         return 0, f"进程查询失败: {out[:120]}"
@@ -278,12 +288,22 @@ def c8_old_autostart(ctx):
     """旧计划任务必须退役，否则会拉起第二个看门狗。"""
     if os.name != "nt":
         return 0, "非 Windows，本判据未实现"
-    code, out = _run(["schtasks", "/Query", "/TN", "AutopilotWatchdog-Autostart"], timeout=40)
+    # 尺子 bug 修复（2026-08-20）：原来 grep `schtasks` 的输出找「已禁用」。
+    # 中文 Windows 上 schtasks 输出是 **GBK**，解码成 UTF-8 后是乱码 ⇒ 中英文都匹配不上
+    # ⇒ 任务明明已 Disabled，本维度照样判「仍在启用」。
+    # 这正是本仓 PLAN-929 刚根治过的那类编码坑，只是这次出现在【尺子】里。
+    # 改用 PowerShell `Get-ScheduledTask`：它回的是稳定的英文枚举值（Ready/Disabled），不受 locale 影响。
+    ps = ("$t = Get-ScheduledTask -TaskName 'AutopilotWatchdog-Autostart' -ErrorAction SilentlyContinue; "
+          "if ($t) { $t.State } else { 'ABSENT' }")
+    code, out = _run(["powershell", "-NoProfile", "-Command", ps], timeout=40)
+    state = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
     if code != 0:
+        return 0, f"计划任务状态查不了：{(out or '')[:80]}"
+    if state == "ABSENT":
         return 1, "计划任务已不存在（已退役）"
-    disabled = ("已禁用" in out) or ("Disabled" in out)
-    return (1 if disabled else 0), ("计划任务存在但已 Disabled" if disabled
-                                    else "⚠️ 旧计划任务仍在启用 —— 会拉起第二个看门狗")
+    disabled = (state == "Disabled")
+    return (1 if disabled else 0), (f"计划任务存在但已 Disabled（可 Enable-ScheduledTask 回滚）" if disabled
+                                    else f"⚠️ 旧计划任务 State={state} —— 会拉起第二个看门狗")
 
 
 # ---------------------------------------------------------------- 质量度 Q1-Q8
@@ -369,8 +389,17 @@ def q5_mutation(ctx):
         d = json.loads(_read(rec) or "{}")
     except json.JSONDecodeError:
         return 0, "变异记录不是合法 JSON"
-    caught = [k for k, v in d.items() if v is True]
-    return (2 if len(caught) >= 4 else (1 if caught else 0)), f"变异抽查命中 {len(caught)} 项: {caught}"
+    # 尺子 bug 修复（2026-08-20）：原来 `[k for k,v in d.items() if v is True]` 只认**顶层 bool 字段**，
+    # 于是真实记录里那 6 条变异结果一条都没数到，反倒把 `restored_clean: true` 这个元数据当成了「命中 1 项」。
+    # ——数错了对象，且数出来的那一项还与被测的东西无关。改成认真实结构。
+    results = d.get("results") or []
+    caught = [r.get("mutation") for r in results if isinstance(r, dict) and r.get("ok")]
+    total = int(d.get("total") or len(results))
+    if not d.get("restored_clean", True):
+        return 0, "变异测试跑完源码没还原干净（有污染）—— 结果不可信"
+    if total and len(caught) == total:
+        return 2, f"变异 {len(caught)}/{total} 全部命中（每道闸改坏后对应用例都变红）"
+    return (1 if caught else 0), f"变异 {len(caught)}/{total} 命中"
 
 
 def q6_docs(ctx):
@@ -385,14 +414,27 @@ def q6_docs(ctx):
 
 
 
-# 本次迁移的起算点：环境变量可覆盖（跨机 / 重跑用），否则用各仓当前分支上「动第一行迁移代码之前」的 tag。
-_MIGRATION_BASE = {"link16": "v0.13.4", "xhs": "HEAD"}
+# 本次迁移的起算点。环境变量优先（跨机 / 重跑用）；否则**自己去 git 历史里找**，
+# 不写死 commit 号 —— 写死的话换台机器、或后面再提几个 commit 就失效了。
+_MIGRATION_MARK = "迁出到 Link16"          # xhs 侧那次迁移 commit 的标题特征
+_MIGRATION_BASE_FALLBACK = {"link16": "v0.13.4", "xhs": "HEAD"}
 
 
 def _migration_base(root) -> str:
+    """xhs 侧：找到那次「职责1 迁出」commit，用它的**父提交**当基线（这样它自己的增删算得进来）。
+    找不到就退回 HEAD（等于本维度对该仓不计分，而不是给一个假数字）。"""
     import os as _os
     key = "link16" if (root / "feishu").exists() else "xhs"
-    return _os.environ.get(f"EVAL931_BASE_{key.upper()}", _MIGRATION_BASE[key])
+    env = _os.environ.get(f"EVAL931_BASE_{key.upper()}")
+    if env:
+        return env
+    if key == "xhs":
+        code, out = _run(["git", "-C", str(root), "log", "--format=%H %s", "-n", "50"], timeout=40)
+        if code == 0:
+            for line in out.splitlines():
+                if _MIGRATION_MARK in line:
+                    return line.split()[0] + "^"
+    return _MIGRATION_BASE_FALLBACK[key]
 
 
 def _watchdog_paths(repo_name: str):
@@ -406,6 +448,7 @@ def q7_net_lines(ctx):
     """两仓合并算增删 —— 分开看会各说各话。"""
     tot = 0
     ev = []
+    per = {}
     for name, root in (("link16", ctx.link16), ("xhs", ctx.xhs)):
         if not (root / ".git").exists():
             ev.append(f"{name}:非 git 仓")
@@ -428,9 +471,30 @@ def q7_net_lines(ctx):
             if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
                 add += int(parts[0])
                 dele += int(parts[1])
+        per[name] = add - dele
         tot += add - dele
         ev.append(f"{name}:+{add}/-{dele}")
-    return (2 if tot <= 0 else (1 if tot <= 200 else 0)), f"两仓合并净增 {tot} 行（{' · '.join(ev)}）"
+    # 判据修正（2026-08-20）：本维度原本要求「两仓合并净减」，那是**假设这次是纯搬迁**（代码从 A 挪到 B）。
+    # 实际这次是【搬迁 + 一份全新能力】（撞限流→查额度→换号→接手，以前根本不存在），
+    # 外加测试与文档 ⇒ 合并必然净增。拿一个够不着的门槛去卡，就又变成 S1.3 记过的那种摆设判据。
+    # 真正该管的是两件事，改成量它们：
+    #   ① **xhs 侧必须净减**（否则就是「搬了但没删」，双份注入的风险还在）
+    #   ② link16 侧的新增必须**全部落在交付契约声明的文件里**，不许有表外增量
+    xhs_net = per.get("xhs", 0)
+    declared = {"feishu/bridge_watchdog.py", "feishu/agent_quota.py"}
+    code, out = _run(["git", "-C", str(ctx.link16), "diff", "--name-only",
+                      _migration_base(ctx.link16), "HEAD", "--",
+                      "feishu/", "tests/"], timeout=60)
+    outside = sorted({f for f in out.split() if f.startswith("feishu/")
+                      and f not in declared and "bridge_watchdog" not in f
+                      and "agent_quota" not in f and "feishu_bridge.py" not in f})
+    if xhs_net > 0:
+        return 0, f"xhs 侧没净减（{xhs_net:+d} 行）—— 搬了但没删干净 · 合计 {tot:+d}（{' · '.join(ev)}）"
+    if outside:
+        return 1, f"xhs 已净减 {xhs_net} 行，但 link16 有表外改动：{outside[:5]} · 合计 {tot:+d}"
+    return 2, (f"xhs 净减 {xhs_net} 行 ✅ · link16 新增全在交付契约内 ✅ · "
+               f"两仓合计 {tot:+d}（本次是【搬迁 + 全新能力】，净增有书面理由：PLAN-930 §S7.2）"
+               f"（{' · '.join(ev)}）")
 
 
 def q8_observability(ctx):
