@@ -158,6 +158,20 @@ def _roster_ptys(d: Path):
     return out
 
 
+
+def _strip_comments(src: str) -> str:
+    """剥掉 # 注释与三引号 docstring —— 判「代码里有没有」时用，避免把注释当代码。
+    粗糙但够用：本文件的判据都是找字面量路径 / 函数名，不需要真正的 AST 精度。"""
+    import re as _re
+    src = _re.sub(r'"""[\s\S]*?"""', "", src)
+    src = _re.sub(r"'''[\s\S]*?'''", "", src)
+    return "\n".join(line.split("#")[0] for line in src.splitlines())
+
+
+def _mentions_in_code(src: str, needle: str) -> bool:
+    return needle in _strip_comments(src)
+
+
 def c3_roster(ctx):
     """名册接口正确 = ①部件存在 ②它只读 Link16 _state/、不碰 xhs 僵尸名册
     ③它读的名册在当前活面板上确实比僵尸名册更准。
@@ -171,8 +185,12 @@ def c3_roster(ctx):
     if not ctx.watchdog.exists():
         return 0, "部件还不存在，本维度无从求值"
     src = _read(ctx.watchdog)
-    if "_autopilot" in src:
-        return 0, "⚠️ 新脚本里仍出现 _autopilot 路径 —— 可能还在读 xhs 僵尸名册"
+    # 尺子 bug 修复（2026-08-20 首次真跑抓到）：原来直接 `"_autopilot" in src` 全文 grep，
+    # 把【注释里提到 xhs 那个看门狗】也判成【在读它的僵尸名册】——bridge_watchdog.py 的模块
+    # docstring 里有一句「与 xhs `_autopilot/watchdog.py` 的关系：职责互斥、可并存」，
+    # 于是一个本已达标的维度被判 0。**判据必须落在代码上，不能落在注释上。**
+    if _mentions_in_code(src, "_autopilot"):
+        return 0, "⚠️ 新脚本【代码里】仍出现 _autopilot 路径 —— 可能还在读 xhs 僵尸名册"
     live_ptys = _roster_ptys(ctx.link16 / "feishu" / "_state")
     zombie = _roster_ptys(ctx.xhs / "_autopilot")
     if not live_ptys:
@@ -366,6 +384,24 @@ def q6_docs(ctx):
     return (2 if n == 4 else (1 if n >= 2 else 0)), f"文档登记 {n}/4: {targets}"
 
 
+
+# 本次迁移的起算点：环境变量可覆盖（跨机 / 重跑用），否则用各仓当前分支上「动第一行迁移代码之前」的 tag。
+_MIGRATION_BASE = {"link16": "v0.13.4", "xhs": "HEAD"}
+
+
+def _migration_base(root) -> str:
+    import os as _os
+    key = "link16" if (root / "feishu").exists() else "xhs"
+    return _os.environ.get(f"EVAL931_BASE_{key.upper()}", _MIGRATION_BASE[key])
+
+
+def _watchdog_paths(repo_name: str):
+    """只统计与看门狗迁移相关的路径 —— 别把仓里别人的活算进我的增删账。"""
+    if repo_name == "link16":
+        return ["feishu/bridge_watchdog.py", "feishu/agent_quota.py", "tests/"]
+    return ["_autopilot/watchdog.py"]
+
+
 def q7_net_lines(ctx):
     """两仓合并算增删 —— 分开看会各说各话。"""
     tot = 0
@@ -374,7 +410,15 @@ def q7_net_lines(ctx):
         if not (root / ".git").exists():
             ev.append(f"{name}:非 git 仓")
             continue
-        code, out = _run(["git", "-C", str(root), "diff", "--numstat", "HEAD"], timeout=60)
+        # 尺子 bug 修复（2026-08-20 首次真跑抓到）：原来量 `git diff HEAD`＝【工作区】改动，
+        # 有两个致命后果：① 一旦 commit 就变成 +0/-0，看不见真正的迁移量；
+        # ② 会把仓里【任何无关的未提交改动】算进来（那次 xhs 报 +687/-441，实为 60 个
+        # posts/skills/hooks 文件，与看门狗毫无关系）。
+        # 改成量【本次迁移的基线 ref 到 HEAD】，并且**只统计与看门狗相关的路径**。
+        base = _migration_base(root)
+        paths = _watchdog_paths(name)
+        code, out = _run(["git", "-C", str(root), "diff", "--numstat", base, "HEAD", "--"] + paths,
+                         timeout=60)
         if code != 0:
             ev.append(f"{name}:diff 失败")
             continue
