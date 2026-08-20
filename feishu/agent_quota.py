@@ -13,11 +13,17 @@
 
 数据源（都用该 profile 自己 home 里的凭据）：
   · claude → GET https://api.anthropic.com/api/oauth/usage
-             Bearer = <home>/.credentials.json 的 claudeAiOauth.accessToken
-             国内直连可达 → 强制**绕过系统代理**（同 xhs scripts/notify.py 的可靠性打法）
+             Bearer = <home>/.credentials.json 的 **claudeAiOauth.accessToken**
+             ⚠️ 必须显式取这个键，**别递归找第一个 accessToken** —— 同一个文件里还有
+             `mcpOAuth`（mobbin/kling 等 MCP server 的 token），而且两者**顺序不固定**
+             （实测 ccp 是 mcpOAuth 在前、ccp2 是 claudeAiOauth 在前）⇒ 递归找会抓到 MCP 的 token 然后 403。
   · codex  → GET https://chatgpt.com/backend-api/codex/usage
              Bearer = <home>/auth.json 的 tokens.access_token（+ chatgpt-account-id 头）
-             墙外 → 走 .env 的 PROXY_URL（每台机自己配 · 不写死端口）
+
+🌐 **线路：两条都试，别按机器写死**（2026-08-20 两台机实测结论【正好相反】）：
+     TB24 直连 200 / 走代理 429（共享出口被限流）；TB25 直连 403（边缘拒绝）/ 走代理 200。
+     ⇒ claude 首选直连、codex 首选代理，**任一失败自动换另一条重试一次**，
+     并把走通的线路记进结果（`route` 字段）。两条都不通才判 unknown，且把两条的原始错都带出来。
 
 用法：
   python feishu/agent_quota.py                      # 全部 profile 一张表
@@ -96,6 +102,40 @@ def _opener(use_proxy):
     return urllib.request.build_opener(handler)
 
 
+# 记住每个 runtime 上一次【真的成功】的那条线路，本进程内复用 —— 避免每次都先撞一次失败。
+_WORKING_ROUTE = {}
+
+
+def _get_json_dual(url, headers, prefer_proxy, runtime):
+    """**两条线路都试**：先试首选，不通就自动换另一条重试一次。返回 (data, err, 走通的线路)。
+
+    🩸 为什么必须这样（2026-08-20 tb25-link16 实证，两台机结论【正好相反】）：
+      · 原代码把 Claude 侧写死成「强制绕过系统代理」，docstring 还写着「国内直连可达」——
+        **那只在 TB24 成立**。TB25 同一个 token、同一个请求头、同一个 URL，只差一个 opener：
+        直连 → 403 `{"type":"forbidden","message":"Request not allowed"}`（边缘/WAF 拒绝话术，
+        **不是鉴权失败**：那号 scopes 含 user:profile、subscriptionType=max、token 还有 5 天）；
+        走 PROXY_URL → **200**，正常返回。差别只是两台机的出口 IP。
+      · 反过来在 TB24 实测：直连 200，而**走代理会 429**（共享出口被限流）。
+      ⇒ **没有任何一条线路是普适的**，按机器写死必然废掉其中一台。
+      而它的失效是**静默**的：Claude 侧全部 profile 变「问不到」→ 按「问不到的绝不选」，
+      那台机上所有 Claude 会话撞限流时**永远选不出可切的号**，failover 等于没装（C9 就是查这个）。
+    """
+    routes = [True, False] if prefer_proxy else [False, True]
+    if runtime in _WORKING_ROUTE:                      # 上次走通哪条就先走哪条
+        w = _WORKING_ROUTE[runtime]
+        routes = [w] + [r for r in routes if r != w]
+    errs = []
+    for use_proxy in routes:
+        data, err = _get_json(url, headers, use_proxy)
+        name = "代理" if use_proxy else "直连"
+        if data is not None:
+            _WORKING_ROUTE[runtime] = use_proxy
+            return data, None, name
+        errs.append(f"{name}: {err}")
+    # 两条都不通 → 把两条的原始错都带出来，别让人只看到其中一条去猜
+    return None, " | ".join(errs), None
+
+
 def _get_json(url, headers, use_proxy):
     """→ (data, err)。err 是给人看的一句话；data 是 dict。两者必有其一。"""
     req = urllib.request.Request(url, headers=headers)
@@ -154,12 +194,12 @@ def _claude_quota(home: Path):
     if not token:
         return {"status": "no_creds", "note": "凭据里没有 accessToken"}
 
-    data, err = _get_json(CLAUDE_USAGE_URL, {
+    data, err, route = _get_json_dual(CLAUDE_USAGE_URL, {
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": "claude-cli (link16 agent_quota)",
         "Accept": "application/json",
-    }, use_proxy=False)                                # 国内直连 · 绕代理
+    }, prefer_proxy=False, runtime="claude")           # 首选直连，不通自动换代理重试
     if data is None:
         return {"status": "unknown", "note": err}
 
@@ -176,7 +216,8 @@ def _claude_quota(home: Path):
         "session_reset": _fmt_reset(five.get("resets_at")),
         "weekly_reset": _fmt_reset(week.get("resets_at")),
         "severity": sev,
-        "note": "",
+        "route": route,
+        "note": f"经{route}" if route else "",
     }
 
 
@@ -192,13 +233,13 @@ def _codex_quota(home: Path):
     if not token:
         return {"status": "no_creds", "note": "凭据里没有 access_token"}
 
-    data, err = _get_json(CODEX_USAGE_URL, {
+    data, err, route = _get_json_dual(CODEX_USAGE_URL, {
         "Authorization": f"Bearer {token}",
         "chatgpt-account-id": tokens.get("account_id") or "",
         "User-Agent": "codex_cli_rs (link16 agent_quota)",
         "originator": "codex_cli_rs",
         "Accept": "application/json",
-    }, use_proxy=True)                                 # 墙外 · 走 PROXY_URL
+    }, prefer_proxy=True, runtime="codex")             # 首选代理（墙外），不通自动换直连重试
     if data is None:
         return {"status": "unknown", "note": err}
 
@@ -218,7 +259,8 @@ def _codex_quota(home: Path):
         "session_reset": _fmt_reset(short.get("reset_at")),
         "weekly_reset": _fmt_reset(long_.get("reset_at")),
         "severity": "critical" if rl.get("limit_reached") else "normal",
-        "note": f"plan={data.get('plan_type') or '?'}",
+        "route": route,
+        "note": f"plan={data.get('plan_type') or '?'}·经{route}",
     }
 
 

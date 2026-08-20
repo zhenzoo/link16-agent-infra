@@ -592,7 +592,21 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         return False
     tgt = chosen["profile"]
     curr = by.get(cur) or {}
-    log(f"选号：{cur}（{curr.get('verdict')}）→ {tgt}（{chosen['verdict']}·周{chosen['weekly_percent']}%）")
+
+    # 跨 runtime 时必须把【为什么跨】说清楚（tb25-link16 2026-08-20 提出 · 采纳）：
+    # TB25 那台能用的 Claude 号实际只有 ccp 一个（ccp2 已满、其余 5 个没登录），
+    # 所以「同 runtime 优先」在那台会**经常落空**、频繁跨到 codex。
+    # 主人已拍板跨 runtime 自动切，但如果不解释，他看到 claude→codex 会以为切错了。
+    cur_rt = curr.get("runtime")
+    why_cross = ""
+    if cur_rt and chosen["runtime"] != cur_rt:
+        same = [r for r in rows if r["runtime"] == cur_rt and r["profile"] != cur]
+        detail = "、".join(f"{r['profile']}({r['verdict']})" for r in same) or "一个都没有"
+        why_cross = (f"\n· **跨 runtime 说明**：同为 {cur_rt} 的其他号都用不了 —— {detail}；"
+                     f"所以切到 {chosen['runtime']} 的 {tgt}。这是预期行为，不是切错。")
+        log(f"跨 runtime：{cur_rt}→{chosen['runtime']}，因为同 runtime 候选 {detail}")
+    log(f"选号：{cur}（{curr.get('verdict')}）→ {tgt}（{chosen['verdict']}·周{chosen['weekly_percent']}%"
+        f"·{chosen.get('route') and '经' + chosen['route'] or ''}）")
 
     # ② 闸
     ok, why = _failover_gate(bot_name)
@@ -617,7 +631,8 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     notify(bot_name, "limit",
            f"🔴 {bot_name} 撞额度上限｜账号 {cur} · 周额度 {curr.get('weekly_percent')}%"
            f"｜{curr.get('weekly_reset')} 恢复\n"
-           f"→ 正在切到 {tgt}（周 {chosen['weekly_percent']}%），并把原任务交给新会话接手。")
+           f"→ 正在切到 {tgt}（周 {chosen['weekly_percent']}%），并把原任务交给新会话接手。"
+           f"{why_cross}")
 
     # ④ 写名册
     try:
