@@ -52,6 +52,48 @@ last_reviewed: 2026-08-17
 | **Link16 agent profile launcher** | `feishu/agent-profiles.json` 是账号映射 SSOT；运行 `python ~/.claude-personal/skills/agent-profile-governance/scripts/profile_governance.py wrappers --apply` 生成 Git Bash + PowerShell 5/7 的动态 wrapper，再跑 `doctor`。禁止手写 `CLAUDE_CONFIG_DIR`/`CODEX_HOME` alias。 |
 | **node** | `node --version`（`~/wmux-rpc.js` 要 node 跑）。 |
 | **仓库 clone** | `git clone git@github.com:zhenzoo/link16-agent-infra.git` 到本机（惯例位置 `$VIBECODING_ROOT\Post\link16-agent-infra`；`zhenz`/`D:` 那台历史上多一层 `Post\tools\`）。 |
+| **OpenSSH Server**（⛔ 必装 · 2026-08-20 加） | `Get-Service sshd` —— **查无此服务 = 没装**。Windows 10/11 默认只装 client、**不装 server**。这是 `.env` 跨机同步（`envsync` skill）的**唯一硬前置**：没装，同步在 preflight 就停，一步也走不了（2026-08-20 tuf19 实证）。装法见 §1.1。 |
+
+### 1.1 · 装 OpenSSH Server（`.env` 同步的硬前置 · 要管理员）
+
+> **为什么算机器接入要求**：`.env` 里的密钥不上任何云，跨机只走**家庭局域网点对点 SSH**。
+> 一台机没有 sshd，它就**永远拿不到新密钥、也发不出自己新增的密钥** —— 装了桥也是半残。
+> ⚠️ **要管理员权限**：agent 会话跑这段会弹 UAC，**无人值守时会静默卡死**。
+> 派给对面 agent 时必须明说「**一弹权限就停手，把整段转给主人**」。
+
+```powershell
+# 探（不用管理员·先跑这个）
+Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe"   # False = 服务端没装（客户端 ssh.exe 有 ≠ 装了 server）
+Get-Service sshd -ErrorAction SilentlyContinue      # 查无此服务 = 没装
+
+# ⚠️ 「这个账号是不是管理员」和「当前进程有没有提权」是【两个问题】，别混（2026-08-20 tuf19 实证）
+Get-LocalGroupMember -Group Administrators          # ← 账号身份：列表里有它 = 是管理员
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()`
+  ).IsInRole('Administrators')                      # ← 当前令牌：False = 没提权（≠ 不是管理员）
+# 🩸 别用 `whoami /groups | findstr S-1-5-32-544` 判断身份：UAC **过滤令牌**会把管理员 SID
+#    置成 deny-only，非提权进程里查出来像「普通用户」→ 会误导你去装 ~/.ssh/authorized_keys，
+#    而 sshd 对【管理员组账号】根本不看那个文件，白查一轮。
+# 🩸 也别用 $env:USERPROFILE 的目录名当登录名：改过名的机器上目录名不跟着改
+#    （tuf19 实证：USERPROFILE = %USERPROFILE%，但账号名是 Zz）。
+#    登录名以 `$env:USERNAME` / `Get-LocalUser` 为准 —— 填错 SSH 会 Permission denied，
+#    而且长得像「公钥没装对」。
+
+# ↓↓↓ 以下需要【管理员 PowerShell】↓↓↓
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service sshd -StartupType Automatic; Start-Service sshd
+if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True `
+    -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+}
+Get-Service sshd | Select-Object Name, Status, StartType    # 验收：Running / Automatic
+```
+
+装完还要**装 hub 机的公钥**才免密 —— 那一步由 hub 机跑 `envsync.ps1 -Register` 自动打印，
+整段转给主人在这台跑。完整流程（注册表 / 多机 / 冲突与删除的硬停闸）见用户级 `envsync` skill。
+
+> 🩸 **ping 不通 ≠ 连不上**：Windows 防火墙默认挡 ICMP，`ping` 失败但 sshd 好好的很常见。
+> 判据一律以 **SSH 能不能连上**为准（`envsync` 的 preflight 已按这个改：ping 只当快速筛选，
+> 全都 ping 不通仍会挨个真连一次 SSH 才放弃）。
 
 ---
 

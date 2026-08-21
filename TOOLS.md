@@ -39,6 +39,18 @@
 | `$agent-profile-governance` | 自动判断 user/repo/both，语义治理用户级或任意仓库的 `CLAUDE.md`/`AGENTS.md`（公共规则 + runtime 适配，不机械互拷）；兼管新账号/bot、实体 renderer、wrapper 与 worker 同 profile | `python ~/.claude-personal/skills/agent-profile-governance/scripts/profile_governance.py doctor` |
 | `feishu/bridge_env.py` | 跨机路径解析（.env/名册/wmux-rpc） | （库） |
 
+> 🧭 **喊别的 bot 被拒「没有它的飞书凭据…拒绝猜」时怎么办**（2026-08-20 实证 · tb25↔tuf19）
+> 判据是【**发送方本机 `.env` 里有没有【目标】的凭据**】—— **不是**「跨不跨机」。
+> 要算「我和它都在哪个群」，得用**目标自己的**凭据去查它在哪些群；本机没有 → `_groups_of()` 返 `None`
+> → `shared_group()` **fail closed 拒绝**（这是对的：旧版会把「查不了」当「不在任何群」，静默发进发送方的
+> 唯一群、@ 一个不在群里的 open_id，还打印 `✅ 已发` —— 典型的「跑了、没报错、什么都没送到」）。
+> **解法二选一**：① 本机 `.env` 补上目标的凭据（`envsync` 同步过来后就自动能用了）
+> ② 显式 `--in <oc_群id>` 指定一个它确实在的群。共享群 = `oc_00000000000000000000000000000001`。
+>
+> ⚠️ **别用飞书群成员 API 判断某个 bot 在不在群里** —— 它**只列人类成员，机器人一个都不返回**。
+> 实测该群 `members` 只返回 1 个人（主人），而真实机器人数在 **`bot_count` 字段 = 53**（= 名册全员）。
+> 拿 members 当 oracle 会得出「没有共同群」的错误结论（我 2026-08-20 就被骗了一次）。
+
 ## 🟢 wmux —— 面板驱动层（`wmux/`）
 
 | 工具 | 职责 | 怎么调 |
