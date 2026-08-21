@@ -408,5 +408,39 @@ def test_handoff_命令已接进桥且不切账号():
     assert "build_align_prompt" in body, "必须注入对齐版 prompt"
     assert "ensure_session" in body, "必须主动起新会话（不像 /close 那样懒启动）"
 
+
+def test_r2_第三态_屏命中但额度问不到_必须告警而不是静默():
+    """🩸 tuf19-link16 2026-08-21 发现：账号那一路有第三种结果 —— **「问不到」**
+    （实测 ccp2：额度查询接口自己被 429 限流），**不是「没满」，是答不上来**。
+    旧代码把它和「没满」并成一档 ⇒ 屏上明明写着撞限流，整套**什么都不做也不告警**。
+    ⇒ 判据的一路哑了、整体就沉默 —— 与「屏在动就永远救不了」同族：不报错、看着正常、什么都没发生。"""
+    满   = {"verdict": "满", "weekly_percent": 100}
+    问不到 = {"verdict": "问不到", "weekly_percent": None}
+    够用 = {"verdict": "够用", "weekly_percent": 13}
+
+    ok, why, unc = w.is_limited(限流屏, 满)
+    assert (ok, unc) == (True, False), "两把尺子同向 → 换号"
+
+    ok, why, unc = w.is_limited(限流屏, 问不到)
+    assert ok is False and unc is True, "屏命中但额度问不到 → 不换号，但必须标成【说不准】"
+    assert "问不到" in why and "历史残留" not in why, "理由不能再说成『历史残留文字』——那个解释在这一档是错的"
+
+    ok, why, unc = w.is_limited(限流屏, None)
+    assert ok is False and unc is True, "压根查不到该 profile 也算【说不准】"
+
+    ok, why, unc = w.is_limited(限流屏, 够用)
+    assert (ok, unc) == (False, False), "账号确实够用 → 才是真的历史残留文字"
+    assert "历史残留" in why
+
+
+def test_说不准必须走告警而不是被忽略():
+    """守住「说不准」这一档在循环里真的会发 DM —— 不是只在判据里标了个位就完事。"""
+    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
+    body = src[src.index("def cmd_run("):]
+    i = body.index("uncertain and bot_name")
+    seg = body[i:i + 400]
+    assert "notify(" in seg, "「说不准」必须发告警，绝不能静默跳过"
+    assert "failover" not in seg, "「说不准」绝不能触发换号（不知道切到哪安全）"
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

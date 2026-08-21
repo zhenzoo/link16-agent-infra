@@ -128,16 +128,37 @@ def is_limited(pane_text, quota_row):
       · 只读屏不够 —— 屏是滚动的，那句 limit 提示会被后续输出挤出读窗；
       · 只读 API 不够 —— API 只知道「这个号满了」，不知道哪个面板正卡着，
         而一个号可能同时挂着好几个 bot、有的在跑有的闲着。
-    返回 (bool, 理由字符串)。"""
+    返回 **(要不要换号, 理由, 是不是「说不准」)** —— 三态，不是两态。
+
+    🩸 为什么必须有第三态「说不准」（tuf19-link16 2026-08-21 发现 · 我复现属实）：
+      双源判定要求「屏命中 AND 账号=满」。但账号那一路还有第三种结果：**「问不到」**
+      —— 不是「没满」，是**答不上来**（实测 ccp2：额度查询接口自己被 429 限流了）。
+      旧代码把「问不到」和「没满」并成一档 ⇒ **屏上明明写着撞限流，整套什么都不做、也不告警。**
+      理由文案还写着「可能是历史残留文字」，**在这种情况下这个解释本身就是错的**。
+      ⇒ **判据的一路哑了，整体就沉默** —— 与刚修的「屏在动就永远救不了」是同一族：
+        **不报错、看着正常、什么都没发生。**
+
+    三态各自怎么办：
+      · 屏命中 + 账号=满     → **换号**（两把尺子都指同一个方向）
+      · 屏命中 + 账号=问不到 → **告警但不换号**：不知道切到哪安全，宁可不动手，
+                              但**绝不静默** —— 让主人看得见「这儿可能出事了，而我不敢动」
+      · 屏命中 + 账号=够用   → 不动（大概率真是屏上的历史残留文字）
+    """
     hit = find_pane_limit(pane_text)
-    full = bool(quota_row) and quota_row.get("verdict") == "满"
+    verdict = (quota_row or {}).get("verdict")
+    full = verdict == "满"
+    unknown = (quota_row is None) or verdict == "问不到"
     if hit and full:
-        return True, f"屏命中『{hit[:60]}』+ 账号判定=满"
-    if hit and not full:
-        return False, f"屏命中但账号未满（可能是历史残留文字）：{(quota_row or {}).get('verdict')}"
-    if full and not hit:
-        return False, "账号满但该面板屏上没有限流渲染（这条会话可能压根没在用它）"
-    return False, "屏与账号都没有限流迹象"
+        return True, f"屏命中『{hit[:60]}』+ 账号判定=满", False
+    if hit and unknown:
+        return False, (f"⚠️ 屏命中『{hit[:60]}』，但账号额度**问不到**"
+                       f"（{'查不到该 profile' if quota_row is None else '接口答不上来'}）"
+                       f" —— 不敢自动换号，需要你看一眼"), True
+    if hit:
+        return False, f"屏命中但账号判定={verdict}（大概率是屏上的历史残留文字）", False
+    if full:
+        return False, "账号满但该面板屏上没有限流渲染（这条会话可能压根没在用它）", False
+    return False, "屏与账号都没有限流迹象", False
 
 
 # ---------- R1 · API/网络错的判据（2026-08-20 从 xhs _autopilot/watchdog.py 原样搬来）----------
@@ -966,7 +987,19 @@ def cmd_run(auto=True):
 
                 # ---- R2 · 撞额度上限 → 换号 + 接手 ----
                 prof = _profile_of(bot_name, bots.get(bot_name)) if bot_name else None
-                limited, why = is_limited(text, quota.get(prof)) if prof else (False, "认不出是哪个 bot")
+                limited, why, uncertain = (is_limited(text, quota.get(prof)) if prof
+                                           else (False, "认不出是哪个 bot", False))
+                # 「说不准」= 屏上明明写着撞限流、但账号那一路答不上来（额度接口自己被限流等）。
+                # **不敢换号（不知道切到哪安全），但绝不静默** —— 静默正是这套东西要根治的病。
+                # 走状态类告警（30min 冷却），且不进 lim_stuck 计数、不触发 failover。
+                if uncertain and bot_name:
+                    notify(bot_name, "limit",
+                           f"⚠️ {bot_name} 疑似撞额度上限，但**我不敢自动换号**\n"
+                           f"· 面板 {ws} 屏上有限流提示\n"
+                           f"· 但账号 `{prof}` 的额度**问不到** —— 不知道切到哪个号是安全的\n"
+                           f"· 详情：{why}\n"
+                           f"· 你可以：`/account <别的号>` 手动切，或跑 `python feishu/agent_quota.py` 看是谁答不上来")
+                    log(f"⚠️ {ws}/{bot_name} 屏命中限流但额度问不到（{prof}）→ 只告警不换号")
                 st["lim_stuck"] = _bump(st, "lim", find_pane_limit(text) if limited else None)
                 if st["lim_stuck"] >= STUCK_CONFIRM:
                     log(f"⚡ {ws}/{bot_name} 撞额度上限（{prof}）：{why}")

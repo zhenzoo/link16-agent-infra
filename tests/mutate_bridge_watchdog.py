@@ -47,8 +47,12 @@ MUTATIONS = [
 
     ("双源判据：退化成只看屏",
      FEISHU / "bridge_watchdog.py",
-     "    if hit and not full:\n        return False,",
-     "    if hit and not full:\n        return True,",
+     # 2026-08-21 随 is_limited 改成三态后更新锚点。
+     # 🩸 上一版锚点（`if hit and not full: return False,`）在改结构后失效，
+     #    变异器**如实报了「锚点没匹配上·本项无效」并把这一项判 0** —— 没有假装通过。
+     #    这正是变异表自己也会腐烂的证据：**守闸的东西也要有人守。**
+     "    if hit and full:\n        return True,",
+     "    if hit:\n        return True,",
      "test_r2_四格真值表"),
 
     ("选号闸：把「问不到」的号也放进候选",
@@ -80,6 +84,12 @@ MUTATIONS = [
      "    return (st.get(f\"{kind}_stuck\", 0) + 1) if sig == prev else 1",
      "    return 0",
      "test_屏在动但信号一直在_必须能累加到触发"),
+
+    ("第三态闸：把「问不到」并回「没满」",
+     FEISHU / "bridge_watchdog.py",
+     "    unknown = (quota_row is None) or verdict == \"问不到\"",
+     "    unknown = False",
+     "test_r2_第三态_屏命中但额度问不到_必须告警而不是静默"),
 
     ("告警冷却闸：拆掉冷却",
      FEISHU / "bridge_watchdog.py",
