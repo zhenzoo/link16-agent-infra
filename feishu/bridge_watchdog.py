@@ -578,6 +578,63 @@ def build_handoff_prompt(pack, new_profile):
     )
 
 
+def build_align_prompt(pack):
+    """**`/handoff` 用的接手 prompt —— 与 `build_handoff_prompt` 刻意相反。**
+
+    两者的差别只有一条，但它是全部：
+      · `build_handoff_prompt`（看门狗自动换号用）→ 「**别问我，直接接着干**」
+        场景：半夜撞限流、主人不在，会话必须自己活下去。
+      · 本函数（`/handoff` 主人手动触发）→ 「**先搞懂、汇报、然后停下等我**」
+        场景：主人**在场**，而且他要开的是**一个全新的重大任务**，
+        新会话现在还不知道他要什么 —— 这时候「自作主张接着干」正是最坏的行为。
+
+    主人的原话（2026-08-21）：「先让它快速调研了解历史内容，然后**等着我**跟它说，
+    等我提新的内容、想法、需求、架构设计，然后跟我 align。」
+
+    典型用法：**当前会话 context 快满了，但要开一条全新的重要线**。
+    既要 fresh context，又不能丢掉前面聊出来的结论（尤其是**最后几轮**——
+    那里往往躺着一份还没打磨完的方案/架构，主人接下来就要接着它谈）。
+    """
+    bg = pack.get("background") or {}
+    procs, files = bg.get("procs") or [], bg.get("files") or []
+    seg = []
+    if procs or files:
+        seg.append("\n【上一个会话可能留下的在途工作】（先判死活，别急着重起或 kill）")
+        for b in procs[:8]:
+            cpu = b.get("cpu_s")
+            flag = "  ← CPU 极低，疑似卡死或早已完成" if isinstance(cpu, int) and cpu < 60 else ""
+            seg.append(f"    pid {b.get('pid')} {b.get('name')} 起于 {b.get('started')}·CPU {cpu}s{flag}")
+        for f in files[:8]:
+            seg.append(f"    {f['age_min']:>6.1f} 分钟前改过  {f['path']}")
+    bg_text = "\n".join(seg)
+
+    return (
+        f"[接手·对齐模式] 你是这条线的新会话（**全新上下文**）。上一个会话的 context 快满了，"
+        f"主人要在这里开一条**新的重要线**，但**不能丢掉前面已经聊出来的结论**。\n\n"
+        f"上一个会话的完整聊天记录：{pack.get('transcript')}\n"
+        f"（session {pack.get('session_id')} · 工作目录 {pack.get('cwd')} · 交接于 {pack.get('at')}）"
+        f"{bg_text}\n\n"
+        f"请按这个顺序做：\n"
+        f"1. **读那份 transcript** —— ⚠️ 它可能上百 MB，**禁止一次性通读**（会当场把你这个新 context 也撑爆，\n"
+        f"   那就白交接了）。**先读尾部**定位「停在哪」，再按需往回翻。\n"
+        f"2. **重点看最后那几轮。** 那里通常躺着一份**刚聊出来、还没打磨完的方案 / 架构 / 结论**，\n"
+        f"   主人接下来大概率就是要接着它谈。**别只看「做了什么」，要看「最后聊到哪、有哪些还没定」。**\n"
+        f"3. **不要只读聊天记录 —— 去调研 code base。** 聊天记录说的是「打算怎么做」，\n"
+        f"   代码和文档才是「实际做成了什么」。两者对不上的地方，正是最值得报给主人的。\n"
+        f"4. **梳理成一份汇报**，至少讲清四样：\n"
+        f"   · 上一条线原本在做什么（任务 / 目标）\n"
+        f"   · 已经做完了什么（有代码 / 文档 / 产物为证的那些）\n"
+        f"   · **当前进度停在哪、为什么停**\n"
+        f"   · **哪些还没定 / 还在讨论中**（尤其最后几轮提出但没敲定的方案）\n\n"
+        f"⛔ **然后就停下来，等主人。**\n"
+        f"   **不要自作主张继续推进上一条线的活，也不要开始动手做任何新东西。**\n"
+        f"   主人接下来会给你新的想法 / 需求 / 架构设计 —— 你的任务是先跟他**对齐**，\n"
+        f"   在他说清楚要做什么之前，你唯一该做的就是**把历史搞懂并汇报**。\n"
+        f"   （这条跟看门狗自动换号那种「直接接着干」是**刻意相反**的：那时候主人不在场，\n"
+        f"    现在他在场、而且他要开的是新东西 —— 猜他要什么是最坏的选择。）\n"
+    )
+
+
 # ---------- 换号 ----------
 
 def _failover_gate(bot_name):
@@ -828,6 +885,37 @@ def _profile_of(bot_name, bot_obj=None):
     return None
 
 
+def _bump(st, kind, sig):
+    """「同一条信号连续出现了几轮」计数器。返回新的计数。纯函数（只改传进来的 st）。
+
+    🩸 2026-08-20 tuf19 现场逮到、tb25-link16 读码独立确认的真洞（这段是修法，别改回去）：
+      原来的判据是 `if (信号在 and static)`，而 `static = (整屏 hash 没变)`。
+      ⇒ **屏上任何一行变了，计数器就归零，永远到不了 STUCK_CONFIRM。**
+      tuf19 那只 bot 挂着每分钟一次的 scheduled task、轮询 120s ⇒ 每轮必进 2 条新记录
+      ⇒ **结构上不可能 static** ⇒ 撞了限流也永远救不了。
+      **「屏死的会被救、屏在动的救不了」—— 而屏在动恰恰是因为它在一遍遍白撞。**
+      判据把「空转烧重试」当成了「在干活」。
+
+    为什么整屏 static 是【冗余】的（不是我少加一道闸，是它本就不该在）：
+      · R2 已经是**双源**（屏命中限流横幅 AND 账号 API 判定=满），API 那一路天生不受屏抖动影响；
+      · STUCK_CONFIRM 的原意是「防它其实还在用 usage-credits 跑」——**这个顾虑结构上已经被覆盖**：
+        真跑起来了，新输出会把限流横幅顶出读窗 ⇒ `find_pane_limit` 不再命中 ⇒ 计数器自己归零。
+        （2026-08-20 实测：44 行新输出之后横幅确实不再命中。）
+        ⇒ **「同一条横幅连续 N 轮还在」这件事本身就携带了「它没在推进」的信息。**
+      · R1 那边「它其实在自愈」的顾虑另有 `RETRY_MARKERS` 单独兜着，static 在那儿同样冗余。
+
+    改成盯【信号本身】而不是【整屏】，比单纯删掉 static 更准：
+      · 无关行怎么变都不影响（治好 tuf19 那种「屏在动」的情形）
+      · 但**换了一条不同的错误/横幅 = 新事件**，计数重新从 1 开始，不会把两次不同的故障混算成"持续"
+    """
+    prev = st.get(f"{kind}_sig")
+    if not sig:
+        st[f"{kind}_sig"] = None
+        return 0
+    st[f"{kind}_sig"] = sig
+    return (st.get(f"{kind}_stuck", 0) + 1) if sig == prev else 1
+
+
 def cmd_run(auto=True):
     """守护循环 —— **一个循环 + 一张规则表**（主人 2026-08-20 定的形状）。
 
@@ -868,10 +956,8 @@ def cmd_run(auto=True):
                     continue                             # 自己的日志里有错误字样，不是卡住的会话
                 ws = (ws_by_pty or {}).get(pty) or "?workspace"
                 bot_name = bot_by_pty.get(pty)
-                st = states.setdefault(pty, {"hash": "", "err_stuck": 0, "lim_stuck": 0, "last_nudge": 0.0})
-                h = str(hash(text))
-                static = (h == st["hash"])
-                st["hash"] = h
+                st = states.setdefault(pty, {"err_sig": None, "err_stuck": 0,
+                                            "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0})
 
                 # ---- R3 · picker → 什么都不做 ----
                 if at_picker(text, bot_name):
@@ -881,7 +967,7 @@ def cmd_run(auto=True):
                 # ---- R2 · 撞额度上限 → 换号 + 接手 ----
                 prof = _profile_of(bot_name, bots.get(bot_name)) if bot_name else None
                 limited, why = is_limited(text, quota.get(prof)) if prof else (False, "认不出是哪个 bot")
-                st["lim_stuck"] = (st["lim_stuck"] + 1) if (limited and static) else 0
+                st["lim_stuck"] = _bump(st, "lim", find_pane_limit(text) if limited else None)
                 if st["lim_stuck"] >= STUCK_CONFIRM:
                     log(f"⚡ {ws}/{bot_name} 撞额度上限（{prof}）：{why}")
                     if auto:
@@ -894,7 +980,7 @@ def cmd_run(auto=True):
 
                 # ---- R1 · API/网络错 + 静止 2 轮 → 注「继续」----
                 err = find_pane_error(text)
-                st["err_stuck"] = (st["err_stuck"] + 1) if (err and static) else 0
+                st["err_stuck"] = _bump(st, "err", err)
                 if st["err_stuck"] >= STUCK_CONFIRM and (now - st["last_nudge"]) >= NUDGE_COOLDOWN:
                     nudge_pane(pty)
                     st["last_nudge"] = now

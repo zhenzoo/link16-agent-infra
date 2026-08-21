@@ -306,5 +306,107 @@ def test_告警_DM失败必须退webhook而不是静默(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "notify_webhook", lambda t: False)
     assert w.notify("botx", "handed", "再来一条") is False, "两条路都断了就必须如实报 False"
 
+
+def test_换号配额_不因告警送达与否而改变():
+    """🩸 tb25-link16 2026-08-20 的反论，采纳并锁死：
+    「告警没送达」和「切没切」是两件独立的事 —— 一次真发生的换号，**不管主人听没听见，
+    它都真的消耗了一个号、真的动了一个会话**，所以必须计入 24h 配额。
+
+    若改成「通知成功才计数」，就会长出**和刚修完的告警自噬一模一样的结构**：
+      告警链路越坏 → 越多换号不计数 → 越能无限切
+      = **故障把自己的刹车也一起关掉了。**
+
+    这条守的是【顺序】：`_record_failover()` 必须在 `notify(handed)` **之前**、且不受其返回值影响。
+    配额属于「动作」那一侧（客观事实），可信度标 ⚠️ 属于「结论」那一侧（主观判断），两者分开。"""
+    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
+    body = src[src.index("def failover("):]
+    i_rec = body.index("_record_failover(bot_name)")
+    i_notify = body.index('notify(bot_name, "handed"')
+    assert i_rec < i_notify, "配额必须在发 handed 告警【之前】就记下，不能等通知成功再记"
+    seg = body[i_rec:i_notify]
+    assert "if " not in seg.replace(chr(10), " ")[:120], "配额记账不许被任何条件包住"
+
+
+# ───── 「屏在动」的卡死必须救得了（tuf19 现场逮到的真洞 · 2026-08-20）─────
+
+def test_屏在动但信号一直在_必须能累加到触发():
+    """🩸 tuf19 现场：那只 bot 挂着每分钟一次的 scheduled task、轮询 120s
+    ⇒ 每轮必进 2 条新记录 ⇒ **结构上不可能整屏 static**。
+    旧判据 `if (信号在 and 整屏hash没变)` 会让计数器永远归零 ⇒ 撞了限流也永远救不了。
+    **「屏死的会被救、屏在动的救不了」—— 而屏在动恰恰因为它在一遍遍白撞。**"""
+    banner = "  ⎿  You've hit your weekly limit · resets Aug 21, 6pm · progress saved"
+    st = {"lim_sig": None, "lim_stuck": 0}
+    for r in range(w.STUCK_CONFIRM):
+        text = banner + chr(10) + f"[scheduled] tick {r} 20:0{r}:00"   # 每轮都变 → 旧判据必归零
+        st["lim_stuck"] = w._bump(st, "lim", w.find_pane_limit(text))
+    assert st["lim_stuck"] >= w.STUCK_CONFIRM, "屏在动但横幅一直在 → 必须能累加到触发"
+
+
+def test_真跑起来了_信号消失后计数器自己归零():
+    """这条守的是「去掉整屏 static 之后，防误判还在不在」——
+    原顾虑「它其实还在用 usage-credits 跑」由**结构**覆盖：真跑起来新输出会把横幅顶出读窗。"""
+    st = {"lim_sig": None, "lim_stuck": 3}
+    running = chr(10).join(f"● 正在处理第 {i} 步…" for i in range(1, 45))
+    assert w.find_pane_limit(running) is None, "新输出应把横幅顶出读窗"
+    assert w._bump(st, "lim", w.find_pane_limit(running)) == 0
+
+
+def test_换成另一条错误_计数重新开始而不是接着累加():
+    """两次【不同】的故障不能被混算成「持续同一个故障」。"""
+    st = {"err_sig": None, "err_stuck": 0}
+    a = w.find_pane_error("● API Error: Connection lost")
+    b = w.find_pane_error("● API Error: 529 Overloaded")
+    st["err_stuck"] = w._bump(st, "err", a)
+    st["err_stuck"] = w._bump(st, "err", a)
+    assert st["err_stuck"] == 2
+    st["err_stuck"] = w._bump(st, "err", b)
+    assert st["err_stuck"] == 1, "换了一条不同的错误 = 新事件，重新从 1 开始"
+
+
+def test_R1和R2用的是同一套计数_别只修一个():
+    """tb25-link16 提醒：R1 有同一个洞。只修 R2 会留下
+    「限流能救、API 错救不了」的怪状态。这条守两边共用 `_bump`。"""
+    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
+    body = src[src.index("def cmd_run("):]
+    assert body.count("_bump(st,") >= 2, "R1 与 R2 必须共用同一套信号计数"
+    assert "and static" not in body, "整屏 static 判据必须已被彻底移除"
+
+
+# ───── /handoff 的对齐版 prompt（与看门狗那版刻意相反）─────
+
+def test_align_prompt_必须要求先汇报再停下而不是接着干():
+    """主人 2026-08-21 定：`/handoff` 用于「context 快满、要开一条全新的重要线」。
+    这时主人**在场**，新会话还不知道他要什么 ⇒ **自作主张接着干是最坏的行为**。
+    与 `build_handoff_prompt`（看门狗半夜自动换号用·「别问我直接干」）刻意相反。"""
+    pack = {"transcript": "C:/x/y.jsonl", "session_id": "y", "cwd": "E:/p",
+            "at": "now", "background": {"procs": [], "files": []}}
+    p = w.build_align_prompt(pack)
+    for must in ("禁止一次性通读", "最后那几轮", "调研 code base", "停下来，等主人", "不要自作主张"):
+        assert must in p, f"align prompt 必须包含：{must}"
+    for must_not in ("不需要跟我确认", "不需要跟我对齐", "直接接着推进"):
+        assert must_not not in p, f"align prompt 绝不能包含：{must_not}（那是自动换号那版的口径）"
+
+
+def test_两版prompt口径必须相反():
+    """守住这两版别被后人「统一」成一个 —— 它们服务的是两种相反的处境。"""
+    pack = {"transcript": "t", "session_id": "s", "cwd": "c", "at": "now",
+            "old_profile": "ccp", "background": {"procs": [], "files": []}}
+    auto = w.build_handoff_prompt(pack, "ccp")
+    align = w.build_align_prompt(pack)
+    assert "不需要跟我确认" in auto and "不需要跟我确认" not in align
+    assert "停下来，等主人" in align and "停下来，等主人" not in auto
+
+
+def test_handoff_命令已接进桥且不切账号():
+    """/handoff 与 /close 的三处差别，缺一不可。"""
+    src = (HERE.parent / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8")
+    i = src.index('if cmd in ("/handoff"')
+    body = src[i:i + 3000]
+    assert "reset_account" not in body, "/handoff 绝不能切账号（那是 /close 干的）"
+    assert "snapshot_handoff" in body, "必须在关会话【之前】快照交接包"
+    assert body.index("snapshot_handoff") < body.index("wmux_session.close"), "快照必须在关会话之前"
+    assert "build_align_prompt" in body, "必须注入对齐版 prompt"
+    assert "ensure_session" in body, "必须主动起新会话（不像 /close 那样懒启动）"
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
