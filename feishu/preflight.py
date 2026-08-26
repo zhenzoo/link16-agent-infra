@@ -20,8 +20,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 # ── 鸡生蛋：本脚本要检查「输出编码是不是 UTF-8」，那它自己就绝不能因为编码而崩。
@@ -56,6 +58,36 @@ def _run(cmd, timeout=8):
         return None
 
 
+def _persistent_windows_path():
+    """读取新终端会继承的 PATH，避免长寿命桌面进程拿着安装前的旧快照。"""
+    if os.name != "nt":
+        return os.environ.get("PATH", "")
+    rows = [os.environ.get("PATH", "")]
+    try:
+        import winreg  # pylint: disable=import-outside-toplevel
+
+        locations = (
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        )
+        for hive, key_name in locations:
+            try:
+                with winreg.OpenKey(hive, key_name) as key:
+                    value, _kind = winreg.QueryValueEx(key, "Path")
+                    rows.append(os.path.expandvars(str(value)))
+            except OSError:
+                continue
+    except (ImportError, OSError):
+        pass
+    return os.pathsep.join(row for row in rows if row)
+
+
+def _fresh_which(name):
+    """先查当前进程，再查 Windows 持久化 PATH（即重开终端后的真实状态）。"""
+    return shutil.which(name) or shutil.which(name, path=_persistent_windows_path())
+
+
 # ────────────────────────────── 各项检查 ──────────────────────────────
 
 def check_python():
@@ -84,11 +116,59 @@ def check_deps():
 
 
 def check_node():
-    exe = shutil.which("node")
+    exe = _fresh_which("node")
     if not exe:
         return Result("Node.js", FAIL, "PATH 里没有 node",
                       "装 Node：https://nodejs.org/ （桥用它跟 wmux daemon 通信）")
     return Result("Node.js", OK, (_run([exe, "--version"]) or "已安装"))
+
+
+def _gh_path():
+    found = _fresh_which("gh")
+    if found:
+        return Path(found)
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        packages = Path(local) / "Microsoft" / "WinGet" / "Packages"
+        try:
+            rows = sorted(packages.glob("GitHub.cli_*/bin/gh.exe"), reverse=True)
+            if rows:
+                return rows[0]
+        except OSError:
+            pass
+    return None
+
+
+def check_github_cli():
+    gh = _gh_path()
+    if not gh:
+        return Result("GitHub CLI", FAIL, "找不到 gh",
+                      "winget install --id GitHub.cli -e；装完重开终端")
+    try:
+        done = subprocess.run(
+            [str(gh), "auth", "status", "--hostname", "github.com"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return Result("GitHub CLI", WARN, f"gh 已安装，认证检查失败：{exc}")
+    if done.returncode == 0:
+        return Result("GitHub CLI", OK, f"{gh} · github.com 已登录")
+    return Result("GitHub CLI", FAIL, "gh 已安装，但 github.com 未登录",
+                  "gh auth login --hostname github.com --git-protocol https --web")
+
+
+def check_repository_main():
+    branch = _run(["git", "-C", str(REPO), "branch", "--show-current"])
+    if branch != "main":
+        return Result("仓库 main 同步", FAIL, f"当前分支 = {branch or '未知'}",
+                      "git fetch --prune origin; git switch main; git pull --ff-only origin main")
+    counts = _run(["git", "-C", str(REPO), "rev-list", "--left-right", "--count",
+                   "origin/main...HEAD"])
+    if counts and counts.split() == ["0", "0"]:
+        return Result("仓库 main 同步", OK, "HEAD = origin/main（0 0）")
+    return Result("仓库 main 同步", FAIL, f"origin/main...HEAD = {counts or '无法读取'}",
+                  "git fetch --prune origin; git pull --ff-only origin main")
 
 
 def _git_bash_path():
@@ -98,12 +178,12 @@ def _git_bash_path():
         if base:
             candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
             candidates.append(Path(base) / "Programs" / "Git" / "bin" / "bash.exe")
-    git = shutil.which("git")
+    git = _fresh_which("git")
     if git:
         git_path = Path(git)
         candidates += [git_path.parent.parent / "bin" / "bash.exe",
                        git_path.parent.parent / "usr" / "bin" / "bash.exe"]
-    bash = shutil.which("bash")
+    bash = _fresh_which("bash")
     if bash and "git" in str(bash).lower() and "system32" not in str(bash).lower():
         candidates.append(Path(bash))
     for path in candidates:
@@ -247,6 +327,12 @@ def check_env_file():
     for p in candidates:
         try:
             if p.is_file():
+                try:
+                    p.resolve().relative_to(REPO.resolve())
+                    return Result(".env 凭据文件", FAIL, f"{p} 在仓库内",
+                                  "把 .env 移到 VIBECODING_ROOT 根，并确认 git status 没有它")
+                except ValueError:
+                    pass
                 where = "VIBECODING_ROOT" if root and p == Path(root) / ".env" else "上溯找到"
                 return Result(".env 凭据文件", OK, f"{p}（{where}）")
         except Exception:  # noqa: BLE001
@@ -254,6 +340,32 @@ def check_env_file():
     return Result(".env 凭据文件", WARN, "没找到（首次注册 bot 时会创建）",
                   "建议设 VIBECODING_ROOT 指向 .env 所在目录：\n"
                   "        [Environment]::SetEnvironmentVariable('VIBECODING_ROOT','D:\\你的目录','User')")
+
+
+def check_proxy_config():
+    try:
+        from network_route import _proxy_display, proxy_url
+        value = proxy_url()
+    except Exception as exc:  # noqa: BLE001
+        return Result("下载代理", WARN, f"无法解析 PROXY_URL：{exc}")
+    if not value:
+        return Result("下载代理", WARN, "未设 PROXY_URL（直连可能可用）",
+                      "python feishu/network_route.py proxy-doctor --url https://github.com/ --prefer proxy")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return Result("下载代理", FAIL, "PROXY_URL 格式无效",
+                      "例：PROXY_URL=http://127.0.0.1:<本地混合端口>")
+    label = _proxy_display(value)
+    if host in {"127.0.0.1", "localhost", "::1"} and port:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                pass
+        except OSError:
+            return Result("下载代理", WARN, f"{label} 当前未监听",
+                          "打开 v2rayN，确认「本地混合端口」，再运行 proxy-doctor")
+    return Result("下载代理", OK, f"{label} 已配置；真实可用性由 proxy-doctor 验证")
 
 
 def check_local_roster():
@@ -303,7 +415,7 @@ def check_registry():
 
 def check_agent_cli():
     """面板里真正干活的那个 CLI（claude / codex）至少得有一个。"""
-    found = [n for n in ("claude", "codex") if shutil.which(n)]
+    found = [n for n in ("claude", "codex") if _fresh_which(n)]
     if found:
         return Result("Agent CLI", OK, "、".join(found))
     return Result("Agent CLI", FAIL, "PATH 里既没有 claude 也没有 codex",
@@ -311,9 +423,9 @@ def check_agent_cli():
                   "桥只负责把消息接进面板，面板里得有东西干活")
 
 
-CHECKS = (check_python, check_deps, check_node, check_git_bash,
+CHECKS = (check_python, check_deps, check_node, check_github_cli, check_repository_main, check_git_bash,
           check_windows_terminal_default, check_wmux, check_wmux_default_shell, check_encoding,
-          check_env_file, check_local_roster, check_registry, check_agent_cli)
+          check_env_file, check_proxy_config, check_local_roster, check_registry, check_agent_cli)
 
 
 def main():

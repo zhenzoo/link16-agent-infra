@@ -66,5 +66,29 @@ class TerminalDefaultsChecks(unittest.TestCase):
                 self.assertEqual(preflight.check_wmux_default_shell().status, preflight.OK)
 
 
+class PortableSetupChecks(unittest.TestCase):
+    def test_fresh_which_reads_persistent_path_after_desktop_process_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "node.EXE"
+            exe.touch()
+            with mock.patch.object(preflight.shutil, "which") as which, \
+                 mock.patch.object(preflight, "_persistent_windows_path", return_value=tmp):
+                which.side_effect = lambda name, path=None: str(exe) if path == tmp else None
+                self.assertEqual(preflight._fresh_which("node"), str(exe))
+
+    def test_repository_main_requires_main_and_zero_zero(self):
+        with mock.patch.object(preflight, "_run", side_effect=["main", "0\t0"]):
+            self.assertEqual(preflight.check_repository_main().status, preflight.OK)
+        with mock.patch.object(preflight, "_run", return_value="feature"):
+            self.assertEqual(preflight.check_repository_main().status, preflight.FAIL)
+
+    def test_proxy_config_warns_when_local_listener_is_closed(self):
+        with mock.patch("network_route.proxy_url", return_value="http://127.0.0.1:65534"), \
+             mock.patch.object(preflight.socket, "create_connection", side_effect=OSError("closed")):
+            row = preflight.check_proxy_config()
+        self.assertEqual(row.status, preflight.WARN)
+        self.assertNotIn("secret", row.detail)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

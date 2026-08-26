@@ -8,7 +8,7 @@
   close(workspace_id)              干净拆除整个 workspace（workspace.close · 旧版没有 · 3.3.0 有）
 
 也可 CLI 直接测：
-  python orchestrator/wmux_session.py spawn --name bot-test --cwd "E:/410_VibeCoding/Post/xhs-card-gen"
+  python feishu/wmux_session.py spawn --name bot-test --cwd "<本机仓库路径>"
   python orchestrator/wmux_session.py list
   python orchestrator/wmux_session.py close --id ws-xxxx
 """

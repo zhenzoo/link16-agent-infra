@@ -84,5 +84,52 @@ class ChildEnvironmentTests(unittest.TestCase):
         self.assertEqual(self.BASE["HTTP_PROXY"], "old")
 
 
+class ProxyDiscoveryTests(unittest.TestCase):
+    def test_discovers_configured_system_and_common_without_duplicates(self):
+        rows = nr.discover_proxy_candidates(
+            "127.0.0.1:7897",
+            {"https": "http://localhost:10808", "http": "http://127.0.0.1:7897"},
+            common_ports=(7897, 7890),
+        )
+        displays = [nr._proxy_display(row.url) for row in rows]
+        self.assertEqual(displays, [
+            "http://127.0.0.1:7897",
+            "http://localhost:10808",
+            "http://127.0.0.1:7890",
+        ])
+
+    def test_ignores_non_loopback_system_proxy_but_keeps_explicit_config(self):
+        rows = nr.discover_proxy_candidates(
+            "http://proxy.example.test:8080",
+            {"https": "http://corp.example.test:3128"},
+            common_ports=(),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].source, "PROXY_URL")
+
+    def test_doctor_functionally_selects_working_candidate(self):
+        candidates = (
+            nr.ProxyCandidate("http://127.0.0.1:7897", "configured"),
+            nr.ProxyCandidate("http://127.0.0.1:10808", "common"),
+        )
+
+        def fake_probe(url, route, proxy, **kwargs):
+            if route == "direct":
+                return result(route, False, error="blocked")
+            if proxy.endswith(":7897"):
+                return result(route, False, error="port open but proxy unusable")
+            return result(route, True, elapsed=80)
+
+        decision, route_map = nr.diagnose_proxy_candidates(
+            "https://example.test", "proxy", candidates, probe_fn=fake_probe
+        )
+        self.assertEqual(decision.selected, "proxy-2")
+        self.assertEqual(route_map[decision.selected].url, "http://127.0.0.1:10808")
+
+    def test_proxy_display_redacts_credentials(self):
+        label = nr._proxy_display("http://user:secret@127.0.0.1:7897")
+        self.assertEqual(label, "http://127.0.0.1:7897")
+        self.assertNotIn("secret", label)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

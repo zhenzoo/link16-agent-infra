@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -35,6 +36,7 @@ PROXY_KEYS = (
     "http_proxy", "https_proxy", "all_proxy",
 )
 NO_PROXY_KEYS = ("NO_PROXY", "no_proxy")
+COMMON_MIXED_PORTS = (7897, 7890, 10808, 10809)
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,12 @@ class RouteDecision:
     reason: str
     prefer: str
     results: tuple[ProbeResult, ...]
+
+
+@dataclass(frozen=True)
+class ProxyCandidate:
+    url: str
+    source: str
 
 
 def _dotenv_value(key: str) -> str | None:
@@ -83,6 +91,88 @@ def proxy_url() -> str | None:
     if value and "://" not in value:
         value = "http://" + value
     return value or None
+
+
+def _normalize_proxy(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = "http://" + raw
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        if not parsed.hostname or not parsed.port:
+            return None
+    except ValueError:
+        return None
+    return raw
+
+
+def _is_loopback_proxy(value: str) -> bool:
+    try:
+        host = (urllib.parse.urlsplit(value).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _proxy_display(value: str) -> str:
+    """不显示 URL 里可能携带的用户名/密码。"""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host = parsed.hostname or "?"
+        return f"{parsed.scheme or 'http'}://{host}:{parsed.port}"
+    except ValueError:
+        return "<invalid proxy>"
+
+
+def discover_proxy_candidates(configured: str | None = None, system=None,
+                              common_ports=COMMON_MIXED_PORTS) -> tuple[ProxyCandidate, ...]:
+    """收集可能的本地 mixed port；只读、不改 v2rayN 或系统代理。"""
+    rows: list[ProxyCandidate] = []
+    seen: set[str] = set()
+
+    def add(value, source, *, loopback_only=False):
+        normalized = _normalize_proxy(value)
+        if not normalized or (loopback_only and not _is_loopback_proxy(normalized)):
+            return
+        key = _proxy_display(normalized).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append(ProxyCandidate(normalized, source))
+
+    add(configured if configured is not None else proxy_url(), "PROXY_URL")
+    proxies = urllib.request.getproxies() if system is None else system
+    for scheme in ("https", "http", "all"):
+        add((proxies or {}).get(scheme), f"Windows/{scheme}", loopback_only=True)
+    for port in common_ports:
+        add(f"http://127.0.0.1:{int(port)}", "common mixed port")
+    return tuple(rows)
+
+
+def diagnose_proxy_candidates(url: str, prefer: str, candidates, *, timeout: float = 5.0,
+                              sample_bytes: int = 64 * 1024, min_gain: float = 0.15,
+                              probe_fn=None):
+    """用真实 URL 验证每个候选；端口能连不等于代理能用。"""
+    probe_fn = probe_fn or probe_route
+    candidates = tuple(candidates)
+    routes = [("direct", None)] + [
+        (f"proxy-{idx}", row.url) for idx, row in enumerate(candidates, start=1)
+    ]
+    with ThreadPoolExecutor(max_workers=len(routes)) as pool:
+        futures = [
+            pool.submit(probe_fn, url, route, proxy, timeout=timeout,
+                        sample_bytes=sample_bytes)
+            for route, proxy in routes
+        ]
+        results = [future.result() for future in futures]
+    preferred_route = "direct"
+    if prefer == "proxy" and candidates:
+        preferred_route = "proxy-1"
+    decision = choose_route(results, preferred_route, min_gain=min_gain)
+    route_map = {f"proxy-{idx}": row for idx, row in enumerate(candidates, start=1)}
+    return decision, route_map
 
 
 def _opener(route: str, proxy: str | None):
@@ -207,12 +297,48 @@ def _parser():
         if name == "run":
             item.add_argument("command", nargs=argparse.REMAINDER,
                               help="放在 -- 后面的命令；不用 shell 拼接")
+    doctor = sub.add_parser("proxy-doctor", help="自动发现并验证本地 mixed port")
+    doctor.add_argument("--url", default="https://github.com/",
+                        help="用于功能验证的真实下载站点")
+    doctor.add_argument("--prefer", choices=("direct", "proxy"), default="proxy",
+                        help="速度差不显著时的默认预设")
+    doctor.add_argument("--timeout", type=float, default=5.0)
+    doctor.add_argument("--sample-kib", type=int, default=64)
+    doctor.add_argument("--min-gain", type=float, default=0.15)
     return parser
 
 
 def main(argv=None):
     args = _parser().parse_args(argv)
     proxy = proxy_url()
+    if args.action == "proxy-doctor":
+        candidates = discover_proxy_candidates(proxy)
+        decision, route_map = diagnose_proxy_candidates(
+            args.url, args.prefer, candidates, timeout=args.timeout,
+            sample_bytes=max(1, args.sample_kib) * 1024,
+            min_gain=max(0.0, args.min_gain),
+        )
+        for row in decision.results:
+            if row.route == "direct":
+                label = "direct"
+            else:
+                candidate = route_map[row.route]
+                label = f"{_proxy_display(candidate.url)} ({candidate.source})"
+            if row.ok:
+                print(f"  [ OK ] {label} · {row.elapsed_ms} ms · HTTP {row.status}")
+            else:
+                print(f"  [FAIL] {label} · {row.error}")
+        if not decision.usable:
+            print("❌ 直连和所有候选代理都不可用；请先打开 v2rayN，再查「本地混合端口」。")
+            return 2
+        if decision.selected == "direct":
+            print(f"✅ 建议本次直连 · {decision.reason}")
+        else:
+            selected = route_map[decision.selected]
+            safe_url = _proxy_display(selected.url)
+            print(f"✅ 建议 PROXY_URL={safe_url} · {decision.reason}")
+            print(f"   PowerShell 用户级：[Environment]::SetEnvironmentVariable('PROXY_URL','{safe_url}','User')")
+        return 0
     configured = (os.environ.get("LINK16_ROUTE_DEFAULT") or "").strip().lower()
     prefer = args.prefer or (configured if configured in {"direct", "proxy"} else None)
     prefer = prefer or ("proxy" if proxy else "direct")

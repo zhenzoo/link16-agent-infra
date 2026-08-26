@@ -1,9 +1,11 @@
 # 飞书桥（feishu/feishu_bridge.py）的 Python 依赖
 # 装：pip install -r feishu/requirements.txt
-# 完整新机器流程见 docs/SOP-100-new-machine-setup.md
+# 完整新机器流程见 docs/SOP-100-new-machine-setup.md；桌面 AI 用户只需说「开始部署 Link16」。
 # 装之前 / 装完，都可以跑 `python feishu/preflight.py` 做一次只读体检（含下面这些非 pip 依赖）
 #
-# ⚠️ 桥还依赖三样【pip 装不了】的东西 —— 缺任何一样桥都跑不起来或半残：
+# ⚠️ 还有 pip 装不了的系统依赖：Git/Git Bash、GitHub CLI、Python、Node、wmux、Claude Code、Codex。
+# 7 项清单由 windows_bootstrap.py + SOP-100 展示/检测；Claude/Codex 至少选一个，gstack 默认不装。
+# 下面仅列桥运行时最容易遗漏的三项：
 #
 #   ① wmux（桌面应用 · 必装且必须开着）
 #      https://www.wmux.app   ·   https://github.com/openwong2kim/wmux
@@ -28,12 +30,11 @@ lark-channel-sdk>=1.0.0     # 飞书 CardKit / WebSocket channel · feishu_bridg
 tzdata>=2024.1; platform_system == "Windows"  # zoneinfo("Asia/Shanghai") 在 Windows 没系统 IANA 库
 
 # ── agent 工具链（桥本身【不 import】，但新机器必装：agent 干活要用）──────────────
-# 放这里的理由：这些是「装了桥的机器上，agent 一定会用到」的东西。少一个，agent 当场
-# 降级去走回退路径（2026-08-18 tuf19 实证：jina 缺失 → 单页读取失败 → 只能退 AnySearch）。
-# 装法与桥依赖同一条命令，不给新机器多加一步。
+# 放这里的理由：Jina 是通用抓取 CLI；桥本身不 import。装法与桥依赖同一条命令，
+# 不给新机器多加一步；没有个人 skills 的独立 Link16 部署也能直接调用 jina。
 jina-cli>=0.3.0             # Jina AI CLI：URL→markdown(read·抓 SPA) / search / embed / rerank
                             # ⚠️ 墙外服务：装的时候要走代理
                             #    先用 network_route.py 对实际 URL 双路探测，再只给本次 pip 注入所选线路
-                            # ⚠️ 别直接调 jina，走轮换器 ~/.claude-personal/scripts/jina_rotate.py
-                            #    （多 key 顺序轮换 + 欠费自动落匿名档 + 自动配代理·参数与 jina 本体一致）
+                            # 独立部署直接调 jina；若用户自己的 ~/.claude-personal/scripts/jina_rotate.py
+                            # 存在，可 opt-in 使用多 key 轮换/欠费回退/代理增强
                             # 详见 docs/SOP-100 §2.1
