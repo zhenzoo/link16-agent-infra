@@ -4,7 +4,10 @@ This directory configures Codex Personal without modifying Claude Code's
 configuration. `~/.claude-personal` remains read-only and continues to be the
 upstream source for the user's custom workflows.
 
-## Refresh gstack
+## Refresh gstack（可选，默认不安装）
+
+gstack 不属于 Link16 核心依赖，也不属于默认的新机 7 项清单。只有用户明确选择后才执行本节；
+不要因为安装 Codex、wmux 或同步个人 Claude skills 而自动安装/刷新 gstack。
 
 The gstack source checkout lives outside Codex skill discovery at
 `~/.gstack/repos/gstack`. Its official setup generates Codex-format skills.
@@ -91,7 +94,7 @@ codex mcp login vercel
 codex mcp list
 ```
 
-Update gstack separately, regenerate its Codex overlays with the official
+If the user explicitly opted in, update gstack separately, regenerate its Codex overlays with the official
 setup, then publish them with `refresh_gstack_codex.ps1`. Do not install the
 gstack source checkout directly inside `~/.agents/skills`, because recursive
 discovery sees its internal source skills as duplicates.

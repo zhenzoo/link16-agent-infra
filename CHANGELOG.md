@@ -3,6 +3,15 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.16.0 — Private 同事桌面化部署（2026-08-26）
+
+- 「开始部署 Link16」成为唯一新机入口：桌面 AI 用户只点 GitHub/provider/飞书登录链接，agent 负责命令和验收。
+- 新增 mixed-port 功能探测、机型/年份前缀建议、`ccp` / `ccp2` / `cxp` 独立账号函数和 private-main 机械验收。
+- 补齐 `.env`/私钥 ignore，停止 token 片段和 SDK 凭据返回体输出；不同同事默认不再同步整份 `.env`。
+- 将现役 registry 明确为 private 受信边界内的运维元数据；对外公开仍必须先完成 PLAN-926 和历史处理。
+- 新增 Windows 7 项安装计划：已有组件不重装，Claude/Codex 走官方原生安装器；wmux 自动补桌面快捷方式并复核 Git Bash。
+- 明确 Link16 核心不依赖个人 `claude-config`；anysearch/push/pull/align 等为个人增强，gstack 从默认部署与 Codex 迁移步骤中移除。
+
 ## v0.15.0 — TB26 装机收口（2026-08-26）
 
 - Windows Terminal 与 wmux 的默认 Git Bash 由“人工习惯”升为 `preflight.py` 机械验收；wmux 安装/升级后必须静态检查 store，并新开临时 workspace 验 `MSYSTEM=MINGW64`。

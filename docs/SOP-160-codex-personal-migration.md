@@ -7,15 +7,15 @@ purpose: 让 Codex Personal 复用主人维护的 Claude workflow，同时保持
 owns:
   - 兼容适配器的生成与放置
   - Codex 侧复用 Claude workflow 的读取方式
-  - 升级 Codex 时必须剥代理的操作
+  - Codex 官方 Windows standalone 的安装/升级与旧 npm 安装兼容
 does_not_own:
   - Claude 侧的任何配置（不得修改）
   - Codex bot 的注册（见 SOP-121）
   - profile 注册（见用户级 $agent-profile-governance）
 read_when:
   - 要让 Codex 复用 Claude 的 skill/workflow
-  - 升级 Codex CLI 很慢
-last_reviewed: 2026-08-17
+  - 安装或升级 Codex CLI
+last_reviewed: 2026-08-26
 ---
 # SOP-160 · Claude Personal → Codex Personal compatibility
 
@@ -23,40 +23,24 @@ last_reviewed: 2026-08-17
 > keeping Claude Code fully operational and single-sourced. This is a
 > compatibility layer, not a destructive migration.
 
-## 升级 Codex（**必须剥代理直连 · 否则慢 100 倍**）
+## 安装 / 升级 Codex（官方 standalone 优先）
 
-`codex update` 内部就是 `npm install -g @openai/codex`（`codex doctor` 的 `update action` 一栏可见）。
-本机 `.bashrc` 全局 `export https_proxy=http://127.0.0.1:7897`，**npm 会继承它**，把 Codex 的平台
-二进制（tarball **151.7 MB** / 解包 **391 MB**）整个塞进 Clash 隧道 → 十几分钟。剥掉代理走直连
-只要几秒。
-
-```bash
-# Git Bash —— 只对这一条命令剥代理，不动系统/全局设置
-env -u https_proxy -u http_proxy -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY \
-    npm install -g @openai/codex@latest
-codex --version        # 核对升上去了
-```
+Windows 新装统一走 OpenAI 官方 standalone installer，不再默认依赖 Node/npm：
 
 ```powershell
-# PowerShell 等价写法（子作用域赋空，退出即恢复）
-$env:HTTPS_PROXY=''; $env:HTTP_PROXY=''; $env:ALL_PROXY=''
-npm install -g @openai/codex@latest
+python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 --prefer proxy -- powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://chatgpt.com/codex/install.ps1 | iex"
 codex --version
 ```
 
-**实测三条路（2026-08-02 · 同一个 tarball · 各跑 20 秒看下了多少）**：
+已有安装先看 `Get-Command codex | Select-Object -ExpandProperty Source`：
 
-| 路线 | 20 秒下载量 | 速度 | 结论 |
-|---|---|---|---|
-| 官方源 + **走代理**（默认，什么都不做就是它） | 5.6 MB | ~0.28 MB/s | ❌ 十几分钟 |
-| 官方源 + **直连** | **151.7 MB（5 秒全下完）** | **~30 MB/s** | ✅ **用这个** |
-| npmmirror 国内镜像 + 直连 | 66.6 MB | ~3.2 MB/s | 🟡 直连不通时的备选 |
+- 命中 `...\Programs\OpenAI\Codex\...`：继续用上面的官方 standalone installer 更新。
+- 命中 npm 全局目录：可以先沿用 `codex update` / npm 更新，不在装机时偷偷迁移；计划迁移时再明确卸载旧入口，避免 PATH 双份。
 
-> **为什么直连反而最快**：npm registry 的 tarball 走 CDN，国内直连本身通畅；代理把 150 MB 全程
-> 中转，隧道带宽成了瓶颈。**只有被墙的服务才需要代理，npm 不是。**
-> 备选（万一哪天直连不通）：`npm install -g @openai/codex@latest --registry=https://registry.npmmirror.com`
+若 `PROXY_URL` 未设或端口不确定，先运行 `python feishu/network_route.py proxy-doctor`。
+每次都对真实官方 URL 选路，不写死某个网络或端口。
 
-**升级时机注意**：`npm install -g` 会替换二进制，但**已经跑着的 Codex 进程仍用旧版**（进程持旧码）。
+**升级时机注意**：安装器会替换磁盘二进制，但**已经跑着的 Codex 进程仍用旧版**（进程持旧码）。
 飞书桥上的 Codex bot 要等各自会话重建才吃到新版；不必为升级专门重启整个桥。
 
 ## Boundary
@@ -70,7 +54,7 @@ codex --version
 | Hooks | Claude hook schema | `~/.codex-personal/hooks.json` | Native Codex events, separate scripts |
 | Transcripts | Claude project JSONL | Codex sessions/state | Never parse as Claude JSONL |
 | Authentication | Claude account homes | `~/.codex-personal/auth.json` | Completely separate |
-| gstack | Official source checkout | Generated Codex skill overlays | Official setup + controlled publish |
+| gstack（可选） | Official source checkout | Generated Codex skill overlays | 默认不安装；仅用户明确 opt-in 后 official setup + controlled publish |
 
 The adapter publisher does not edit Claude sources. The explicit
 `$agent-profile-governance` workflow is the one authorized writer for generated
@@ -90,10 +74,7 @@ the home and run `codex login` under that `CODEX_HOME`; afterward use Link16
 profile wrappers for daily sessions.
 
 ```powershell
-# 0a. Update Codex first — older CLIs may not know the target model string.
-#     ⚠️ 别直接用 `codex update` / 裸 npm —— 会走 Clash 代理，慢 100 倍。
-#        走直连的快命令见下面「升级 Codex」一节。
-codex update ; codex --version          # target: >= 0.144.x
+# 0a. 先按本文「升级 Codex」自动选路更新，再核对版本。
 
 # 0b. Point every step at the isolated home for the whole session.
 $env:CODEX_HOME = "$HOME\.codex-personal"
@@ -140,16 +121,19 @@ python codex-personal/configure_personal.py --apply
 pwsh -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync
 pwsh -NoProfile -File "$HOME\.claude-personal\scripts\govctl.ps1" sync -Apply
 
-# 3. gstack generated Codex skills
-powershell -ExecutionPolicy Bypass -File codex-personal/refresh_gstack_codex.ps1
-powershell -ExecutionPolicy Bypass -File codex-personal/refresh_gstack_codex.ps1 -Apply
-
-# 4. Link16 Codex hooks
+# 3. Link16 Codex hooks
 python feishu/install_codex_bridge_hooks.py --codex-home "$HOME\.codex-personal"
 python feishu/install_codex_bridge_hooks.py --codex-home "$HOME\.codex-personal" --write
 ```
 
-Configuration and gstack apply paths archive their previous state. The adapter
+默认安装到此结束。gstack 不属于 Link16 新机依赖；只有用户明确要求时，才单独运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File codex-personal/refresh_gstack_codex.ps1
+powershell -ExecutionPolicy Bypass -File codex-personal/refresh_gstack_codex.ps1 -Apply
+```
+
+Configuration and optional gstack apply paths archive their previous state. The adapter
 publisher uses atomic writes and may remove only stale marker-owned leaf
 adapters under the prune rules below. Re-running every command is idempotent.
 

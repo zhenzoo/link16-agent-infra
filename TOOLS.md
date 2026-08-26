@@ -19,7 +19,10 @@
 | **`/handoff`（飞书里发）** ⭐ | **`/close` 的进阶版：换一个全新 context，但让它先读懂历史再跟你对齐**。关掉当前会话 → **账号和目录都不变** → 起一个全新会话 → 自动注入 prompt 让它：读上一轮 transcript（先读尾部·禁止通读）+ **重点看最后几轮那份还没定的方案** + **调研 code base**（不只读聊天记录）→ 汇报「原任务/已完成/停在哪/哪些还没定」→ **停下等你提新需求**。💡 用在「当前 context 快满了，但要在这条线上开一个全新的重要任务」 | 在飞书里 @ 该 bot 发 `/handoff`（或 `/交接`） |
 | `feishu/bridge_watchdog.py` ⭐ | **看门狗（全机 agent 会话保活 + 撞额度上限自动换号接手）**：每 120s 扫【全部 workspace 全部面板】，按**规则表**处理各类中断——R1 API错→注「继续」· R2 撞限流→查额度选号→换号→把原任务交接给新会话 · R3 停在 picker→什么都不做 · R4 桥死→告警。**随桥整体 start/stop 起停**（没有自己的计划任务→跨机零路径问题）。详见 `docs/ARCH-160` | `python feishu/bridge_watchdog.py status [--verbose]`（在看护几个面板/上次巡检/注入记录+跨机自检）· `failover --bot X [--to ccp] [--dry-run]`（手动换号·破坏性·先预演） |
 | `feishu/agent_quota.py` ⭐ | **查各账号还剩多少额度（实时·唯一真源）**：Claude 走 `api.anthropic.com/api/oauth/usage`（直连绕代理）· Codex 走 `chatgpt.com/backend-api/codex/usage`（走代理）。**绝不读本地缓存**（实测会把 100% 的号报成 0%）| `python feishu/agent_quota.py`（表）· `--json` · `pick --exclude ccp2 --prefer-runtime claude`（该切哪个号） |
-| `feishu/network_route.py` | **下载/安装线路选择器**：对实际 URL 并行探测 direct / `.env` 的 `PROXY_URL`，成功优先、明显更快者覆盖预设；只改一次子进程环境，不动系统代理/v2rayN、不按网络名写特例 | `probe --url <URL> [--prefer proxy]` · `run --url <URL> -- <命令...>` |
+| `feishu/network_route.py` | **下载/安装线路选择器**：对真实 URL 测 direct / 已配代理；`proxy-doctor` 会发现 Windows 系统代理和常见 mixed port，但只建议 `PROXY_URL`、不动 v2rayN/系统设置 | `proxy-doctor --url https://github.com/` · `probe --url <URL>` · `run --url <URL> -- <命令...>` |
+| `feishu/machine_identity.py` | **新机前缀探针**：只读 Windows 厂商/型号/BIOS 年份，建议 `tb25` / `tuf19` 类前缀并检查 registry 冲突；不读序列号/UUID | `python feishu/machine_identity.py [--year 2026] [--prefix tb26]` |
+| `feishu/profile_bootstrap.py` | **同事自助 profile 入口**：建 `ccp` / `ccp2` / `cxp` 独立 home 和 Git Bash/PowerShell 函数；不复制 auth/token/session | `python feishu/profile_bootstrap.py` 预览；`--apply` 应用 |
+| `feishu/windows_bootstrap.py` | **Windows 7 项安装计划**：检测 Git/GH/Python/Node/wmux/Claude/Codex，默认只预览；已有项不重装，provider 走官方原生安装器；收尾建 wmux 桌面快捷方式并校验 Git Bash；gstack 永远默认关闭 | `python feishu/windows_bootstrap.py`；确认后 `--apply --yes [--skip claude\|codex]` |
 | `feishu/bridge_doctor.py` | 机械自愈：outbox 三态诊断 + 卡→自动重启 drainer | `python feishu/bridge_doctor.py [--bot X]` |
 | `feishu/bridge_stop_replay.py` ⭐ | **改 Stop 装配前后的退化闸**：拿真实历史 transcript 逐个终结落点重放「旧码 vs 新码」，判**新码有没有少发旧码发过的正文**（少发=退化 exit 1；旧码把已发过的又拼一遍=去重，不算）。baseline 自动从 git 取（`--baseline <ref>`·默认 `v0.12.1`），不用手工备份旧码。**改 `bridge_stop.py` / `jsonl_reply_extract.py` 前后必跑**——比「等一天看它还犯不犯」快、且覆盖全部历史形状 | `python feishu/bridge_stop_replay.py --transcript <session.jsonl> [--transcript ...] [--baseline <ref>]` |
 | `feishu/bridge_resend_audit.py` ⭐ | **查「同一段正文被下一轮又发一遍」**（v0.12.2 事故的常备尺子·两台机同一把判据：同 anchor 连续出现且收尾卡逐轮变长；Codex bot 结构免疫→自动跳过）。**有发作 exit 1** → 可直接当巡航/CI 闸 | `python feishu/bridge_resend_audit.py`（全量）/ `--since 2026-08-17`（当闸）/ `--bot X --json` |
@@ -38,7 +41,7 @@
 | `feishu/send_feishu_media.py` ⭐ | 发**图/视频/媒体在线看**链接（嵌 docx·同走 `feishu_docs`·链接同样默认任何人可看） | `python feishu/send_feishu_media.py --bot X --media <m> --title "..."` |
 | `feishu/feishu_rest.py` | 飞书 REST 原语（api/tenant_token/send_msg · 纯标库绕代理） | （feishu_docs/media/voice 内部用） |
 | `feishu/agent-profiles.json` · `feishu/agent_profile_cli.py` · `feishu/agent_runtime.py` | Agent profile SSOT + 公共 launcher：主 session/独立 wmux worker 都只传 `LINK16_AGENT_PROFILE`，由 registry 派生 Claude/Codex home/driver | `python feishu/agent_profile_cli.py list`；`doctor --profile cxp`；`run --profile cxp --cwd <repo>` |
-| `$agent-profile-governance` | 自动判断 user/repo/both，语义治理用户级或任意仓库的 `CLAUDE.md`/`AGENTS.md`（公共规则 + runtime 适配，不机械互拷）；兼管新账号/bot、实体 renderer、wrapper 与 worker 同 profile | `python ~/.claude-personal/skills/agent-profile-governance/scripts/profile_governance.py doctor` |
+| `$agent-profile-governance`（个人可选） | 仓库维护者自己的完整用户规则/skills 治理；不是同事只 clone Link16 的运行依赖。独立部署用本仓 `profile_bootstrap.py` | 已有该个人 skill 时才运行其 doctor |
 | `feishu/bridge_env.py` | 跨机路径解析（.env/名册/wmux-rpc） | （库） |
 
 ## 🟢 wmux —— 面板驱动层（`wmux/`）
@@ -80,7 +83,7 @@
 
 | 工具 | 干什么 | 装 / 验收 |
 |---|---|---|
-| `jina-cli` | 单页抓取的主力：URL→markdown（能啃 SPA，AnySearch 抓不动的它能抓）+ search / embed / rerank | 已进 `feishu/requirements.txt`；**别直接调 `jina`，走轮换器** `~/.claude-personal/scripts/jina_rotate.py`。完整装法 / key / 验收见 [`docs/SOP-100 §2.1`](docs/SOP-100-new-machine-setup.md) |
+| `jina-cli` | 单页抓取：URL→markdown（能啃 SPA）+ search / embed / rerank；桥本身不依赖 | 已进 `feishu/requirements.txt`；独立部署直接调 `jina`。用户自己的 `jina_rotate.py` 存在时可 opt-in 使用轮换/代理增强。见 [`docs/SOP-100 §2.1`](docs/SOP-100-new-machine-setup.md) |
 
-> 2026-08-18 tuf19 实证：`jina` 入口在、底层 CLI 没装 → 单页读取直接失败、只能退 AnySearch。
+> 2026-08-18 tuf19 实证：`jina` 入口在、底层 CLI 没装 → 单页读取直接失败；因此 CLI 随 requirements 安装。
 > 这类「缺了不报错」的依赖必须写进新机器 SOP，否则每台机都要现场发现一次。

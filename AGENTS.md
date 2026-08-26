@@ -61,7 +61,9 @@ last_reviewed: 2026-08-17
   值缺失 / 未知 / doctor 不健康时，**在建 pane 之前就失败**。
 - **绝不**从 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、alias 或 cwd 反推身份。
 - 各 runtime 的原生 subagent（Claude 的 Agent tool、Codex 的 `spawn_agent`）由各自 harness 继承，**不另选 profile**。
-- 新 profile / 新 bot / 新仓 worker 接入，一律走 `$agent-profile-governance`。
+- 本仓独立部署的新 profile 先走 `feishu/profile_bootstrap.py`；仓库维护者本人已安装
+  `$agent-profile-governance` 时，再用它治理完整用户规则/skills。新 bot / 新仓 worker 的运行时
+  映射仍以本仓 `agent-profiles.json` + `agent_profile_cli.py` 为准，禁止复制私人配置正文。
 
 ### 4.2 名册
 - 名册只持久化 `profile`（或 `defaults.profiles`）。
@@ -139,11 +141,26 @@ python feishu/registry.py --json peers <仓名> --exclude-machine <本机代号>
 - ⚠️ `PROPOSAL` / `STRATEGY` / `GUIDE` / `STATUS` 是**禁用前缀**。本仓 `docs/PROPOSAL-91x`、
   `docs/STRATEGY-900` 是历史遗留，按 SPEC 不做批量重命名，但**不得新增**。
 
-## 8. 本仓将设为 public
+## 8. Private 协作与隐私边界
 
-对外开放前必须完成 [`docs/PLAN-926-public-onboarding.md`](docs/PLAN-926-public-onboarding.md) 的 S1 脱敏闸。
-安全基线（2026-08-17 全量审查 150 个 commit）：**零凭据泄漏**——app secret / API key / token / 私钥
-从未进过仓库，`.env` 始终在仓库外。待清理的是身份标识符与主机名，不是权限。
+本仓保持 **private**。仅向受信同事授予 collaborator 权限；他们可见当前文件和完整 Git 历史。
+`feishu/agent-registry.json` 中的 hostname / open_id / chat_id 不是认证凭据，但属于私有运维元数据；
+非受信人不应获得仓库访问权。`.env` / auth.json / token / 私钥必须始终在 Git 外，
+不同同事之间禁止复制整份 `.env` 或 provider 认证目录。
+
+若将来对外开放，必须先完成 [`docs/PLAN-926-public-onboarding.md`](docs/PLAN-926-public-onboarding.md)
+的 registry 迁移、脱敏与历史边界处理；仅删除当前文件不能清除 Git 历史。
+
+## 9. 「开始部署 Link16」是新机入口
+
+用户在 Claude / Codex / QX 等桌面客户端说「开始部署 Link16」时，立即按
+[`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) 执行。默认用户不懂 terminal：
+
+- 安装前一次性展示 7 项清单，默认全选，只问哪些 provider 不要；gstack 默认不安装；
+- 检测已有安装，避免重复；Claude Code / Codex 新装走各自官方原生安装器，不默认走 npm；
+- agent 执行命令、检测网络/机型/环境并记录结果；
+- 用户只负责打开安全登录链接、选择账号/飞书组织、授权和接受必要审批；
+- 沟通「你会看到什么 / 现在要做什么」，不要用 alias、PATH、env 等内部实现教学打断流程。
 
 ---
 
@@ -155,8 +172,8 @@ python feishu/registry.py --json peers <仓名> --exclude-machine <本机代号>
 - **CXP**（`profile=cxp`，`CODEX_HOME=$HOME/.codex-personal`）是推荐且机器默认的生产 Codex profile；
   CX 是独立的可选 profile。
 - 维护 Codex 兼容性时，**不得修改** `$HOME/.claude-personal`、Claude 的 hooks / settings / skills / 认证。
-- Claude 兼容适配器由 `codex-personal/sync_claude_skills.py` 生成在 `$HOME/.agents/skills` 下，
-  运行时读取 Claude 的 workflow 源。
+- Claude 兼容适配器是**个人配置增强项**：仅当用户确有自己的 `.claude-personal` workflow 源时，
+  才由 `codex-personal/sync_claude_skills.py` 生成到 `$HOME/.agents/skills`；Link16 核心运行不依赖它。
 - 原生 Codex skill 用 `$name`。桥只在 `name` 恰好匹配一个已安装 skill 时才翻译 legacy 的 `/name`；
   Codex 原生 slash 命令与所有 Claude 命令保持不变。
 - **完成信号**：Codex 输出必须走 Codex 的 hook event 记录，**不得假设 Claude 的 JSONL 结构**

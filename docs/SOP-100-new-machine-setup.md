@@ -7,6 +7,8 @@ purpose: 新机器从 clone 到桥跑起来并配好开机自启的唯一入口�
 owns:
   - 依赖安装顺序与验证
   - wmux 与 RPC 客户端的就位检查
+  - private GitHub collaborator 登录、main-only clone 与同步验收
+  - 新机机型/年份前缀与 ccp / ccp2 / cxp 基线入口
   - 本机 .env 凭据与 bot 名册的建立
   - 起桥与验收
   - 开机自启（桥的计划任务 + wmux 的 Run 键）
@@ -14,11 +16,11 @@ owns:
 does_not_own:
   - 注册单个 bot 的细节（见 SOP-120）
   - 桥的内部机制（见 ARCH-110）
-  - 账号 profile 的注册（见用户级 $agent-profile-governance）
+  - provider 账号的认证细节（每人在各自 profile 里登录）
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -30,17 +32,85 @@ last_reviewed: 2026-08-25
 
 ---
 
+## 桌面 AI 用户入口（不需要会 terminal）
+
+在 Claude、Codex、QX 或其他能操作这台电脑的桌面 agent 里说：
+
+> **开始部署 Link16**
+
+agent 负责运行后文的命令、选路、修复和验收。用户只会经历这些可见节点：
+
+| 你会看到 | 你要做 | agent 此时在做 |
+|---|---|---|
+| GitHub 浏览器登录/设备码页 | 用自己的 GitHub 账号登录、接受 private 仓邀请 | 验真账号并只 clone `main` |
+| 网络检测结果 | 若被提示，打开 v2rayN；不需要猜端口 | 对真实 GitHub/PyPI URL 测直连和候选 mixed port |
+| 「机型 + 建议前缀」 | 仅当年份不对或名称冲突时纠正 | 只读型号/BIOS 年份，不读序列号/UUID |
+| Claude / Codex 登录页 | 分别登录 `ccp`、`ccp2`、`cxp`；不用的可明确跳过 | 建立三个彼此隔离的用户级 profile |
+| 飞书 Device Grant 链接 | 在页面核对账号和目标组织，然后授权 | 创建应用并把凭据只写入本机 `.env` |
+| 绿色验收表 | 在飞书私聊 bot 发一句「在吗」 | 核对 Git Bash、wmux、profile、桥和 `main` 全绿 |
+
+展示给用户的说明应聚焦「现在会发生什么 / 你要点哪里」；
+alias、PATH、环境变量、wrapper 等内部细节只在排错时再解释。
+
+### 部署前只确认一次：7 项安装清单
+
+agent 在真正安装前必须一次性展示下表并问：**“默认全装；哪项不要？”**
+已经安装的只验版本/路径，不重复安装。前五项是 Link16 核心依赖，不能取消；
+Claude Code / Codex 默认都装，但只用一种 provider 时可以取消另一种。
+
+| # | 默认 | 组件 | 安装源与规则 |
+|---:|---|---|---|
+| 1 | ☑ 必需 | Git + Git Bash | Git for Windows 官方包（WinGet `Git.Git`） |
+| 2 | ☑ 必需 | GitHub CLI | GitHub 官方包（WinGet `GitHub.cli`） |
+| 3 | ☑ 必需 | Python 3.12+ | Python Software Foundation 官方包 |
+| 4 | ☑ 必需 | Node.js LTS | OpenJS 官方 LTS；仓库 RPC 运行时依赖 |
+| 5 | ☑ 必需 | wmux | wmux 官方 WinGet 包；安装后建桌面快捷方式并设 Git Bash |
+| 6 | ☑ 可取消 | Claude Code | 优先 Anthropic 原生安装器；不再默认 `npm -g` |
+| 7 | ☑ 可取消 | Codex CLI | 优先 OpenAI Windows standalone 安装器；不再默认 `npm -g` |
+
+**gstack 不在清单里，默认不安装。** 它是独立的第三方 skill 套件，不是 Link16、wmux、
+Claude Code 或 Codex 的运行依赖。检测/执行器如下；默认仅预览，用户确认后 agent 才加 `--apply --yes`：
+
+```powershell
+python feishu/windows_bootstrap.py
+python feishu/windows_bootstrap.py --apply --yes
+# 例如只用 Codex：
+python feishu/windows_bootstrap.py --skip claude --apply --yes
+```
+
+脚本会同时读取当前进程与持久化用户/系统 PATH，避免桌面客户端开得太久，
+把刚装好的 Node/Claude 误报成“未安装”。执行每个缺失项前还会对该组件的真实官方来源 URL
+比较直连与已配置代理，沿用 `LINK16_ROUTE_DEFAULT` 预设，只有另一条明显更快时才切换；两路都失败就停。
+已有安装保持现有安装管理器，不在装机时偷偷迁移或重复覆盖。
+
+---
+
 ## 0 · 心智模型（先懂为什么有这些步骤）
 
-桥 = **Python 半边**（lark SDK 连飞书云）+ **wmux 半边**（在本机托管 Claude 会话）。两半之间靠一个 node 脚本 `~/wmux-rpc.js` 通信。新机器要补的东西分三类：
+桥 = **Python 半边**（lark SDK 连飞书云）+ **wmux 半边**（在本机托管 agent 会话）。两半之间靠仓库自带的 `wmux/wmux-rpc.js` 通信。新机器要补的东西分三类：
 
 1. **Python 依赖**（pip · 跟着 requirements.txt 走）
-2. **wmux + 它的 RPC 客户端 `~/wmux-rpc.js`**（⚠️ 最容易卡的一步 · 见 §3）
+2. **wmux + 仓库自带的 RPC 客户端**（⚠️ 最容易卡的一步 · 见 §3）
 3. **本机 `.env` 凭证 + 机器本地 bot 名册**（每台机各管各的）
 
 > 🔑 **「为什么之前在新机器拿不到 wmux handler？」** —— 因为缺 `wmux-rpc.js`。桥靠 `node <wmux-rpc.js> rpc workspace.list/new/…` 跟 wmux daemon 对话；这个脚本**原是仓库外的自建脚本（没提交进 git）**，只活在主力机 home，所以 `git pull` 带不来它。新机器 `git clone` 完，Python 装好、wmux 也开着，但只要找不到 `wmux-rpc.js`，桥就连不上 wmux = 拿不到 handler。
 >
 > ✅ **已永久修复（2026-06-17）**：正本已提交进仓库 [`wmux/wmux-rpc.js`](../wmux/wmux-rpc.js)，桥的 `bridge_env.resolve_wmux_rpc()` 解析顺序 = `WMUX_RPC_PATH` env → `~/wmux-rpc.js`（存在则优先·主力机热改用）→ **仓库副本兜底**。**新机器 clone 完就有了，不用再手放**（§3 的手放步骤现在是可选）。
+
+### 0.1 · 只 clone Link16，和再装个人配置，分别得到什么
+
+| 层 | 只 clone `link16-agent-infra` | 另有个人 `claude-config` / skills |
+|---|---|---|
+| 飞书桥、wmux RPC、注册、网络/机器体检 | **完整可用** | 不改变核心链路 |
+| `ccp` / `ccp2` / `cxp` | `profile_bootstrap.py` 建最小独立 home 与 Shell 函数；分别原生登录即可 | 可再叠加本人的规则、模型预设与长期记忆 |
+| 常用工作流 | provider 自带能力正常；没有私有 skill 名称 | 增加 `anysearch`、`push`、`pull`、`align`、`commit`、`feishu` 等个人工作流 |
+| Jina | requirements 会装 `jina` CLI，可直接使用 | 若有 `jina_rotate.py`，再获得多 key 轮换/代理增强 |
+| gstack | **不安装、也不需要** | 仍是单独来源、明确 opt-in，不随个人 skills 同步而默认安装 |
+
+结论：同事只拉 Link16 **不会影响桥、wmux、Claude/Codex 登录或飞书 bot 正常工作**；
+少的是主人的个人操作习惯与专用工作流，不是运行依赖。不要为了补 skills 去复制主人的
+`.claude-personal`、认证目录或会话历史。独立部署以本仓 `profile_bootstrap.py` 为准；
+仓库维护者本人已有 `$agent-profile-governance` 时，才用它做更完整的多环境语义治理。
 
 ---
 
@@ -48,12 +118,65 @@ last_reviewed: 2026-08-25
 
 | 项 | 怎么查 / 怎么配 |
 |---|---|
-| **`VIBECODING_ROOT` 环境变量** | 指向 `.env` 所在的 VibeCoding 根（如 `D:\410_VibeCoding`）。桥的 `.env` 路径靠它跨机解析（不写死盘符·见 ARCH-110 §4.1）。没设也有上溯/legacy 兜底，但建议设。 |
+| **Git for Windows / Git Bash** | 安装 Git for Windows。具体 `bash.exe` 路径由 `preflight.py` 发现，不假定必在 `C:\Program Files` 。 |
+| **GitHub CLI (`gh`)** | `winget install --id GitHub.cli -e`；每位同事登录自己的 GitHub 账号，不复制他人 token。 |
+| **Python 3.12+** | 运行 `Get-Command python -All`、`python --version`、`py -3 --version`。若只命中 `WindowsApps\python.exe` 占位符，安装官方 Python、勾 Add to PATH，必要时关闭 App execution alias，然后重开终端。 |
+| **`VIBECODING_ROOT` 环境变量** | 指向这个用户自己的 `.env` 所在根（例 `C:\410_VibeCoding`）。首次写凭据前必须明确设定，不依赖其他电脑的盘符。 |
 | **`PROXY_URL`** | 放在 `$VIBECODING_ROOT/.env`（如本地 mixed port）。下载/安装由 `feishu/network_route.py` 对实际 URL 同时探测直连与此代理；代码不写死端口、不改 v2rayN。 |
-| **Link16 agent profile launcher** | `feishu/agent-profiles.json` 是账号映射 SSOT；运行 `python ~/.claude-personal/skills/agent-profile-governance/scripts/profile_governance.py wrappers --apply` 生成 Git Bash + PowerShell 5/7 的动态 wrapper，再跑 `doctor`。禁止手写 `CLAUDE_CONFIG_DIR`/`CODEX_HOME` alias。 |
-| **Git for Windows + Windows Terminal** | `C:\Program Files\Git\bin\bash.exe` 必须存在；Windows Terminal 的默认 profile 必须选 Git Bash。装完由 `preflight.py` 机械检查。 |
-| **node** | `node --version`（`~/wmux-rpc.js` 要 node 跑）。 |
-| **仓库 clone** | `git clone git@github.com:zhenzoo/link16-agent-infra.git` 到本机（惯例位置 `$VIBECODING_ROOT\Post\link16-agent-infra`；`zhenz`/`D:` 那台历史上多一层 `Post\tools\`）。 |
+| **Link16 agent profile launcher** | 运行 `python feishu/profile_bootstrap.py --apply`，建立 `ccp` / `ccp2` / `cxp` 目录和 Git Bash + PowerShell 函数。它们不是 alias，也不复制认证。 |
+| **Windows Terminal + wmux** | 两者默认 shell 都选 Git Bash；安装或升级 wmux 后重新检查。 |
+| **node** | `node --version`（仓库自带的 `wmux/wmux-rpc.js` 要 node 跑）。 |
+| **PowerShell 脚本策略** | 若启动时报「禁止运行脚本」，检查 `Get-ExecutionPolicy -List`；对普通用户设 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force`，重开终端后验收 profile 函数。 |
+
+### 1.1 · Private 仓登录与 main-only clone
+
+1. 管理员在 GitHub 把同事账号加为 collaborator；同事在浏览器接受邀请。
+2. agent 运行下面命令，用户只在浏览器登录授权：
+
+```powershell
+gh auth login --hostname github.com --git-protocol https --web
+gh auth status
+[Environment]::SetEnvironmentVariable('VIBECODING_ROOT','C:\410_VibeCoding','User')
+$env:VIBECODING_ROOT = 'C:\410_VibeCoding'
+New-Item -ItemType Directory -Force "$env:VIBECODING_ROOT\Post" | Out-Null
+gh repo clone zhenzoo/link16-agent-infra "$env:VIBECODING_ROOT\Post\link16-agent-infra" -- --branch main --single-branch
+Set-Location "$env:VIBECODING_ROOT\Post\link16-agent-infra"
+git fetch --prune origin
+git switch main
+git pull --ff-only origin main
+git branch --show-current
+git rev-list --left-right --count origin/main...HEAD
+```
+
+验收：当前分支是 `main`，最后一行是 `0 0`。日常更新只用 `git pull --ff-only origin main`。
+
+隐私边界：private collaborator 可见整个 Git 历史和 committed registry 中的主机/open_id/chat_id；
+这些不是密钥，但是私有运维元数据。不同同事绝不复制 `.env`、`auth.json`、provider home 或 session 历史。
+
+### 1.2 · 代理与真实站点检测
+
+```powershell
+python feishu/network_route.py proxy-doctor --url https://github.com/ --prefer proxy
+python feishu/network_route.py probe --url https://pypi.org/simple/lark-oapi/
+```
+
+`proxy-doctor` 候选来源 = 当前 `PROXY_URL` + Windows 系统代理 + 常见本地 mixed port。
+它会通过真实 URL 验证，所以「端口能连但代理不能访问」仍会判失败。
+不得根据 Wi-Fi 名称写 Remote/Staff/企业租户A 特例，也不得把 `7897` 写成所有人的默认。
+若候选全失败，让用户打开 v2rayN 的「参数设置 → 本地监听 → 本地混合端口」，再重测。
+
+### 1.3 · 机器前缀与三个账号 profile
+
+```powershell
+python feishu/machine_identity.py
+python feishu/profile_bootstrap.py --apply
+```
+
+- 前缀约定 = 产品线缩写 + 年份，例 `tb25` / `tb24` / `tuf19`。自动年份来自 BIOS，不等于购买年；用户告知时用 `--year 2025` 覆盖。
+- 本机名命示例：`<prefix>-link16`、`<prefix>-ccp`、`<prefix>-cxp`。写入共享 registry 前，要说明 private collaborator 可见主机元数据。
+- `ccp` → `~/.claude-personal`；`ccp2` → `~/.claude-personal2`；`cxp` → `~/.codex-personal`。它们是 Shell 函数，不是 alias。
+- 重开 Git Bash，分别输入 `ccp`、`ccp2`、`cxp`。每个 profile 在自己的浏览器页登录；不复制别人的认证文件。
+- 桌面用户不需要理解函数内部实现；他们只需知道「输入这三个名字会进入对应的独立账号」。
 
 ---
 
@@ -74,10 +197,11 @@ python -c "import lark_oapi; from lark_channel import FeishuChannel, OutboundIma
 ```
 > 报 `ModuleNotFoundError: No module named 'lark_channel'` / 桥打印 `缺依赖: pip install lark-channel-sdk` → 这步没做。
 
-### 2.1 · Jina infra（桥不依赖，但装了桥的机器一定用得上 · 2026-08-18 补）
+### 2.1 · Jina infra（桥不依赖；作为通用抓取 CLI 随 requirements 安装）
 
 **为什么写进新机器 SOP**：`jina` 是 agent 抓单页的主力（URL→markdown，能啃 SPA，AnySearch 抓不动的它能抓）。
-它不在桥的运行路径上，所以**缺了桥照样跑、没有任何报错**——agent 只会在真要用的时候当场降级去走 AnySearch 回退。
+它不在桥的运行路径上，所以**缺了桥照样跑、没有任何报错**。有个人 `anysearch` skill 的机器可以回退到 AnySearch；
+没有个人配置的同事则使用 provider 自带网页能力，两者都不影响桥本身。
 2026-08-18 在 tuf19 实证：`jina` 入口存在但底层 CLI 没装 → 单页读取直接失败。**这种"缺了不报错"的东西最该写进 SOP**，否则每台新机器都要现场发现一次。
 
 **装**（`§2` 那条 `pip install -r feishu/requirements.txt` 已经带上了；单独补装用下面这条）：
@@ -89,17 +213,18 @@ python feishu/network_route.py run --url https://pypi.org/simple/jina-cli/ -- \
 **key**：`$VIBECODING_ROOT/.env` 里一行 `JINA_API_KEY=jina_xxxx`（多账号续 `JINA_API_KEY_2` / `_3` …，轮换器按顺序花）。
 没 key 也不是全废——`read` 能落匿名档照样抓。
 
-**⛔ 别直接调 `jina`，走轮换器**（多 key 顺序轮换 + 欠费自动落匿名档 + 自动配代理，参数和 `jina` 本体一模一样）：
+**调用规则**：独立 Link16 部署直接用官方 `jina` CLI；若这个用户自己的个人配置里存在
+`~/.claude-personal/scripts/jina_rotate.py`，可优先用轮换器获得多 key 顺序轮换、欠费回退与代理增强：
 ```bash
-JX="$HOME/.claude-personal/scripts/jina_rotate.py"
-python "$JX" read "<URL>"        # URL→markdown（会渲染 JS）
-python "$JX" search "查询词"      # 全网搜索
+jina read "<URL>"
+# 个人增强（文件存在时才用）：
+python "$HOME/.claude-personal/scripts/jina_rotate.py" read "<URL>"
 ```
 
 **验收**（两条都跑，别只跑 `--help` 就当装好了）：
 ```bash
 python -c "import shutil; print(shutil.which('jina'))"           # 有绝对路径 = CLI 在 PATH 上
-python "$HOME/.claude-personal/scripts/jina_rotate.py" read "https://example.com" | head -3
+jina read "https://example.com" | head -3
 ```
 出现 `Title: Example Domain` = 端到端通了。
 
@@ -110,7 +235,7 @@ python "$HOME/.claude-personal/scripts/jina_rotate.py" read "https://example.com
 
 ## 3 · wmux + handler（⚠️ 最易卡 · 见 §0 那段）
 
-1. **装 wmux 并打开它**（GUI）。打开后 daemon 起来，home 下会有：`~/.wmux/`（含 `config.json`）、`~/.wmux-auth-token`、`~/.wmux-tcp-port`。
+1. **装 wmux 并打开它**（GUI）。`windows_bootstrap.py --apply --yes` 会创建桌面 `wmux.lnk`，目标指向不随版本号变化的稳定 `wmux.exe`；开始菜单入口仍保留。打开后 daemon 起来，home 下会有：`~/.wmux/`（含 `config.json`）、`~/.wmux-auth-token`、`~/.wmux-tcp-port`。
 2. **`wmux-rpc.js` —— ✅ 现在仓库自带，不用手放**（2026-06-17 永久修复）。正本在 [`wmux/wmux-rpc.js`](../wmux/wmux-rpc.js)，桥/`wmux_session.py` 经 `bridge_env.resolve_wmux_rpc()` 自动引用它（`~/wmux-rpc.js` 存在则优先 → 否则用这份仓库副本）。
    - 它是基于 wmux 仓库 `examples/event-recorder/wmux-rpc.mjs` 改的 + 加了「workspace 守卫」（跨 workspace 写默认 DENY，只放行 `--allow-ws`；`pane.split` 盲劈拒绝，改用 `split-here`）。
    - 脚本用 `os.homedir()` / `os.userInfo().username` 动态取路径 → **机器无关**。
@@ -130,7 +255,7 @@ python "$HOME/.claude-personal/scripts/jina_rotate.py" read "https://example.com
 ## 4 · Windows Terminal + wmux 默认 Git Bash（必做）
 
 1. **Windows Terminal** → Settings → Startup → Default profile → **Git Bash**。若列表没有，新增 profile，commandline 用 `"C:\Program Files\Git\bin\bash.exe" --login -i`。
-2. **wmux** → Settings → Default Shell → **Git Bash**（`C:\Program Files\Git\bin\bash.exe`）。
+2. **wmux**：安装脚本在 wmux 未运行时自动写入 Git Bash；若 wmux 正在运行，为防退出时覆盖配置，会明确提示到 Settings → Default Shell → **Git Bash**。路径由体检发现，不假定固定盘符。
 3. 运行 `python feishu/preflight.py`；`Git Bash`、`Windows Terminal 默认 Shell`、`wmux 默认 Shell` 三项都必须是 `[ OK ]`。
 
 wmux 的「默认 Shell」+「启动目录」**不在 `~/.wmux/config.json`**。真实持久化字段是 `%APPDATA%\wmux\session.json.defaultShell`（GUI 渲染层 store）；安装或升级 wmux 后都要复核。**不要为默认 shell 改 `.bashrc`，也不要造 alias。**
