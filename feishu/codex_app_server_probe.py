@@ -16,6 +16,8 @@ import threading
 import time
 from pathlib import Path
 
+from codex_app_server_worker import _codex_native_default
+
 
 DEFAULT_PROMPT = (
     "This is a read-only protocol probe. First send a commentary message that "
@@ -182,11 +184,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--codex",
-        default=(
-            str(Path.home() / "AppData/Roaming/npm/node_modules/@openai/codex/"
-                "node_modules/@openai/codex-win32-x64/vendor/"
-                "x86_64-pc-windows-msvc/bin/codex.exe")
-        ),
+        default=str(_codex_native_default()),
     )
     parser.add_argument("--codex-home", default="~/.codex-personal")
     parser.add_argument("--cwd", default=str(Path(__file__).resolve().parents[1]))

@@ -648,7 +648,8 @@ def standalone_worker_cmd(
             prefix
             + env_text
             + f"CODEX_HOME={_q(profile.home_path.as_posix())} "
-            + "codex --dangerously-bypass-approvals-and-sandbox --search "
+            + "codex --dangerously-bypass-approvals-and-sandbox "
+            + "--dangerously-bypass-hook-trust --search "
             + "-c shell_environment_policy.inherit=all"
         )
         if cwd:
@@ -712,6 +713,37 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
             bot=name,
         )
     raise ValueError(f"runtime {spec.name} has no launch command")
+
+
+def ensure_codex_trust(bot, cwd) -> None:
+    """Pre-seed Codex's project trust so a first launch in a new directory never
+    parks on the interactive "Do you trust the contents of this directory?"
+    prompt. The screen-scraping auto-Enter (needs_trust_confirmation) fires too
+    late for the app-server transport: the worker's warmup thread/start is
+    already blocked upstream of the TUI. Codex persists project keys lowercase
+    on Windows and its lookup is case-insensitive (verified 2026-08-25 with a
+    throwaway dir: mixed-case -C input matched the lowercase stored key), so we
+    write exactly that form. No-op for other runtimes — Claude's prompt is
+    already auto-accepted by the ready wait."""
+    if runtime_spec(bot).name != "codex":
+        return
+    profile = resolve_profile(bot, required=True)
+    config = profile.home_path / "config.toml"
+    key = str(cwd).replace("/", "\\").lower()
+    header = f"[projects.'{key}']"
+    try:
+        text = config.read_text(encoding="utf-8") if config.is_file() else ""
+    except OSError:
+        return
+    if header.lower() in text.lower():
+        return
+    try:
+        with config.open("a", encoding="utf-8") as fh:
+            if text and not text.endswith("\n"):
+                fh.write("\n")
+            fh.write(f"\n{header}\ntrust_level = \"trusted\"\n")
+    except OSError:
+        pass
 
 
 def needs_trust_confirmation(bot, screen: str) -> bool:

@@ -73,6 +73,8 @@ class AgentProfileTests(unittest.TestCase):
         self.assertIn('LINK16_AGENT_PROFILE="cxp"', codex)
         self.assertIn(".codex-personal", codex)
         self.assertIn("CODEX_HOME=", codex)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", codex)
+        self.assertIn("--dangerously-bypass-hook-trust", codex)
         self.assertIn('"resume" "abc 123"', codex)
         self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
 
@@ -569,6 +571,44 @@ class ClaudeStartupPromptTests(unittest.TestCase):
         self.assertFalse(agent_runtime.is_ready(self.CLAUDE, "$ bash\n"))
         self.assertFalse(agent_runtime.needs_trust_confirmation({"agent": "codex"}, self.TRUST_SCREEN))
         self.assertTrue(agent_runtime.is_ready({"agent": "codex"}, "status\n› Use /skills"))
+
+
+class CodexTrustPreseedTests(unittest.TestCase):
+    """2026-08-25 · Codex 首启 trust 弹窗会在 app-server warmup 上游挡死会话
+    （刷屏自动回车来不及）→ spawn 前把目录信任预写进 profile 的 config.toml。
+    Codex 自己持久化的就是小写 key，且查找大小写不敏感（当天 throwaway 目录实测）。"""
+
+    CODEX = {"name": "trustlab-codex", "agent": "codex"}
+    CLAUDE = {"name": "trustlab-claude", "agent": "claude"}
+
+    def _profile(self, home: Path, runtime: str):
+        from types import SimpleNamespace
+        return SimpleNamespace(home_path=home, runtime=runtime, name="test")
+
+    def test_seeds_lowercase_key_into_missing_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                agent_runtime.ensure_codex_trust(self.CODEX, "C:/410_VibeCoding/Post/Some-Repo")
+            text = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn("[projects.'c:\\410_vibecoding\\post\\some-repo']", text)
+            self.assertIn('trust_level = "trusted"', text)
+
+    def test_existing_key_is_not_duplicated_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            config = home / "config.toml"
+            config.write_text("[projects.'C:\\410_VibeCoding\\Post\\Some-Repo']\ntrust_level = \"trusted\"\n", encoding="utf-8")
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                agent_runtime.ensure_codex_trust(self.CODEX, "c:/410_vibecoding/post/some-repo")
+            self.assertEqual(config.read_text(encoding="utf-8").count("projects."), 1)
+
+    def test_claude_runtime_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "claude")):
+                agent_runtime.ensure_codex_trust(self.CLAUDE, "C:/whatever")
+            self.assertFalse((home / "config.toml").exists())
 
 
 class BridgeProcessSnapshotTests(unittest.TestCase):

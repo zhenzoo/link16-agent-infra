@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import queue
+import shutil
 import socket
 import subprocess
 import threading
@@ -180,11 +181,21 @@ class MilestoneObserver:
 
 
 def _codex_native_default() -> Path:
-    return (
+    candidates = [
+        # 旧：npm 全局安装的 @openai/codex
         Path.home()
         / "AppData/Roaming/npm/node_modules/@openai/codex/node_modules/"
-        "@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
-    )
+        "@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+        # 新：Codex 官方原生安装
+        Path.home() / "AppData/Local/Programs/OpenAI/Codex/bin/codex.exe",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    found = shutil.which("codex")
+    if found:
+        return Path(found)
+    return candidates[0]
 
 
 def _wait_rpc(url: str, timeout=30) -> RpcConnection:
