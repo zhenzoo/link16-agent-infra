@@ -40,18 +40,15 @@ RETRY_BACKOFF = [0, 2, 5]  # 3 次尝试的等待秒数
 
 
 def find_webhook_url():
-    """优先读环境变量；否则从脚本所在位置向上找 .env 解析同名键。"""
+    """优先读环境变量；否则按 bridge_env 的跨机契约解析 .env。"""
     val = os.environ.get(ENV_KEY)
     if val and val.strip() and "PASTE_" not in val:
         return val.strip()
 
-    here = Path(__file__).resolve()
-    candidates = [p / ".env" for p in here.parents]
-    candidates.append(Path("E:/410_VibeCoding/.env"))  # 已知绝对位置兜底
-    for env_file in candidates:
-        try:
-            if not env_file.is_file():
-                continue
+    try:
+        from bridge_env import resolve_env_path
+        env_file = resolve_env_path(start=Path(__file__))
+        if env_file.is_file():
             for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = line.strip()
                 if line.startswith("#") or "=" not in line:
@@ -61,8 +58,8 @@ def find_webhook_url():
                     value = value.strip()
                     if value and "PASTE_" not in value:
                         return value
-        except Exception:
-            continue
+    except Exception:
+        pass
     return None
 
 

@@ -27,6 +27,7 @@ import os
 import re
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 # 🔌 飞书 = 国内端点 → 本进程强制【直连·不走代理】。
@@ -70,11 +71,63 @@ def _set_key(text, key, value):
     return text.rstrip("\n") + f"\n{key}={value}\n"
 
 
-def write_env(app_id, secret, id_key, sec_key):
-    text = ENV_PATH.read_text(encoding="utf-8", errors="ignore")
+def write_env(app_id, secret, id_key, sec_key, env_path=None):
+    """原子更新本机 .env。
+
+    已存在的 .env 可按旧规则向上查找；首次创建必须由
+    XHS_ENV_FILE 或 VIBECODING_ROOT 明确指定，禁止在新同事电脑上默写历史 E: 盘。
+    """
+    target = Path(env_path) if env_path is not None else ENV_PATH
+    if not target.exists() and not (
+        os.environ.get("XHS_ENV_FILE") or os.environ.get("VIBECODING_ROOT") or env_path is not None
+    ):
+        raise RuntimeError(
+            "首次注册前请先设置 VIBECODING_ROOT（例如 C:\\410_VibeCoding），"
+            "或用 XHS_ENV_FILE 明确指定 .env。"
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = target.read_text(encoding="utf-8", errors="ignore") if target.exists() else ""
     text = _set_key(text, id_key, app_id)
     text = _set_key(text, sec_key, secret)
-    ENV_PATH.write_text(text, encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        os.replace(tmp_name, target)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _credential_failure_summary(result):
+    """只输出允许的状态字段和字段名，不回显 SDK 返回体。"""
+    if not isinstance(result, dict):
+        return f"response_type={type(result).__name__}"
+    fields = ",".join(sorted(str(key) for key in result)) or "(empty)"
+    status = result.get("status")
+    code = result.get("code")
+    safe = [f"fields=[{fields}]"]
+    if isinstance(status, (str, int, float, bool)):
+        safe.append(f"status={status}")
+    if isinstance(code, (str, int, float, bool)):
+        safe.append(f"code={code}")
+    return " ".join(safe)
+
+
+def _sync_guidance(trusted_same_owner_devices=False):
+    if trusted_same_owner_devices:
+        return (
+            "\n🔄 同一所有者的受信设备：如确需共用这只 bot，再运行 envsync。\n"
+            "   它会处理凭据；不要用 Git、聊天或邮件传 .env。"
+        )
+    return (
+        "\n🔒 凭据默认只留在这台电脑。\n"
+        "   不同同事、不同所有者之间不复制整份 .env；每人在自己的账号下注册和登录。\n"
+        "   只有同一所有者的受信设备才可用 --trusted-same-owner-devices 显示 envsync 指引。"
+    )
 
 
 def _bot_identity(app_id, app_secret):
@@ -190,6 +243,8 @@ def main():
                     help="Link16 agent profile（如 cck/cxp）；不给则取同 runtime 的本机默认")
     ap.add_argument("--app-id", default=None,
                     help="续接已由本次 Device Grant 创建的应用，避免回传中断后重复创建")
+    ap.add_argument("--trusted-same-owner-devices", action="store_true",
+                    help="仅当目标是同一所有者的受信设备时，显示 envsync 后续指引")
     args = ap.parse_args()
 
     requested = (args.profile or "").strip().lower()
@@ -230,7 +285,7 @@ def main():
     app_id = result.get("client_id")
     secret = result.get("client_secret")
     if not app_id or not secret:
-        print(f"❌ 没拿到凭据: {result}", flush=True)
+        print(f"❌ 没拿到凭据：{_credential_failure_summary(result)}", flush=True)
         sys.exit(1)
     write_env(app_id, secret, id_key, sec_key)
     action = "续接成功" if args.app_id else "创建成功"
@@ -296,14 +351,7 @@ def main():
           "   （Claude：请把这句话【明确转达给主人】，别默认他知道。）",
           flush=True)
 
-    # 🔄 跨机 .env 同步：新 bot 的 APP_ID/SECRET 只落在【本机】.env，另一台机不同步就喊不到它（2026-08-02 主人定）
-    print("\n🔄 还要做：把新凭据【同步到另一台电脑】——跑 envsync skill：\n"
-          "   本次注册往本机 .env 写了 FEISHU_BRIDGE_<KEY>_APP_ID / _APP_SECRET，\n"
-          "   但**另一台机的 .env 不会自己长出来**。不同步的后果：另一台机上的 agent\n"
-          "   `send_feishu_msg --to-agent <新bot>` 解析不到凭据 → 按名字喊不到这个新 bot。\n"
-          "   ⇒ 注册完【当场】跑一次 envsync（局域网点对点·不上云），别攒着——攒着必忘。\n"
-          "   （Claude：这一步同样【必须转达给主人】并当场执行，属于注册流程的一部分。）",
-          flush=True)
+    print(_sync_guidance(args.trusted_same_owner_devices), flush=True)
 
 
 if __name__ == "__main__":

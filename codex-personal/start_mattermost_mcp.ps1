@@ -15,18 +15,16 @@ function Read-DotEnvValue {
     return ($line -replace ('^' + [regex]::Escape($Name) + '='), '').Trim()
 }
 
-$roots = @()
-if ($env:VIBECODING_ROOT) {
-    $roots += $env:VIBECODING_ROOT
+$vibeRoot = $env:VIBECODING_ROOT
+if (-not $vibeRoot) {
+    $vibeRoot = [Environment]::GetEnvironmentVariable('VIBECODING_ROOT', 'User')
 }
-$roots += 'D:\410_VibeCoding'
-
-$envFile = $roots |
-    ForEach-Object { Join-Path $_ '.env' } |
-    Where-Object { Test-Path -LiteralPath $_ } |
-    Select-Object -First 1
+$envFile = if ($vibeRoot) { Join-Path $vibeRoot '.env' } else { $null }
 if (-not $envFile) {
     throw 'Cannot find VibeCoding .env. Set VIBECODING_ROOT first.'
+}
+if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
+    throw "Cannot find VibeCoding .env at $envFile. Check VIBECODING_ROOT."
 }
 
 $server = Join-Path $HOME '.claude\mcp-servers\mattermost\server.py'
