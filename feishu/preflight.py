@@ -91,6 +91,82 @@ def check_node():
     return Result("Node.js", OK, (_run([exe, "--version"]) or "已安装"))
 
 
+def _git_bash_path():
+    override = (os.environ.get("GIT_BASH_PATH") or "").strip()
+    candidates = [Path(override)] if override else []
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA")):
+        if base:
+            candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
+            candidates.append(Path(base) / "Programs" / "Git" / "bin" / "bash.exe")
+    git = shutil.which("git")
+    if git:
+        git_path = Path(git)
+        candidates += [git_path.parent.parent / "bin" / "bash.exe",
+                       git_path.parent.parent / "usr" / "bin" / "bash.exe"]
+    bash = shutil.which("bash")
+    if bash and "git" in str(bash).lower() and "system32" not in str(bash).lower():
+        candidates.append(Path(bash))
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _looks_like_git_bash(value):
+    normalized = str(value or "").strip().strip('"').replace("\\", "/").lower()
+    return "/git/bin/bash.exe" in normalized or "/git/usr/bin/bash.exe" in normalized
+
+
+def check_git_bash():
+    """运行时确证 Git for Windows Bash；拒绝误命中 System32/WSL 的 bash.exe。"""
+    bash = _git_bash_path()
+    if not bash:
+        return Result("Git Bash", FAIL, "找不到 Git for Windows 的 bash.exe",
+                      "安装 Git for Windows：https://git-scm.com/download/win")
+    output = _run([
+        str(bash), "--noprofile", "--norc", "-c",
+        'printf "BASH_VERSION=%s\\nMSYSTEM=%s\\n" "$BASH_VERSION" "$MSYSTEM"',
+    ]) or ""
+    if "BASH_VERSION=" in output and "MSYSTEM=MINGW" in output:
+        return Result("Git Bash", OK, f"{bash} · MINGW 运行态正常")
+    return Result("Git Bash", FAIL, f"{bash} 能找到，但不是正常的 Git Bash 运行态：{output or '无输出'}",
+                  "重装 Git for Windows，并确认 bin\\bash.exe 可直接启动")
+
+
+def check_windows_terminal_default():
+    """Windows Terminal 不是桥硬依赖，但本机操作标准要求新窗口默认进入 Git Bash。"""
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return Result("Windows Terminal 默认 Shell", WARN, "LOCALAPPDATA 不可用，无法检查")
+    base = Path(local) / "Packages"
+    candidates = [
+        base / "Microsoft.WindowsTerminal_8wekyb3d8bbwe" / "LocalState" / "settings.json",
+        base / "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe" / "LocalState" / "settings.json",
+    ]
+    settings = next((path for path in candidates if path.is_file()), None)
+    if not settings:
+        return Result("Windows Terminal 默认 Shell", WARN, "没找到 Windows Terminal settings.json",
+                      "安装 Windows Terminal；设置 → 启动 → 默认配置文件 → Git Bash")
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8-sig"))
+        default = str(data.get("defaultProfile") or "").lower()
+        profiles = data.get("profiles", {}).get("list", [])
+        row = next((p for p in profiles if str(p.get("guid") or "").lower() == default), None)
+    except Exception as exc:  # noqa: BLE001
+        return Result("Windows Terminal 默认 Shell", WARN, f"settings.json 解析失败：{exc}",
+                      "打开 Windows Terminal 设置页，手动把默认配置文件设为 Git Bash")
+    if row and _looks_like_git_bash(row.get("commandline")):
+        return Result("Windows Terminal 默认 Shell", OK,
+                      f"defaultProfile → {row.get('name') or 'Git Bash'}")
+    actual = (row or {}).get("name") or default or "未设置"
+    return Result("Windows Terminal 默认 Shell", FAIL, f"当前默认 = {actual}，不是 Git Bash",
+                  "Windows Terminal → 设置 → 启动 → 默认配置文件 → Git Bash；"
+                  "若列表没有，新增 commandline = C:\\Program Files\\Git\\bin\\bash.exe --login -i")
+
+
 def check_wmux():
     """wmux 是硬依赖：没有它，桥能连上飞书但开不出面板，@ 一句只会回『wmux 没开』。"""
     port_file = Path.home() / ".wmux-tcp-port"
@@ -103,6 +179,27 @@ def check_wmux():
         return Result("wmux", FAIL, f"仓库里缺 {rpc.relative_to(REPO)}",
                       "重新 clone 本仓（这个文件是仓库自带的）")
     return Result("wmux", OK, f"daemon 在跑（{port_file.name} 存在）· RPC 客户端就位")
+
+
+def check_wmux_default_shell():
+    """wmux GUI/store 的默认 shell 真源；不是 ~/.wmux/config.json，也不是 .bashrc alias。"""
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return Result("wmux 默认 Shell", FAIL, "APPDATA 不可用，无法读取 wmux session.json")
+    session = Path(appdata) / "wmux" / "session.json"
+    if not session.is_file():
+        return Result("wmux 默认 Shell", FAIL, f"找不到 {session}",
+                      "先打开 wmux，再到 Settings 把 Default Shell 设为 Git Bash")
+    try:
+        shell = json.loads(session.read_text(encoding="utf-8-sig")).get("defaultShell")
+    except Exception as exc:  # noqa: BLE001
+        return Result("wmux 默认 Shell", FAIL, f"session.json 解析失败：{exc}",
+                      "在 wmux Settings 重新选择 Git Bash 后重开 wmux")
+    if _looks_like_git_bash(shell) and Path(str(shell)).is_file():
+        return Result("wmux 默认 Shell", OK, str(shell))
+    return Result("wmux 默认 Shell", FAIL, f"当前 defaultShell = {shell or '未设置'}",
+                  "wmux → Settings → Default Shell → C:\\Program Files\\Git\\bin\\bash.exe；"
+                  "安装或升级 wmux 后都要复核")
 
 
 def check_encoding():
@@ -160,9 +257,7 @@ def check_env_file():
 
 
 def check_local_roster():
-    """🚨 首次运行的真陷阱：本机没有 local 名册时，注册脚本会拿 committed 的
-    bridge-bots.json 【整盘做种子】——而那里面是【别人机器】的 bot。它们会被你的桥拉起，
-    而同一个飞书应用同时只允许一条长连接 → 把对方正在用的连接抢掉。"""
+    """本机名册必须显式存在；committed 名册已是空模板，缺 local 时安全地 fail closed。"""
     local = HERE / "bridge-bots.local.json"
     committed = HERE / "bridge-bots.json"
     if local.is_file():
@@ -186,13 +281,10 @@ def check_local_roster():
         pass
     return Result(
         "本机 bot 名册", FAIL,
-        f"缺 feishu/bridge-bots.local.json —— 现在注册 bot 会把 committed 里的 "
-        f"{n_committed} 只【别人的 bot】播种进来并被你的桥拉起（抢对方飞书长连接）",
-        '先落一本只属于本机的空名册：\n'
-        '        python -c "import json,pathlib;'
-        'pathlib.Path(\'feishu/bridge-bots.local.json\').write_text('
-        'json.dumps({\'defaults\':{\'profiles\':{\'claude\':\'ccp\',\'codex\':\'cxp\'}},\'bots\':[]},'
-        'ensure_ascii=False,indent=2),encoding=\'utf-8\')"')
+        f"缺 feishu/bridge-bots.local.json；committed 模板有 {n_committed} 只 bot，"
+        "桥会安全停住，不会接管其他机器",
+        "先复制空模板，再注册本机 bot：\n"
+        "        Copy-Item feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json")
 
 
 def check_registry():
@@ -219,7 +311,8 @@ def check_agent_cli():
                   "桥只负责把消息接进面板，面板里得有东西干活")
 
 
-CHECKS = (check_python, check_deps, check_node, check_wmux, check_encoding,
+CHECKS = (check_python, check_deps, check_node, check_git_bash,
+          check_windows_terminal_default, check_wmux, check_wmux_default_shell, check_encoding,
           check_env_file, check_local_roster, check_registry, check_agent_cli)
 
 

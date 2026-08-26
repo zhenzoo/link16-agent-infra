@@ -169,6 +169,16 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
     return stub
 
 
+def _run_device_grant(name, app_id=None):
+    """创建新应用，或用 cli_... App ID 续接同一次 Device Grant。"""
+    return lark.register_app(
+        on_qr_code=on_qr,
+        on_status_change=on_status,
+        app_preset={"name": name},
+        app_id=app_id,
+    )
+
+
 def main():
     ap = argparse.ArgumentParser(description="一键创建飞书智能体应用并写凭据进 .env")
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
@@ -178,6 +188,8 @@ def main():
                     help="目标 runtime；不给时由 --profile 推导，无 profile 则兼容默认 claude")
     ap.add_argument("--profile", default=None,
                     help="Link16 agent profile（如 cck/cxp）；不给则取同 runtime 的本机默认")
+    ap.add_argument("--app-id", default=None,
+                    help="续接已由本次 Device Grant 创建的应用，避免回传中断后重复创建")
     args = ap.parse_args()
 
     requested = (args.profile or "").strip().lower()
@@ -214,18 +226,15 @@ def main():
     else:
         id_key, sec_key = "FEISHU_BRIDGE_APP_ID", "FEISHU_BRIDGE_APP_SECRET"
 
-    result = lark.register_app(
-        on_qr_code=on_qr,
-        on_status_change=on_status,
-        app_preset={"name": args.name},
-    )
+    result = _run_device_grant(args.name, args.app_id)
     app_id = result.get("client_id")
     secret = result.get("client_secret")
     if not app_id or not secret:
         print(f"❌ 没拿到凭据: {result}", flush=True)
         sys.exit(1)
     write_env(app_id, secret, id_key, sec_key)
-    print(f"\n✅ 应用「{args.name}」创建成功 · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
+    action = "续接成功" if args.app_id else "创建成功"
+    print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
 
     # 自动登记进 agent-registry.json（登记协议自动化·不靠人记得回写）
     stub = append_registry_stub(app_id, secret, args.bot, args.name, runtime)
