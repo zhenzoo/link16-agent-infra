@@ -25,7 +25,7 @@ last_reviewed: 2026-08-26
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
 > **用途**：在一台**新机器**上从零跑起 `feishu/feishu_bridge.py`（飞书桥），挂上能被手机飞书 @ 的本机 bot，并配好**开机自启**（§9）。
-> **这是新机器部署的唯一入口文档** —— clone 完本仓，从 §1 顺着做到 §9 就完事。
+> **这是新机器部署的唯一入口文档** —— 真空白机先做下面 Stage 0；已有 Git/gh/Python 的机器 clone 后从 §1 顺着做到 §9。
 > **配套**：架构见 [`ARCH-110-feishu-bridge.md`](ARCH-110-feishu-bridge.md)（§4.1 跨机可移植）· 依赖见 [`feishu/requirements.txt`](../feishu/requirements.txt) · 注册 bot 细节见 [`SOP-120-feishu-register.md`](SOP-120-feishu-register.md)。
 > **实证**：2026-06-16 第二台机（`zhenz` / `D:`）跑通 §1–§8；2026-07-25 第一台机（`zhuzhen` / `E:`）跑通 §9 开机自启。
 > **原名** `feishu/SETUP-new-machine.md`（2026-07-25 按全局 `TYPE-NNN-slug` 规范搬进 `docs/` 并编号）。
@@ -47,10 +47,38 @@ agent 负责运行后文的命令、选路、修复和验收。用户只会经�
 | 「机型 + 建议前缀」 | 仅当年份不对或名称冲突时纠正 | 只读型号/BIOS 年份，不读序列号/UUID |
 | Claude / Codex 登录页 | 分别登录 `ccp`、`ccp2`、`cxp`；不用的可明确跳过 | 建立三个彼此隔离的用户级 profile |
 | 飞书 Device Grant 链接 | 在页面核对账号和目标组织，然后授权 | 创建应用并把凭据只写入本机 `.env` |
+| 飞书权限审阅链接 | 核对本次能力与权限，按页面要求创建版本/发布或等管理员审核 | 只申请所选 capability，并持续检查真实授权状态 |
 | 绿色验收表 | 在飞书私聊 bot 发一句「在吗」 | 核对 Git Bash、wmux、profile、桥和 `main` 全绿 |
 
 展示给用户的说明应聚焦「现在会发生什么 / 你要点哪里」；
 alias、PATH、环境变量、wrapper 等内部细节只在排错时再解释。
+
+### 部署工程师的分工与完成闸
+
+- `AGENTS.md` 只负责识别“开始部署 Link16”、规定人工停点和何时可宣布完成。
+- 本 SOP 是唯一顺序手册，安装命令、回滚、验收和排错只在这里维护。
+- `CLAUDE.md` / Codex 适配层只翻译各 runtime 怎样跑后台任务和读完成信号，不复制步骤。
+
+对人只暂停在 GitHub/provider 登录、飞书两个授权链接、版本发布或管理员审批；注册器和 Monitor 必须
+后台常驻并在机械信号到来后自动继续。最终绿色验收至少包括：`main` 与 `origin/main` 为 `0 0`、
+preflight 必需项全绿、选中的 profile 可真启动、wmux 新面板是 Git Bash、Windows Terminal（若安装）
+默认进入 Git Bash、本机 local roster 不越界、
+桥健康、owner DM 真往返；选了群能力时再验目标群 @ 往返。若尚未注册 bot，只能报告“Link16 核心已
+部署，飞书接入待验收”。
+
+### Stage 0 · 真空白机先自举 Git / gh / Python
+
+仓内 `windows_bootstrap.py` 自己需要 Python，也必须在 clone 之后才能运行；因此它不能负责真空白机的
+前三步。桌面 agent 先直接调用 Windows 自带的 WinGet（已有安装会由 WinGet 跳过/升级策略处理）：
+
+```powershell
+winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements
+winget install --id GitHub.cli -e --accept-source-agreements --accept-package-agreements
+winget install --id Python.Python.3.13 -e --accept-source-agreements --accept-package-agreements
+```
+
+重开终端，确认 `git --version`、`gh --version`、`python --version`（必须 3.12+），再按 §1.1 登录并 clone。
+若 `winget` 本身不存在，先从 Microsoft Store 安装/更新“应用安装程序”；这是空白机唯一额外人工安装点。
 
 ### 部署前只确认一次：7 项安装清单
 
@@ -82,6 +110,8 @@ python feishu/windows_bootstrap.py --skip claude --apply --yes
 把刚装好的 Node/Claude 误报成“未安装”。执行每个缺失项前还会对该组件的真实官方来源 URL
 比较直连与已配置代理，沿用 `LINK16_ROUTE_DEFAULT` 预设，只有另一条明显更快时才切换；两路都失败就停。
 已有安装保持现有安装管理器，不在装机时偷偷迁移或重复覆盖。
+脚本还会持久化当前用户的 `PYTHONUTF8=1`；这是 Python 运行时设置，不会改 Windows 的系统区域或影响旧软件。
+由于已经启动的终端、wmux 和计划任务不会倒灌新环境，设置后必须重开终端；生产桥只在安排好的维护窗口重启。
 
 ---
 
@@ -104,7 +134,7 @@ python feishu/windows_bootstrap.py --skip claude --apply --yes
 | 飞书桥、wmux RPC、注册、网络/机器体检 | **完整可用** | 不改变核心链路 |
 | `ccp` / `ccp2` / `cxp` | `profile_bootstrap.py` 建最小独立 home 与 Shell 函数；分别原生登录即可 | 可再叠加本人的规则、模型预设与长期记忆 |
 | 常用工作流 | provider 自带能力正常；没有私有 skill 名称 | 增加 `anysearch`、`push`、`pull`、`align`、`commit`、`feishu` 等个人工作流 |
-| Jina | requirements 会装 `jina` CLI，可直接使用 | 若有 `jina_rotate.py`，再获得多 key 轮换/代理增强 |
+| Jina | 不属于桥；按需安装 `requirements-agent-tools.txt` | 若有 `jina_rotate.py`，再获得多 key 轮换/代理增强 |
 | gstack | **不安装、也不需要** | 仍是单独来源、明确 opt-in，不随个人 skills 同步而默认安装 |
 
 结论：同事只拉 Link16 **不会影响桥、wmux、Claude/Codex 登录或飞书 bot 正常工作**；
@@ -121,10 +151,11 @@ python feishu/windows_bootstrap.py --skip claude --apply --yes
 | **Git for Windows / Git Bash** | 安装 Git for Windows。具体 `bash.exe` 路径由 `preflight.py` 发现，不假定必在 `C:\Program Files` 。 |
 | **GitHub CLI (`gh`)** | `winget install --id GitHub.cli -e`；每位同事登录自己的 GitHub 账号，不复制他人 token。 |
 | **Python 3.12+** | 运行 `Get-Command python -All`、`python --version`、`py -3 --version`。若只命中 `WindowsApps\python.exe` 占位符，安装官方 Python、勾 Add to PATH，必要时关闭 App execution alias，然后重开终端。 |
+| **Python UTF-8 模式** | `windows_bootstrap.py --apply --yes` 自动写用户级 `PYTHONUTF8=1`，重开终端后由 `preflight.py` 验收。**不要求**勾 Windows“Beta: 使用 Unicode UTF-8”系统区域选项；Link16 hook 还会直接按 UTF-8 读原始字节，不依赖机器 ANSI 代码页。 |
 | **`VIBECODING_ROOT` 环境变量** | 指向这个用户自己的 `.env` 所在根（例 `C:\410_VibeCoding`）。首次写凭据前必须明确设定，不依赖其他电脑的盘符。 |
 | **`PROXY_URL`** | 放在 `$VIBECODING_ROOT/.env`（如本地 mixed port）。下载/安装由 `feishu/network_route.py` 对实际 URL 同时探测直连与此代理；代码不写死端口、不改 v2rayN。 |
 | **Link16 agent profile launcher** | 运行 `python feishu/profile_bootstrap.py --apply`，建立 `ccp` / `ccp2` / `cxp` 目录和 Git Bash + PowerShell 函数。它们不是 alias，也不复制认证。 |
-| **Windows Terminal + wmux** | 两者默认 shell 都选 Git Bash；安装或升级 wmux 后重新检查。 |
+| **Windows Terminal + wmux** | 两者默认 shell 都选 Git Bash；脚本在应用未运行时保留未知字段并安全配置，正在运行时才显示一次 GUI 动作。 |
 | **node** | `node --version`（仓库自带的 `wmux/wmux-rpc.js` 要 node 跑）。 |
 | **PowerShell 脚本策略** | 若启动时报「禁止运行脚本」，检查 `Get-ExecutionPolicy -List`；对普通用户设 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force`，重开终端后验收 profile 函数。 |
 
@@ -197,17 +228,17 @@ python -c "import lark_oapi; from lark_channel import FeishuChannel, OutboundIma
 ```
 > 报 `ModuleNotFoundError: No module named 'lark_channel'` / 桥打印 `缺依赖: pip install lark-channel-sdk` → 这步没做。
 
-### 2.1 · Jina infra（桥不依赖；作为通用抓取 CLI 随 requirements 安装）
+### 2.1 · Jina infra（桥不依赖；按需安装）
 
-**为什么写进新机器 SOP**：`jina` 是 agent 抓单页的主力（URL→markdown，能啃 SPA，AnySearch 抓不动的它能抓）。
-它不在桥的运行路径上，所以**缺了桥照样跑、没有任何报错**。有个人 `anysearch` skill 的机器可以回退到 AnySearch；
+**为什么写进新机器 SOP**：`jina` 是可选的单页抓取工具（URL→markdown，能啃 SPA）。
+它不在桥的运行路径上，所以**缺了桥照样跑**，安装失败也不得阻塞部署。有个人 `anysearch` skill 的机器可以回退到 AnySearch；
 没有个人配置的同事则使用 provider 自带网页能力，两者都不影响桥本身。
 2026-08-18 在 tuf19 实证：`jina` 入口存在但底层 CLI 没装 → 单页读取直接失败。**这种"缺了不报错"的东西最该写进 SOP**，否则每台新机器都要现场发现一次。
 
-**装**（`§2` 那条 `pip install -r feishu/requirements.txt` 已经带上了；单独补装用下面这条）：
+**按需装**（不在核心 `requirements.txt`；用户明确要网页抓取工具时才运行）：
 ```bash
 python feishu/network_route.py run --url https://pypi.org/simple/jina-cli/ -- \
-  python -m pip install -U jina-cli
+  python -m pip install -r feishu/requirements-agent-tools.txt
 ```
 
 **key**：`$VIBECODING_ROOT/.env` 里一行 `JINA_API_KEY=jina_xxxx`（多账号续 `JINA_API_KEY_2` / `_3` …，轮换器按顺序花）。
@@ -254,7 +285,7 @@ jina read "https://example.com" | head -3
 
 ## 4 · Windows Terminal + wmux 默认 Git Bash（必做）
 
-1. **Windows Terminal** → Settings → Startup → Default profile → **Git Bash**。若列表没有，新增 profile，commandline 用 `"C:\Program Files\Git\bin\bash.exe" --login -i`。
+1. **Windows Terminal**：安装脚本在它未运行时保留全部未知设置并自动补/选择 **Git Bash**；若正在运行，为防内存态覆盖文件，才提示 Settings → Startup → Default profile → Git Bash。若列表没有，脚本会新增 profile，commandline 使用体检发现的真实 `bash.exe --login -i`。
 2. **wmux**：安装脚本在 wmux 未运行时自动写入 Git Bash；若 wmux 正在运行，为防退出时覆盖配置，会明确提示到 Settings → Default Shell → **Git Bash**。路径由体检发现，不假定固定盘符。
 3. 运行 `python feishu/preflight.py`；`Git Bash`、`Windows Terminal 默认 Shell`、`wmux 默认 Shell` 三项都必须是 `[ OK ]`。
 

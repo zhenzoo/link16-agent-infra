@@ -263,13 +263,21 @@ def _trace(msg):
         pass
 
 
+def _read_stdin_json():
+    """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stream.read()
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    return json.loads(text.lstrip("\ufeff"))
+
+
 def main():
     bot = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not bot:
         _trace("EXIT 无 FEISHU_BRIDGE_SESSION（非桥会话）")
         return                                    # 非桥会话 → 不管（env-scope 隔离）
     try:
-        inp = json.load(sys.stdin)
+        inp = _read_stdin_json()
     except Exception:                             # noqa: BLE001
         return
     tp = inp.get("transcript_path")

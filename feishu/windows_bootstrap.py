@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -81,6 +82,44 @@ def _winget_package(pattern):
         return None
 
 
+def _python_version(path):
+    try:
+        done = subprocess.run(
+            [str(path), "-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10, check=False,
+        )
+        version = tuple(int(part) for part in done.stdout.strip().split("."))
+        return version if done.returncode == 0 and len(version) == 3 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def _python312_executable():
+    """Re-probe installed interpreters; the bootstrap process may still be the old Python."""
+    candidates = [Path(sys.executable)]
+    found = preflight._fresh_which("python")
+    if found:
+        candidates.append(Path(found))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        try:
+            candidates.extend((Path(local) / "Programs" / "Python").glob("Python*/python.exe"))
+        except OSError:
+            pass
+    valid = []
+    seen = set()
+    for path in candidates:
+        key = str(path).casefold()
+        if key in seen or not path.is_file():
+            continue
+        seen.add(key)
+        version = _python_version(path)
+        if version and version >= (3, 12, 0):
+            valid.append((version, path))
+    return max(valid, default=(None, None))[1]
+
+
 def wmux_executable():
     local = os.environ.get("LOCALAPPDATA")
     candidates = []
@@ -103,7 +142,7 @@ def detect_component(key):
     if key == "gh":
         return preflight._gh_path()
     if key == "python":
-        return Path(sys.executable) if sys.version_info >= (3, 12) else None
+        return _python312_executable()
     if key == "node":
         found = preflight._fresh_which("node")
         return Path(found) if found else _winget_package("OpenJS.NodeJS.LTS_*/node-*/node.exe")
@@ -156,6 +195,79 @@ def _wmux_running():
         check=False,
     )
     return done.returncode == 0
+
+
+def _windows_terminal_running():
+    if os.name != "nt":
+        return False
+    done = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command",
+         "if (Get-Process WindowsTerminal -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"],
+        capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        check=False,
+    )
+    return done.returncode == 0
+
+
+def _windows_terminal_settings(localappdata=None):
+    raw = localappdata or os.environ.get("LOCALAPPDATA")
+    if not raw:
+        return None
+    base = Path(raw) / "Packages"
+    candidates = (
+        base / "Microsoft.WindowsTerminal_8wekyb3d8bbwe" / "LocalState" / "settings.json",
+        base / "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe" / "LocalState" / "settings.json",
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def configure_windows_terminal_git_bash(*, apply=False, localappdata=None, running=None):
+    """Set WT's default profile while preserving all unrelated settings."""
+    bash = preflight._git_bash_path()
+    if not bash:
+        return {"task": "windows-terminal-default", "status": "blocked", "detail": "Git Bash 未安装"}
+    settings = _windows_terminal_settings(localappdata)
+    if not settings:
+        return {"task": "windows-terminal-default", "status": "not-found",
+                "detail": "未发现 Windows Terminal settings.json（未安装时不阻塞 Link16）"}
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8-sig"))
+        profiles_obj = data.setdefault("profiles", {})
+        profiles = profiles_obj.setdefault("list", [])
+        if not isinstance(profiles, list):
+            raise ValueError("profiles.list 不是数组")
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return {"task": "windows-terminal-default", "status": "blocked",
+                "detail": f"无法安全解析 {settings}: {exc}"}
+
+    row = next(
+        (item for item in profiles if isinstance(item, dict) and (
+            preflight._looks_like_git_bash(item.get("commandline"))
+            or str(item.get("name") or "").strip().casefold() == "git bash"
+        )),
+        None,
+    )
+    current = str(data.get("defaultProfile") or "").casefold()
+    if row and current == str(row.get("guid") or "").casefold() \
+            and preflight._looks_like_git_bash(row.get("commandline")):
+        return {"task": "windows-terminal-default", "status": "ok",
+                "detail": f"{settings} → {row.get('name') or 'Git Bash'}"}
+
+    if (running is None and _windows_terminal_running()) or running is True:
+        return {"task": "windows-terminal-default", "status": "needs-gui",
+                "detail": "Windows Terminal 正在运行；请在 Settings → Startup → Default profile 选择 Git Bash"}
+
+    guid = "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"link16-git-bash:{str(bash).casefold()}")) + "}"
+    if not row:
+        row = {"guid": guid, "name": "Git Bash"}
+        profiles.append(row)
+    row.setdefault("guid", guid)
+    row["commandline"] = f'"{bash}" --login -i'
+    data["defaultProfile"] = row["guid"]
+    if apply:
+        _atomic_json(settings, data)
+    return {"task": "windows-terminal-default", "status": "applied" if apply else "drift",
+            "detail": f"{settings} → {row.get('name') or 'Git Bash'}"}
 
 
 def _atomic_json(path: Path, data):
@@ -248,6 +360,56 @@ def ensure_wmux_desktop_shortcut(*, apply=False, desktop=None, executable=None):
     return {"task": "wmux-desktop-shortcut", "status": status, "detail": detail}
 
 
+def _user_env_value(name):
+    if os.name != "nt":
+        return os.environ.get(name)
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            return str(winreg.QueryValueEx(key, name)[0])
+    except OSError:
+        return None
+
+
+def _set_user_env_value(name, value):
+    if os.name != "nt":
+        os.environ[name] = value
+        return
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+
+
+def _broadcast_environment_change():
+    """Tell Explorer/new terminals to refresh HKCU\\Environment without logout."""
+    if os.name != "nt":
+        return
+    import ctypes
+    result = ctypes.c_size_t()
+    ctypes.windll.user32.SendMessageTimeoutW(
+        0xFFFF, 0x001A, 0, "Environment", 0x0002, 2000, ctypes.byref(result)
+    )
+
+
+def configure_python_utf8(*, apply=False):
+    """Persist Python UTF-8 mode for future shells without changing Windows locale."""
+    if (_user_env_value("PYTHONUTF8") or "").strip() == "1":
+        os.environ["PYTHONUTF8"] = "1"
+        return {"task": "python-utf8", "status": "ok",
+                "detail": "用户级 PYTHONUTF8=1（无需启用 Windows 系统区域 UTF-8 Beta）"}
+    if not apply:
+        return {"task": "python-utf8", "status": "missing",
+                "detail": "将写入用户级 PYTHONUTF8=1；完成后须重开终端"}
+    try:
+        _set_user_env_value("PYTHONUTF8", "1")
+        _broadcast_environment_change()
+        os.environ["PYTHONUTF8"] = "1"
+    except OSError as exc:
+        return {"task": "python-utf8", "status": "blocked", "detail": str(exc)}
+    return {"task": "python-utf8", "status": "applied",
+            "detail": "已写入用户级 PYTHONUTF8=1；重开终端后由 preflight 验收"}
+
+
 def apply_missing(rows):
     results = []
     for row in rows:
@@ -271,6 +433,23 @@ def apply_missing(rows):
     return results
 
 
+def deployment_failures(rows, installs, post_install):
+    """Return visible failures after installers and post-install configuration."""
+    failures = [
+        f"installer:{item.get('key')}"
+        for item in installs if item.get("returncode")
+    ]
+    failures.extend(
+        f"missing:{row['key']}" for row in rows
+        if row.get("status") == "missing"
+    )
+    failures.extend(
+        f"post:{row['task']}:{row['status']}" for row in post_install
+        if row.get("status") in {"blocked", "needs-gui"}
+    )
+    return failures
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Link16 Windows 7 项依赖安装计划（默认只预览）")
     parser.add_argument("--skip", action="append", default=[],
@@ -283,18 +462,21 @@ def main(argv=None):
         skipped = parse_skips(args.skip)
     except ValueError as exc:
         parser.error(str(exc))
-    rows = installation_plan(skipped)
+    initial_rows = installation_plan(skipped)
     if args.apply and not args.yes:
         parser.error("--apply 需要 --yes；agent 必须先把 7 项清单一次性展示给用户")
-    installs = apply_missing(rows) if args.apply else []
-    post = []
+    installs = apply_missing(initial_rows) if args.apply else []
+    rows = installation_plan(skipped) if args.apply else initial_rows
+    post = [configure_python_utf8(apply=args.apply)]
     if "wmux" not in skipped:
-        post = [
+        post.extend([
+            configure_windows_terminal_git_bash(apply=args.apply),
             ensure_wmux_desktop_shortcut(apply=args.apply),
             configure_wmux_git_bash(apply=args.apply),
-        ]
+        ])
+    failures = deployment_failures(rows, installs, post) if args.apply else []
     payload = {"applied": args.apply, "components": rows, "installs": installs,
-               "post_install": post, "gstack_default": False}
+               "post_install": post, "failures": failures, "gstack_default": False}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -305,9 +487,11 @@ def main(argv=None):
         print("  gstack：默认不安装（不在 7 项清单里）")
         for row in post:
             print(f"  [{row['status']:^9}] {row['task']} · {row['detail']}")
+        if failures:
+            print("  [  FAIL   ] 安装后复查未通过：" + ", ".join(failures))
         if not args.apply:
             print("下一步：把清单展示给用户；确认后运行 --apply --yes，可用 --skip claude/codex。")
-    return 1 if any(row.get("returncode") for row in installs) else 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

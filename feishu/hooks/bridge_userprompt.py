@@ -16,6 +16,14 @@ import sys
 from pathlib import Path
 
 
+def _read_stdin_json():
+    """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stream.read()
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    return json.loads(text.lstrip("\ufeff"))
+
+
 def _state_dir():
     d = os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR")        # 桥 spawn 时设=STATE_DIR(feishu/_state)·与 bridge_stop 同源
     if d and os.path.isdir(d):
@@ -28,7 +36,7 @@ def main():
     if not bot:
         return                                            # 非桥会话 → env-scope 隔离·不管
     try:
-        inp = json.load(sys.stdin)
+        inp = _read_stdin_json()
     except Exception:                                     # noqa: BLE001
         inp = {}
     prompt = inp.get("prompt") or ""

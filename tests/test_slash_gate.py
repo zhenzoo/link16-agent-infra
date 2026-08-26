@@ -224,7 +224,8 @@ class GrantCliEntrypointTest(unittest.TestCase):
         """判据①的端到端形态：真的把 CLI 当命令跑一遍，不带任何 --state-dir。"""
         import subprocess
         r = subprocess.run([sys.executable, str(ROOT / "feishu" / "agent_grant.py"), "status"],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=60)
         self.assertEqual(r.returncode, 0, f"CLI 裸跑失败：{r.stderr[-400:]}")
         self.assertNotIn("ImportError", r.stderr)
 

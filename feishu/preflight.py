@@ -309,8 +309,7 @@ def check_encoding():
         "        Git Bash  :  setx PYTHONUTF8 1",
         "      验收：python -c 'import locale;print(locale.getpreferredencoding(False))' 要回 UTF-8",
         "      （tb24 实证：真 GBK 机器只靠这一个用户级变量就完全免疫，连计划任务里的 pythonw 都继承得到）",
-        "      （Win11 另一条路：设置→时间和语言→语言和区域→管理语言设置→更改系统区域设置→",
-        "        勾「Beta: 使用 Unicode UTF-8 提供全球语言支持」·需重启·tb25 走的这条）",
+        "      不要求修改 Windows 的「Beta: 使用 Unicode UTF-8」系统区域选项；避免影响旧软件。",
     ])
     return Result("输出编码", FAIL,
                   f"getpreferredencoding = {pref_raw} · stdout = {_ORIGINAL_STDOUT_ENCODING or '未知'}"

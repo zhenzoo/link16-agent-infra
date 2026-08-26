@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import sys
 import subprocess
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,6 +65,40 @@ class ProfileBootstrapTests(unittest.TestCase):
             )
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual(done.stdout.split(), ["function", "function", "function"])
+
+    def test_git_bash_resolver_prefers_python313_over_python39(self):
+        candidates = [
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
+            Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        ]
+        bash = next((path for path in candidates if path.is_file()), None)
+        if not bash:
+            self.skipTest("Git for Windows bash not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            local = root / "Local App Data"
+            old_python = local / "Programs" / "Python" / "Python39" / "python.exe"
+            new_python = local / "Programs" / "Python" / "Python313" / "python.exe"
+            old_python.parent.mkdir(parents=True)
+            new_python.parent.mkdir(parents=True)
+            shutil.copy2(sys.executable, old_python)
+            shutil.copy2(sys.executable, new_python)
+            pb.bootstrap(home, apply=True)
+            rc = (home / ".bashrc").as_posix()
+            done = subprocess.run(
+                [str(bash), "--noprofile", "--norc", "-c",
+                 f"export LOCALAPPDATA='{local.as_posix()}'; source '{rc}'; __link16_python"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("Python313/python.exe", done.stdout.replace("\\", "/"))
+
+    def test_powershell_resolver_uses_semantic_version_and_requires_312(self):
+        block = pb._powershell_block()
+        self.assertIn("[version]", block)
+        self.assertIn("sys.version_info >= (3, 12)", block)
+        self.assertNotIn("Sort-Object Name -Descending", block)
 
 
 if __name__ == "__main__":

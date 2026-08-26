@@ -7,6 +7,7 @@ purpose: 让任意 runtime（Claude Code / Codex / 其它）的 agent 在一次�
 owns:
   - 仓库身份与职责边界
   - 全 runtime 共享的硬约束（身份、名册、飞书投递、生产纪律）
+  - 新机部署的触发、人工停点与完成判据
   - 变更后的验证命令
   - 文档地图与工具路由
 does_not_own:
@@ -16,7 +17,7 @@ does_not_own:
   - 内容业务规则（属各内容仓）
 read_when:
   - 每一个在本仓开工的 agent session
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-26
 ---
 
 # Link 16 · agent 入口
@@ -154,13 +155,22 @@ python feishu/registry.py --json peers <仓名> --exclude-machine <本机代号>
 ## 9. 「开始部署 Link16」是新机入口
 
 用户在 Claude / Codex / QX 等桌面客户端说「开始部署 Link16」时，立即按
-[`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) 执行。默认用户不懂 terminal：
+[`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) 执行。这里只定义部署工程师的
+决策边界；命令、顺序和排错只在 SOP-100 维护，禁止把第二份安装教程复制进 `AGENTS.md` / `CLAUDE.md`。
+默认用户不懂 terminal：
 
 - 安装前一次性展示 7 项清单，默认全选，只问哪些 provider 不要；gstack 默认不安装；
 - 检测已有安装，避免重复；Claude Code / Codex 新装走各自官方原生安装器，不默认走 npm；
 - agent 执行命令、检测网络/机型/环境并记录结果；
-- 用户只负责打开安全登录链接、选择账号/飞书组织、授权和接受必要审批；
+- 用户只负责 GitHub/provider 登录、选择飞书组织、逐条审阅授权链接、发布版本和批准必要审批；
 - 沟通「你会看到什么 / 现在要做什么」，不要用 alias、PATH、env 等内部实现教学打断流程。
+
+部署 agent 必须在后台保持需要跨 turn 等待的注册器/Monitor；出现人工步骤时给出唯一可点击链接与
+页面动作，并用机械信号继续，不能让短 tool timeout 杀掉授权流程。只有以下终态同时成立，才能说
+“部署完成”：本地与 `origin/main` 为 `0 0`、`preflight.py` 的必需项全绿、选中的 profile doctor/
+selftest 可启动、Windows Terminal（若安装）与 wmux 的 Git Bash 默认值已复查、本机 local roster 只列
+本机 bot、桥状态健康，并完成至少一条真实 owner DM 往返；选择群能力时再加一条目标群 @ 往返。没注册 bot 时应明确说“核心已部署，
+飞书接入尚未验收”，不能把脚本安装成功当成整套完成。
 
 ---
 

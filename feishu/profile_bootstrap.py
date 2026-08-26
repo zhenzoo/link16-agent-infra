@@ -68,9 +68,14 @@ __link16_root() {{
 __link16_python() {{
   local base="${{LOCALAPPDATA:-}}" found="" candidate
   command -v cygpath >/dev/null 2>&1 && base="$(cygpath -u "$base")"
-  for candidate in "$base"/Programs/Python/Python*/python.exe; do [ -x "$candidate" ] && found="$candidate"; done
+  while IFS= read -r candidate; do
+    [ -x "$candidate" ] || continue
+    "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && found="$candidate"
+  done < <(printf '%s\n' "$base"/Programs/Python/Python*/python.exe | sort -V)
   [ -n "$found" ] && {{ printf '%s\n' "$found"; return; }}
-  command -v python
+  candidate="$(command -v python 2>/dev/null)" || return 1
+  "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 || return 1
+  printf '%s\n' "$candidate"
 }}
 __link16_run_profile() {{
   local profile="$1" root py; shift
@@ -91,13 +96,24 @@ def _powershell_block(profiles=DEFAULT_PROFILES) -> str:
     return rf'''{PS_BEGIN}
 function Resolve-Link16Python {{
     $command = Get-Command python.exe -ErrorAction SilentlyContinue
-    if ($command -and $command.Source -notlike '*\Microsoft\WindowsApps\*') {{ return $command.Source }}
+    if ($command -and $command.Source -notlike '*\Microsoft\WindowsApps\*') {{
+        & $command.Source -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
+        if ($LASTEXITCODE -eq 0) {{ return $command.Source }}
+    }}
     $root = Join-Path $env:LOCALAPPDATA 'Programs\Python'
     $candidate = Get-ChildItem -LiteralPath $root -Directory -Filter 'Python*' -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending | ForEach-Object {{ Join-Path $_.FullName 'python.exe' }} |
-        Where-Object {{ Test-Path -LiteralPath $_ -PathType Leaf }} | Select-Object -First 1
+        Sort-Object @{{ Expression = {{
+            if ($_.Name -match '^Python(\d)(\d+)$') {{ [version]("$($Matches[1]).$($Matches[2])") }}
+            else {{ [version]'0.0' }}
+        }}; Descending = $true }} |
+        ForEach-Object {{ Join-Path $_.FullName 'python.exe' }} |
+        Where-Object {{
+            if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) {{ return $false }}
+            & $_ -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
+            $LASTEXITCODE -eq 0
+        }} | Select-Object -First 1
     if ($candidate) {{ return $candidate }}
-    throw 'Python not found. Install Python 3 and reopen the terminal.'
+    throw 'Python 3.12+ not found. Install it and reopen the terminal.'
 }}
 function Resolve-Link16Root {{
     $root = $env:LINK16_AGENT_INFRA_ROOT
@@ -156,7 +172,7 @@ def bootstrap(home: Path, *, apply=False, profiles=DEFAULT_PROFILES):
             launch_existed = launch.is_file()
             if apply and not launch_existed:
                 _atomic_write(launch, """#!/usr/bin/env bash
-unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_CHILD_SESSION
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-personal2}"
 """)
             rows.append({"kind": "launcher", "name": name, "path": str(launch),

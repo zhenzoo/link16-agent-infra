@@ -3,6 +3,15 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## Unreleased
+
+- 注册采用 runtime-neutral Monitor：OAuth、权限审阅/验真、认主、入群都能跨 turn 回调原 bot；默认两个人工链接，第一条只创建应用，第二条按 capability 明列 tenant scopes，代码不代替发布或管理员审批。
+- 权限从“全量默认开”改为 `core/group-a2a/docs-text/docs-media/docs-import/group-listen` 能力档；默认不申请 broad Drive，scope auditor 明确 app owner 不等于企业管理员。
+- 新增 accepted-inbound durable ledger；群 @、桥内 slash、会话首启失败前的长消息先保留全文，再与 cutover 前 transcript 和出站记录合并。Codex app-server ready wait 覆盖合法 120 秒 warm-up。
+- 新机部署补真空白机自举、安装后复查、Windows Terminal 安全配置、多 Python 语义版本选择与 Claude harness 环境清理；Codex 基线不再依赖私人 govctl，Jina 从桥核心依赖拆为可选工具。
+- 桥、cron、watchdog、注册回调共用跨进程 session/TUI 锁；cron 对 composer 未提交如实失败，不再假绿。
+- 修复中文 Windows 上 Claude/Codex hook 把 UTF-8 stdin 当 CP936 解码、导致群回址退化到主人 DM：全部 6 个 JSON hook 改读原始 UTF-8 字节并补真实中文 `p2a-ext` 回归；装机自动持久化用户级 `PYTHONUTF8=1`，不要求修改系统区域 UTF-8 Beta。
+
 ## v0.16.0 — Private 同事桌面化部署（2026-08-26）
 
 - 「开始部署 Link16」成为唯一新机入口：桌面 AI 用户只点 GitHub/provider/飞书登录链接，agent 负责命令和验收。
