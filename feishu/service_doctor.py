@@ -297,25 +297,43 @@ def evaluate(raw: dict) -> dict:
     processes = _process_groups(raw.get("processes") or [])
 
     startup_plan = (raw.get("startup") or {}).get("plan")
-    startup_ok = bool(startup_plan and all(row["status"] == "ok" for row in startup_plan["actions"]))
+    startup_actions = {
+        str(row.get("key") or ""): str(row.get("status") or "")
+        for row in (startup_plan or {}).get("actions", [])
+        if isinstance(row, dict)
+    }
+    startup_ok = bool(startup_plan and startup_actions and
+                      all(status == "ok" for status in startup_actions.values()))
+    wmux_startup_ok = startup_actions.get("wmux_run") == "ok"
+    bridge_task_ok = startup_actions.get("bridge_task") == "ok"
+    legacy_watchdog_ok = startup_actions.get("legacy_watchdog_task") == "ok"
     components["startup"] = _component(
         file_present=PASS if startup_plan else FAIL,
         configured=PASS if startup_ok else FAIL,
         running=NA, real_io=NA,
         evidence=("wmux Run + FeishuBridge task exact；legacy watchdog 未启用" if startup_ok
-                  else (raw.get("startup") or {}).get("error") or "启动项与 desired plan 有差异"),
+                  else (raw.get("startup") or {}).get("error") or
+                  f"启动项差异={startup_actions}"),
         fix="python feishu/service_installer.py plan",
     )
 
     profiles = raw["profiles"]
     skill_ok = bool(profiles["skills"]) and all(row["status"] == "ok" for row in profiles["skills"])
     hooks_ok = bool(profiles["hooks"]) and all(row["ok"] for row in profiles["hooks"])
-    profile_ok = profiles["registry_is_local"] and not profiles["errors"] and skill_ok
+    # Older Link16 machines intentionally keep reading the committed profile
+    # registry until their explicit, dry-run-first local migration.  That
+    # compatibility source is valid runtime configuration, not corruption.
+    # New deployments still materialize a local registry through SOP-100.
+    registry_usable = Path(profiles["registry"]).is_file() and not profiles["errors"]
+    profile_ok = registry_usable and skill_ok
+    registry_mode = "local" if profiles.get("registry_is_local") else "legacy-compatible"
     components["profiles_skill"] = _component(
         file_present=PASS if Path(profiles["registry"]).is_file() else FAIL,
         configured=PASS if profile_ok else FAIL, running=NA, real_io=NA,
-        evidence=f"registry={Path(profiles['registry']).name} · profiles={profiles['selected']} · skills={profiles['skills']}",
-        fix="python feishu/profile_bootstrap.py --doctor",
+        evidence=(f"registry={Path(profiles['registry']).name} ({registry_mode}) · "
+                  f"profiles={profiles['selected']} · skills={profiles['skills']}"),
+        fix=("python feishu/profile_bootstrap.py --doctor" if profiles.get("registry_is_local")
+             else "旧机可继续运行；维护窗口先 dry-run 再 --migrate-registry --apply"),
     )
     components["hooks_transport"] = _component(
         file_present=PASS if profiles["hooks"] else FAIL,
@@ -334,7 +352,7 @@ def evaluate(raw: dict) -> dict:
 
     components["wmux"] = _component(
         file_present=PASS if raw["wmux"]["rpc_file"] else FAIL,
-        configured=PASS if startup_ok else FAIL,
+        configured=PASS if wmux_startup_ok else FAIL,
         running=PASS if raw["wmux"]["rpc_ok"] else FAIL, real_io=NA,
         evidence=raw["wmux"]["evidence"], fix="打开 wmux 并复核 RPC/default shell",
     )
@@ -370,7 +388,7 @@ def evaluate(raw: dict) -> dict:
     watchdog_running = len(processes["watchdog"]) == 1 and hb_age is not None and hb_age <= 300
     components["watchdog"] = _component(
         file_present=PASS if (HERE / "bridge_watchdog.py").is_file() else FAIL,
-        configured=PASS if startup_ok else FAIL,
+        configured=PASS if bridge_task_ok and legacy_watchdog_ok else FAIL,
         running=PASS if watchdog_running else FAIL, real_io=NA,
         evidence=f"process_count={len(processes['watchdog'])} · heartbeat_age_sec={round(hb_age, 1) if hb_age is not None else None}",
         fix="不得建独立 task；由整体 bridge lifecycle 拉起并验唯一实例/心跳",

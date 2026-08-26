@@ -88,6 +88,26 @@ def test_files_without_configuration_or_processes_never_false_green(monkeypatch,
     assert result["components"]["bridge"]["layers"]["real_io"] == "unknown"
 
 
+def test_startup_drift_does_not_poison_unrelated_watchdog_configuration(monkeypatch, tmp_path):
+    raw = raw_fixture(tmp_path)
+    raw["startup"]["plan"]["actions"][0]["status"] = "change"
+    result = evaluate(monkeypatch, tmp_path, raw)
+    assert result["components"]["startup"]["layers"]["configured"] == "fail"
+    assert result["components"]["wmux"]["layers"]["configured"] == "fail"
+    assert result["components"]["watchdog"]["layers"]["configured"] == "pass"
+    assert result["components"]["watchdog"]["layers"]["running"] == "pass"
+
+
+def test_legacy_profile_registry_is_accepted_during_old_machine_migration(monkeypatch, tmp_path):
+    raw = raw_fixture(tmp_path)
+    raw["profiles"]["registry_is_local"] = False
+    result = evaluate(monkeypatch, tmp_path, raw)
+    row = result["components"]["profiles_skill"]
+    assert row["layers"]["configured"] == "pass"
+    assert "legacy-compatible" in row["evidence"]
+    assert "--migrate-registry --apply" in row["fix"]
+
+
 def test_missing_duplicate_and_extra_bridge_processes_are_degraded(monkeypatch, tmp_path):
     for rows in (
         [],
