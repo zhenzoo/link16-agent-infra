@@ -39,6 +39,7 @@ Claude Code 很强，但它被钉在**一台电脑的一个终端窗口**里。�
 | **Windows** | 桥依赖 Windows 计划任务做开机自启。macOS 未适配（wmux 本身支持 macOS，是本仓这一侧还没做）。 |
 | **Python 3.12+** | `pip install -r feishu/requirements.txt`（lark-oapi + lark-channel-sdk） |
 | **Node.js** | 桥用一个 node 脚本跟 wmux daemon 通信（脚本仓库自带，见 `wmux/wmux-rpc.js`） |
+| **Git for Windows / Git Bash** | Windows Terminal 与 wmux 的默认 shell；安装/升级后由 `preflight.py` 检查，不靠 `.bashrc` alias |
 | **wmux** ⭐ | **必装，且必须开着** —— 见下节 |
 | **飞书账号** | 用来创建 bot 应用；注册流程是扫码 OAuth，仓库里有一键脚本 |
 | **Claude Code 或 Codex CLI** | 面板里真正干活的那个 |
@@ -64,7 +65,7 @@ Claude Code 很强，但它被钉在**一台电脑的一个终端窗口**里。�
 
 ## 快速开始
 
-> 完整装机（含开机自启、看门狗）见 [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md)。
+> 完整装机（含 Git Bash 默认终端、按 URL 自动选择直连/代理、开机自启、看门狗）见 [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md)。
 > 下面只是「跑出第一只能对话的 bot」。命令以 **PowerShell** 为准（Windows 自带）。
 
 ```powershell
@@ -133,9 +134,7 @@ python feishu/feishu_bridge.py status     # 每只 bot 应显示「进程=在跑
 | `feishu/agent-registry.json` | **目录**：全舰队谁是谁、在哪台机、分管哪个仓 | ✅（样例见 `feishu/agent-registry.example.json`） |
 
 > 🚨 **第一次用的人注意**：`bridge-bots.local.json` 的语义是「**整盘接管**」——桥只跑它列的 bot。
-> 如果你没有这个文件就去注册 bot，脚本会拿仓库里 committed 的那本做种子，
-> **把别人的 bot 抄进你的名册并被你的桥拉起**（同一个飞书应用两台机各连一条长连接会互相抢）。
-> `feishu/preflight.py` 会检查这一项并提示你先建一本空的。
+> committed 名册与 local example 都是空模板；缺 local 时桥会安全停住。`feishu/preflight.py` 会提示先复制空模板，再由注册脚本 upsert 本机 bot。
 
 ---
 

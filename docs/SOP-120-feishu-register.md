@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-26
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -36,9 +36,8 @@ last_reviewed: 2026-08-17
 # 1. 一键建应用（官方扫码 · 自动写 .env）
 python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <profile>
 # 2. 脚本按 profile doctor 后自动 upsert 本机运行名册；只核对非身份字段（见 §1）
-# 3. 开权限（一键预置不含的，手动·见 §2）：
-#    ② drive:drive（在线查看 send --doc）   ③ 群消息接收 scope（a2a 关键！）
-#    每个都要：开发者后台勾选 → 创建版本 → 发布 才生效
+# 3. 选择能力档（见 §2）：默认 core/group-a2a 不追加权限；
+#    docs-publish 或 group-listen 才申请增量 scope，可能需要管理员审批
 # 4. 把 bot 拉进群；各 bot 互报 open_id（跨机靠 bot/v3/info · 群成员 API 不列 bot · 见 §3）
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
 # 6. 重启桥生效（只加了新 bot 就【单起它】·别全局 stop/start 把在跑的会话全杀了）
@@ -69,9 +68,27 @@ python feishu/feishu_bridge.py start --bot <新bot>
 - 默认 bot：`FEISHU_BRIDGE_APP_ID` / `FEISHU_BRIDGE_APP_SECRET`
 - 第 N 个：`--bot <key>` → `FEISHU_BRIDGE_<KEY>_APP_ID` / `_SECRET`
 
+### 注册前：目标飞书组织 / tenant（新机器问一次，不是每只 bot 都问）
+
+- 飞书应用属于**创建时 Device Grant 页面选择的组织/企业 tenant**；权限、管理员审批和能访问的组织资源都在该 tenant 内。它不是“这台电脑的通用飞书账号”。
+- **新机器且本机还没有 roster**：注册第一只 bot 前，让用户明确一次“创建到哪个飞书组织/企业”，并在网页上核对当前账号和组织。
+- **本机已有 roster，用户没另说**：沿用当前注册上下文，不重复询问。**用户明确指定组织时永远覆盖沿用。**
+- CLI 本地拿不到可靠的组织显示名，不能假装替用户验证；Claude/Codex 的 `ccp/ccp2/cxp` profile 与飞书组织也没有绑定关系。
+
+### 页面已显示创建成功、CLI 却没拿到 secret：续接原应用
+
+不要再造第二个应用。复制页面上的 `cli_...` **App ID**，并复用原来的 `--name/--bot/--profile`：
+
+```bash
+python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --profile <原profile> \
+  --app-id cli_xxxxxxxxxxxxxxxx
+```
+
+`--app-id` 不是八位验证码，也不是 device code；它只用于续接本次已经创建的应用。成功后脚本会补写 `.env` 并 upsert 同一条本机 roster，不应生成第二个 bot。
+
 > 🔌 **代理坑（2026-07-28 实证 · 已在脚本里堵死）**：飞书是**国内端点**，注册轮询**必须直连**。本机开着 Clash（`http(s)_proxy=127.0.0.1:7897` + Windows 注册表系统代理）时，OAuth 轮询会在跑了 10 分钟、**123 次正常轮询之后**突然拿回一个 HTML 错误页 → SDK `resp.json()` 抛 `JSONDecodeError`、整个注册崩、device_code 作废、授权链接得重开。→ `register_feishu_app.py` 开头现在**在进程内**清 `http(s)_proxy/ALL_PROXY` **并**设 `NO_PROXY=feishu.cn,…`（Windows 上 requests 还会读注册表系统代理，光清环境变量不够，得靠 `no_proxy` 才绕得掉）。只影响该进程，不动系统代理。**症状认领**：注册跑一半报 `JSONDecodeError: Expecting value: line 1 column 1` = 这个。
 
-**名册** = `feishu/bridge-bots.json`（committed · 当前 7 bot：default/arch/explore/twitter/config/social_media/podcast）。每 bot 一行：`name` + `app_id_env` + `app_secret_env` + `at_name`（+ 可选 `cwd`）。**密钥不在这里**（在 `.env`，这里只存键名）。
+**运行名册** = `feishu/bridge-bots.local.json`（gitignored · 本机 SSOT）。committed 的 `bridge-bots.json` 与 `bridge-bots.local.example.json` 都是 `bots: []` 的安全模板；缺 local 时桥 fail closed，不会接管别人的 bot。每 bot 一行：`name` + `app_id_env` + `app_secret_env` + `at_name`（+ 可选 `cwd`）。**密钥不在这里**（在 `.env`，这里只存键名）。
 - ⚠️ **cwd 机器无关铁律**：仓库类 bot **不写 cwd**（自动落本仓库根，任何机/盘自适应）；只有非本仓库目录的 bot 才写 `cwd`，且用 `~/...`（各机自己 home，绝不写死盘符/用户名）。
 - 改名册后 **重启桥**（stop→start）生效。
 
@@ -106,18 +123,23 @@ python feishu/feishu_bridge.py start --bot <新bot>
 
 ## § 2 · 权限三层（★ 本文最关键的一节）
 
-| 层 | 谁给 | 内容 | 何时必须 | 现状 |
-|---|---|---|---|---|
-| **① 一键预置** | `register_feishu_app`（官方 `lark.register_app`） | **40+ 权限 + 6 事件**（含 `im.message.receive_v1`）+ WebSocket 长连接订阅 | 自动·**收发 DM（私聊）够用** | 所有 bot 都有 |
-| **② 云文档 `drive:drive` + `docx:document`(:create)** | **手动**（register 脚本末尾打印**一条**一键开通链 · `feishu_docs.auth_url(app_id, APP_IDENTITY_MANUAL_SCOPES)`） | 应用身份云文档读写 + **创建 docx**（**⚠️ 2026-06-21 修正：光 drive:drive 不够·创建文档另需 docx:document(:create)·否则报 99991672**） | 要 `send --doc` / `send_feishu_media`（在线文档/媒体在线查看）时 | 老 bot 预置带 docx 已绿；新 bot 走一键全开链 |
-| **③ `im:chat`（a2a 关键）** | **手动 · 之前从没记录、也没默认开** | `im:chat`（获取与更新群组信息）· 见下方「③ 详解」 | bot 要进群跟别的 agent 彼此 @ / 通讯时（= 跨机 a2a 的底层） | 见 §2.1 登记表 |
+注册不再把“所有历史 bot 开过的权限”当成每只新 bot 的完成条件。`register_feishu_app.py --capability ...` 按实际用途选择；未指定时使用 `core`。
 
-### ③ 详解 — `im:chat`（获取与更新群组信息）
+| 能力档 | 能做什么 | 额外权限 | 审批边界 |
+|---|---|---|---|
+| `core` | DM 收发、发文字/图/文件、接收群内 @ | 无；官方 preset 已带 | Device Grant 创建流内完成 |
+| `group-a2a` | 入共享群后与 peer bot 互相 @ | 无额外 umbrella scope；依赖 preset 的 granular `im:chat:read/update`、`im:chat.members:bot_access`、群 @ scope | 权限通常已随 preset；**人工拉群**仍不可省 |
+| `docs-publish` | `send --doc`、媒体嵌 docx、授权 owner、公开链接 | `drive:drive` + 任一 docx 创建/编辑权限 | 云文档应用权限需要企业管理员审批；租户免审规则例外 |
+| `group-listen` | 不被 @ 也主动读取全群 | `im:message.group_msg` | 可选高范围能力；不用就不开 |
 
-**这是「把 bot 拉进一个群、让它们彼此 @、彼此通讯」必需的那个权限（Publisher 2026-06-20 实测确认）。** ① 的预置 + `im.message.receive_v1` 事件保证私聊收得到；但 bot 要在**群**里正常参与（解析群、认成员、收发群内 @），必须额外开 **`im:chat`**（开发者后台「获取与更新群组信息」）。
+本机 `lark-oapi>=1.7.3` 已支持 `register_app(addons=...)`。注册器会把显式能力档的增量 scopes 放进创建流；这能避免事后逐个补，但**不能绕过租户管理员审批**。普通 agent 推荐 `core + group-a2a`，不申请 Drive 与听全群。
 
-- 开通入口：开发者后台「权限管理」勾 `im:chat` → **创建版本 + 发布**（光勾不发版 = 没开）。
-- 一键开通链格式：`https://open.feishu.cn/app/<app_id>/auth?q=im:chat&op_from=openapi&token_type=tenant`
+### § 2.0.1 · 谁能审核，能不能自己发布
+
+- 企业自建应用生产版本原则上由企业管理员审核；管理员可以给某个应用或开发者配置免审。开发者只有同时是管理员、或命中免审规则时，才会表现为“自己确认发布即可”。
+- 云文档应用权限明确需要企业管理员审批；`drive:drive` 开不了不是 Link16 故障，代码不能绕过租户政策。
+- Device Grant preset 的基础能力不需要再手工申请新版本，所以不需要 Drive 的 bot 可以直接运行。
+- “应用 owner/协作者”“最近可审核该应用的应用管理员”“企业超级管理员”不是同一身份。`bridge_scope_audit.py --reviewers --bot X` 会尽量机械查询并明确标记权限不足；不得把 app owner 自动认成企业管理员。
 
 #### § 2.1 · 一个 bot 的【三个名】+ 全员名册（★ 名单 SSOT = `feishu/agent-registry.json` · 本节只讲概念，名单查工具）
 
@@ -159,9 +181,9 @@ python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某
 | 本架构能力 | 脚本 / 功能 | 需要的 scope | 一键预置含? |
 |---|---|---|---|
 | 收发文字/图/文件（DM + 桥基础） | `feishu_bridge` · `send_feishu_msg` · `send_feishu_file` · `send --image` | `im:message` 家族 + `im.message.receive_v1` 事件 | ✅ **预置**（所有 bot 都有）|
-| 在线文档 / 媒体在线查看 | `send --doc` · `send_feishu_media` | **`drive:drive`** | ❌ **手动**（已铺全 bot）|
+| 在线文档 / 媒体在线查看 | `send --doc` · `send_feishu_media` | **`drive:drive` + 任一 docx 创建/编辑权限** | ❌ 可选 `docs-publish` |
 | 进群 + 群内 @ 通讯（a2a） | `send_feishu_msg`(群) · 被 @ 回 | `im:chat:read`/`im:chat:update` + `im:chat.members:bot_access` + `im:message.group_at_msg:readonly` | ✅ **预置就有**（见下实测纠偏）|
-| 听全群历史（不被 @ 也听全程） | 读全群消息 | **`im:message.group_msg`** | ❌ **手动**（当前无 bot 开）|
+| 听全群历史（不被 @ 也听全程） | 读全群消息 | **`im:message.group_msg`** | ❌ 可选 `group-listen` |
 
 **每 bot 实测能力矩阵**（`bridge_scope_audit.py --all-env` · **2026-06-26 snapshot · 全 22 应用权限齐全 ✅**）：
 
@@ -203,7 +225,7 @@ python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某
 > - **群参与那套**（`im:chat:read/update`、`im:chat.members:bot_access`、`im:message.group_at_msg:readonly`、群只读）**一键预置就带**——连没手动动过的 config/social_media 都有。所以「让 bot 进群聊天」**底层不靠额外权限**，**真门槛是「在不在群里」（成员关系·手动拉·§2.1）**。
 > - **`drive:drive`（在线文档）** = 手动开·已全铺。
 > - **`im:message.group_msg`（听全群·不被 @ 也听全程）** = 手动开。**Publisher 已给 a2a 参与者开**（arch/explore/twitter/podcast + tb25_speech/codex ✅）→ 这几个能跟住整场群讨论；config/social_media 及 TB25 工具 bot 未开（不需旁听）。
-> - plain `im:chat`（群信息读写）也手动开在同一批 a2a 参与者上（read/update 预置已覆盖群参与·plain 更多是「显式声明 + 兼容」）。
+> - plain `im:chat` 不再作为完成闸；preset 的 granular read/update 已覆盖 Link16 正常群参与。
 
 **`im:chat` vs `im:message.group_msg`（2026-06-20 实测厘清）**：
 - **`im:chat`** = 参与群所需：**发群消息 + 被 @ 收事件 + 读群信息**（成员/群名）。**a2a 默认开这个就够**。
@@ -240,11 +262,13 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 > **🔒 登记协议（Publisher 2026-06-20 定规 · 硬规则 · 2026-07-04 大部分已自动化）**：每次用 `register_feishu_app.py` 建新 bot、**或**给任何 bot 开/关权限之后都要回写登记。**register 现在【自动】把新 bot 补进 [`agent-registry.json`](../feishu/agent-registry.json)（目录名单·open_id 现查填好）** → 运行的 agent 只需**核对/补 `repo`**；开/关权限后再跑 auditor 刷新 §2.2 能力矩阵。§2.1 名单已收口为 `agent-registry.json` 的指针·**不再手抄**。`register_feishu_app.py` 跑完会打印这份清单提醒。
 
 - [ ] **注册** `register_feishu_app.py --name X --bot key --profile <profile>`（OAuth 前 profile doctor）
+- [ ] **能力档** — 默认 `core`；需要群协作加 `--capability group-a2a`；只有确实需要才选 `docs-publish` / `group-listen`
+- [ ] **Monitor** — 注册器已自动 arm；`python feishu/registration_monitor.py status --bot key` 能看到 OAuth/权限/认主/入群机械状态
 - [ ] **运行时名册** — ✅ 注册脚本自动 upsert `bridge-bots.local.json`；核对 name/app_id_env/at_name/cwd/profile，禁止 legacy identity 字段
 - [ ] **跨机目录名册** `agent-registry.json` —— ✅ **`register_feishu_app.py` 已【自动】补 stub**（name/machine/send_key/open_id/at_name/verified 现查填好）→ 你只需**核对/补 `repo`**（分管哪个仓·脚本不知道）+ 必要时 machine，共享仓则 `shared:true`。查名册 tool / repo-sync 路由 / 方案B 按名喊全靠它
 - [x] **默认 profile** — 本机 `defaults.profiles` 只写一次；例外 bot 只写 `profile`。机制见 [`ARCH-120`](ARCH-120-agent-profile-runtime.md) 与 [`ARCH-110 §4.2`](ARCH-110-feishu-bridge.md)。
-- [ ] **②** 开 `drive:drive`（register 末尾的链）→ 创版本 → 发布
-- [ ] **③** 开 `im:chat`（获取与更新群组信息）→ 创版本 → 发布 ★**默认必开**（群 a2a 关键）
+- [ ] **可选 docs-publish** — 只有要在线文档/媒体时才申请 Drive 权限并走管理员/免审发布
+- [ ] **可选 group-listen** — 只有要听全群时才申请 `group_msg`
 - [ ] **拉进共享群** + 互换 open_id（`bot/v3/info`）
 - [ ] **两台机** 各配 `.env`（§5）
 - [ ] **重启桥** stop→start
@@ -256,14 +280,14 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 ## § 5 · 两台电脑配置（多机各跑各的桥）
 
 - **`.env`**：每台机把全部 bot 的 `FEISHU_BRIDGE_<KEY>_APP_ID/SECRET` 配齐（同一批应用、两台机共用同一套密钥）。
-- **`bridge-bots.local.json`**（gitignored · 每台机自建）：**存在 = 整盘接管**——桥**只跑**它列的 bot（**不合并** committed `bridge-bots.json`）。理由：**同一飞书应用两台机各连一条 WS 会撞** → 本机必须只连自己负责的那几个 bot。不存在 = 用 committed 名册（另一台机/CI 走这条）。详见 `ARCH-101 §4.1`。
+- **`bridge-bots.local.json`**（gitignored · 每台机自建）：**存在 = 整盘接管**——桥**只跑**它列的 bot（**不合并** committed `bridge-bots.json`）。理由：**同一飞书应用两台机各连一条 WS 会撞** → 本机必须只连自己负责的那几个 bot。不存在时 committed 名册为空，桥会 fail closed 并提示先建 local。详见 `ARCH-101 §4.1`。
 - `.env` 路径跨机解析见 `bridge_env.resolve_env_path`（`XHS_ENV_FILE` → `VIBECODING_ROOT/.env` → 上溯找 → legacy 兜底·不写死盘符）。
 
 ---
 
 ## § 6 · 待办 / 已知缺口
 
-1. ✅ **已做（2026-06-20）**：`register_feishu_app.py` 注册末尾现在默认也打印 `im:chat` 开通链（+ 提示「拉群只能人工」+「听全群另需 `im:message.group_msg`」）。建新 bot 不再漏开。
+1. ✅ **2026-08-26 纠偏**：注册改为能力档；preset granular scopes 已够普通群 a2a，不再默认申请 plain `im:chat`、Drive 或听全群。
 2. ~~③ 精确 scope code 待核对~~ → ✅ 已确认 = **`im:chat`**（Publisher 2026-06-20）。
 3. `/cd` 书签（`bridge-cd-bookmarks.json`）暂仍 committed 指某台机；本机本地化放 `.local` 版（`ARCH-101 §4.1` 注）。
 4. ✅ **已做（注册必直连飞书 · 两机各撞一次才补齐）**：`register_feishu_app.py` 曾是**全仓唯一没有绕代理 guard 的飞书脚本**（`feishu_bridge` / `send_feishu_msg` / `send_feishu_file` / `bridge_scope_audit` 早就有）。**同一个根因、两台机两种死法**：

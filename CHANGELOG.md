@@ -3,6 +3,13 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.15.0 — TB26 装机收口（2026-08-26）
+
+- Windows Terminal 与 wmux 的默认 Git Bash 由“人工习惯”升为 `preflight.py` 机械验收；wmux 安装/升级后必须静态检查 store，并新开临时 workspace 验 `MSYSTEM=MINGW64`。
+- 新增 `feishu/network_route.py`：按实际下载 URL 并行比较 direct / `.env` 的 `PROXY_URL`，只给一次子进程注入所选线路；不改 v2rayN/系统代理，不包含 企业租户A Remote/Staff 网络特例。
+- 飞书注册支持 `--app-id cli_...` 续接已创建但凭据回传中断的应用；最低 `lark-oapi` 升至 1.7.3，并补测试与 SOP。
+- 新机器首次建 bot 前只确认一次目标飞书组织；同机后续沿用，显式指定覆盖。空 local roster 模板改为不可运行的 `bots: []`。
+
 ## v0.14.0 — 撞限流自动接管：会话不再死在 weekly limit 上（2026-08-20）
 
 **WHY**：2026-08-20 17:11 `tb24-voiceover` 撞 ccp2 的 weekly limit 停住，**主人在飞书上零通知**，

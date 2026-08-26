@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-25
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -49,7 +49,9 @@ last_reviewed: 2026-08-17
 | 项 | 怎么查 / 怎么配 |
 |---|---|
 | **`VIBECODING_ROOT` 环境变量** | 指向 `.env` 所在的 VibeCoding 根（如 `D:\410_VibeCoding`）。桥的 `.env` 路径靠它跨机解析（不写死盘符·见 ARCH-110 §4.1）。没设也有上溯/legacy 兜底，但建议设。 |
+| **`PROXY_URL`** | 放在 `$VIBECODING_ROOT/.env`（如本地 mixed port）。下载/安装由 `feishu/network_route.py` 对实际 URL 同时探测直连与此代理；代码不写死端口、不改 v2rayN。 |
 | **Link16 agent profile launcher** | `feishu/agent-profiles.json` 是账号映射 SSOT；运行 `python ~/.claude-personal/skills/agent-profile-governance/scripts/profile_governance.py wrappers --apply` 生成 Git Bash + PowerShell 5/7 的动态 wrapper，再跑 `doctor`。禁止手写 `CLAUDE_CONFIG_DIR`/`CODEX_HOME` alias。 |
+| **Git for Windows + Windows Terminal** | `C:\Program Files\Git\bin\bash.exe` 必须存在；Windows Terminal 的默认 profile 必须选 Git Bash。装完由 `preflight.py` 机械检查。 |
 | **node** | `node --version`（`~/wmux-rpc.js` 要 node 跑）。 |
 | **仓库 clone** | `git clone git@github.com:zhenzoo/link16-agent-infra.git` 到本机（惯例位置 `$VIBECODING_ROOT\Post\link16-agent-infra`；`zhenz`/`D:` 那台历史上多一层 `Post\tools\`）。 |
 
@@ -58,9 +60,13 @@ last_reviewed: 2026-08-17
 ## 2 · Python 依赖
 
 ```bash
-pip install -r feishu/requirements.txt
+# 对真实 PyPI 目标并行探测 direct / PROXY_URL，选稳定且明显更快的一路执行 pip。
+python feishu/network_route.py run --url https://pypi.org/simple/lark-oapi/ -- \
+  python -m pip install -r feishu/requirements.txt
 # = lark_oapi + lark-channel-sdk（requests-toolbelt 自动带入）
 ```
+
+`network_route.py` 只给这一次子进程设置代理环境，不改系统代理或 v2rayN。双路都失败会非零退出，不会拿“预设”假装成功；只想看结果可把 `run` 换成 `probe`。
 
 验证：
 ```bash
@@ -76,7 +82,8 @@ python -c "import lark_oapi; from lark_channel import FeishuChannel, OutboundIma
 
 **装**（`§2` 那条 `pip install -r feishu/requirements.txt` 已经带上了；单独补装用下面这条）：
 ```bash
-HTTPS_PROXY=http://127.0.0.1:7897 pip install -U jina-cli    # 墙外服务·必须走代理
+python feishu/network_route.py run --url https://pypi.org/simple/jina-cli/ -- \
+  python -m pip install -U jina-cli
 ```
 
 **key**：`$VIBECODING_ROOT/.env` 里一行 `JINA_API_KEY=jina_xxxx`（多账号续 `JINA_API_KEY_2` / `_3` …，轮换器按顺序花）。
@@ -120,19 +127,20 @@ python "$HOME/.claude-personal/scripts/jina_rotate.py" read "https://example.com
 
 ---
 
-## 4 · wmux GUI 设置（可选 · 只影响你手动开的终端）
+## 4 · Windows Terminal + wmux 默认 Git Bash（必做）
 
-「默认 Shell」+「启动目录」**不在 `~/.wmux/config.json`**（那只是 daemon 兜底，且没有 cwd 键），它们是 wmux 的 **GUI App 设置**（渲染层 store，解析优先级 `profile.startupCwd > 全局 startupDirectory > homedir`）。在 **wmux Settings 面板**里设：
+1. **Windows Terminal** → Settings → Startup → Default profile → **Git Bash**。若列表没有，新增 profile，commandline 用 `"C:\Program Files\Git\bin\bash.exe" --login -i`。
+2. **wmux** → Settings → Default Shell → **Git Bash**（`C:\Program Files\Git\bin\bash.exe`）。
+3. 运行 `python feishu/preflight.py`；`Git Bash`、`Windows Terminal 默认 Shell`、`wmux 默认 Shell` 三项都必须是 `[ OK ]`。
 
-- 「默认 Shell」→ Git Bash（如 `C:\Program Files\Git\bin\bash.exe`）
-- 「启动目录 / Startup Directory」→ 你的工作根（如 `D:\410_VibeCoding\Post\tools`）
+wmux 的「默认 Shell」+「启动目录」**不在 `~/.wmux/config.json`**。真实持久化字段是 `%APPDATA%\wmux\session.json.defaultShell`（GUI 渲染层 store）；安装或升级 wmux 后都要复核。**不要为默认 shell 改 `.bashrc`，也不要造 alias。**
 
 > App 正在跑时它在内存里管这状态，手写持久化文件会被它退出时覆盖 → 走 GUI 最稳。
-> 注：桥起的 bot 会话 cwd 由 bot 名册的 `cwd` 字段 + 桥自己 `cd` 决定，**跟这个 GUI 设置无关**——GUI 设置只管你手动开的面板。
+> 注：启动目录可选；桥起的 bot 会话 cwd 由 bot 名册的 `cwd` 字段 + 桥自己 `cd` 决定，与 GUI 启动目录无关。
 
-### 4.1 · 让 wmux 面板自动进仓库目录（`~/.bashrc` · 比 GUI 设置更可移植 · 推荐）
+### 4.1 · 可选：只在确实需要“手动面板自动 cd”时改 `~/.bashrc`
 
-wmux 开终端时会注入环境变量 `WMUX_WORKSPACE_ID`。在**本机** `~/.bashrc` 末尾加一段，靠它判断「只有 wmux 面板才 `cd` 进仓库」（普通 git bash / 子 shell 不受影响，仍停在 `~`）：
+Link16 默认不需要这段；bot 的 cwd 已由名册决定。只有你明确想让**手动新建的 wmux 面板**自动进固定仓库时，才在本机 `~/.bashrc` 加：
 
 ```bash
 # wmux 面板里自动进项目目录（普通 git bash / 子 shell 不受影响）
@@ -146,7 +154,7 @@ fi
 - **设了 `VIBECODING_ROOT`（§1 建议设）就用它当前缀**：`cd "$VIBECODING_ROOT/Post/xhs-card-gen"`——盘符/用户名无关，跨机最稳（子路径按本机实际 clone 位置调，如有的机 clone 到 `$VIBECODING_ROOT/Post/tools/xhs-card-gen`）。没设 `VIBECODING_ROOT` 才退而写本机绝对路径。
 - 两个守卫的含义：`WMUX_WORKSPACE_ID` = 只 wmux 面板才 `cd`（不污染普通终端）；`_WMUX_CD_DONE` = 子 shell 不重复 `cd`。
 - 加完开新 wmux 面板即生效（或 `source ~/.bashrc`）。
-- 跟 §4 的 GUI「启动目录」**二选一即可**：GUI 改的是 wmux 渲染层、不跨机；这段改的是 shell 层、跟着 `VIBECODING_ROOT` 走 → **更推荐用这个**。
+- 跟 wmux GUI 的「启动目录」二选一即可；没有这个需求就两者都不配，保持 home 最简单。
 
 ---
 
@@ -162,7 +170,9 @@ fi
 
 ## 6 · `.env` 凭证 + bot
 
-- **bot = 一个飞书云应用**（app_id/secret），不绑机器——同一套凭证哪台机都能用。**但一个 app 同时只允许一条长连接 → 同一个 bot 不能两台机同时跑**（会抢连接）。
+- **bot = 某个飞书组织/租户里的云应用**（app_id/secret），不绑机器——同一套凭证哪台机都能用；但权限、管理员审批和能访问的组织资源都属于创建时的租户。Claude/Codex profile 与飞书组织无关。
+- **新机器第一只 bot 前只确认一次目标组织**：让用户明确“注册到哪个飞书组织/企业”，Device Grant 页面核对当前账号和组织；本机已有 roster 且用户没另说时沿用，不必每只都问。用户显式指定永远覆盖沿用。CLI 本地无法可靠读取组织显示名，不能假装自动验证。
+- **同一个 app 同时只允许一条长连接** → 同一个 bot 不能两台机同时跑（会抢连接）。
 - **新建本机专属 bot**（推荐 · 跟别的机零冲突）：
   ```bash
   python feishu/register_feishu_app.py --name 本机助手 --bot local1
@@ -188,6 +198,7 @@ cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json
 ## 8 · 起桥 + 验收
 
 ```bash
+python feishu/preflight.py                 # 终端/profile/依赖/名册都绿再起桥
 python feishu/feishu_bridge.py start      # 给名册里每个 bot 各起一隐藏进程
 python feishu/feishu_bridge.py status     # 看进程/会话活没活
 ```
@@ -435,9 +446,9 @@ Get-Content "$repo\_autopilot\watchdog.log" -Tail 2                             
 | 敲 `ccp`/`cxp` 冒 `wsl: …` + `execvpe(/bin/bash) failed`，直接回到提示符 | 命令被交给了 **System32 的 WSL bash**（`CreateProcess` 把 System32 排在 PATH 前）。执行处必须走 `agent_runtime.resolve_shell()`，绝不传裸名 `bash`。查：`python -c "import subprocess;subprocess.call(['bash','-lc','echo HI'])"` —— 打不出 `HI` 就是中招（PLAN-923 · BUG-1） |
 | 开新 Git Bash 冒一串 ``syntax error near unexpected token `('``，且 `type ccp` 显示 is aliased | CLI 输出带 `\r`，`unalias` 拿到 `cc<CR>` 删不掉老 alias → 函数定义撞 alias。查：`agent_profile_cli.py list --names \| od -c` 有没有 `\r`（PLAN-923 · BUG-2） |
 | 拿不准「现在到底哪些号能起」 | `python feishu/agent_profile_cli.py selftest` —— 一张矩阵 + `N/N 全绿`，比逐个 doctor 可靠（它会真启动一次） |
-| 升级 Codex 慢得要死（`codex update` / `npm i -g @openai/codex` 卡十几分钟） | npm 继承了 `.bashrc` 的全局 `https_proxy`，把 151.7 MB 二进制塞进 Clash。**剥代理直连快 100 倍**（实测 5 秒下完）：见 [`SOP-160` › 升级 Codex](SOP-160-codex-personal-migration.md#升级-codex必须剥代理直连--否则慢-100-倍) |
+| 下载/安装异常慢，拿不准直连还是代理 | 不按旧机器经验猜。对实际目标先跑 `python feishu/network_route.py probe --url <URL>`；执行安装用 `run ... -- <命令>`。它从 `.env` 读 `PROXY_URL`，双路都失败就停止；不改 v2rayN/系统代理，也不识别网络名。 |
 | 桥连不到 `.env` / 凭证空 | `VIBECODING_ROOT` 没设且上溯找不到 `.env`（§1）；或 §6 没 register |
-| 手动开的 wmux 终端不是 git-bash / 目录不对 | §4 GUI 设置（不是改 config.json） |
+| Windows Terminal / wmux 新终端不是 Git Bash | §4：分别改默认 profile / Default Shell，再跑 preflight；不是 `.bashrc` alias，也不是 `~/.wmux/config.json` |
 | 开机后桥没自己起来 / 每次都要手动 `start` | §9 开机自启没配（或任务被禁用）→ 见 §9.4 |
 
 ## 附录 B · 已知跨机硬编码残留（不影响「只跑本机 bot」）
