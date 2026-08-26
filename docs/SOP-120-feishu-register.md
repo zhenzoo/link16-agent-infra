@@ -269,6 +269,7 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 
 - [ ] **注册** `register_feishu_app.py --name X --bot key --profile <profile>`（OAuth 前 profile doctor）
 - [ ] **能力档** — 默认 `core + group-a2a`；只有确实需要才选 `docs-text` / `docs-media` / `docs-import` / `group-listen`
+- [ ] **第二步开权限（必做）** — 按租户走 [§ 4.1](#-41--第二步开权限两个分支--按租户选) 的分支 A 或 B；企业租户A 企业租户一律 `python feishu/scope_level.py --new-app <app_id>`
 - [ ] **Monitor** — 注册器已自动 arm；`python feishu/registration_monitor.py status --bot key` 能看到 OAuth/权限/认主/入群机械状态
 - [ ] **运行时名册** — ✅ 注册脚本自动 upsert `bridge-bots.local.json`；核对 name/app_id_env/at_name/cwd/profile，禁止 legacy identity 字段
 - [ ] **跨机目录名册** `agent-registry.json` —— ✅ **`register_feishu_app.py` 已【自动】补 stub**（name/machine/send_key/open_id/at_name/verified 现查填好）→ 你只需**核对/补 `repo`**（分管哪个仓·脚本不知道）+ 必要时 machine，共享仓则 `shared:true`。查名册 tool / repo-sync 路由 / 方案B 按名喊全靠它
@@ -280,6 +281,106 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 - [ ] **重启桥** stop→start
 - [ ] 验：群里 `@新bot` 一句能回 + 让它 `send_feishu_msg` @ 另一台的 bot 能送达
 - [ ] 🔄 **回写登记**：`agent-registry.json` 目录条目上一步 register 已**自动补**（核对 `repo`/machine 即可，别忘）；开/关权限后跑 `python feishu/bridge_scope_audit.py --all-env` 刷新 **§2.2 能力矩阵**。（§2.1 名单已是 `agent-registry.json` 的指针·不再手抄）
+
+---
+
+## § 4.1 · 第二步：开权限（两个分支 · 按租户选）
+
+`register_feishu_app.py` 跑完 = **第一步**（应用建好 + 官方 preset 的基础消息权限）。
+**第二步必须手动开云文档权限**，走哪个分支取决于这只 bot 建在哪个租户。
+
+### 分支 A · 默认（个人租户 / 能批 `drive:drive` 的企业）
+
+沿用原做法：`feishu_docs.auth_url(app_id)` 给的那组云文档权限
+（`drive:drive` + `docx:document` + `docx:document:create`），一条链接开完。
+
+### 分支 B · 企业租户A 企业租户A（企业租户 `YOUR_TENANT` · `drive:drive` 批不下来）
+
+```bash
+python feishu/scope_level.py --new-app <app_id>
+```
+
+一条链接开 **54 条**，**不含 `drive:drive`** —— 该租户压着不批，而且**不需要它**。
+发布后复核：`python feishu/scope_level.py`，新 bot 应显示「已齐平」。
+
+> 判断走哪个分支：注册时选的组织就是它的租户（见 PLAN-932 §0.4）。
+> 拿不准就先跑一次 `scope_level.py`，看它和同租户其它 bot 差多少。
+
+### 为什么不含 `drive:drive` 也够用（2026-08-26 实测）
+
+| 动作 | 要 `drive:drive` 吗 | 实测证据 |
+|---|---|---|
+| 建在线文档 | ❌ 只要 `docx:document:create` | `tb26-baseball` 零高权限 `code=0` |
+| Markdown → 文档正文 | ❌ 只要 `docx:document.block:convert` | 同上 |
+| 设「组织内凭链接可读」 | ❌ | `code=0`，另一只 bot 读回 121 字符验证生效 |
+| 把人加成协作者 | ✅ 或 `docs:permission.member:create` | baseball 被拒 |
+| 上传素材走 import 链 | ✅ 或 `docs:document.media:upload` | baseball 被拒 |
+
+**「加协作者」那一步可以不做** —— 文档设成组织内凭链接可读后，拿到链接的人直接能打开。
+所以「发在线文档给主人」这条链路，**零高权限就成立**。
+
+### ⚠️ 应用侧查不到哪些权限「需审核」
+
+实测 `GET /application/v6/scopes` 只返回 `scope_name` / `grant_status` / `scope_type` 三个字段，
+且**只列已生效的**；`app_versions` 也只返回已通过的版本 —— **待审核的版本根本不出现**。因此：
+
+- **API 说没有 ≠ 没申请过**，可能正卡在审批里。
+- 某条是不是「需审核」，**只能人在开发者后台看**，脚本查不到。
+- 实践做法：点链接 → 发布 → 跑 `scope_level.py` 复核，**到手的就是能用的**。
+- 2026-08-26 实测：企业租户A 租户里后台标「需审核」的 9 条，实际放行了 7 条，
+  只有 `drive:export:readonly` 和 `space:document:retrieve` 没过。所以别看到「需审核」就放弃，先点。
+
+### 两层权限，别混为一谈（最常见的误判）
+
+- `99991672` = **权限清单不够** → 开权限能解决，`capability_probe.py` 会把飞书接受的权限清单打出来。
+- `1770032 forBidden` = **这份文档 / 这个群没分享给它** → **开再多权限都没用**，
+  要把 bot 拉进那个群，或把文档设成组织内可见。
+  实测：有 `drive:drive` 的 bot 读不到群内文档；在群里、没有 `drive:drive` 的 bot 读得到。
+
+### ⚠️ 飞书在线文档不支持免登录访问
+
+设成 `anyone_readable` + `external_access:open` 之后，匿名浏览器**仍会被 302 到登录页**
+（企业租户与个人租户实测一致）。飞书的「任何人」= 任何**已登录飞书**的人。
+要真正「不用登录、任何网络都能打开」的公开链接，走自建静态站
+（`skills/align/scripts/publish_mockup.py` → Cloudflare Pages），实测匿名 `HTTP 200`。
+
+### 最小可用权限集（推荐给新 bot · 别无脑开 54 条）
+
+54 条里绝大多数是**官方注册预设自带的**（消息、评论、pin、表情、斜杠命令、机器人菜单…），
+不是我们挑的。真正撑起「收发消息 + 发在线文档 + 读文档 + 扒图」的核心只有 **14 条**：
+
+| 用途 | 权限 |
+|---|---|
+| 私聊收发 + 资源 | `im:message:send_as_bot`、`im:message.p2p_msg:readonly`、`im:resource` |
+| 群内 @ 与路由 | `im:chat:read`、`im:message.group_at_msg:readonly` |
+| 听全群（可选） | `im:message.group_msg` |
+| **发在线文档** | `docx:document:create`、`docx:document:write_only`、`docx:document.block:convert`、`drive:drive.metadata:readonly` |
+| 读文档 | `docx:document:readonly`、`wiki:node:read` |
+| 扒文档内嵌图片 | `docs:document.media:download` |
+| 读表格（可选） | `bitable:app:readonly`、`sheets:spreadsheet:readonly` |
+
+`--new-app` 给的 54 条是「和现有 bot 完全拉齐」的做法，省心但偏多；
+**只想要能用**就照上表挑。多出来的那些不构成额外风险（都是消息类和只读类），但也没必要。
+
+### 发在线文档链接给人时：必须带中文说明，不许只甩链接
+
+主人 2026-08-27 定的硬规则：**任何投递在线文档链接的消息，链接前必须有一句中文说明这文档是什么**
+（文档名 / 一句话内容摘要）。只甩一条 `https://…/docx/xxx` 过去，收件人根本不知道是什么。
+
+- ✅ `PLAN-980 · 无 drive:drive 的飞书在线文档收发通路（29 条实测事实）
+https://…`
+- ❌ 光一行 `https://…/docx/RCpudZZg8o…`
+
+同样适用于图片、视频、附件：先说这是什么，再给链接或文件。
+
+### 相关工具
+
+| 想知道 | 跑什么 |
+|---|---|
+| 新 bot 一次性开全（企业分支） | `python feishu/scope_level.py --new-app <app_id>` |
+| 各 bot 权限差多少、怎么拉齐 | `python feishu/scope_level.py` |
+| 某能力被拒时飞书接受哪些权限 | `python feishu/capability_probe.py --doc <token> --media <token>` |
+
 
 ---
 
