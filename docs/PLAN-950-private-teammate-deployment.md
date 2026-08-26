@@ -2,7 +2,7 @@
 doc_type: PLAN
 doc_id: PLAN-950
 title: 私有仓同事部署：桌面端一句话开工、机器/profile 引导与隐私加固
-status: active
+status: complete
 plan_version: 5
 purpose: 让不熟悉终端的 Windows 同事仅凭桌面 AI 客户端和一句“开始部署 Link16”，安全完成 7 项官方依赖、private main clone、网络确认、ccp/ccp2/cxp、机器前缀与飞书桥部署。
 owns:
@@ -112,7 +112,7 @@ last_reviewed: 2026-08-26
 - [x] S6.1 `AGENTS.md` 只持有 runtime-neutral 的触发、人工停点、完成判据；`CLAUDE.md` 只补后台续跑等 Claude 执行适配。
 - [x] S6.2 `SOP-100` 保持唯一顺序手册，并把真实 DM/可选群 @ 往返纳入最终完成闸。
 - [x] S6.3 审查 `v0.15.0..v0.16.0`、当前工作树、远端 main 与新机依赖来源；修掉会阻塞同事 clone/deploy 的问题。
-- [ ] S6.4 全量验证后按概念提交并安全推送；同事只从新的 `origin/main` 开始部署。
+- [x] S6.4 全量验证后按概念提交并安全推送；同事只从新的 `origin/main` 开始部署。
 
 ## 3 · Evaluation ledger
 
@@ -138,7 +138,7 @@ last_reviewed: 2026-08-26
 | 2 | 20/22 | 6/7 | 完整 mirror 扫描 205 commits / 0 missing / 0 凭据候选 / 0 敏感文件名；36 项定向测试通过，本机前缀 tb26，真 Git Bash 加载三个 function 通过；待全仓测试与 main push |
 | 3 | 29/31 | 7/8 | 7 项计划与 wmux 收尾落地，个人 skills/gstack 边界去耦；全仓 282 tests + 10 subtests 通过，本机 7 项与桌面快捷方式/defaultShell 验真；待提交、push 后最终 preflight |
 | 4 | 31/31 | 8/8 | 三类变更独立提交并推到远端 main；最终 preflight 15/15 OK、HEAD=origin/main 0/0、真实 Git Bash 三个 profile function 通过，v0.15.0/v0.16.0 发布 |
-| 5 | 34/35 | 10/10 | 部署入口、人工停点、真实往返完成闸与单仓依赖边界均已复核；全仓 306 passed + 16 subtests、fresh-env preflight 15/15 | 待提交与推送 |
+| 5 | 35/35 | 10/10 | 部署入口、人工停点、真实往返完成闸与单仓依赖边界均已复核；全仓 306 passed + 16 subtests、fresh-env preflight 15/15；`7de1321` + `3c6383b` 已推 `origin/main`，最终 0/0 | 同事可从新 main 开始部署 |
 
 ### tool_fixes
 
