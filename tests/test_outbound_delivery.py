@@ -1,8 +1,11 @@
+import asyncio
 import json
 import os
 import sys
 import tempfile
+import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -167,6 +170,63 @@ class FallbackLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("\n" + url, channel.payloads[0]["text"])
 
 
+class ProviderMessageUuidTests(unittest.TestCase):
+    def test_local_fragment_id_maps_to_stable_standard_uuid(self):
+        local_id = "a" * 64
+        provider_id = feishu_bridge._provider_message_uuid(
+            {"fragment_id": local_id}
+        )
+        self.assertEqual(len(local_id), 64)
+        self.assertEqual(len(provider_id), 36)
+        self.assertEqual(str(uuid.UUID(provider_id)), provider_id)
+        self.assertEqual(
+            provider_id,
+            str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"link16:feishu:fragment:{local_id}",
+            )),
+        )
+        self.assertEqual(
+            feishu_bridge._provider_message_uuid({"fragment_id": local_id}),
+            provider_id,
+        )
+        self.assertNotEqual(
+            feishu_bridge._provider_message_uuid({"fragment_id": "b" * 64}),
+            provider_id,
+        )
+        self.assertNotEqual(provider_id, local_id)
+
+    def test_card_and_text_rest_bodies_use_same_provider_uuid(self):
+        provider_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "link16-test-fragment"))
+        payloads = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read():
+                return json.dumps({"code": 0, "data": {"message_id": "om_test"}}).encode()
+
+        def urlopen(request, timeout=None):
+            payloads.append(json.loads(request.data.decode("utf-8")))
+            return Response()
+
+        with mock.patch.object(feishu_bridge, "_tenant_token", return_value="token"), \
+             mock.patch("urllib.request.urlopen", side_effect=urlopen):
+            feishu_bridge._send_interactive_message(
+                "app", "secret", "ou_owner", {"schema": "2.0"}, provider_id,
+            )
+            feishu_bridge._send_text_message(
+                "app", "secret", "ou_owner", "answer", None, provider_id,
+            )
+        self.assertEqual([row.get("uuid") for row in payloads], [provider_id, provider_id])
+        self.assertTrue(all(len(row["uuid"]) == 36 for row in payloads))
+
+
 class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.bot = {"app_id": "app", "app_secret": "secret"}
@@ -184,7 +244,8 @@ class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
             texts.append((target, body, at, message_uuid))
             return f"text-{len(texts)}"
 
-        fragment = {"answer_id": "a", "fragment_id": "f", "part": 1,
+        local_id = "f" * 64
+        fragment = {"answer_id": "a", "fragment_id": local_id, "part": 1,
                     "total": 1, "content_sha256": "h"}
         with mock.patch.object(feishu_bridge, "_send_interactive_message", side_effect=card), \
              mock.patch.object(feishu_bridge, "_send_group_text", side_effect=text), \
@@ -204,7 +265,10 @@ class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(dm["ok"] and human["ok"] and peer["ok"])
         self.assertEqual([row[0] for row in interactive], ["oc_dm", "oc_group"])
         self.assertIn("<at id=ou_human></at>", json.dumps(interactive[1][1], ensure_ascii=False))
-        self.assertEqual(texts, [("oc_group", "机器人", "ou_peer", "f")])
+        provider_id = feishu_bridge._provider_message_uuid(fragment)
+        self.assertEqual([row[2] for row in interactive], [provider_id, provider_id])
+        self.assertEqual(texts, [("oc_group", "机器人", "ou_peer", provider_id)])
+        self.assertEqual(fragment["fragment_id"], local_id)
 
     async def test_group_progress_is_skipped_but_robot_prefixed_final_is_not(self):
         calls = []
@@ -226,7 +290,8 @@ class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_card_id_falls_back_once_and_empty_text_id_stays_failed(self):
         texts = []
-        fragment = {"answer_id": "a", "fragment_id": "f", "part": 1,
+        local_id = "f" * 64
+        fragment = {"answer_id": "a", "fragment_id": local_id, "part": 1,
                     "total": 1, "content_sha256": "h"}
         route = {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_human"}
         with mock.patch.object(feishu_bridge, "_send_interactive_message", return_value=None), \
@@ -242,6 +307,8 @@ class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(card["ok"])
         self.assertTrue(plain["ok"])
         self.assertEqual(len(texts), 1)
+        self.assertEqual(texts[0][-1], feishu_bridge._provider_message_uuid(fragment))
+        self.assertEqual(fragment["fragment_id"], local_id)
         self.assertTrue(any(row.get("fallback") == "text" for row in self.receipts))
         self.assertTrue(any(row.get("degraded") is True for row in self.receipts))
 
@@ -330,6 +397,65 @@ class DocumentReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DocumentCommandHelpersTests(unittest.TestCase):
+    def test_renamed_file_as_text_is_explicit_and_legacy_flag_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "answer.md"
+            source.write_text("正文", encoding="utf-8")
+            self.assertEqual(
+                feishu_bridge._read_send_text(file_as_text=source),
+                "正文",
+            )
+        with self.assertRaisesRegex(ValueError, "--file-as-text"):
+            feishu_bridge._read_send_text(legacy_file="answer.md")
+
+    def test_doc_attachment_fallback_is_explicit_and_validated(self):
+        self.assertIsNone(feishu_bridge._doc_delivery_fallback({"name": "bot"}))
+        self.assertEqual(
+            feishu_bridge._doc_delivery_fallback({
+                "name": "bot", "doc_delivery_fallback": "attachment",
+            }),
+            "attachment",
+        )
+        with self.assertRaisesRegex(SystemExit, "只允许 attachment"):
+            feishu_bridge._doc_delivery_fallback({
+                "name": "bot", "doc_delivery_fallback": "relay",
+            })
+
+    def test_attachment_fallback_sends_one_real_file_payload(self):
+        sent = []
+
+        class FakeMediaSource:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeOutboundFile:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeChannel:
+            async def send(self, target, payload):
+                sent.append((target, payload))
+                return types.SimpleNamespace(success=True)
+
+        fake_lark = types.SimpleNamespace(
+            MediaSource=FakeMediaSource,
+            OutboundFile=FakeOutboundFile,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "deliverable.md"
+            source.write_text("# 原始文件", encoding="utf-8")
+            with mock.patch.dict(sys.modules, {"lark_channel": fake_lark}):
+                ok, error = asyncio.run(feishu_bridge._send_file_attachment(
+                    FakeChannel(), "ou_owner", source,
+                ))
+
+        self.assertTrue(ok)
+        self.assertIsNone(error)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "ou_owner")
+        self.assertIsInstance(sent[0][1], FakeOutboundFile)
+        self.assertEqual(sent[0][1].kwargs["file_name"], "deliverable.md")
+
     def test_text_document_reports_real_source_size(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "PLAN.md"

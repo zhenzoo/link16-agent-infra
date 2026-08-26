@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""feishu_docs.py — 本地 md/HTML → 飞书在线云文档 → 授权 → 返回可打开的文档 URL。
+"""feishu_docs.py — 本地文档 → 飞书在线云文档 → 返回登录后可打开的 URL。
 
 旁挂小工具（**不塞 feishu_bridge 主回路**）。被 `feishu_bridge.py send --doc` 调，也可任意会话直接
 `import feishu_docs` 用。链路全 tenant_access_token·bot 身份（详见 ARCH-101 §2.11）：
 
-  upload_all(file_token) → import_tasks(ticket) → 轮询(token+url) → permissions/members 授权 owner
-  → permissions/public 设【任何人凭链接可读】(2026-07-29 起默认) → url
+  旧链：upload_all → import_tasks → 授权 owner → 设置链接可见范围 → url
+  原生文字链：create_docx → markdown 转块 → 写块/表格 → 设置组织内可见 → url
 
-🚨 前置：bot 应用开 `drive:drive` + `docx:document`(:create) 这组云文档 scope 才贯通全链（创建 docx 必须 docx；
-   drive:drive 只够 upload/import/授权）。一键全开见 register_feishu_app.py（Publisher 后台开通·见 ARCH-101 §2.11）。
+前置：旧导入链需要 `drive:drive`；原生文字链只需 docx 创建/写入/转换及可见范围权限。
+飞书的 `anyone_readable` 仍要求访问者登录飞书，不等于匿名公网链接（PLAN-980 E25）。
 SSOT：复用 scripts/send_card_feishu.py 的 `api`（stdlib·绕代理 urllib 传输层）；token 这里改成 raise 不
 sys.exit（适合被长驻进程/库 import）。不硬编码盘符/用户名/folder。
 
@@ -142,10 +142,9 @@ def _grant_member(token: str, doc_token: str, open_id: str, perm: str = "edit"):
     return True, None
 
 
-# 「拿到链接的任何人都能打开看」这一档的公开配置（Publisher 2026-07-29 拍板：
-# 本桥产出的在线文档【一律】走这档 —— 不管是主人自己、别的智能体(a2a)、还是转给外人，
-# 点开就能读，不再有「无权限 / 需要申请」这层摩擦）。
-#   · link_share_entity=anyone_readable  互联网上【获得链接的任何人可阅读】（默认 tenant_readable=仅组织内 → 外人打不开）
+# 「拿到链接且已登录飞书的人可读」这一档的分享配置。
+# `anyone_readable` 不是匿名公网访问：干净浏览器仍会跳飞书登录页（PLAN-980 E25）。
+#   · link_share_entity=anyone_readable  已登录飞书且获得链接的人可阅读
 #   · external_access_entity=open        允许分享到组织外（不开的话 anyone_readable 也传不出去）
 #   · security/comment/copy=anyone_can_view  可查看/可评论/可复制（只读够看·不给编辑）
 _PUBLIC_LINK_BODY = {
@@ -158,7 +157,7 @@ _PUBLIC_LINK_BODY = {
 
 
 def set_public_link(token: str, doc_token: str, *, doc_type: str = "docx"):
-    """Step5 把文档链接设成【任何人凭链接可读】（drive v2 permissions/public·PATCH）。
+    """Step5 允许获得链接且已登录飞书的人阅读（drive v2 permissions/public）。
 
     失败不 raise——文档已建好、owner 也授过权·只是外人/别的 bot 可能打不开·返回 (False, err) 让上层 warn。
     注：v2 端点才有 `link_share_entity` 这套 enum（v1 是老式 bool 字段）；scope 用 `drive:drive` 即可。
@@ -177,7 +176,7 @@ def publish_file_as_doc(app_id: str, app_secret: str, file_path, *,
     """本地 md/HTML → 飞书云文档 → (授权 owner) → (设公开链接) → 返回
     {url, token, type, granted, grant_error, public, public_error}。
     perm: view/edit/full_access（默认 edit·满足「能改存」）。
-    public: 默认 True = 【拿到链接的任何人（人 / 别的智能体 / 外人）都能打开阅读】（见 set_public_link）。
+    public: 默认 True = 获得链接且已登录飞书的人可阅读（不等于匿名公网访问）。
     dry_run: 只回显将走的链路不真发。"""
     path = Path(file_path)
     if not path.is_file():
@@ -325,10 +324,10 @@ def _doc_url(token: str, doc_id: str) -> str:
 # 2026-08-26 实测（PLAN-980）：`publish_file_as_doc` 那条链要先 upload_all 再 import，
 # 两步都要 `drive:drive` 系列权限；企业管理员不批时整条死掉。
 # 这里换一条只用 docx 权限的路：建文档 → markdown 转块 → 写入 → 设「组织内凭链接可读」。
-# `tb26-baseball`（无 drive:drive、无任何需审核权限）实测 2.9 秒全绿。
+# `tb26-baseball`（无 drive:drive、无任何需审核权限）已用 21KB / 874 块真文档跑通。
 #
-# ⚠️ 单次写入有块数上限：一个一级块展开 121 块（大表格）就 `invalid param`，
-#    所以按【展开后块数】动态分批；单个块自身就超限时退化成纯文本，绝不静默丢内容。
+# ⚠️ 普通块按展开后块数动态分批；表格结构不能直接写 descendant，必须先建空表再逐格填。
+#    单元格或普通块写入失败时追加完整纯文本兜底，绝不静默丢内容。
 
 _BLOCK_BATCH_LIMIT = 45
 
@@ -378,25 +377,39 @@ def _table_data(blocks_by_id, tid):
     return rows, cols, texts
 
 
+def _text_chunks(text, limit=1800):
+    value = str(text or "")
+    return [value[i:i + limit] for i in range(0, len(value), limit)]
+
+
 def _insert_real_table(token, doc_id, index, rows, cols, texts):
-    """建空表块（飞书自动生成单元格）→ 逐格填字。回 (ok, 填成功的格数)。"""
+    """建空表块并逐格填字。回 ``(table_ok, filled, failed_indexes)``。"""
     d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
             token=token, body={"children": [{"block_type": 31, "table": {"property": {
                 "row_size": rows, "column_size": cols, "header_row": True}}}], "index": index})
     if d.get("code") != 0:
-        return False, 0
+        return False, 0, []
     child = ((d.get("data") or {}).get("children") or [{}])[0]
     cells = (child.get("table") or {}).get("cells") or []
     filled = 0
-    for cid, value in zip(cells, texts):
+    failed = list(range(len(cells), len(texts)))
+    for cell_index, (cid, value) in enumerate(zip(cells, texts)):
         if not value:
             continue
-        w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
-                token=token, body={"children": [{"block_type": 2, "text": {
-                    "elements": [{"text_run": {"content": value[:1800]}}], "style": {}}}], "index": 0})
-        if w.get("code") == 0:
+        cell_ok = True
+        for part_index, chunk in enumerate(_text_chunks(value)):
+            w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
+                    token=token, body={"children": [{"block_type": 2, "text": {
+                        "elements": [{"text_run": {"content": chunk}}], "style": {}}}],
+                        "index": part_index})
+            if w.get("code") != 0:
+                cell_ok = False
+                break
+        if cell_ok:
             filled += 1
-    return True, filled
+        else:
+            failed.append(cell_index)
+    return True, filled, failed
 
 
 def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
@@ -435,22 +448,29 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
 
     index = i = 0
     tables_real = tables_degraded = batches = 0
+    table_cells_filled = table_cells_failed = 0
     while i < len(first_level):
         bid = first_level[i]
         if (by_id.get(bid) or {}).get("block_type") == 31:
             rows, cols, texts = _table_data(by_id, bid)
             if rows and cols and rows * cols <= cell_budget:
-                ok, _ = _insert_real_table(token, doc_id, index, rows, cols, texts)
-                if ok:
+                ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts)
+                table_cells_filled += filled
+                table_cells_failed += len(failed)
+                if ok and not failed:
                     cell_budget -= rows * cols
                     tables_real += 1
                     index += 1
                     i += 1
                     continue
+                if ok:
+                    # 已创建的部分表格无法原子回滚；紧随其后追加完整逐行文本，保证内容不丢。
+                    index += 1
             lines = [" | ".join(texts[r * cols:(r + 1) * cols]) for r in range(rows or 0)]
             for line in [ln for ln in lines if ln.strip()]:
-                _create_text_block(token, doc_id, doc_id, line)
-                index += 1
+                for chunk in _text_chunks(line):
+                    _create_text_block(token, doc_id, doc_id, chunk)
+                    index += 1
             tables_degraded += 1
             i += 1
             continue
@@ -469,8 +489,8 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
         if d.get("code") != 0:
             for bid2 in part:
                 text = _plain_text_of(by_id, bid2)
-                if text:
-                    _create_text_block(token, doc_id, doc_id, text)
+                for chunk in _text_chunks(text):
+                    _create_text_block(token, doc_id, doc_id, chunk)
                     index += 1
         else:
             index += len(part)
@@ -485,6 +505,8 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     return {"url": _doc_url(token, doc_id), "token": doc_id, "type": "docx",
             "blocks": len(blocks), "batches": batches,
             "tables_real": tables_real, "tables_degraded": tables_degraded,
+            "table_cells_filled": table_cells_filled,
+            "table_cells_failed": table_cells_failed,
             "granted": granted, "grant_error": grant_error,
             "visibility": vis_ok, "visibility_error": vis_err}
 
@@ -501,7 +523,7 @@ def _plain_text_of(blocks_by_id, bid) -> str:
                     run = el.get("text_run") or {}
                     if run.get("content"):
                         parts.append(run["content"])
-    return " ".join(parts).strip()[:2000]
+    return " ".join(parts).strip()
 
 
 _VISIBILITY_PRESETS = {

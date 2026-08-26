@@ -11,6 +11,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -71,21 +72,22 @@ def _self_contained_checks() -> list[tuple[str, bool]]:
         ]
 
 
-async def _route_checks_async() -> list[tuple[str, bool]]:
+async def _route_checks_async(*, mutate_provider_uuid=False) -> list[tuple[str, bool]]:
     calls = []
     originals = {
         "card": feishu_bridge._send_interactive_message,
         "text": feishu_bridge._send_group_text,
         "history": feishu_bridge._record_automatic_outbound,
         "receipt": feishu_bridge.receipt,
+        "provider_uuid": feishu_bridge._provider_message_uuid,
     }
 
-    def fake_card(_app, _secret, target, payload, _uuid=None):
-        calls.append(("card", target, payload))
+    def fake_card(_app, _secret, target, payload, message_uuid=None):
+        calls.append(("card", target, payload, message_uuid))
         return f"om_card_{len(calls)}"
 
-    def fake_text(_app, _secret, target, text, at=None, _uuid=None):
-        calls.append(("text", target, text, at))
+    def fake_text(_app, _secret, target, text, at=None, message_uuid=None):
+        calls.append(("text", target, text, at, message_uuid))
         return f"om_text_{len(calls)}"
 
     def route_to_dest(route):
@@ -96,27 +98,42 @@ async def _route_checks_async() -> list[tuple[str, bool]]:
         feishu_bridge._send_group_text = fake_text
         feishu_bridge._record_automatic_outbound = lambda *_args, **_kwargs: True
         feishu_bridge.receipt = lambda *_args, **_kwargs: None
+        if mutate_provider_uuid:
+            feishu_bridge._provider_message_uuid = lambda fragment: fragment.get("fragment_id")
         bot = {"app_id": "app", "app_secret": "secret"}
+        fragment = {"fragment_id": "f" * 64}
         await feishu_bridge._deliver_routed_new(
-            bot, "bot", "dm", {"kind": "p2a"}, "answer", {}, route_to_dest,
+            bot, "bot", "dm", {"kind": "p2a"}, "answer", fragment, route_to_dest,
         )
         await feishu_bridge._deliver_routed_new(
             bot, "bot", "human", {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_human"},
-            "answer", {}, route_to_dest,
+            "answer", fragment, route_to_dest,
         )
         await feishu_bridge._deliver_routed_new(
             bot, "bot", "peer", {"kind": "a2a", "dest": "oc_group", "at": "ou_peer"},
-            "answer", {}, route_to_dest,
+            "answer", fragment, route_to_dest,
         )
     finally:
         feishu_bridge._send_interactive_message = originals["card"]
         feishu_bridge._send_group_text = originals["text"]
         feishu_bridge._record_automatic_outbound = originals["history"]
         feishu_bridge.receipt = originals["receipt"]
+        feishu_bridge._provider_message_uuid = originals["provider_uuid"]
+    provider_ids = [calls[0][3], calls[1][3], calls[2][4]]
+    standard_provider_uuid = False
+    try:
+        standard_provider_uuid = all(
+            len(value) == 36 and str(uuid.UUID(value)) == value
+            for value in provider_ids
+        )
+    except (TypeError, ValueError, AttributeError):
+        pass
     return [
         ("p2a DM interactive", calls[0][0] == "card" and calls[0][1] == "oc_dm"),
         ("p2a-ext human group interactive", calls[1][0] == "card" and "ou_human" in json.dumps(calls[1][2])),
         ("a2a peer text", calls[2][0] == "text" and calls[2][3] == "ou_peer"),
+        ("three routes share one standard provider UUID",
+         standard_provider_uuid and len(set(provider_ids)) == 1),
     ]
 
 
@@ -127,6 +144,9 @@ def _fragment_checks(*, mutate=False) -> list[tuple[str, bool]]:
     source = ("一段正文。\n" * 900) + "END"
     long = bridge_outbox._answer_fragments(record, source, route)
     stable = bridge_outbox._answer_fragments(record, source, route)
+    provider_id = feishu_bridge._provider_message_uuid(long[0])
+    provider_stable = feishu_bridge._provider_message_uuid(stable[0])
+    provider_distinct = feishu_bridge._provider_message_uuid(long[-1])
     if mutate:
         long.append(dict(long[0]))
     with tempfile.TemporaryDirectory() as tmp:
@@ -158,6 +178,10 @@ def _fragment_checks(*, mutate=False) -> list[tuple[str, bool]]:
         ("stable unique fragment IDs",
          [item["fragment_id"] for item in long] == [item["fragment_id"] for item in stable]
          and len({item["fragment_id"] for item in long}) == len(long)),
+        ("local and provider IDs have separate stable formats",
+         len(long[0]["fragment_id"]) == 64 and len(provider_id) == 36
+         and str(uuid.UUID(provider_id)) == provider_id
+         and provider_id == provider_stable and provider_id != provider_distinct),
         ("durable ACK and active-turn guard",
          persisted and restored == delivery and active.get("active") is True
          and blocked and override["reason"] == "proactive-override"),
@@ -193,10 +217,12 @@ def _doc_checks() -> list[tuple[str, bool]]:
     ]
 
 
-def evaluate(*, mutate_fragments=False) -> dict:
+def evaluate(*, mutate_fragments=False, mutate_provider_uuid=False) -> dict:
     dimensions = [
         _dimension("self_contained", _self_contained_checks()),
-        _dimension("routing", asyncio.run(_route_checks_async())),
+        _dimension("routing", asyncio.run(_route_checks_async(
+            mutate_provider_uuid=mutate_provider_uuid,
+        ))),
         _dimension("fragment_dedup", _fragment_checks(mutate=mutate_fragments)),
         _dimension("services", _service_checks()),
         _dimension("docs", _doc_checks()),
@@ -209,14 +235,20 @@ def evaluate(*, mutate_fragments=False) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true",
-                        help="inject one duplicate fragment and prove the evaluator rejects it")
+                        help="inject fragment and provider-UUID regressions and prove both are rejected")
     args = parser.parse_args(argv)
     baseline = evaluate()
     output = {"baseline": baseline}
     if args.self_test:
-        mutation = evaluate(mutate_fragments=True)
-        caught = baseline["passed"] and not mutation["passed"]
-        output.update({"mutation": mutation, "self_test_caught": caught})
+        fragment_mutation = evaluate(mutate_fragments=True)
+        provider_uuid_mutation = evaluate(mutate_provider_uuid=True)
+        caught = (baseline["passed"] and not fragment_mutation["passed"]
+                  and not provider_uuid_mutation["passed"])
+        output.update({
+            "mutation": fragment_mutation,
+            "provider_uuid_mutation": provider_uuid_mutation,
+            "self_test_caught": caught,
+        })
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if caught else 2
     print(json.dumps(output, ensure_ascii=False, indent=2))

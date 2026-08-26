@@ -15,7 +15,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-27
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -39,7 +39,10 @@ last_reviewed: 2026-08-26
 - 去掉显示用分片标题后，各片正文按 part 拼接必须逐字符等于原 answer；不得截断、重叠或补写模型未输出的内容。
 - 每个成功片段立刻写 durable ACK。重启或重试只发送未 ACK 的 fragment；同一个 answer 的已 ACK 片不得再次发送。
 - 发送失败、返回空 message_id 或等待超过时间都不得推进 answer HWM。不得用“超过 600 秒”把未送达伪装成已处理。
-- 每个 `fragment_id` 同时作为 provider 请求 UUID。它是远端幂等辅助；本地合同仍以 durable ACK 为准，不宣称网络模糊失败下无条件 exactly-once。
+- `fragment_id` 是 Link16 本地账本主键，固定为 64 位十六进制摘要；**不得原样作为 provider 请求 UUID**。
+- 飞书请求使用标准 UUIDv5 派生 36 字符 UUID：namespace 固定为 Python `uuid.NAMESPACE_URL`，name 固定为 `link16:feishu:fragment:<完整 fragment_id>`。相同 fragment 跨重启必须得到相同 provider UUID，不同 fragment 必须得到不同 provider UUID；卡片、a2a 文字与卡片失败后的文字 fallback 必须共用这一个派生值。
+- provider UUID 只负责远端一小时窗口内的请求去重；本地合同仍以 `fragment_id` 和 durable ACK 为准，不宣称网络模糊失败下无条件 exactly-once。
+- 旧 outbox、HWM 与 answer-state 不做迁移或清空：未 ACK 的旧 fragment 在重放时按原 `fragment_id` 派生合法 provider UUID，已 ACK 的 fragment 继续跳过。
 
 ## 3. Active turn 防双发
 
@@ -68,4 +71,4 @@ last_reviewed: 2026-08-26
 
 ## 5. 变更闸
 
-修改本合同承重代码后至少覆盖：route 格式矩阵、卡失败降级、边界容量与无损重组、跨重启补片、active route 同目标拒绝、proactive override、三类 runtime final 生命周期、message_id 精确去重与同文不同 ID 保留。自动测试只用 fake channel/临时账本；生产桥重启与真人群 E2E 必须另取维护窗口授权。
+修改本合同承重代码后至少覆盖：route 格式矩阵、卡失败降级、边界容量与无损重组、跨重启补片、本地 `fragment_id` 与 36 字符 provider UUID 分离、三种发送格式共用同一派生键、active route 同目标拒绝、proactive override、三类 runtime final 生命周期、message_id 精确去重与同文不同 ID 保留。自动测试只用 fake channel/临时账本；生产桥重启与真人群 E2E 必须另取维护窗口授权。

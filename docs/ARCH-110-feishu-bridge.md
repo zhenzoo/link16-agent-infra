@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-27
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -340,7 +340,7 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 **配套 · 主动推送 CLI**（解决「我在终端让你发到飞书」· 走 DM 不走群喇叭）：
 ```
-python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/open_id>] --json
+python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <chat_id/open_id>] --json
 ```
 → 独立短进程重建 `FeishuChannel`（REST · 不依赖常驻桥）→ 推到持久化的 `chat_id` / owner open_id → 复用 `guaranteed_send` 四级兜底 → 打印 `{delivered, via, to}`。**这是 Claude 在终端会话里主动发飞书的唯一正道**（`scripts/notify.py` 是群喇叭 · 只用于机械告警 · 绝不用于对话回复）。
 
@@ -427,31 +427,25 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 ## § 2.11 · 在线查看（本地 md/HTML → 飞书云文档链接 · 2026-06-16 · ROADMAP §11 路线 2）
 
-> 一句话：会话把本地 `.md`/`.html` 文件**转成飞书在线云文档**，发一条**文档链接**到你 DM——你在飞书 App 里直接看（格式完整、可滚动、**可复制、可编辑保存**），不用回电脑、不用隧道、不用 Tailscale。最 Feishu-native 的「在线查看」。
+> 一句话：会话把本地 `.md`/`.html` 文件转成飞书在线文档并发链接——访问者需要登录飞书；能否编辑取决于是否成功加为协作者，组织内凭链接默认是只读。
 
 **入口**：`python feishu/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`。
 
-**链路（全 `tenant_access_token` · bot 身份 · 封装在旁挂小工具 `feishu/feishu_docs.py`·不塞桥主回路）**：
-1. **上传素材** `POST /drive/v1/medias/upload_all`（multipart · `parent_type=ccm_import_open` · `extra={"obj_type":"docx","file_extension":ext}`）→ `data.file_token`。
-2. **建导入任务** `POST /drive/v1/import_tasks`（`type=docx` · `point={mount_type:1, mount_key:""}`=bot 云空间根目录）→ `data.ticket`。
-3. **轮询** `GET /drive/v1/import_tasks/{ticket}`（间隔 2s·上限 ~30 次）→ **成功判据 = `job_status==0` 且 `token` 非空**（坑：status=0 但 token 空 = 仍处理中·别当成功）→ 取 `data.result.{token,url}`。
-4. **授权 owner（关键坑·否则你点链接「无权限」）** `POST /drive/v1/permissions/{token}/members?type=docx`（body `{member_type:"openid", member_id:<owner open_id>, perm:"view", type:"user"}`）。⚠️ body 的 `type:"user"`(成员类别) ≠ query 的 `type=docx`(资源类别)·两个都要传。
-5. **设【任何人凭链接可读】（2026-07-29 起默认开·Publisher 拍板）** `PATCH /drive/v2/permissions/{token}/public?type=docx`（body `{external_access_entity:"open", link_share_entity:"anyone_readable", security_entity/comment_entity/copy_entity:"anyone_can_view"}`·SSOT = `feishu_docs._PUBLIC_LINK_BODY` + `set_public_link()`）。**为什么**：飞书新建文档默认 `link_share_entity=tenant_readable`（**仅本组织内**），主人转给别人、别的智能体拿去读都会「无权限」——每次还要手动去文档里点开分享设置，纯摩擦。现在建完自动设成互联网任何人凭链接可阅读（**只读·不可编辑**）。⚠️ **必须 v2 端点**（v1 是老式 bool 字段、没有 `link_share_entity` 这套 enum）；scope 沿用 `drive:drive`、不用加新权限。失败**不 raise**（文档已建好·只是降级回组织内可见）·返回 `public:false` + `public_error` 让上层 warn。
-6. **发链接**：把 `data.result.url` 用 `card_send` 发到 DM（原始 URL 明文可见且可点）。
-7. **final 对账（PLAN-921）**：桥内同 bot 的 p2a 回合用 `send --doc` 成功取得 URL 后，追加一条 `kind=doc_delivery` 到该 bot outbox；drainer 去重并原子持久化到 `bridge-delivery-state-<bot>.json`，在下一条匹配的 p2a answer 追加“标题 + 原始 docx URL”。answer 真正送达后才清账；失败重试、桥重启都保留。显式 `--to`、手工 terminal、别的 bot 与 a2a 路由不登记，避免串收件人。
+**生产链路（全 `tenant_access_token` · 始终使用当前 bot 身份）**：
+1. 先试旧 upload/import 链；它保留 HTML/Office 导入能力，但需要 `drive:drive` 或等价窄口权限。
+2. 旧链被拒且源是 Markdown/TXT 时，自动走 `publish_text_as_doc`：建 docx → Markdown 转块 → 普通块分批写 → 表格逐格写 → 设 `tenant_readable`。这条链不需要 `drive:drive`；表格单元格或普通块失败会追加完整纯文本兜底，不能静默丢内容。
+3. 只有两条在线链都失败，并且用户此前明确确认权限无法获批、为该 bot 设置了 `doc_delivery_fallback=attachment`，才由**同一 bot**发送原文件附件。不存在换基础设施 bot 代发的分支。
+4. 在线文档成功必须同时拿到 URL，并证实“组织内凭链接可读”或 owner 协作者授权成功；否则不报送达。
+5. 飞书 `anyone_readable` 的“任何人”仍要求登录飞书（PLAN-980 E25），不是匿名公网访问；真匿名交付走静态站。
+6. **final 对账（PLAN-921）**：同 bot 的 p2a 回合取得 URL 后写 `kind=doc_delivery`；drainer 去重、持久化并在下一条匹配 answer 追加标题和原始 URL。显式 `--to`、手工 terminal、别的 bot 与 a2a 不登记，避免串收件人。
 
-**支持**：`.md`/`.markdown`/`.mark` 和 `.html` 都导成 docx（文档类只能导成 docx）。≤20MB 走单次上传。
+**支持**：`.md`/`.markdown`/`.mark`/`.txt` 同时有 import 与原生链；`.html`/`.doc`/`.docx` 只走 import。旧链单次上传上限 20MB。
 
-**🚨 前置（一次性·每个要用此功能的 bot 应用·只有 Publisher 能在开发者后台做）**：开**【应用身份/tenant】** scope（桥用 tenant_access_token·**不是用户身份**——2026-06-17 实证：只开用户身份仍 `99991672 Access denied`）。
-> - **采用 `drive:drive` + `docx:document`(:create)**（SSOT = `feishu_docs.CLOUD_DOC_SCOPES`）。⚠️ **2026-06-21 修正**：`drive:drive` 只覆盖 upload/import/query/授权，但**创建 docx**（`POST /docx/v1/documents`·§2.11b 媒体在线查看的第 1 步）**另需 `docx:document` 或 `docx:document:create`**——只给 `drive:drive` 会在创建文档处报 `99991672 One of [docx:document, docx:document:create] is required`。老 bot 一直能发是因为注册预置带了 docx 家族（实测 tb25-cartoonMV 有 `docx:document:create`）；漏了 docx 的新 bot（tb25-cartoonMV-3）才暴露此坑。现 `register_feishu_app.py` 末尾**一条链一次开齐**（`APP_IDENTITY_MANUAL_SCOPES`）。
-> - 等价可选（更细粒度·explore 验过）：`docs:document.media:upload` + `docs:document:import` + `docs:permission.member:create` 三个。改用哪组 = 改 `CLOUD_DOC_SCOPES` 一处。
-> - **为什么必须单独开**：一键创建 SDK（`lark_oapi.register_app`）的 `app_preset` **只支持 `name`/`avatar`/`desc`**（源码 `scene/registration/__init__._apply_app_preset` + 单测确认）、archetype 硬编码 `PersonalAgent`——**无法在创建时预置 scope**；且没有「应用给自己授权」的 API（安全红线）→ scope 只能管理员后台开。
-> - **怎么开**：`register_feishu_app.py` 建完会打印**一键开通链**（`feishu_docs.auth_url(app_id)`），**Claude 把它发给 Publisher** → 点开 → 开通（**务必选「应用身份/tenant_access_token」·不是用户身份**！2026-06-17 podcast/social_media 实证：只开用户身份仍全拒）→ **创建版本并发布**才生效。铺老 bot 同理（各 app_id 一条链）。
-> - 判定够没够：`python feishu/_tmp/_probe_scopes.py <bot>`（4 步都不报 `99991672` = 通）。一键预置建的 app **不含**这权限·必走此步。
+**🚨 前置**：权限必须开在【应用身份/tenant】而不是用户身份。原生文字链最小需要 docx 创建/写入/块转换及分享设置；旧 import/媒体链另需 `drive:drive` 或报错列出的窄口替代。注册后的第二个权限链接与复核步骤以 SOP-120 §4.1 为准，不再把 `drive:drive` 当文字在线文档的硬前置。
 
-**边界（诚实）**：① 你在飞书里改了文档，**改动留在飞书云那篇·不会自动回灌本地 `.md`**——回灌要再加一步（`GET /docs/v1/content` 把文档拉回 markdown 覆盖本地）·是 v2。② 它**会在飞书云存一份文档**（导入到 bot 云空间根目录·可后续归到专用文件夹/定期清）——Publisher 已知此 tradeoff 并接受。③ ~~`type=docx` 与 public 分享 enum 有「不确定」项·首篇先测~~ → **2026-07-29 实测定案**：`drive/v2/permissions/{token}/public?type=docx` 的 `link_share_entity` 支持 `anyone_readable`，本机个人版飞书（`my.feishu.cn`）`lock_switch=false`、可自由设 → 已定为默认（见链路第 5 步）。若换成有安全策略的企业租户、管理员锁了外链，此步会返非 0 → 自动降级为组织内可见并 warn，**属组织策略不是代码问题**。
+**边界（诚实）**：① 飞书侧修改不会自动回灌本地源文件。② 每次发布都会在飞书云产生一篇新文档；没有“先清空旧文档再重写”的危险原地更新。③ 企业策略可能禁止外部分享；组织内可见与协作者授权都失败时，桥不会把不可读 URL 当成功。
 
-**SSOT / 不硬编码**：复用 `scripts/send_card_feishu.py` 的 `api`/`tenant_token`（stdlib·绕代理·不重写 token 逻辑）；owner open_id 取桥已持久化的 `bridge-owner-<bot>.json` / 会话 open_id；不硬编码 folder/盘符/用户名。`send` 的建文档与直发是独立短进程、即改即用；PLAN-921 的 final 对账由常驻 drainer 消费，需重启对应 bot bridge 后生效。CLI/receipt 同时记录正文字符数、文档源字符数/字节数与 doc URL，不再把 doc-only 误报成“0 字”。
+**SSOT / 不硬编码**：发布原语在 `feishu_docs.py`，生产选择与附件终局兜底在 `feishu_bridge.py`；owner open_id 取桥持久状态，策略只写本机 roster。`send` 是独立短进程、代码即改即用；CLI/receipt 记录链路类型、源字符/字节、错误与 URL。
 
 ## § 2.11b · 在线查看媒体（本地【图片 / 视频 / 任意文件】→ 嵌进 docx → 发链接 · 2026-06-19）
 
@@ -796,7 +790,7 @@ armed → oauth_waiting → registered → permissions_review → manual_pending
 - **消息串行**：同一 bot 同时收多条消息 → per-bot `asyncio.Lock` 串行处理（Zara 式「运行中消息排队下一轮」· 防并发注入交错丢回复 · 2026-06-15 修）。
 - **owner 自动信任**：每个 bot **首个 @ 它的人自动成 owner**（之后只认它 · 免手维护白名单 · open_id 是 per-app 的故必须如此 · 保留 `.env` 全局白名单兼容）。
 - **消息样式**：回复走**飞书互动卡片流式发**（实时进度 + 最终答案 + 过程小结），超长自动转分条普通消息，详见 §2.6——你（bot 会话）不用自己管发送格式，桥统一处理；你只管把答案写好（markdown 写法即可）。
-- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python feishu/feishu_bridge.py send --bot <bot> --file reply.md --json`（独立 REST · 绕卡片超时 · 走 bot 自己的 DM 通道 · **绝不用 `scripts/notify.py` 群喇叭**）。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python feishu/feishu_bridge.py doctor`。
+- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python feishu/feishu_bridge.py send --bot <bot> --file-as-text reply.md --json`（这是明确把正文发进聊天框；要发原始附件用 `send_feishu_file.py --file`）。旧 `send --file` 会机械报错，防止把附件误拆成消息。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python feishu/feishu_bridge.py doctor`。
 
 ---
 

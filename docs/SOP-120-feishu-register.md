@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-27
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -341,20 +341,20 @@ python feishu/scope_level.py --new-app <app_id>
 
 设成 `anyone_readable` + `external_access:open` 之后，匿名浏览器**仍会被 302 到登录页**
 （企业租户与个人租户实测一致）。飞书的「任何人」= 任何**已登录飞书**的人。
-要真正「不用登录、任何网络都能打开」的公开链接，走自建静态站
-（`skills/align/scripts/publish_mockup.py` → Cloudflare Pages），实测匿名 `HTTP 200`。
+要真正「不用登录、任何网络都能打开」的公开链接，走部署者自己选择并维护的静态站发布工具；
+Link16 不依赖用户私人 skill。PLAN-980 的实测静态页匿名访问为 `HTTP 200`。
 
 ### 最小可用权限集（推荐给新 bot · 别无脑开 54 条）
 
 54 条里绝大多数是**官方注册预设自带的**（消息、评论、pin、表情、斜杠命令、机器人菜单…），
-不是我们挑的。真正撑起「收发消息 + 发在线文档 + 读文档 + 扒图」的核心只有 **14 条**：
+不是我们挑的。真正需要的是下表这些按能力组合的权限；可选能力不启用就不申请，不再写一个容易误导的固定总数：
 
 | 用途 | 权限 |
 |---|---|
 | 私聊收发 + 资源 | `im:message:send_as_bot`、`im:message.p2p_msg:readonly`、`im:resource` |
 | 群内 @ 与路由 | `im:chat:read`、`im:message.group_at_msg:readonly` |
 | 听全群（可选） | `im:message.group_msg` |
-| **发在线文档** | `docx:document:create`、`docx:document:write_only`、`docx:document.block:convert`、`drive:drive.metadata:readonly` |
+| **发在线文档** | `docx:document:create`、`docx:document:write_only`、`docx:document.block:convert`、`drive:drive.metadata:readonly`、`docs:permission.setting:write_only`（或 `docs:permission.member:create`） |
 | 读文档 | `docx:document:readonly`、`wiki:node:read` |
 | 扒文档内嵌图片 | `docs:document.media:download` |
 | 读表格（可选） | `bitable:app:readonly`、`sheets:spreadsheet:readonly` |

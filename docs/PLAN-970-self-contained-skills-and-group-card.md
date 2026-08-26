@@ -18,14 +18,14 @@ read_when:
   - 从零创建隔离的 Claude Code 或 Codex 工作账号
   - 群聊回复出现 Markdown 纯文字、双发或进度泄漏
   - 调整 AGENTS.md 与 CLAUDE.md 的职责边界
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-27
 ---
 
 # PLAN-970 · Link16 自带飞书能力、隔离 Profile 与真人群卡片
 
-> Plan version: **4** · 2026-08-26
+> Plan version: **6** · 2026-08-26
 >
-> 当前状态：**主人已批准执行；尚未重启生产桥。**
+> 当前状态：**S4.5 生产热修完成；DM 积压、真人群短卡和 provider 重试已真实验收。长群答与 live a2a 仍留在 S5.2，不伪装成全项完成。**
 > 开工后按 living-plan 分 Step 推进；任何会改变本机开机启动项的动作都先展示计划并等用户确认。
 
 ## 0. 本轮已经拍板
@@ -205,18 +205,28 @@ last_reviewed: 2026-08-26
   - `bridge_history.py` 按 message_id 合并去重，自动 answer 与主动发送都能按秒还原。
   - 进展：新增加锁的 `link16-outbound-v1` JSONL；自动片段与主动发送都记录 message_id。history 只按非空 message_id 去重，并抑制已有送达片段对应的 legacy outbox 摘要。
 
+- [x] **S4.5 分离本地 fragment ID 与飞书 provider UUID（生产热修）**
+  - 保留 S4.1～S4.4：不回退真人群卡片、稳定分片、逐片 durable ACK、active-turn 防双发和统一历史。
+  - `fragment_id` 继续作为 64 位本地账本主键；飞书卡片、a2a 文字和 fallback 文字统一使用从完整 fragment ID 派生的标准 36 字符 UUID。
+  - 旧积压原地续送：不清 outbox/HWM/answer-state；未 ACK 片自动改用合法 UUID，已 ACK 片不得重发。
+  - 预期文件：`docs/SPEC-210-outbound-delivery.md`、本 PLAN、`feishu/feishu_bridge.py`、`tests/test_outbound_delivery.py`、`tests/eval_plan_970.py`。净改目标：只增加一个 provider 映射 helper 和承重测试，不改本地分片算法。
+  - 验证档位：cheap（helper/route 单测）→ stage（49 项投递 focused tests + evaluator mutation）→ e2e（只重启飞书桥，回读 receipt/history/outbox）。
+  - 量化判据：本地 ID `64/64` 字符保留；provider UUID `36/36` 字符且三种发送出口 `3/3` 一致；三个积压 outbox `3/3` 重新推进；旧已 ACK 片新增重复 `0`。
+  - 结果：只新增一个确定性 UUIDv5 映射；三个旧 outbox 原地从 stuck 降为 `0B`，共 21 个未 ACK fragment 全部取得真实 message_id，未清任何 HWM/answer-state。对同一真人群 fragment 再投一次，飞书返回同一个 message_id，客户端可见消息没有新增第二条。
+
 ### S5 · 自动验证、维护窗口与发布
 
 - [x] **S5.1 分层自动验证**
   - focused tests → full pytest → py_compile → preflight/service doctor → docs/skill/profile validator。
   - 只用 fake channel/fixture，不把生产桥重启当自动测试。
-  - 进展：全仓 `369 passed + 30 subtests`；承重模块 py_compile 全绿；评分器基线 19/19 且 mutation 17/19。当前机 profile/skill/hooks、5 bot、cron、唯一 watchdog、注册回调与 history 真往返已验证。preflight 只因当前老进程未继承用户级 `PYTHONUTF8=1` 报编码失败；service doctor 只因未获批准的 wmux 启动路径 drift 报 configured fail，均未伪装成完成。
+  - 进展：全仓 `380 passed + 30 subtests`；承重模块 py_compile 全绿；评分器基线 21/21，重复 fragment 变异降至 19/21，raw provider UUID 变异降至 20/21。当前机 profile/skill/hooks、5 bot、cron、唯一 watchdog、注册回调与 history 真往返已验证。
 
 - [ ] **S5.2 维护窗口做三类真人 E2E**
   - 用户批准后只重启目标 bot/必要服务。
   - 真人群短答案：恰好 1 张 interactive；长答案：按容量得到 N 张有序 interactive，N 个 fragment ID 唯一、正文拼回原文、0 重复。
   - 重试验：同一 answer/fragment 再投一次不新增消息；若中途缺一片，只补缺片。
   - bot 群验：恰好 1 条 text、对端能读并回；DM 卡片、history 和 watchdog 同时复核。
+  - 进展：DM 旧积压 21 个 fragment 全部成功且 0 重复；`tb26-baseball-zhen` 在 Sport 业务产品团队成功发送 1 张真人群 interactive，重复同一 provider UUID 得到同一个 message_id。群长答和 live a2a 尚未跑。另发现原 `tb26-baseball` 已不在该群，真实 API 返回 `230002 Bot/User can NOT be out of the chat`；这是成员关系变化，不是本次 UUID 代码回归。
 
 - [ ] **S5.3 晋升真源、提交和版本**
   - 把最终规则晋升到 ROLE/ARCH/SOP/SPEC/TOOLS，回填本 PLAN 和 CHANGELOG。
@@ -243,8 +253,8 @@ last_reviewed: 2026-08-26
 | 维度 | 数据来源 | 满分条件 | 天花板 |
 |---|---|---|---|
 | 自足完成度 | `tests/eval_plan_970.py` + 临时 HOME | repo skill、local registry、双 runtime 安装、service doctor 全部可达 | 4/4 |
-| 路由完成度 | fake channel receipts + outbound ledger | DM card、p2a-ext card、a2a text 三路全对 | 3/3 |
-| 去重与分卡质量 | answer/fragment ledger fixtures | 短答 1 片、长答 N 片可还原、重试 0 新重复、缺片只补缺片 | 4/4 |
+| 路由完成度 | fake channel receipts + outbound ledger | DM card、p2a-ext card、a2a text、三路 provider UUID 全对 | 4/4 |
+| 去重与分卡质量 | answer/fragment ledger fixtures | 短答 1 片、长答 N 片可还原、本地/远端 ID 分离、重试 0 新重复、缺片只补缺片 | 5/5 |
 | 常驻服务质量 | service doctor 结构化输出 | wmux、bridge task、bridge、cron、唯一 watchdog 均给出真实状态 | 5/5 |
 | 文档边界质量 | docs validator | 0 个私人必备依赖、0 个第二 watchdog 现行指令、入口共同职责全覆盖 | 3/3 |
 
@@ -258,10 +268,12 @@ last_reviewed: 2026-08-26
 | v4-s3 | 3/4 | 36 focused tests | 空 HOME、service plan/apply/rollback、四层 doctor、live 5-bot/cron/watchdog/registration/history | S3.1–S3.3 完成；S3.4 只待已展示的 wmux 启动项人工批准 |
 | v4-s4 | 19/19 | 61 focused tests + 21 subtests；bootstrap/hooks 补漏 29 passed + 6 subtests | route fake receipts、稳定分片/跨重启 ACK、active-turn guard、unified outbound ledger、PLAN evaluator mutation | S4 完成；`eval_plan_970.py --self-test` 基线 19/19，故意复制一个 fragment 后降为 17/19，证明评分器能抓重复 |
 | v4-s5-static | 19/19 | 369 passed + 30 subtests | full pytest、py_compile、profile doctor、preflight、service doctor | 静态/fixture 验收完成；生产桥未重启，真人群短/长/a2a E2E 与 wmux 启动项仍等人工维护窗口 |
+| v5-before | **19/19（假绿）** | 生产 `3/3` 活跃 bot 最终回复 HTTP 400 | history 中答案存在但 message_id 为空；三个 outbox stuck | 评分器只测本地 fragment 稳定性，未约束 provider UUID，必须先修尺子再修代码 |
+| v6-hotfix | **21/21** | 380 passed + 30 subtests；51 focused + 11 subtests | 三个积压 outbox `3/3` 清零；21 个 fragment 全 ACK；DM/真人群卡片真实 message_id；同 UUID 重试返回同一 ID | 只重启 5 个飞书桥；6 个 wmux PID、8 个 workspace 与 workspace ID 均未变化；21:05 后新增 UUID 相关 HTTP 400 为 0 |
 
 ### 6.3 尺子审计
 
-- `tool_fixes`：首次真跑后记录；评分器必须支持 `--self-test`，空目录不得假绿。
+- `tool_fixes`：v5-before 的评分器假绿已修：现在显式检查 64 位本地 ID、36 位标准 provider UUID、三出口共用与 raw UUID 变异；故意恢复旧行为会从 21/21 降为 20/21。
 - `blind_spots`：飞书客户端视觉布局仍需真实群回读/截图辅助；API receipt 只能证明 `interactive`，不能证明阅读体验。
 - `rejected`：禁止把“去重”偷换成“一轮只允许一条消息”。
 - `blocked`：只有飞书权限/真实账号/维护窗口等外部条件才可进入；不阻塞的步骤继续执行。

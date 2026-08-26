@@ -57,12 +57,14 @@ CAPABILITY_SPECS = {
             ["docx:document", "docx:document:write_only"],
             ["docx:document.block:convert"],
             ["drive:drive.metadata:readonly", "drive:drive"],
+            ["docs:permission.setting:write_only", "docs:permission.member:create", "drive:drive"],
         ],
         "requested": [
             "docx:document:create",
             "docx:document:write_only",
             "docx:document.block:convert",
             "drive:drive.metadata:readonly",
+            "docs:permission.setting:write_only",
         ],
     },
     "docs-media": {

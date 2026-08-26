@@ -12,8 +12,8 @@
 这就是官方给的替代清单。本工具用一只**故意缺权限**的 bot 去撞每个能力对应的接口，
 把这些清单收集成一张「能力 → 主用权限 / 可替代权限」的矩阵，供换组织、换租户时挑一条能批的走。
 
-⚠️ 只跑**无副作用**的探测：读取、列举、上传素材（不发送）、以及会被权限拦下的写操作。
-   真正会打扰到人的动作（发消息、发卡片）不实调，只报「权限在不在」。
+⚠️ 默认只跑读取、列举和不会落资源的转换探测。上传素材/图片会在飞书生成临时资源，
+   必须显式加 `--allow-upload-probes`；发消息、发卡片始终不实调，只报权限在不在。
 
 用法：
     python feishu/capability_probe.py                  # 全部 bot × 全部能力
@@ -58,7 +58,8 @@ CAPABILITIES = [
      "method": "POST", "path": "/docx/v1/documents/blocks/convert",
      "body": {"content_type": "markdown", "content": "# probe\n\ntext\n"}},
     {"key": "upload-media", "label": "上传素材（发文档 import 链的第一步）",
-     "method": "POST", "path": "/drive/v1/medias/upload_all", "multipart": True},
+     "method": "POST", "path": "/drive/v1/medias/upload_all", "multipart": True,
+     "write_probe": "会生成一份 5 字节临时上传素材"},
     {"key": "grant-member", "label": "给文档加协作者",
      "method": "POST", "path": "/drive/v1/permissions/{doc}/members?type=docx&need_notification=false",
      "body": {"member_type": "openid", "member_id": "ou_0000000000000000000000000000000", "perm": "view"}},
@@ -73,7 +74,8 @@ CAPABILITIES = [
      "method": "GET", "path": "/im/v1/messages/{msg}/resources/{key}?type=image",
      "note": "要 im:resource；只能取自己看得到的会话"},
     {"key": "upload-im-image", "label": "上传图片以便 DM/群里发图",
-     "method": "POST", "path": "/im/v1/images", "multipart_im": True},
+     "method": "POST", "path": "/im/v1/images", "multipart_im": True,
+     "write_probe": "会生成一张 1×1 临时消息图片"},
     {"key": "send-msg", "label": "发消息 / 发交互卡片", "scope_only": ["im:message:send_as_bot"],
      "note": "有副作用，不实调；只查权限在不在"},
     {"key": "group-listen", "label": "听群里未 @ 自己的消息",
@@ -122,11 +124,13 @@ TINY_PNG = bytes.fromhex(
 )
 
 
-def probe(cap, token, ctx, allow_create=False):
+def probe(cap, token, ctx, allow_create=False, allow_upload=False):
     """回 (状态, 可替代权限列表)。状态：ok / denied / n-a / skipped。"""
     if cap.get("scope_only"):
         return "scope-only", []
     if cap.get("destructive") and not allow_create:
+        return "skipped", []
+    if cap.get("write_probe") and not allow_upload:
         return "skipped", []
     path = cap["path"]
     for name, value in ctx.items():
@@ -172,6 +176,8 @@ def main():
     ap.add_argument("--msg", default="", help="用来探测的消息 id")
     ap.add_argument("--key", default="", help="该消息里的 image_key/file_key")
     ap.add_argument("--allow-create", action="store_true", help="允许真的建一篇空文档来探测")
+    ap.add_argument("--allow-upload-probes", action="store_true",
+                    help="允许上传 5 字节素材和 1×1 图片探针（会生成临时云端资源）")
     ap.add_argument("--alternatives", action="store_true", help="只出「能力 → 可替代权限」总表")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -184,7 +190,9 @@ def main():
         row = {"bot": bot["name"], "error": error, "caps": {}}
         if not error:
             for cap in CAPABILITIES:
-                status, alternatives = probe(cap, token, ctx, args.allow_create)
+                status, alternatives = probe(
+                    cap, token, ctx, args.allow_create, args.allow_upload_probes,
+                )
                 row["caps"][cap["key"]] = status
                 if alternatives:
                     alt_map.setdefault(cap["key"], set()).update(alternatives)
