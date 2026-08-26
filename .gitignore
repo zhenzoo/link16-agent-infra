@@ -1,6 +1,9 @@
 # 机器本地 bot 名册（每台机各管各的·整盘覆盖 committed bridge-bots.json）
 feishu/bridge-bots.local.json
 feishu/bridge-cd-bookmarks.local.json
+# 本机 agent profile→runtime/home/launcher 映射；新机由 profile_bootstrap 显式建立。
+feishu/agent-profiles.local.json
+feishu/agent-profiles.local.json.*.tmp
 # 跨机 agent 目录的本机覆盖（含全舰队 open_id + 主机名）
 # 样例见 feishu/agent-registry.example.json；解析顺序见 feishu/bridge_env.py 的 registry_path()
 # 当前 private 仓仍有 committed 现役本；受信 collaborator 可见这些运维元数据。

@@ -40,6 +40,40 @@ class CodexSkillInvocationTests(unittest.TestCase):
         self.assertIsNone(agent_runtime.codex_skill_invocation(bot, "/not-installed"))
         self.assertIsNone(agent_runtime.codex_skill_invocation({"agent": "claude"}, "/envsync"))
 
+    def test_discovers_repo_skill_from_nested_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            repo = Path(tmp) / "repo"
+            nested = repo / "src" / "feature"
+            skill = repo / ".agents" / "skills" / "feishu"
+            nested.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                "---\nname: feishu\ndescription: test\n---\n", encoding="utf-8"
+            )
+            with patch.object(Path, "home", return_value=home):
+                actual = agent_runtime.codex_skill_invocation(
+                    {"agent": "codex", "codex_home": str(home / ".codex-work")},
+                    "/feishu status", cwd=nested,
+                )
+        self.assertEqual(actual, "$feishu status")
+
+    def test_duplicate_skill_names_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for folder in ("feishu", "claude-compat-feishu"):
+                skill = home / ".agents" / "skills" / folder
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(
+                    "---\nname: feishu\ndescription: test\n---\n", encoding="utf-8"
+                )
+            with patch.object(Path, "home", return_value=home):
+                self.assertIsNone(agent_runtime.codex_skill_invocation(
+                    {"agent": "codex", "codex_home": str(home / ".codex-work")},
+                    "/feishu status",
+                ))
+
 
 class AgentProfileTests(unittest.TestCase):
     def test_registry_has_nine_profiles_and_cxp_is_codex_default(self):
@@ -48,6 +82,59 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(agent_runtime.default_profile("codex"), "cxp")
         self.assertEqual(agent_runtime.profile_spec("cxp").home, "~/.codex-personal")
         self.assertEqual(agent_runtime.profile_spec("cck").launcher, "launch-sh")
+
+    def test_local_registry_wins_and_invalid_local_never_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            committed = root / "agent-profiles.json"
+            local = root / "agent-profiles.local.json"
+            committed.write_text((ROOT / "feishu" / "agent-profiles.json").read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+            local.write_text(json.dumps({
+                "version": 1,
+                "default_profiles": {"claude": "claude-work", "codex": "codex-work"},
+                "profiles": {
+                    "claude-work": {"runtime": "claude", "home": "~/.claude-work", "launcher": "direct"},
+                    "codex-work": {"runtime": "codex", "home": "~/.codex-work", "launcher": "direct"},
+                },
+            }), encoding="utf-8")
+            with patch.object(agent_runtime, "PROFILE_REGISTRY_PATH", committed), \
+                 patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH", local):
+                self.assertEqual(agent_runtime.profile_registry_path(), local)
+                self.assertEqual([p.name for p in agent_runtime.profile_specs()],
+                                 ["claude-work", "codex-work"])
+                local.write_text("not-json", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "读失败"):
+                    agent_runtime.profile_specs()
+
+    def test_missing_local_uses_explicit_legacy_transition_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            committed = root / "agent-profiles.json"
+            local = root / "agent-profiles.local.json"
+            committed.write_text((ROOT / "feishu" / "agent-profiles.json").read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+            with patch.object(agent_runtime, "PROFILE_REGISTRY_PATH", committed), \
+                 patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH", local):
+                self.assertEqual(agent_runtime.profile_registry_path(), committed)
+                self.assertEqual(agent_runtime.default_profile("codex"), "cxp")
+
+    def test_single_runtime_registry_is_valid_and_other_default_fails_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "agent-profiles.local.json"
+            registry.write_text(json.dumps({
+                "version": 1,
+                "default_profiles": {"claude": "claude-work"},
+                "profiles": {
+                    "claude-work": {
+                        "runtime": "claude", "home": "~/.claude-work", "launcher": "direct",
+                    },
+                },
+            }), encoding="utf-8")
+            self.assertEqual([p.name for p in agent_runtime.profile_specs(registry)], ["claude-work"])
+            self.assertEqual(agent_runtime.default_profile("claude", registry), "claude-work")
+            with self.assertRaises(KeyError):
+                agent_runtime.default_profile("codex", registry)
 
     def test_profile_wins_over_conflicting_legacy_runtime(self):
         bot = {

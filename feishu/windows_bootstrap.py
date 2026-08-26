@@ -19,6 +19,7 @@ from pathlib import Path
 
 import preflight
 import network_route
+import service_doctor
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,22 @@ COMPONENTS = (
 )
 COMPONENT_BY_KEY = {row.key: row for row in COMPONENTS}
 OPTIONAL_KEYS = {row.key for row in COMPONENTS if not row.required}
+USER_STATUSES = {
+    "将安装", "已存在跳过", "已验证", "需要登录", "需要人工确认", "本次不安装",
+}
+
+LINK16_ITEMS = (
+    ("profiles", "隔离的 Claude/Codex profiles"),
+    ("feishu_skill", "Link16 飞书 skill"),
+    ("hooks_transport", "消息 hooks / typed transport"),
+    ("local_roster", "本机 bot 名册"),
+    ("credentials", "飞书应用凭据"),
+    ("bridge", "飞书桥"),
+    ("cron", "定时任务调度器"),
+    ("watchdog", "会话看门狗"),
+    ("registration_monitor", "注册回调监督器"),
+    ("history_ledger", "消息历史账本"),
+)
 
 
 def _first_file(paths):
@@ -182,6 +199,105 @@ def installation_plan(skipped=()):
         row.update(status=status, detected_path=str(path) if path else "",
                    install_command=list(component.install_command))
         rows.append(row)
+    return rows
+
+
+def software_user_plan(rows, *, installed_this_run=(), runtime_health=None):
+    """Project technical detection into the small vocabulary shown to people."""
+    installed_this_run = set(installed_this_run)
+    runtimes = set(((runtime_health or {}).get("profiles") or {}).get("runtimes", {}).values())
+    result = []
+    for row in rows:
+        status = row["status"]
+        if status == "skipped":
+            user_status = "本次不安装"
+        elif status == "missing":
+            user_status = "将安装"
+        elif row["key"] in installed_this_run:
+            user_status = "已验证"
+        elif row["key"] in {"claude", "codex"} and row["key"] not in runtimes:
+            user_status = "需要登录"
+        elif row["key"] in {"claude", "codex"}:
+            user_status = "已验证"
+        else:
+            user_status = "已存在跳过"
+        result.append({**row, "user_status": user_status})
+    return result
+
+
+def _link_row(key, label, user_status, detail, technical):
+    if user_status not in USER_STATUSES:
+        raise ValueError(f"未知用户状态：{user_status}")
+    return {
+        "key": key, "label": label, "user_status": user_status,
+        "detail": detail, "technical": technical,
+    }
+
+
+def link16_user_plan(raw=None, health=None):
+    """Return the fixed Link16 deployment checklist without hiding raw evidence."""
+    raw = service_doctor.collect_raw() if raw is None else raw
+    health = service_doctor.evaluate(raw) if health is None else health
+    components = health.get("components") or {}
+    profiles = raw.get("profiles") or {}
+    roster = raw.get("roster") or {}
+
+    profile_component = components.get("profiles_skill") or {"layers": {}}
+    profile_ok = profile_component["layers"].get("configured") == service_doctor.PASS
+    profile_status = "已验证" if profile_ok else "需要人工确认"
+    profile_detail = (
+        f"已选：{', '.join(profiles.get('selected') or [])}"
+        if profiles.get("selected") else "请给工作/私人账号命名，并选择 Claude、Codex 或两者"
+    )
+
+    skill_rows = profiles.get("skills") or []
+    skill_ok = bool(skill_rows) and all(row.get("status") == "ok" for row in skill_rows)
+    skill_status = "已验证" if skill_ok else ("将安装" if profiles.get("selected") else "需要人工确认")
+    skill_detail = "所有所选 runtime 使用同一仓内真源" if skill_ok else "选定 profile 后由仓内安装器部署"
+
+    hook_component = components.get("hooks_transport") or {"layers": {}}
+    hooks_ok = hook_component["layers"].get("configured") == service_doctor.PASS
+    hook_status = "已验证" if hooks_ok else "将安装"
+
+    roster_exists = bool(roster.get("exists") and not roster.get("error"))
+    roster_status = "已验证" if roster_exists and roster.get("names") else "需要人工确认"
+    roster_detail = (
+        f"本机接管 {len(roster.get('names') or [])} 只 bot"
+        if roster_exists else "请从 local example 建立本机名册"
+    )
+    missing = roster.get("credential_missing") or {}
+    credentials_status = "已验证" if roster_exists and not missing else "需要人工确认"
+    credentials_detail = "所需键均已找到（值未输出）" if credentials_status == "已验证" else "需注册/授权缺失的飞书应用"
+
+    rows = [
+        _link_row("profiles", LINK16_ITEMS[0][1], profile_status, profile_detail, profile_component),
+        _link_row("feishu_skill", LINK16_ITEMS[1][1], skill_status, skill_detail, skill_rows),
+        _link_row("hooks_transport", LINK16_ITEMS[2][1], hook_status,
+                  "Claude 用桥专属 hooks；Codex 用 typed event transport", hook_component),
+        _link_row("local_roster", LINK16_ITEMS[3][1], roster_status, roster_detail, roster),
+        _link_row("credentials", LINK16_ITEMS[4][1], credentials_status, credentials_detail,
+                  {"missing_keys_by_bot": missing}),
+    ]
+    for key, label in LINK16_ITEMS[5:]:
+        component = components.get(key) or {"layers": {}}
+        layers = component.get("layers") or {}
+        if key == "registration_monitor":
+            if layers.get("real_io") == service_doctor.PASS:
+                status, detail = "已验证", "已有注册回调成功记录；有活动 job 时监督器才常驻"
+            elif layers.get("file_present") == service_doctor.PASS:
+                status, detail = "已存在跳过", "首次注册时自动启动并通过回调验收"
+            else:
+                status, detail = "将安装", component.get("fix") or ""
+        elif key == "history_ledger" and layers.get("real_io") == service_doctor.PASS:
+            status, detail = "已验证", component.get("evidence") or ""
+        elif (layers.get("configured") != service_doctor.FAIL
+              and layers.get("running") == service_doctor.PASS):
+            status, detail = "已验证", component.get("evidence") or ""
+        elif layers.get("file_present") == service_doctor.FAIL:
+            status, detail = "将安装", component.get("fix") or ""
+        else:
+            status, detail = "需要人工确认", component.get("fix") or component.get("evidence") or ""
+        rows.append(_link_row(key, label, status, detail, component))
     return rows
 
 
@@ -475,18 +591,28 @@ def main(argv=None):
             configure_wmux_git_bash(apply=args.apply),
         ])
     failures = deployment_failures(rows, installs, post) if args.apply else []
-    payload = {"applied": args.apply, "components": rows, "installs": installs,
+    raw_health = service_doctor.collect_raw()
+    evaluated_health = service_doctor.evaluate(raw_health)
+    installed_this_run = [row["key"] for row in installs if row.get("returncode") == 0]
+    software = software_user_plan(rows, installed_this_run=installed_this_run,
+                                  runtime_health=raw_health)
+    link16 = link16_user_plan(raw_health, evaluated_health)
+    payload = {"applied": args.apply, "components": software, "software": software,
+               "link16": link16, "installs": installs,
                "post_install": post, "failures": failures, "gstack_default": False}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        print("Link16 Windows 依赖（默认全选；核心 5 项 + provider 2 项）：")
-        for idx, row in enumerate(rows, 1):
+        print("软件层（默认全选；核心 5 项 + provider 2 项）：")
+        for idx, row in enumerate(software, 1):
             flag = "必需" if row["required"] else "默认选中/可跳过"
-            print(f"  {idx}. [{row['status']:^9}] {row['label']} · {flag} · {row['official_source']}")
+            print(f"  {idx}. [{row['user_status']}] {row['label']} · {flag} · {row['official_source']}")
         print("  gstack：默认不安装（不在 7 项清单里）")
         for row in post:
             print(f"  [{row['status']:^9}] {row['task']} · {row['detail']}")
+        print("\nLink16 层（飞书智能体真正能工作所需）：")
+        for idx, row in enumerate(link16, 1):
+            print(f"  {idx}. [{row['user_status']}] {row['label']} · {row['detail']}")
         if failures:
             print("  [  FAIL   ] 安装后复查未通过：" + ", ".join(failures))
         if not args.apply:

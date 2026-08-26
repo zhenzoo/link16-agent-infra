@@ -427,14 +427,20 @@ CHECKS = (check_python, check_deps, check_node, check_github_cli, check_reposito
           check_env_file, check_proxy_config, check_local_roster, check_registry, check_agent_cli)
 
 
-def main():
-    as_json = "--json" in sys.argv
+def run_checks(checks=CHECKS):
+    """Run every probe without printing or exiting, for installers/doctors."""
     results = []
-    for fn in CHECKS:
+    for fn in checks:
         try:
             results.append(fn())
-        except Exception as e:  # noqa: BLE001 — 任何一项自身出错都不该让整个体检崩
+        except Exception as e:  # noqa: BLE001 — one broken probe must not hide the rest
             results.append(Result(getattr(fn, "__name__", "?"), WARN, f"检查项自身出错：{e}"))
+    return results
+
+
+def main():
+    as_json = "--json" in sys.argv
+    results = run_checks()
 
     if as_json:
         print(json.dumps(

@@ -67,6 +67,41 @@ class ComponentPlanTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(result[0]["returncode"], 2)
 
+    def test_software_plan_uses_only_user_facing_status_vocabulary(self):
+        rows = [
+            {"key": "git", "status": "installed"},
+            {"key": "claude", "status": "installed"},
+            {"key": "codex", "status": "skipped"},
+            {"key": "node", "status": "missing"},
+        ]
+        result = wb.software_user_plan(rows, runtime_health={"profiles": {"runtimes": {}}})
+        self.assertEqual([row["user_status"] for row in result], [
+            "已存在跳过", "需要登录", "本次不安装", "将安装",
+        ])
+        self.assertTrue(all(row["user_status"] in wb.USER_STATUSES for row in result))
+
+    def test_link16_plan_has_fixed_ten_items_and_preserves_technical_evidence(self):
+        raw = {
+            "profiles": {"selected": ["work"], "runtimes": {"work": "codex"},
+                         "skills": [{"status": "ok"}]},
+            "roster": {"exists": True, "error": "", "names": ["bot1"],
+                       "credential_missing": {}},
+        }
+        component = lambda **layers: {"layers": layers, "evidence": "proof", "fix": "fix"}
+        health = {"components": {
+            "profiles_skill": component(configured="pass"),
+            "hooks_transport": component(configured="pass"),
+            "bridge": component(file_present="pass", running="pass", real_io="pass"),
+            "cron": component(file_present="pass", running="pass", real_io="na"),
+            "watchdog": component(file_present="pass", running="pass", real_io="na"),
+            "registration_monitor": component(file_present="pass", running="na", real_io="pass"),
+            "history_ledger": component(file_present="pass", running="na", real_io="pass"),
+        }}
+        rows = wb.link16_user_plan(raw, health)
+        self.assertEqual([row["key"] for row in rows], [key for key, _ in wb.LINK16_ITEMS])
+        self.assertTrue(all(row["user_status"] in wb.USER_STATUSES for row in rows))
+        self.assertTrue(all("technical" in row for row in rows))
+
 
 class WmuxPostInstallTests(unittest.TestCase):
     def test_windows_terminal_can_be_safely_set_without_losing_other_fields(self):

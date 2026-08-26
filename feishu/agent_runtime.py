@@ -195,26 +195,47 @@ def codex_skill_invocation(bot, text: str, cwd=None) -> str | None:
     if requested.casefold() in _CODEX_NATIVE_SLASH:
         return None
 
-    roots = [Path.home() / ".agents" / "skills", _codex_home(bot) / "skills"]
+    roots = []
     if cwd:
-        roots.insert(0, Path(cwd).expanduser() / ".agents" / "skills")
-    seen = set()
+        current = Path(cwd).expanduser().resolve()
+        chain = []
+        cursor = current
+        while True:
+            chain.append(cursor)
+            if (cursor / ".git").exists():
+                break
+            if cursor.parent == cursor:
+                chain = [current]
+                break
+            cursor = cursor.parent
+        roots.extend(path / ".agents" / "skills" for path in chain)
+    roots.append(Path.home() / ".agents" / "skills")
+    seen_roots = set()
+    matches = []
+    seen_files = set()
     for root in roots:
-        key = root.as_posix().casefold()
-        if key in seen or not root.is_dir():
+        key = root.resolve().as_posix().casefold()
+        if key in seen_roots or not root.is_dir():
             continue
-        seen.add(key)
+        seen_roots.add(key)
         for skill_file in root.glob("*/SKILL.md"):
             name = _skill_frontmatter_name(skill_file)
             if name and name.casefold() == requested.casefold():
-                args = (match.group(2) or "").strip()
-                return f"${name}" + (f" {args}" if args else "")
-    return None
+                file_key = skill_file.resolve().as_posix().casefold()
+                if file_key not in seen_files:
+                    seen_files.add(file_key)
+                    matches.append(name)
+    if len(matches) != 1:
+        return None
+    args = (match.group(2) or "").strip()
+    return f"${matches[0]}" + (f" {args}" if args else "")
 
 
 # ---------- Agent Profile SSOT (ARCH-120) ----------
 PROFILE_ENV = "LINK16_AGENT_PROFILE"
-PROFILE_REGISTRY_PATH = Path(__file__).resolve().with_name("agent-profiles.json")
+PROFILE_REGISTRY_PATH = Path(__file__).resolve().with_name("agent-profiles.json")  # legacy committed source
+PROFILE_REGISTRY_LOCAL_PATH = Path(__file__).resolve().with_name("agent-profiles.local.json")
+PROFILE_REGISTRY_ENV = "LINK16_AGENT_PROFILE_REGISTRY"
 ROSTER_LOCAL_PATH = Path(__file__).resolve().with_name("bridge-bots.local.json")
 ROSTER_COMMITTED_PATH = Path(__file__).resolve().with_name("bridge-bots.json")
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -245,8 +266,24 @@ def _expand_home(raw) -> Path:
     return Path(os.path.expandvars(value)).expanduser()
 
 
+def profile_registry_path() -> Path:
+    """Return exactly one effective profile registry, never a merged mapping.
+
+    New installations materialize the gitignored local file.  During the
+    multi-machine migration window only, machines without it continue reading
+    the committed legacy registry.  A present-but-invalid local file is never
+    bypassed: `_profile_document` raises against that exact path.
+    """
+    override = str(os.environ.get(PROFILE_REGISTRY_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    if PROFILE_REGISTRY_LOCAL_PATH.is_file():
+        return PROFILE_REGISTRY_LOCAL_PATH
+    return PROFILE_REGISTRY_PATH
+
+
 def _profile_document(path=None) -> dict:
-    registry = Path(path) if path else PROFILE_REGISTRY_PATH
+    registry = Path(path) if path else profile_registry_path()
     try:
         data = json.loads(registry.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -286,11 +323,20 @@ def profile_specs(path=None) -> list[ProfileSpec]:
             label=str(raw.get("label") or ""),
             recommended=bool(raw.get("recommended")),
         ))
+    if not result:
+        raise ValueError("profile registry 至少需要一个 profile")
     known = {p.name: p.runtime for p in result}
-    for runtime in _PROFILE_RUNTIMES:
+    present_runtimes = {p.runtime for p in result}
+    unknown_defaults = set(defaults) - _PROFILE_RUNTIMES
+    if unknown_defaults:
+        raise ValueError(f"default_profiles 含未知 runtime：{sorted(unknown_defaults)!r}")
+    for runtime in present_runtimes:
         selected = defaults.get(runtime)
         if selected not in known or known[selected] != runtime:
             raise ValueError(f"default_profiles.{runtime} 不是合法 {runtime} profile：{selected!r}")
+    absent_defaults = set(defaults) - present_runtimes
+    if absent_defaults:
+        raise ValueError(f"default_profiles 指向未安装 runtime：{sorted(absent_defaults)!r}")
     return result
 
 

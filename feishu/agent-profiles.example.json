@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "default_profiles": {
+    "claude": "claude-work",
+    "codex": "codex-work"
+  },
+  "entry_documents": {
+    "managed_profiles": [
+      "claude-work",
+      "codex-work"
+    ]
+  },
+  "profiles": {
+    "claude-work": {
+      "runtime": "claude",
+      "home": "~/.claude-work",
+      "launcher": "direct",
+      "label": "Claude Code Work"
+    },
+    "codex-work": {
+      "runtime": "codex",
+      "home": "~/.codex-work",
+      "launcher": "direct",
+      "label": "Codex Work",
+      "recommended": true
+    }
+  }
+}
