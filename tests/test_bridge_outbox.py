@@ -67,6 +67,14 @@ class FakeCards:
         return True
 
 
+class RoutedResultCards(FakeCards):
+    """Production delivery callbacks return a structured receipt, not a bare ID."""
+
+    async def new_card(self, text, route=None, purpose="answer", fragment=None):
+        self.new.append((text, route))
+        return {"ok": True, "message_id": f"m{len(self.new)}"}
+
+
 class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
     async def drain(self, records, state, cards):
         return await bridge_outbox.drain_batch(
@@ -104,6 +112,32 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(cards.new), 1)
         self.assertEqual(len(cards.edits), 1)
         self.assertIn("✅ A", cards.edits[0][1])
+
+    async def test_structured_delivery_result_keeps_real_message_id_for_patch(self):
+        state, cards = fresh_state(), RoutedResultCards()
+        first = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "c1", "revision": 1, "kind": "commentary", "label": "first"}
+        ]}
+        second = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "c1", "revision": 2, "kind": "commentary", "label": "second"}
+        ]}
+        await self.drain([first], state, cards)
+        await self.drain([second], state, cards)
+        self.assertEqual(state["v2_mid"], "m1")
+        self.assertEqual([mid for mid, _text in cards.edits], ["m1"])
+        self.assertEqual(len(cards.new), 1)
+
+    async def test_legacy_progress_also_normalizes_structured_delivery_result(self):
+        state, cards = fresh_state(), RoutedResultCards()
+        await self.drain([{"kind": "progress", "turn": "t", "steps": [
+            {"kind": "tool", "label": "first"}
+        ]}], state, cards)
+        await self.drain([{"kind": "progress", "turn": "t", "steps": [
+            {"kind": "tool", "label": "first"}, {"kind": "tool", "label": "second"}
+        ]}], state, cards)
+        self.assertEqual(state["cur_mid"], "m1")
+        self.assertEqual([mid for mid, _text in cards.edits], ["m1"])
+        self.assertEqual(len(cards.new), 1)
 
     async def test_milestone_edit_failure_sends_dirty_event_only(self):
         state, cards = fresh_state(), FakeCards()
@@ -223,6 +257,21 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored["v2_mid"], "message-id")
         self.assertEqual(restored["v2_acked"], {"c1": 1})
         self.assertEqual(restored["v2_route"], {"kind": "p2a"})
+
+    def test_poisoned_structured_message_id_is_discarded_on_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = bridge_outbox.progress_state_path(tmp, "bot")
+            path.write_text(json.dumps({
+                "contract": "milestone-v1",
+                "turn": "t",
+                "steps": [],
+                "mid": {"ok": True, "message_id": "om_real"},
+                "card_ids": [],
+                "acked": {},
+                "route": {"kind": "p2a"},
+            }), encoding="utf-8")
+            restored = bridge_outbox.load_progress_state(tmp, "bot")
+        self.assertIsNone(restored["v2_mid"])
 
     def test_answer_fragments_are_stable_bounded_and_lossless(self):
         route = {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_user"}

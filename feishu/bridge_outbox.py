@@ -154,10 +154,13 @@ def load_progress_state(state_dir, bot):
         return {}
     if not isinstance(raw, dict) or raw.get("contract") != "milestone-v1":
         return {}
+    mid = raw.get("mid")
+    if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
+        mid = None
     return {
         "v2_turn": raw.get("turn"),
         "v2_steps": raw.get("steps") or [],
-        "v2_mid": raw.get("mid"),
+        "v2_mid": mid,
         "v2_card_ids": raw.get("card_ids") or [],
         "v2_acked": raw.get("acked") or {},
         "v2_route": raw.get("route"),
@@ -645,9 +648,17 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                       force_flush=False, on_ask=None, on_resume=None, persist_answer=None):
     """统一卡片流：progress 当前卡 edit_card 原地长大 → 满 CARD_BUDGET 或 edit 失败 → 冻结开新卡接着写(不截断)；
     answer 拆 ≤BUDGET 连续多卡(new_card·失败退 send_plain)·发前先把进度卡刷到最新·保序。
-    deps（均 coroutine）：new_card(text)->mid|None · edit_card(mid,text)->bool · send_plain(text)。
+    deps（均 coroutine）：new_card(text)->mid|{ok,message_id}|None · edit_card(mid,text)->bool · send_plain(text)。
     state = {turn,steps,usage,seg_start,cur_mid,flushed,last_flush,sent}。返回动作数。"""
     n = 0
+
+    def _result(result):
+        if isinstance(result, dict):
+            mid = result.get("message_id")
+            if not isinstance(mid, str) or not mid.strip():
+                mid = None
+            return bool(result.get("ok") and mid), mid
+        return bool(result) and result != "skip-progress", result if isinstance(result, str) else None
 
     def _safe_count(value):
         try:
@@ -706,7 +717,14 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             text = _v2_text(group, snapshot)
             chunks = _ans_chunks(text)
             for chunk in chunks:
-                last_mid = await new_card(chunk, route=state.get("v2_route"), purpose="progress")
+                result = await new_card(
+                    chunk, route=state.get("v2_route"), purpose="progress"
+                )
+                ok, mid = _result(result)
+                # Group progress is intentionally suppressed.  Failed progress
+                # is also best-effort and must never leave a dict/sentinel in
+                # state where the next flush would pass it as a message ID.
+                last_mid = mid if ok else None
                 n += 1
             last_ids = [str(step.get("event_id")) for step in group if step.get("event_id")]
         return last_mid, last_ids
@@ -725,6 +743,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         card_steps = [by_id[event_id] for event_id in card_ids]
         text = _v2_text(card_steps, state.get("v2_steps") or [])
         mid = state.get("v2_mid")
+        if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
+            mid = None
+            state["v2_mid"] = None
         if mid and len(text) <= CARD_BUDGET:
             ok = await edit_card(mid, text)
             n += 1
@@ -755,22 +776,30 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             k = _fit_count(seg, len(head) + 2, CARD_BUDGET)
             text = _card_text(head, seg[:k])
             full_fit = state["seg_start"] + k >= len(full)
-            if state["cur_mid"]:
-                ok = await edit_card(state["cur_mid"], text)
+            mid = state.get("cur_mid")
+            if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
+                mid = None
+                state["cur_mid"] = None
+            if mid:
+                ok = await edit_card(mid, text)
                 n += 1
                 if not ok:                                # edit 失败(撞上限?) → 当轮换：弃旧卡开新卡
                     pending_start = max(state.get("flushed", 0), state["seg_start"])
                     pending = [s.get("label", "") for s in full[pending_start:state["seg_start"] + k]]
                     delta = _card_text(head, pending or seg[:k])
-                    state["cur_mid"] = await new_card(
+                    result = await new_card(
                         delta, route=state.get("progress_route"), purpose="progress"
                     )
+                    ok, mid = _result(result)
+                    state["cur_mid"] = mid if ok else None
                     state["seg_start"] = pending_start
                     n += 1
             else:
-                state["cur_mid"] = await new_card(
+                result = await new_card(
                     text, route=state.get("progress_route"), purpose="progress"
                 )
+                ok, mid = _result(result)
+                state["cur_mid"] = mid if ok else None
                 n += 1
             if full_fit:
                 break                                     # 收完·此卡保持开放(下次接着 edit 长大)
@@ -782,11 +811,6 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
     def _persist_answers():
         if persist_answer and not persist_answer(state["answer_delivery"]):
             raise OSError("answer fragment state is not durable yet")
-
-    def _result(result):
-        if isinstance(result, dict):
-            return bool(result.get("ok")), result.get("message_id")
-        return bool(result) and result != "skip-progress", result if isinstance(result, str) else None
 
     async def _deliver(chunks, key, route=None, *, purpose="answer"):
         """Send ask/progress compatibility chunks without durable answer IDs."""
