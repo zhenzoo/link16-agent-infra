@@ -321,6 +321,204 @@ def _doc_url(token: str, doc_id: str) -> str:
     return metas[0].get("url") if metas else f"https://feishu.cn/docx/{doc_id}"
 
 
+# ═══ Markdown → docx 原生发布（不经云空间·无需 drive:drive）═══════════════
+# 2026-08-26 实测（PLAN-980）：`publish_file_as_doc` 那条链要先 upload_all 再 import，
+# 两步都要 `drive:drive` 系列权限；企业管理员不批时整条死掉。
+# 这里换一条只用 docx 权限的路：建文档 → markdown 转块 → 写入 → 设「组织内凭链接可读」。
+# `tb26-baseball`（无 drive:drive、无任何需审核权限）实测 2.9 秒全绿。
+#
+# ⚠️ 单次写入有块数上限：一个一级块展开 121 块（大表格）就 `invalid param`，
+#    所以按【展开后块数】动态分批；单个块自身就超限时退化成纯文本，绝不静默丢内容。
+
+_BLOCK_BATCH_LIMIT = 45
+
+
+def _convert_markdown(token: str, markdown: str):
+    d = api("POST", f"{_DOCX}/blocks/convert", token=token,
+            body={"content_type": "markdown", "content": markdown})
+    if d.get("code") != 0:
+        raise DocImportError(f"markdown 转换失败 {d.get('code')} {d.get('msg')}")
+    data = d.get("data") or {}
+    return data.get("blocks") or [], data.get("first_level_block_ids") or []
+
+
+def _subtree(blocks_by_id, ids):
+    out, seen, stack = [], set(), list(ids)
+    while stack:
+        bid = stack.pop(0)
+        if bid in seen or bid not in blocks_by_id:
+            continue
+        seen.add(bid)
+        block = blocks_by_id[bid]
+        out.append(block)
+        stack += list(block.get("children") or [])
+    return out
+
+
+def _table_data(blocks_by_id, tid):
+    """从 convert 输出里抠出表格的行列数与每格文字。"""
+    table = blocks_by_id.get(tid) or {}
+    prop = (table.get("table") or {}).get("property") or {}
+    rows = int(prop.get("row_size") or 0)
+    cols = int(prop.get("column_size") or 0)
+    texts = []
+    for cid in table.get("children") or []:
+        cell = blocks_by_id.get(cid) or {}
+        parts = []
+        for kid in cell.get("children") or []:
+            block = blocks_by_id.get(kid) or {}
+            for key in ("text", "heading1", "heading2", "heading3", "bullet", "ordered", "code"):
+                payload = block.get(key)
+                if isinstance(payload, dict):
+                    for el in payload.get("elements") or []:
+                        run = el.get("text_run") or {}
+                        if run.get("content"):
+                            parts.append(run["content"])
+        texts.append("".join(parts).strip())
+    return rows, cols, texts
+
+
+def _insert_real_table(token, doc_id, index, rows, cols, texts):
+    """建空表块（飞书自动生成单元格）→ 逐格填字。回 (ok, 填成功的格数)。"""
+    d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
+            token=token, body={"children": [{"block_type": 31, "table": {"property": {
+                "row_size": rows, "column_size": cols, "header_row": True}}}], "index": index})
+    if d.get("code") != 0:
+        return False, 0
+    child = ((d.get("data") or {}).get("children") or [{}])[0]
+    cells = (child.get("table") or {}).get("cells") or []
+    filled = 0
+    for cid, value in zip(cells, texts):
+        if not value:
+            continue
+        w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
+                token=token, body={"children": [{"block_type": 2, "text": {
+                    "elements": [{"text_run": {"content": value[:1800]}}], "style": {}}}], "index": 0})
+        if w.get("code") == 0:
+            filled += 1
+    return True, filled
+
+
+def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
+                        markdown: str = None, title: str = None,
+                        grant_open_id: str = None, perm: str = "edit",
+                        visibility: str = "tenant", cell_budget: int = 400,
+                        dry_run: bool = False) -> dict:
+    """Markdown → 飞书在线文档，只用 docx 权限（不碰云空间上传/导入）。
+
+    2026-08-27 实测（PLAN-980）：
+    - 普通块（标题/段落/列表/引用/代码）可以一次塞 60 个，走 `descendant` 批量写。
+    - **表格无论多小都塞不进 `descendant`**（1x2 的表 9 个块照样 `1770001`）——
+      convert 产出的表格结构与该接口不兼容，和块数无关。
+      正解是「先建空表块（飞书自动生成单元格）→ 逐格填字」，实测 9/9 成功。
+    - 表格代价是 1+行×列 次请求，所以用 `cell_budget` 封顶；超预算的表降级成逐行文字，
+      **降级会记进返回值，绝不静默丢内容**。
+
+    visibility: "tenant" 组织内凭链接可读（默认）/ "anyone" 任何已登录飞书的人 / "none" 不动
+    """
+    src = Path(file_path) if file_path else None
+    if markdown is None:
+        if not src or not src.exists():
+            raise DocImportError(f"找不到源文件：{file_path}")
+        markdown = src.read_text(encoding="utf-8", errors="replace")
+    doc_title = title or (src.stem if src else "未命名文档")
+    if dry_run:
+        return {"dry_run": True, "title": doc_title, "chars": len(markdown),
+                "chain": ["create_docx", "blocks/convert", "descendant(普通块分批)",
+                          "children(表格逐格填)", f"visibility={visibility}",
+                          "grant_member" if grant_open_id else "skip-grant"]}
+
+    token = _tenant_token(app_id, app_secret)
+    doc_id = _create_docx(token, doc_title)
+    blocks, first_level = _convert_markdown(token, markdown)
+    by_id = {b["block_id"]: b for b in blocks}
+
+    index = i = 0
+    tables_real = tables_degraded = batches = 0
+    while i < len(first_level):
+        bid = first_level[i]
+        if (by_id.get(bid) or {}).get("block_type") == 31:
+            rows, cols, texts = _table_data(by_id, bid)
+            if rows and cols and rows * cols <= cell_budget:
+                ok, _ = _insert_real_table(token, doc_id, index, rows, cols, texts)
+                if ok:
+                    cell_budget -= rows * cols
+                    tables_real += 1
+                    index += 1
+                    i += 1
+                    continue
+            lines = [" | ".join(texts[r * cols:(r + 1) * cols]) for r in range(rows or 0)]
+            for line in [ln for ln in lines if ln.strip()]:
+                _create_text_block(token, doc_id, doc_id, line)
+                index += 1
+            tables_degraded += 1
+            i += 1
+            continue
+        part = []
+        while i < len(first_level) and (by_id.get(first_level[i]) or {}).get("block_type") != 31:
+            candidate = part + [first_level[i]]
+            if len(_subtree(by_id, candidate)) > _BLOCK_BATCH_LIMIT and part:
+                break
+            part = candidate
+            i += 1
+        if not part:
+            continue
+        d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/descendant?document_revision_id=-1",
+                token=token,
+                body={"children_id": part, "index": index, "descendants": _subtree(by_id, part)})
+        if d.get("code") != 0:
+            for bid2 in part:
+                text = _plain_text_of(by_id, bid2)
+                if text:
+                    _create_text_block(token, doc_id, doc_id, text)
+                    index += 1
+        else:
+            index += len(part)
+            batches += 1
+
+    granted, grant_error = (None, None)
+    if grant_open_id:
+        granted, grant_error = _grant_member(token, doc_id, grant_open_id, perm)
+    vis_ok, vis_err = (None, None)
+    if visibility and visibility != "none":
+        vis_ok, vis_err = _set_visibility(token, doc_id, visibility)
+    return {"url": _doc_url(token, doc_id), "token": doc_id, "type": "docx",
+            "blocks": len(blocks), "batches": batches,
+            "tables_real": tables_real, "tables_degraded": tables_degraded,
+            "granted": granted, "grant_error": grant_error,
+            "visibility": vis_ok, "visibility_error": vis_err}
+
+
+def _plain_text_of(blocks_by_id, bid) -> str:
+    """把一棵块子树压成纯文本，用于超限块的降级写入。"""
+    parts = []
+    for block in _subtree(blocks_by_id, [bid]):
+        for key in ("text", "heading1", "heading2", "heading3", "bullet",
+                    "ordered", "code", "quote", "table_cell"):
+            payload = block.get(key)
+            if isinstance(payload, dict):
+                for el in payload.get("elements") or []:
+                    run = el.get("text_run") or {}
+                    if run.get("content"):
+                        parts.append(run["content"])
+    return " ".join(parts).strip()[:2000]
+
+
+_VISIBILITY_PRESETS = {
+    "tenant": {"external_access_entity": "closed", "link_share_entity": "tenant_readable"},
+    "anyone": {"external_access_entity": "open", "link_share_entity": "anyone_readable"},
+}
+
+
+def _set_visibility(token: str, doc_token: str, visibility: str, *, doc_type: str = "docx"):
+    body = _VISIBILITY_PRESETS.get(visibility)
+    if not body:
+        return None, f"未知 visibility={visibility}"
+    d = api("PATCH", f"{BASE}/drive/v2/permissions/{doc_token}/public?type={doc_type}",
+            token=token, body=body)
+    return (True, None) if d.get("code") == 0 else (False, f"{d.get('code')} {d.get('msg')}")
+
+
 def publish_media_as_doc(app_id: str, app_secret: str, files, *,
                          title: str | None = None, captions=None,
                          grant_open_id: str | None = None, perm: str = "view",
