@@ -489,8 +489,10 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 - `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=8` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
-- 配套 `feishu_bridge._wait_claude_ready`：`READY_TIMEOUT_SEC` 60→30、**先读后睡**（首轮不空等）。首发不再被吞后 claude ~10–15s 出 ❯，补发基本用不上。
+- 配套 `feishu_bridge._wait_agent_ready`：**先读后睡**（首轮不空等），并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 为 150s。
 - **超时兜底**：探不到提示符 → 回退原 `sleep(0.4)` 照发，最坏不比旧版差、绝不卡死 / 少发。
+
+**2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。
 
 **向后兼容**：`spawn(name, cmd, cwd, shell_init)` 签名 / 返回值不变 → autopilot（走 `spawn_worker.py` 的 split-here · 不经 `wmux_session.spawn`）零影响。
 

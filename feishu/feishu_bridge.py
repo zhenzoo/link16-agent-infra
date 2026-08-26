@@ -46,9 +46,11 @@ LOG_DIR = PROJECT / "feishu" / "_logs"
 INBOX_ROOT = STATE_DIR / "inbox"   # 入站附件落地（你发飞书的图/文件）· 按 bot/日期分目录 · scratch（agent 收下后移到目标资产目录）
 
 REPLY_POLL_SEC = 2
-READY_TIMEOUT_SEC = 30            # 等 spawn 出的 worker 起好最多 30 秒（spawn 探就绪保送达后 claude/codex ~10-15s 出提示符）
+READY_TIMEOUT_SEC = 30            # legacy Codex/custom 的默认启动窗口
+CLAUDE_READY_TIMEOUT_SEC = 90     # Claude Code 2.1.240 新机冷启实测约 42s；30s 会误判并把启动命令重复塞进 TUI
 CODEX_APP_SERVER_READY_TIMEOUT_SEC = 150  # worker fresh thread 合法 warm-up=120s，再留 remote TUI 启动余量
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
+STARTUP_FAILURE_MAX_AGE_SEC = 24 * 60 * 60  # /screen 可回看最近一次已关闭失败 pane 的现场
 CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_send 单卡 / 超了 SDK 自动分条
 # 注入策略（2026-06-28 修正）：
 #   入站消息一律走 paste（限速分块·bracketed-paste）注入，不再用裸 send。原因：CC 输入框是 TUI·有吞吐上限，
@@ -550,6 +552,73 @@ def clear_codex_thread(bot_name):
         f.unlink()
 
 
+def _startup_failure_file(bot_name):
+    return STATE_DIR / f"bridge-startup-failure-{bot_name}.json"
+
+
+def _record_startup_failure(bot, *, workspace_id, pty, cwd, stage, reason, screen):
+    """Save the failed startup screen before its throwaway pane is closed.
+
+    The old error told the user to run ``/screen`` after the workspace had
+    already been destroyed, so the evidence was guaranteed to be gone. Keep
+    only a bounded screen tail and non-secret metadata; never persist the worker
+    command or environment because launchers may source private credentials.
+    """
+    rec = {
+        "ts": int(time.time()),
+        "bot": bot["name"],
+        "runtime": agent_runtime.runtime_name(bot),
+        "profile": agent_runtime.profile_name(bot, required=False),
+        "cwd": str(cwd),
+        "workspace_id": str(workspace_id or ""),
+        "pty": str(pty or ""),
+        "stage": str(stage or "unknown"),
+        "reason": str(reason or "")[:500],
+        "screen_tail": str(screen or "")[-4000:],
+    }
+    try:
+        STATE_DIR.mkdir(exist_ok=True)
+        bridge_injection.atomic_write_json(_startup_failure_file(bot["name"]), rec)
+    except Exception:  # noqa: BLE001 — 诊断留痕失败不得掀翻原启动错误
+        pass
+    return rec
+
+
+def _load_startup_failure(bot_name, max_age=STARTUP_FAILURE_MAX_AGE_SEC):
+    path = _startup_failure_file(bot_name)
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(rec, dict):
+            return None
+        if int(time.time()) - int(rec.get("ts") or 0) > int(max_age):
+            return None
+        return rec
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _clear_startup_failure(bot_name):
+    try:
+        _startup_failure_file(bot_name).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _startup_failure_markdown(bot_name):
+    rec = _load_startup_failure(bot_name)
+    if not rec:
+        return None
+    when = time.strftime("%m-%d %H:%M:%S", time.localtime(int(rec.get("ts") or 0)))
+    screen = str(rec.get("screen_tail") or "")[-1500:] or "（失败前屏幕为空）"
+    return (
+        f"⚠️ 最近一次启动失败现场（{when} · {rec.get('runtime') or 'agent'} · "
+        f"profile `{rec.get('profile') or 'unknown'}` · 阶段 `{rec.get('stage') or 'unknown'}`）\n"
+        f"原因：{rec.get('reason') or '未记录'}\n```\n{screen}\n```"
+    )
+
+
 # ---------- 镜像器高水位（HWM·单独文件·只镜像器一个写者·与会话注册表零争用）----------
 def _mirror_file(bot_name):
     return STATE_DIR / f"bridge-mirror-{bot_name}.json"
@@ -771,6 +840,8 @@ def _ready_timeout(bot, explicit=None):
         return float(configured)
     if agent_runtime.uses_app_server(bot):
         return float(CODEX_APP_SERVER_READY_TIMEOUT_SEC)
+    if agent_runtime.runtime_spec(bot).name == "claude":
+        return float(CLAUDE_READY_TIMEOUT_SEC)
     return float(READY_TIMEOUT_SEC)
 
 
@@ -813,6 +884,76 @@ def _agent_live(bot, pty):
     except RuntimeError:
         return True                       # 读不到屏 ≠ 死，别误判
     return agent_runtime.is_live(bot, scr)
+
+
+def _startup_retryable_shell(bot, pty, screen=None):
+    """Only a proven bare shell may receive the launch command a second time.
+
+    A slow Claude splash, a modal, an unreadable screen, or a wmux metadata
+    disagreement all fail closed. Reinjecting a full launcher into any of those
+    states can become a user prompt once the TUI finally appears.
+    """
+    try:
+        alive, agent_name = wmux_session.pty_state(pty)
+    except RuntimeError:
+        return False
+    if not alive or agent_name:
+        return False
+    if screen is None:
+        try:
+            screen = read_screen(pty, 80)
+        except RuntimeError:
+            return False
+    return not agent_runtime.is_live(bot, screen)
+
+
+def _finish_worker_startup(bot, workspace_id, pty, cwd):
+    """Wait for one worker startup and perform at most one evidence-gated retry."""
+    if _wait_agent_ready(bot, pty, workspace_id):
+        _clear_startup_failure(bot["name"])
+        return True
+
+    try:
+        screen = read_screen(pty, 100)
+    except RuntimeError as exc:
+        screen = ""
+        screen_error = f"读屏失败：{exc}"
+    else:
+        screen_error = ""
+
+    retried = _startup_retryable_shell(bot, pty, screen)
+    if retried:
+        blog(bot["name"], f"⏳ {pty} 明确停在裸 shell → 补发一次 {agent_runtime.display_name(bot)} 启动命令")
+        try:
+            wmux("send", pty, _worker_cmd(bot, cwd), "--allow-ws", workspace_id)
+            time.sleep(0.3)
+            wmux("enter", pty, "--allow-ws", workspace_id)
+        except Exception as exc:  # noqa: BLE001
+            screen_error = f"补发失败：{exc}"
+        else:
+            if _wait_agent_ready(bot, pty, workspace_id):
+                _clear_startup_failure(bot["name"])
+                return True
+        try:
+            screen = read_screen(pty, 100)
+        except RuntimeError:
+            pass
+        stage = "bare-shell-retry-failed"
+        reason = screen_error or "明确检测到裸 shell；补发一次后仍未就绪"
+    else:
+        stage = "agent-started-not-ready"
+        reason = screen_error or "agent 已在启动或被弹窗阻塞；为防重复输入，未补发启动命令"
+
+    _record_startup_failure(
+        bot,
+        workspace_id=workspace_id,
+        pty=pty,
+        cwd=cwd,
+        stage=stage,
+        reason=reason,
+        screen=screen,
+    )
+    return False
 
 
 # ---------- transcript 定位（钉死每会话自己的 jsonl · 消灭多会话串台）----------
@@ -948,21 +1089,15 @@ def _ensure_session_unlocked(bot):
     agent_runtime.ensure_codex_trust(bot, cwd)  # Codex 首启 trust 弹窗会在 app-server warmup 上游就把会话挡死 → spawn 前预写目录信任（Claude 侧由就绪等待自动回车，无需预写）
     r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)  # cwd 交给 spawn 单独发 cd + 探就绪(分行不合并)
     ws, pty = r["workspace_id"], r["pty"]
-    if not _wait_agent_ready(bot, pty, ws):
-        # 首发 worker 没起来（瞬时竞态：新 shell 没就绪时被吞 / 首启 trust 提示挡）→ 同壳补发一次再等
-        blog(bot["name"], f"⏳ {pty} 首发 {agent_runtime.display_name(bot)} 未就绪 → 补发一次再等")
+    if not _finish_worker_startup(bot, ws, pty, cwd):
         try:
-            wmux("send", pty, _worker_cmd(bot, cwd), "--allow-ws", ws)
-            time.sleep(0.3)
-            wmux("enter", pty, "--allow-ws", ws)
+            wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
         except Exception:  # noqa: BLE001
             pass
-        if not _wait_agent_ready(bot, pty, ws):
-            try:
-                wmux_session.close(ws)   # 别留没起来的 bash 空 workspace
-            except Exception:  # noqa: BLE001
-                pass
-            raise RuntimeError(f"{agent_runtime.display_name(bot)} 会话起不来（两次都没就绪）——可能 wmux 卡了 / 首启 trust 提示挡住,@ 我发 /screen 看现场")
+        raise RuntimeError(
+            f"{agent_runtime.display_name(bot)} 在 {_ready_timeout(bot):g} 秒启动窗口内未就绪。"
+            "失败现场已保存，请发 /screen 查看；桥没有向仍在启动的 TUI 重复塞命令。"
+        )
     newj = _detect_new_jsonl(bot, before)
     jsonl = str(newj) if newj else None
     _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl,
@@ -1834,6 +1969,9 @@ def run(bot_name=None):
             alive = bool(rec and rec.get("pty") and await asyncio.to_thread(wmux_session.pty_alive, rec["pty"]))
             if cmd == "/screen":
                 if not alive:
+                    failed = _startup_failure_markdown(bot["name"])
+                    if failed:
+                        await reply(chat_id, md=failed); return
                     await reply(chat_id, "🛌 你现在没有会话（发句话我就给你起一个）"); return
                 shot = await asyncio.to_thread(read_screen, rec["pty"], 40)
                 await reply(chat_id, md="```\n" + shot[-1500:] + "\n```"); return

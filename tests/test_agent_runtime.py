@@ -752,7 +752,7 @@ class AppServerReadySignalTests(unittest.TestCase):
             feishu_bridge._ready_timeout(default_codex),
             codex_app_server_worker.WARMUP_TIMEOUT_SEC,
         )
-        self.assertEqual(feishu_bridge._ready_timeout({"agent": "claude"}), 30)
+        self.assertEqual(feishu_bridge._ready_timeout({"agent": "claude"}), 90)
         self.assertEqual(feishu_bridge._ready_timeout({
             "agent": "codex", "codex_transport": "cli-legacy",
         }), 30)
@@ -832,6 +832,85 @@ class AppServerReadySignalTests(unittest.TestCase):
                     )
             finally:
                 feishu_bridge.STATE_DIR = previous
+
+
+class BridgeStartupRecoveryTests(unittest.TestCase):
+    BOT = {"name": "test-claude-startup", "agent": "claude"}
+
+    def _with_state_dir(self, callback):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = feishu_bridge.STATE_DIR
+            feishu_bridge.STATE_DIR = Path(tmp)
+            try:
+                callback(Path(tmp))
+            finally:
+                feishu_bridge.STATE_DIR = previous
+
+    def test_slow_live_agent_is_never_given_duplicate_launcher(self):
+        def check(_tmp):
+            with (
+                patch.object(feishu_bridge, "_wait_agent_ready", return_value=False),
+                patch.object(feishu_bridge, "read_screen", return_value="Claude Code is starting…"),
+                patch.object(feishu_bridge.wmux_session, "pty_state", return_value=(True, "Claude Code")),
+                patch.object(feishu_bridge, "wmux") as send,
+            ):
+                self.assertFalse(feishu_bridge._finish_worker_startup(
+                    self.BOT, "ws-test", "pty-test", "C:/repo",
+                ))
+            send.assert_not_called()
+            failure = feishu_bridge._load_startup_failure(self.BOT["name"])
+            self.assertEqual(failure["stage"], "agent-started-not-ready")
+            self.assertIn("未补发启动命令", failure["reason"])
+            self.assertIn("Claude Code is starting", failure["screen_tail"])
+            self.assertIn("最近一次启动失败现场", feishu_bridge._startup_failure_markdown(
+                self.BOT["name"]
+            ))
+
+        self._with_state_dir(check)
+
+    def test_proven_bare_shell_gets_one_retry_and_clears_failure(self):
+        def check(tmp):
+            feishu_bridge._record_startup_failure(
+                self.BOT,
+                workspace_id="old-ws",
+                pty="old-pty",
+                cwd="C:/repo",
+                stage="old",
+                reason="old",
+                screen="old",
+            )
+            with (
+                patch.object(feishu_bridge, "_wait_agent_ready", side_effect=(False, True)),
+                patch.object(
+                    feishu_bridge,
+                    "read_screen",
+                    return_value="remo@host MINGW64 /c/repo\n$ ",
+                ),
+                patch.object(feishu_bridge.wmux_session, "pty_state", return_value=(True, "")),
+                patch.object(feishu_bridge, "_worker_cmd", return_value="launch-claude"),
+                patch.object(feishu_bridge, "blog"),
+                patch.object(feishu_bridge.time, "sleep"),
+                patch.object(feishu_bridge, "wmux") as send,
+            ):
+                self.assertTrue(feishu_bridge._finish_worker_startup(
+                    self.BOT, "ws-test", "pty-test", "C:/repo",
+                ))
+            self.assertEqual(send.call_count, 2)
+            send.assert_any_call(
+                "send", "pty-test", "launch-claude", "--allow-ws", "ws-test"
+            )
+            send.assert_any_call("enter", "pty-test", "--allow-ws", "ws-test")
+            self.assertFalse((tmp / "bridge-startup-failure-test-claude-startup.json").exists())
+
+        self._with_state_dir(check)
+
+    def test_unknown_or_unreadable_screen_fails_closed(self):
+        with patch.object(
+            feishu_bridge.wmux_session, "pty_state", return_value=(True, "")
+        ):
+            self.assertFalse(feishu_bridge._startup_retryable_shell(
+                self.BOT, "pty-test", ""
+            ))
 
 
 if __name__ == "__main__":
