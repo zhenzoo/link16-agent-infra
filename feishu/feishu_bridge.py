@@ -51,6 +51,7 @@ CLAUDE_READY_TIMEOUT_SEC = 90     # Claude Code 2.1.240 新机冷启实测约 42
 CODEX_APP_SERVER_READY_TIMEOUT_SEC = 150  # worker fresh thread 合法 warm-up=120s，再留 remote TUI 启动余量
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
 STARTUP_FAILURE_MAX_AGE_SEC = 24 * 60 * 60  # /screen 可回看最近一次已关闭失败 pane 的现场
+HANDOFF_RETRY_MAX_AGE_SEC = 6 * 60 * 60     # 已快照但未完成的手动 handoff 可在无活会话时重试
 CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_send 单卡 / 超了 SDK 自动分条
 # 注入策略（2026-06-28 修正）：
 #   入站消息一律走 paste（限速分块·bracketed-paste）注入，不再用裸 send。原因：CC 输入框是 TUI·有吞吐上限，
@@ -617,6 +618,68 @@ def _startup_failure_markdown(bot_name):
         f"profile `{rec.get('profile') or 'unknown'}` · 阶段 `{rec.get('stage') or 'unknown'}`）\n"
         f"原因：{rec.get('reason') or '未记录'}\n```\n{screen}\n```"
     )
+
+
+def _handoff_attempt_file(bot_name):
+    return STATE_DIR / f"bridge-handoff-attempt-{bot_name}.json"
+
+
+def _record_handoff_attempt(bot_name, pack, status, error=""):
+    """Track whether a persisted manual handoff pack was actually delivered."""
+    session_id = str((pack or {}).get("session_id") or "")
+    previous = None
+    try:
+        previous = json.loads(_handoff_attempt_file(bot_name).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    attempts = 1
+    if isinstance(previous, dict) and previous.get("session_id") == session_id:
+        attempts = int(previous.get("attempts") or 0) + (1 if status == "pending" else 0)
+    rec = {
+        "ts": int(time.time()),
+        "bot": bot_name,
+        "session_id": session_id,
+        "status": str(status),
+        "attempts": attempts,
+        "error": str(error or "")[:500],
+    }
+    try:
+        STATE_DIR.mkdir(exist_ok=True)
+        bridge_injection.atomic_write_json(_handoff_attempt_file(bot_name), rec)
+    except Exception:  # noqa: BLE001 — 交接主链优先，状态留痕不得反向阻塞
+        pass
+    return rec
+
+
+def _load_retryable_handoff(bot_name, max_age=HANDOFF_RETRY_MAX_AGE_SEC):
+    """Return a recent manual handoff pack that has not completed delivery.
+
+    Older bridges wrote only ``watchdog-handoff-*.json``. An absent attempt
+    sidecar therefore means "unknown, allow one explicit /handoff retry" rather
+    than "complete"; this is what recovers the 2026-08-26 production failure.
+    """
+    path = STATE_DIR / f"watchdog-handoff-{bot_name}.json"
+    try:
+        if time.time() - path.stat().st_mtime > float(max_age):
+            return None
+        pack = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(pack, dict):
+        return None
+    if pack.get("bot") != bot_name or pack.get("reason") != "主人手动 /handoff":
+        return None
+    try:
+        attempt = json.loads(_handoff_attempt_file(bot_name).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        attempt = None
+    if (
+        isinstance(attempt, dict)
+        and attempt.get("session_id") == str(pack.get("session_id") or "")
+        and attempt.get("status") == "complete"
+    ):
+        return None
+    return pack
 
 
 # ---------- 镜像器高水位（HWM·单独文件·只镜像器一个写者·与会话注册表零争用）----------
@@ -2031,29 +2094,50 @@ def run(bot_name=None):
                     import bridge_watchdog as bw
                 except Exception as _e:                                    # noqa: BLE001
                     await reply(chat_id, f"⛔ 交接失败：载不进 bridge_watchdog（{_e}）"); return
+                recovering = False
                 if not alive:
-                    await reply(chat_id, "🛌 当前没有会话可交接。直接发消息我就起一个新的。"); return
-                await reply(chat_id, "🔄 正在交接：快照上一轮 → 关会话 → 起全新 context → 让它先读懂历史……")
-                pack = await asyncio.to_thread(bw.snapshot_handoff, bot["name"], "主人手动 /handoff")
+                    pack = _load_retryable_handoff(bot["name"])
+                    if not pack:
+                        await reply(chat_id, "🛌 当前没有会话可交接，也没有最近失败的交接包。直接发消息我就起一个新的。"); return
+                    recovering = True
+                    keep_dir = str(pack.get("cwd") or current_cwd(bot))
+                    await reply(
+                        chat_id,
+                        f"🔁 检测到上一轮 `/handoff` 已完成快照、但新会话没有起成功。"
+                        f"正在复用 session `{pack.get('session_id')}` 的交接包重试，不会再关一次旧会话……",
+                    )
+                else:
+                    await reply(chat_id, "🔄 正在交接：快照上一轮 → 关会话 → 起全新 context → 让它先读懂历史……")
+                    pack = await asyncio.to_thread(bw.snapshot_handoff, bot["name"], "主人手动 /handoff")
+                    bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
+                    keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
+                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 if not pack.get("transcript"):
                     await reply(chat_id, "⚠️ 没找到上一个会话的 transcript —— 交接会缺历史，仍继续（它只能靠屏尾和 code base）。")
-                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
-                keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
-                await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 clear_codex_thread(bot["name"])                            # codex：清 thread 指针，确保真·新会话
                 _merge_session(bot["name"], {"cwd": keep_dir, "pty": None, "workspace_id": None,
                                              "jsonl": None, "daemon_fp": None})   # 只清 runtime 指针·留账号与目录
+                _record_handoff_attempt(bot["name"], pack, "pending")
                 try:
                     ws2, pty2, _created, _ = await asyncio.to_thread(ensure_session, bot)   # ③ 主动起
                 except Exception as _e:                                    # noqa: BLE001
-                    await reply(chat_id, f"⛔ 新会话起不来：{_e}。发条消息我再试。"); return
+                    _record_handoff_attempt(bot["name"], pack, "failed", str(_e))
+                    await reply(
+                        chat_id,
+                        f"⛔ 新会话起不来：{_e}\n"
+                        "交接包仍保留；发 `/screen` 可看失败现场，修复后再次发 `/handoff` 会直接复用它。",
+                    ); return
                 marker = (bw.build_align_prompt(pack)
                           + f"\n[飞书 from=host to={bot['name']} via=handoff · route=p2a]")
                 ok = await asyncio.to_thread(_inject, pty2, ws2, marker)
+                _record_handoff_attempt(
+                    bot["name"], pack, "complete" if ok else "injection-unconfirmed"
+                )
                 _bgn = len((pack.get("background") or {}).get("procs") or []) \
                     + len((pack.get("background") or {}).get("files") or [])
                 await reply(chat_id, md=(
-                    f"{'✅' if ok else '⚠️'} **已交接给全新会话**（账号 `{agent_runtime.current_account(bot)}` 不变 · 目录 `{keep_dir}`）\n"
+                    f"{'✅' if ok else '⚠️'} **{'已恢复交接并启动全新会话' if recovering else '已交接给全新会话'}**"
+                    f"（账号 `{agent_runtime.current_account(bot)}` 不变 · 目录 `{keep_dir}`）\n"
                     f"· 上一轮 session `{pack.get('session_id')}` 的记录已交给它\n"
                     f"· 在途工作线索 {_bgn} 条一并带过去了\n"
                     f"· 它会**先读历史 + 调研 code base → 汇报 → 停下等你**，不会自作主张往下做\n"

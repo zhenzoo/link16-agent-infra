@@ -492,7 +492,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 - 配套 `feishu_bridge._wait_agent_ready`：**先读后睡**（首轮不空等），并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 为 150s。
 - **超时兜底**：探不到提示符 → 回退原 `sleep(0.4)` 照发，最坏不比旧版差、绝不卡死 / 少发。
 
-**2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。
+**2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。手动 `/handoff` 另以 `bridge-handoff-attempt-<bot>.json` 记录 pending/failed/complete：旧会话已经关掉但新会话没起成时，6 小时内再次发 `/handoff` 会复用原快照重试，不会要求已经不存在的旧会话再活一次；complete 后同一快照不可重放。
 
 **向后兼容**：`spawn(name, cmd, cwd, shell_init)` 签名 / 返回值不变 → autopilot（走 `spawn_worker.py` 的 split-here · 不经 `wmux_session.spawn`）零影响。
 

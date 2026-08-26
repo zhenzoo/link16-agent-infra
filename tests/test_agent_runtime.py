@@ -912,6 +912,45 @@ class BridgeStartupRecoveryTests(unittest.TestCase):
                 self.BOT, "pty-test", ""
             ))
 
+    def test_recent_unfinished_manual_handoff_is_retryable_exactly_until_complete(self):
+        def check(tmp):
+            pack = {
+                "bot": self.BOT["name"],
+                "reason": "主人手动 /handoff",
+                "session_id": "old-session",
+                "cwd": "C:/repo",
+            }
+            path = tmp / f"watchdog-handoff-{self.BOT['name']}.json"
+            path.write_text(json.dumps(pack, ensure_ascii=False), encoding="utf-8")
+
+            # Backward compatibility: the production failure predates the
+            # attempt sidecar, so an absent sidecar is explicitly retryable.
+            self.assertEqual(
+                feishu_bridge._load_retryable_handoff(self.BOT["name"]), pack
+            )
+            pending = feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "pending"
+            )
+            self.assertEqual(pending["attempts"], 1)
+            feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "failed", "startup timed out"
+            )
+            self.assertEqual(
+                feishu_bridge._load_retryable_handoff(self.BOT["name"]), pack
+            )
+            second = feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "pending"
+            )
+            self.assertEqual(second["attempts"], 2)
+            feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "complete"
+            )
+            self.assertIsNone(
+                feishu_bridge._load_retryable_handoff(self.BOT["name"])
+            )
+
+        self._with_state_dir(check)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -406,7 +406,7 @@ def test_handoff_命令已接进桥且不切账号():
     """/handoff 与 /close 的三处差别，缺一不可。"""
     src = (HERE.parent / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8")
     i = src.index('if cmd in ("/handoff"')
-    body = src[i:i + 3000]
+    body = src[i:src.index('if cmd == "/new"', i)]
     assert "reset_account" not in body, "/handoff 绝不能切账号（那是 /close 干的）"
     assert "snapshot_handoff" in body, "必须在关会话【之前】快照交接包"
     assert body.index("snapshot_handoff") < body.index("wmux_session.close"), "快照必须在关会话之前"
