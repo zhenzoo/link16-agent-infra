@@ -11,7 +11,7 @@ owns:
 does_not_own:
   - Claude 侧的任何配置（不得修改）
   - Codex bot 的注册（见 SOP-121）
-  - profile 注册（见用户级 $agent-profile-governance）
+  - Link16 profile 注册（见本仓 profile_bootstrap.py）
 read_when:
   - 要让 Codex 复用 Claude 的 skill/workflow
   - 安装或升级 Codex CLI
@@ -22,6 +22,9 @@ last_reviewed: 2026-08-26
 > Goal: make Codex Personal reuse the user's maintained Claude workflows while
 > keeping Claude Code fully operational and single-sourced. This is a
 > compatibility layer, not a destructive migration.
+>
+> **这是维护者主动选择的私人兼容层，不是 SOP-100/120/121 的部署基线。** Link16 核心 `feishu`
+> skill、profile registry、hooks 与 bridge 都能只靠本仓安装；没有本文中的私人源、govctl 或 adapters 也应完整工作。
 
 ## 安装 / 升级 Codex（官方 standalone 优先）
 
@@ -48,7 +51,7 @@ codex --version
 | Surface | Claude Personal source | Codex Personal destination | Strategy |
 |---|---|---|---|
 | User rules | 经同一语义治理的 Claude runtime source + Codex runtime source | `~/.codex{,-personal}/AGENTS.md` | `$agent-profile-governance` 先分类公共规则/runtime 适配，再由 renderer 生成带 source hash 的实体入口 |
-| Skills | `~/.claude-personal/skills/*` | `~/.agents/skills/claude-compat-*` | Thin adapter; upstream read at runtime |
+| Personal skills（排除 repo-owned `feishu`） | `~/.claude-personal/skills/*` | `~/.agents/skills/claude-compat-*` | Thin adapter; upstream read at runtime；`feishu` 由 Link16 bootstrap 安装 |
 | Legacy commands | `~/.claude-personal/commands/*.md` | Same adapter namespace | `/name` becomes `$name` |
 | MCP | Claude settings | `~/.codex-personal/config.toml` | Re-register/authenticate per profile |
 | Hooks | Claude hook schema | `~/.codex-personal/hooks.json` | Native Codex events, separate scripts |
@@ -181,7 +184,7 @@ Claude-specific tool names inside an upstream workflow map as follows:
 | `Write` / `Edit` / `MultiEdit` | `apply_patch` |
 | Bash / PowerShell | Current shell runner |
 | `Task` subagents | Codex collaboration only when delegation is permitted |
-| `WebSearch` / `WebFetch` | AnySearch/Jina policy, then native fallback |
+| `WebSearch` / `WebFetch` | 遵循被适配 workflow 自己的网络策略；否则使用当前 runtime 可用能力 |
 
 An adapter is not a claim of perfect binary compatibility: workflows that
 depend on Claude-only UI, undocumented hooks, or a Claude plugin-specific tool
@@ -193,7 +196,7 @@ runtime instead of silently pretending the APIs are identical.
 ```text
 Feishu message
   -> feishu_bridge.py
-  -> profile=cxp -> registry derives CODEX_HOME=~/.codex-personal
+  -> profile=<codex-profile> -> local registry derives its isolated CODEX_HOME
   -> UserPromptSubmit pins this turn's reply route
   -> PostToolUse writes progress records
   -> Stop writes the answer record
@@ -209,7 +212,7 @@ PLAN-915 canary uses an explicit machine-local bot flag:
 ```json
 {
   "name": "tb25-link16-codex",
-  "profile": "cxp",
+  "profile": "<codex-profile>",
   "codex_transport": "app-server-canary",
   "delivery_contract": "milestone-v1"
 }
@@ -239,8 +242,8 @@ already-running bot needs.
 ## Verification
 
 ```powershell
-python feishu/agent_profile_cli.py doctor --profile cxp
-python feishu/agent_profile_cli.py command --profile cxp --cwd .
+python feishu/agent_profile_cli.py doctor --profile <codex-profile>
+python feishu/agent_profile_cli.py command --profile <codex-profile> --cwd .
 python "$HOME\.claude-personal\skills\agent-profile-governance\scripts\profile_governance.py" doctor
 python -m unittest discover -s tests -v
 python feishu/feishu_bridge.py status --bot tb25-link16-codex

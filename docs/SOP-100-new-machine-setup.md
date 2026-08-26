@@ -8,12 +8,13 @@ owns:
   - 依赖安装顺序与验证
   - wmux 与 RPC 客户端的就位检查
   - private GitHub collaborator 登录、main-only clone 与同步验收
-  - 新机机型/年份前缀与 ccp / ccp2 / cxp 基线入口
+  - 新机机型/年份前缀与用户显式命名的隔离 Claude/Codex profile
   - 本机 .env 凭据与 bot 名册的建立
   - 起桥与验收
   - 开机自启（桥的计划任务 + wmux 的 Run 键）
   - 排错速查表
 does_not_own:
+  - 部署工程师职责、人工停点与完成声明（见 ROLE-010）
   - 注册单个 bot 的细节（见 SOP-120）
   - 桥的内部机制（见 ARCH-110）
   - provider 账号的认证细节（每人在各自 profile 里登录）
@@ -45,7 +46,7 @@ agent 负责运行后文的命令、选路、修复和验收。用户只会经�
 | GitHub 浏览器登录/设备码页 | 用自己的 GitHub 账号登录、接受 private 仓邀请 | 验真账号并只 clone `main` |
 | 网络检测结果 | 若被提示，打开 v2rayN；不需要猜端口 | 对真实 GitHub/PyPI URL 测直连和候选 mixed port |
 | 「机型 + 建议前缀」 | 仅当年份不对或名称冲突时纠正 | 只读型号/BIOS 年份，不读序列号/UUID |
-| Claude / Codex 登录页 | 分别登录 `ccp`、`ccp2`、`cxp`；不用的可明确跳过 | 建立三个彼此隔离的用户级 profile |
+| Claude / Codex 登录页 | 登录用户本轮选择并命名的隔离 profile；不用的 provider 可明确跳过 | 建立 local registry、隔离 home 与对应入口，不复制任何认证 |
 | 飞书 Device Grant 链接 | 在页面核对账号和目标组织，然后授权 | 创建应用并把凭据只写入本机 `.env` |
 | 飞书权限审阅链接 | 核对本次能力与权限，按页面要求创建版本/发布或等管理员审核 | 只申请所选 capability，并持续检查真实授权状态 |
 | 绿色验收表 | 在飞书私聊 bot 发一句「在吗」 | 核对 Git Bash、wmux、profile、桥和 `main` 全绿 |
@@ -53,18 +54,10 @@ agent 负责运行后文的命令、选路、修复和验收。用户只会经�
 展示给用户的说明应聚焦「现在会发生什么 / 你要点哪里」；
 alias、PATH、环境变量、wrapper 等内部细节只在排错时再解释。
 
-### 部署工程师的分工与完成闸
+### 部署工程师的职责与完成闸
 
-- `AGENTS.md` 只负责识别“开始部署 Link16”、规定人工停点和何时可宣布完成。
-- 本 SOP 是唯一顺序手册，安装命令、回滚、验收和排错只在这里维护。
-- `CLAUDE.md` / Codex 适配层只翻译各 runtime 怎样跑后台任务和读完成信号，不复制步骤。
-
-对人只暂停在 GitHub/provider 登录、飞书两个授权链接、版本发布或管理员审批；注册器和 Monitor 必须
-后台常驻并在机械信号到来后自动继续。最终绿色验收至少包括：`main` 与 `origin/main` 为 `0 0`、
-preflight 必需项全绿、选中的 profile 可真启动、wmux 新面板是 Git Bash、Windows Terminal（若安装）
-默认进入 Git Bash、本机 local roster 不越界、
-桥健康、owner DM 真往返；选了群能力时再验目标群 @ 往返。若尚未注册 bot，只能报告“Link16 核心已
-部署，飞书接入待验收”。
+共享角色合同只认 [`ROLE-010`](ROLE-010-link16-deployment-engineer.md)：它定义谁做什么、何时必须停给人操作、
+怎样跨 turn 继续，以及什么证据齐了才能宣布完成。本 SOP 只维护顺序、命令、回滚、验收和排错。
 
 ### Stage 0 · 真空白机先自举 Git / gh / Python
 
@@ -117,11 +110,12 @@ python feishu/windows_bootstrap.py --skip claude --apply --yes
 
 ## 0 · 心智模型（先懂为什么有这些步骤）
 
-桥 = **Python 半边**（lark SDK 连飞书云）+ **wmux 半边**（在本机托管 agent 会话）。两半之间靠仓库自带的 `wmux/wmux-rpc.js` 通信。新机器要补的东西分三类：
+桥 = **Python 半边**（lark SDK 连飞书云）+ **wmux 半边**（在本机托管 agent 会话）。两半之间靠仓库自带的 `wmux/wmux-rpc.js` 通信。新机器要补的东西分四类：
 
 1. **Python 依赖**（pip · 跟着 requirements.txt 走）
 2. **wmux + 仓库自带的 RPC 客户端**（⚠️ 最容易卡的一步 · 见 §3）
-3. **本机 `.env` 凭证 + 机器本地 bot 名册**（每台机各管各的）
+3. **本机 profile registry + repo-owned `feishu` skill**（用户显式命名、hash/drift 可验）
+4. **本机 `.env` 凭证 + 机器本地 bot 名册**（每台机各管各的）
 
 > 🔑 **「为什么之前在新机器拿不到 wmux handler？」** —— 因为缺 `wmux-rpc.js`。桥靠 `node <wmux-rpc.js> rpc workspace.list/new/…` 跟 wmux daemon 对话；这个脚本**原是仓库外的自建脚本（没提交进 git）**，只活在主力机 home，所以 `git pull` 带不来它。新机器 `git clone` 完，Python 装好、wmux 也开着，但只要找不到 `wmux-rpc.js`，桥就连不上 wmux = 拿不到 handler。
 >
@@ -132,15 +126,16 @@ python feishu/windows_bootstrap.py --skip claude --apply --yes
 | 层 | 只 clone `link16-agent-infra` | 另有个人 `claude-config` / skills |
 |---|---|---|
 | 飞书桥、wmux RPC、注册、网络/机器体检 | **完整可用** | 不改变核心链路 |
-| `ccp` / `ccp2` / `cxp` | `profile_bootstrap.py` 建最小独立 home 与 Shell 函数；分别原生登录即可 | 可再叠加本人的规则、模型预设与长期记忆 |
-| 常用工作流 | provider 自带能力正常；没有私有 skill 名称 | 增加 `anysearch`、`push`、`pull`、`align`、`commit`、`feishu` 等个人工作流 |
-| Jina | 不属于桥；按需安装 `requirements-agent-tools.txt` | 若有 `jina_rotate.py`，再获得多 key 轮换/代理增强 |
+| 隔离 profile | `profile_bootstrap.py` 按本机 local registry 建独立 home 与 Shell 函数；用户分别原生登录 | 可再叠加本人规则、模型预设与长期记忆 |
+| 飞书操作入口 | repo-owned `.agents/skills/feishu`，bootstrap 安装并校验 hash/drift | 不需要私人 skill |
+| 个人 workflows | 不安装，也不影响桥 | 用户自己决定 anysearch、push、pull、align、commit 等增强 |
+| Jina | 不属于桥；用户明确选择时才装 `requirements-agent-tools.txt` | 由用户自己的配置决定额外增强 |
 | gstack | **不安装、也不需要** | 仍是单独来源、明确 opt-in，不随个人 skills 同步而默认安装 |
 
 结论：同事只拉 Link16 **不会影响桥、wmux、Claude/Codex 登录或飞书 bot 正常工作**；
-少的是主人的个人操作习惯与专用工作流，不是运行依赖。不要为了补 skills 去复制主人的
-`.claude-personal`、认证目录或会话历史。独立部署以本仓 `profile_bootstrap.py` 为准；
-仓库维护者本人已有 `$agent-profile-governance` 时，才用它做更完整的多环境语义治理。
+少的是别人的个人操作习惯与专用工作流，不是运行依赖。不要为了补 skills 去复制别人的
+用户配置仓、认证目录或会话历史。独立部署只以本仓 `profile_bootstrap.py` 与 repo-owned
+`feishu` skill 为准。
 
 ---
 
@@ -154,7 +149,7 @@ python feishu/windows_bootstrap.py --skip claude --apply --yes
 | **Python UTF-8 模式** | `windows_bootstrap.py --apply --yes` 自动写用户级 `PYTHONUTF8=1`，重开终端后由 `preflight.py` 验收。**不要求**勾 Windows“Beta: 使用 Unicode UTF-8”系统区域选项；Link16 hook 还会直接按 UTF-8 读原始字节，不依赖机器 ANSI 代码页。 |
 | **`VIBECODING_ROOT` 环境变量** | 指向这个用户自己的 `.env` 所在根（例 `C:\410_VibeCoding`）。首次写凭据前必须明确设定，不依赖其他电脑的盘符。 |
 | **`PROXY_URL`** | 放在 `$VIBECODING_ROOT/.env`（如本地 mixed port）。下载/安装由 `feishu/network_route.py` 对实际 URL 同时探测直连与此代理；代码不写死端口、不改 v2rayN。 |
-| **Link16 agent profile launcher** | 运行 `python feishu/profile_bootstrap.py --apply`，建立 `ccp` / `ccp2` / `cxp` 目录和 Git Bash + PowerShell 函数。它们不是 alias，也不复制认证。 |
+| **Link16 agent profile launcher** | 先建立 `agent-profiles.local.json`，再由 `profile_bootstrap.py` 为用户选中的 profile 建隔离 home、Git Bash + PowerShell 函数和 `feishu` skill；Codex profile 同时无损合并 `UserPromptSubmit` / `PostToolUse` / `Stop` bridge hooks。函数不是 alias，也不复制认证。 |
 | **Windows Terminal + wmux** | 两者默认 shell 都选 Git Bash；脚本在应用未运行时保留未知字段并安全配置，正在运行时才显示一次 GUI 动作。 |
 | **node** | `node --version`（仓库自带的 `wmux/wmux-rpc.js` 要 node 跑）。 |
 | **PowerShell 脚本策略** | 若启动时报「禁止运行脚本」，检查 `Get-ExecutionPolicy -List`；对普通用户设 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force`，重开终端后验收 profile 函数。 |
@@ -196,18 +191,38 @@ python feishu/network_route.py probe --url https://pypi.org/simple/lark-oapi/
 不得根据 Wi-Fi 名称写 Remote/Staff/企业租户A 特例，也不得把 `7897` 写成所有人的默认。
 若候选全失败，让用户打开 v2rayN 的「参数设置 → 本地监听 → 本地混合端口」，再重测。
 
-### 1.3 · 机器前缀与三个账号 profile
+### 1.3 · 机器前缀与用户选择的隔离 profiles
 
 ```powershell
 python feishu/machine_identity.py
+
+# 新机：示例同时选 Claude/Codex；只装一个 provider 时只提供对应的一组参数
+python feishu/profile_bootstrap.py --init-registry `
+  --claude-profile claude-work --claude-home ~/.claude-work `
+  --codex-profile codex-work --codex-home ~/.codex-work
+python feishu/profile_bootstrap.py --init-registry `
+  --claude-profile claude-work --claude-home ~/.claude-work `
+  --codex-profile codex-work --codex-home ~/.codex-work --apply
+
+# 已有旧机：不改名、不搬认证，先逐字迁入 local registry
+python feishu/profile_bootstrap.py --migrate-registry
+python feishu/profile_bootstrap.py --migrate-registry --apply
+
+# 两条分支在这里汇合：先预览，再安装，再体检
+python feishu/profile_bootstrap.py
 python feishu/profile_bootstrap.py --apply
+python feishu/profile_bootstrap.py --doctor
 ```
 
+`--doctor` 必须同时看到 repo-owned `feishu` skill 与所选 Codex home 的 bridge hooks 为 `ok`。已有的私人 hooks 会保留；损坏或结构非法的 `hooks.json` 报 conflict，安装器不会覆盖。
+
 - 前缀约定 = 产品线缩写 + 年份，例 `tb25` / `tb24` / `tuf19`。自动年份来自 BIOS，不等于购买年；用户告知时用 `--year 2025` 覆盖。
-- 本机名命示例：`<prefix>-link16`、`<prefix>-ccp`、`<prefix>-cxp`。写入共享 registry 前，要说明 private collaborator 可见主机元数据。
-- `ccp` → `~/.claude-personal`；`ccp2` → `~/.claude-personal2`；`cxp` → `~/.codex-personal`。它们是 Shell 函数，不是 alias。
-- 重开 Git Bash，分别输入 `ccp`、`ccp2`、`cxp`。每个 profile 在自己的浏览器页登录；不复制别人的认证文件。
-- 桌面用户不需要理解函数内部实现；他们只需知道「输入这三个名字会进入对应的独立账号」。
+- 本机名示例：`<prefix>-link16`、`<prefix>-baseball`。写入共享 agent registry 前，要说明 private collaborator 可见主机元数据。
+- profile ID 与 home 由用户选择；新建流程拒绝精确的 `~/.claude`、`~/.codex`，推荐 `~/.claude-work`、`~/.codex-work2` 这类隔离目录。
+- `agent-profiles.local.json` 是 gitignored 的单一本机有效 registry，不与 committed 文件合并；旧机迁移期 committed `agent-profiles.json` 只作显式 fallback。
+- Claude 的 `feishu` 安装到各所选 profile home；Codex 按官方用户级规则安装到 `$HOME/.agents/skills/feishu`，供同一 Windows 用户的 Codex profiles 共用。
+- 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
+- 重开 Git Bash，用用户自己命名的 profile 函数进入对应账号并在官方页面登录；不复制别人的认证文件。
 
 ---
 
@@ -228,12 +243,10 @@ python -c "import lark_oapi; from lark_channel import FeishuChannel, OutboundIma
 ```
 > 报 `ModuleNotFoundError: No module named 'lark_channel'` / 桥打印 `缺依赖: pip install lark-channel-sdk` → 这步没做。
 
-### 2.1 · Jina infra（桥不依赖；按需安装）
+### 2.1 · Jina（用户主动选择的非核心工具）
 
-**为什么写进新机器 SOP**：`jina` 是可选的单页抓取工具（URL→markdown，能啃 SPA）。
-它不在桥的运行路径上，所以**缺了桥照样跑**，安装失败也不得阻塞部署。有个人 `anysearch` skill 的机器可以回退到 AnySearch；
-没有个人配置的同事则使用 provider 自带网页能力，两者都不影响桥本身。
-2026-08-18 在 tuf19 实证：`jina` 入口存在但底层 CLI 没装 → 单页读取直接失败。**这种"缺了不报错"的东西最该写进 SOP**，否则每台新机器都要现场发现一次。
+`jina` 可把网页转成 Markdown，但不在桥运行路径上。只有用户在 Stage 0 明确选择网页工具时才安装；
+没有安装或安装失败都不得阻塞 Link16 部署，也不进入核心完成判据。
 
 **按需装**（不在核心 `requirements.txt`；用户明确要网页抓取工具时才运行）：
 ```bash
@@ -241,26 +254,12 @@ python feishu/network_route.py run --url https://pypi.org/simple/jina-cli/ -- \
   python -m pip install -r feishu/requirements-agent-tools.txt
 ```
 
-**key**：`$VIBECODING_ROOT/.env` 里一行 `JINA_API_KEY=jina_xxxx`（多账号续 `JINA_API_KEY_2` / `_3` …，轮换器按顺序花）。
-没 key 也不是全废——`read` 能落匿名档照样抓。
-
-**调用规则**：独立 Link16 部署直接用官方 `jina` CLI；若这个用户自己的个人配置里存在
-`~/.claude-personal/scripts/jina_rotate.py`，可优先用轮换器获得多 key 顺序轮换、欠费回退与代理增强：
-```bash
-jina read "<URL>"
-# 个人增强（文件存在时才用）：
-python "$HOME/.claude-personal/scripts/jina_rotate.py" read "<URL>"
-```
-
-**验收**（两条都跑，别只跑 `--help` 就当装好了）：
+**验收**（仅用户已选择安装时）：
 ```bash
 python -c "import shutil; print(shutil.which('jina'))"           # 有绝对路径 = CLI 在 PATH 上
 jina read "https://example.com" | head -3
 ```
-出现 `Title: Example Domain` = 端到端通了。
-
-> **本机实测记录（tuf19 · 2026-08-18）**：`jina-cli 0.3.0` 装好，`read` ✅、`search` ✅（付费端点通 = key 有余额）。
-> ⚠️ 用户级 CLAUDE.md 里「两把 key 都欠费、只剩匿名 read」那段是 2026-07-29 的旧状态，**已过期**，以本机实测为准。
+出现 `Title: Example Domain` = 端到端通了；否则把它标为“可选工具未就绪”，继续核心部署。
 
 ---
 
@@ -320,7 +319,8 @@ fi
 /plugin marketplace add openwong2kim/wmux
 /plugin install wmux-claude-integration@wmux
 ```
-> 这是 Claude Code **内置命令**（脚本/agent 调不了，得人在输入框敲）。它给 Claude Code 加 wmux 相关 skills/hooks，**但不放 `~/wmux-rpc.js`、不配 ccp**（那两样是 §1/§3 手动的）。
+> 这是 Claude Code **内置命令**（脚本/agent 调不了，得人在输入框敲）。它给 Claude Code 加 wmux 相关 skills/hooks，
+> **但不放 `~/wmux-rpc.js`、不创建 Link16 profile**（那两样由 §1/§3 的仓内流程负责）。
 
 ---
 
@@ -364,57 +364,55 @@ python feishu/feishu_bridge.py status     # 看进程/会话活没活
 
 ## 9 · 开机自启（必做 · 否则每次开机都得手动跑 §8）
 
-### 9.0 · 心智模型：**两半都要自启，而且都挂在「登录」上**
+### 9.0 · 心智模型：**两个启动入口，三个 Python 服务**
 
 桥是两半（§0）：**wmux 半边**托管 Claude 会话、**Python 半边**连飞书。开机后要能无人值守干活，**两半都得自己起来**：
 
 | 半边 | 靠什么自启 | 装机时通常 |
 |---|---|---|
 | **wmux**（GUI） | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `wmux` 项 | wmux 安装程序**自己写好**，一般不用管，§9.1 只是核对 |
-| **飞书桥**（Python） | 计划任务 **`FeishuBridge-Autostart`** | **要手动建**，见 §9.2 |
-| **看门狗**（Python · 全机限流自愈） | 计划任务 **`AutopilotWatchdog-Autostart`** | **要手动建**，见 §9.5（桥挂了没人管 ≠ 会话卡了没人管 —— 这是**第二层**保护） |
+| **飞书桥**（Python） | 计划任务 **`FeishuBridge-Autostart`** | 经用户审阅准确 before/after 后建立，见 §9.2；整体 `start` 同时拉起 cron 与 watchdog |
+| **看门狗**（Python · 全机限流自愈） | **没有独立计划任务** | 随飞书桥整体 `start`/`stop` 起停；§9.5 只清理旧任务并验唯一实例 |
 
 > 🚨 **别把触发器改成「开机时（不等登录）」——那是个看着更强、实际全废的陷阱。** 两个硬理由：
 > 1. **wmux 是 Electron 桌面应用**（进程带 `--type=renderer` / `--type=gpu-process`），必须有**交互式桌面会话**才活得了。没登录 = 没 wmux = 桥虽然连上了飞书，但收到消息时开不出面板，第一条消息就白扔。
-> 2. 「不等登录」的任务只能以 **SYSTEM** 跑（或把你密码存进任务里跑 Session 0）。SYSTEM 的 home 是 `C:\Windows\System32\config\systemprofile` → `~/.claude-personal`、`~/.wmux`、`$VIBECODING_ROOT\.env` **一个都找不到**，桥连起都起不来。
+> 2. 「不等登录」的任务只能以 **SYSTEM** 跑（或把你密码存进任务里跑 Session 0）。SYSTEM 的 home 是 `C:\Windows\System32\config\systemprofile` → 用户选择的隔离 profile home、`~/.wmux`、`$VIBECODING_ROOT\.env` **一个都找不到**，桥连起都起不来。
 >
 > ✅ **真想「通电后手都不用碰」的正解不是改触发器，而是给这台机开 Windows 自动登录**（`netplwiz` 取消「必须输入密码」）。那样链路是：通电 → 自动进桌面 → wmux 自启 → 延迟后桥自启 → 全套活的。代价 = 密码落本地 + 任何人开机即进桌面，**按机器所处环境自己权衡**。
 
-### 9.1 · 核对 wmux 登录自启
+### 9.1 · 先生成启动项计划（只读）
+
+不要手写注册表或计划任务。仓内安装器会同时检查三件事：wmux 登录自启、唯一
+`FeishuBridge-Autostart`、legacy `AutopilotWatchdog-Autostart`。默认只读：
 
 ```powershell
-Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | Select-Object wmux
+python feishu/service_installer.py plan
 ```
-有值（指向 `…\AppData\Local\wmux\app-<ver>\wmux.exe`）= 已配好。**没有**就补一条：
+
+输出会逐项展示准确的 `before=` / `after=`，并给出一个 `digest`（本次计划指纹）。agent 必须把所有
+`change`/`conflict` 原样解释给用户；**用户明确同意前停在这里**。如果全是 `已验证/none`，无需 apply。
+
+wmux 的目标必须是 Squirrel 稳定 shim `…\AppData\Local\wmux\wmux.exe`，不能固定到会随升级变化的
+`app-<ver>\wmux.exe`。飞书桥任务目标由当前仓、当前 `pythonw.exe`、当前 Windows 用户和本机名册派生，
+不写死别人机器的盘符或用户名。
+
+### 9.2 · 用户确认后 apply；需要时可精确回滚
+
+把用户刚审阅的 digest 代入；apply 前会再次读现场，现场一旦变化就拒绝执行，要求重新 plan：
+
 ```powershell
-$wmux = (Get-ChildItem "$env:LOCALAPPDATA\wmux" -Directory -Filter 'app-*' | Sort-Object Name -Descending | Select-Object -First 1).FullName + "\wmux.exe"
-Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name wmux -Value "`"$wmux`""
+python feishu/service_installer.py apply --yes --expect <刚审阅的digest>
 ```
 
-### 9.2 · 建飞书桥的计划任务（**机器无关 · 整段照抄照跑**）
-
-> 全部走变量取值（`Get-Command` 找解释器、`$env:USERNAME` 取账号、`$env:VIBECODING_ROOT` 取根），**不写死盘符/用户名** —— 任何机器整段粘进 PowerShell 即可。
+实际发生修改时，输出会给出一个 receipt 文件。receipt 保存本次每个启动项的修改前状态；需要撤回时先向用户
+展示 receipt，再运行：
 
 ```powershell
-# ① 本机三个坐标（唯一可能要改的是 $repo：有的机多一层 Post\tools\）
-$repo = "$env:VIBECODING_ROOT\Post\link16-agent-infra"
-if (-not (Test-Path $repo)) { $repo = "$env:VIBECODING_ROOT\Post\tools\link16-agent-infra" }
-$py   = (Get-Command pythonw).Source        # pythonw = 无控制台窗口，开机不闪黑窗
-$me   = "$env:USERDOMAIN\$env:USERNAME"
-"repo=$repo`npy=$py`nuser=$me"              # 先肉眼核一眼这三行
-
-# ② 注册任务
-$action    = New-ScheduledTaskAction -Execute $py -Argument "`"$repo\feishu\feishu_bridge.py`" start" -WorkingDirectory $repo
-$trigger   = New-ScheduledTaskTrigger -AtLogOn -User $me
-$trigger.Delay = "PT1M"                     # 留 1 分钟给 wmux 起完 + 网络就绪
-$principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive
-$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-             -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
-
-Register-ScheduledTask -TaskName "FeishuBridge-Autostart" -Action $action -Trigger $trigger `
-  -Principal $principal -Settings $settings -Force `
-  -Description "登录后延迟 1 分钟跑 link16 的 feishu_bridge.py start，拉起名册全部 bot 桥进程 + cron 守护。"
+python feishu/service_installer.py rollback --receipt <receipt文件> --yes
 ```
+
+rollback 也会做 compare-and-swap：只有现场仍等于本次 apply 后状态才恢复，避免覆盖后来由用户或升级程序做的
+新改动。安装器只写持久配置，**不会自动启停当前生产桥或 wmux**。
 
 **各参数为什么这么设**：
 
@@ -427,16 +425,28 @@ Register-ScheduledTask -TaskName "FeishuBridge-Autostart" -Action $action -Trigg
 | `-MultipleInstances IgnoreNew` | 已在跑就不重复起（`run` 那层本来也有单实例锁兜底） |
 | 不加 `-RunLevel Highest` | 不需要管理员；普通权限即可，也不会弹 UAC |
 
-### 9.3 · 验收（**不用真重启，手动触发一次即可**）
+### 9.3 · 分层验收；真实启停只在维护窗口
+
+先跑只读 service doctor：
 
 ```powershell
-Start-ScheduledTask -TaskName "FeishuBridge-Autostart"; Start-Sleep 12
-Get-ScheduledTaskInfo FeishuBridge-Autostart | Select-Object LastRunTime, LastTaskResult   # 期望 LastTaskResult = 0
-Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
-  Where-Object { $_.CommandLine -match 'feishu_bridge|bridge_cron' } |
-  ForEach-Object { ($_.CommandLine -split 'feishu\\')[-1] }
+python feishu/service_doctor.py
 ```
-期望：**每个名册 bot 各一行 `feishu_bridge.py run --bot <name>`，外加一行 `bridge_cron.py run`**（cron 守护随整体 `start` 一起起）。
+
+它把每个部件分成“文件存在 / 已配置 / 正在运行 / 已真实收发”，不会把“脚本在磁盘上”冒充“服务能工作”。
+至少核对：profile + skill、hooks/typed transport、本机名册与凭据、wmux RPC、每 bot 恰好一个 bridge、唯一 cron、
+唯一 watchdog + 新鲜心跳、活动 registration monitor、历史账本真实往返。
+
+新机器第一次启用，或确实需要验证刚写的计划任务时，约维护窗口后再手动触发；这会改变当前运行态：
+
+```powershell
+Start-ScheduledTask -TaskName "FeishuBridge-Autostart"
+Get-ScheduledTaskInfo FeishuBridge-Autostart | Select-Object LastRunTime, LastTaskResult   # 期望 LastTaskResult = 0
+python feishu/service_doctor.py
+```
+
+期望：每个名册 bot 各一个 bridge，外加一个 cron 和唯一一个 watchdog；registration monitor 只在有活动注册 job
+时常驻。cron/watchdog 都由整体 bridge lifecycle 管理，不各建计划任务。
 
 再看日志坐实真连上了飞书云：
 ```bash
@@ -448,148 +458,28 @@ tail -5 feishu/_logs/bridge-<某个bot>.log
 
 | 症状 | 病因 / 修 |
 |---|---|
-| `LastTaskResult` 非 0 / 进程数为 0 | `$py`/`$repo` 路径不对 → 重跑 §9.2 ① 那三行核对 |
+| `LastTaskResult` 非 0 / 进程数为 0 | 重跑 `service_installer.py plan`，核对输出里的 repo/pythonw/user 与 doctor 修复建议 |
 | 任务跑了、桥起了，但 @ bot 没反应 | wmux 没起（§9.1）或没登录桌面 → 见 §9.0 陷阱 |
-| 开机后要等很久才活 | 正常：登录 + 1 分钟延迟；急就把 `PT1M` 改 `PT30S` 再 `Set-ScheduledTask` |
+| 开机后要等很久才活 | 正常：登录 + 1 分钟延迟。需要调整合同先改安装器真源和测试，再重新 plan，不手改任务造成漂移 |
 | 想临时停掉自启 | `Disable-ScheduledTask -TaskName FeishuBridge-Autostart`（重开 `Enable-`） |
-| 换了仓库路径 / 换了 Python | 重跑 §9.2 整段（带 `-Force`，直接覆盖旧任务） |
+| 换了仓库路径 / 换了 Python | 重跑 `service_installer.py plan`，审阅新 before/after 后再 apply |
 
-### 9.5 · ⛔ 本节已作废 —— 看门狗不再需要计划任务（2026-08-20）
+### 9.5 · 清理 legacy watchdog 任务并验证 bridge-owned 实例
 
-> **不要再照下面的步骤注册 `AutopilotWatchdog-Autostart`。** 看门狗已迁进 Link16
-> （`feishu/bridge_watchdog.py`），**随飞书桥整体 `start`/`stop` 起停**，没有自己的计划任务。
-> 桥的自启脚本（§9.2）本来就是探测式的，所以看门狗**根本不需要知道自己装在哪** ——
-> 当年那条写死路径的注册命令正是 2026-08-17 在 TB25 `Test-Path` 返 False、装不上的原因，
-> 现在这个问题从源头消失了。运行时真源见 `docs/ARCH-160-agent-watchdog.md`。
+新机器不得创建 `AutopilotWatchdog-Autostart`。老机器若存在，`service_installer.py plan` 会把它列为
+`before=<当前任务>` / `after=Disabled`；用户确认后 apply 只做可恢复的 Disable，receipt 可以回滚。安装器不会删除任务，
+也不会停止残留进程。残留进程和整体桥重启只在维护窗口处理，不要把别台机器的状态当成本机状态。
 
-#### 9.5a · 【每台机各自都要做一次】停掉旧的那个（🩸 别以为别人替你停了）
-
-> 🩸 **2026-08-20 tb25 实证**：TB24 上 Disable 了旧任务并写进文档「本次已 Disable」，
-> 但 **TB25 那台照样 `State=Ready`、旧 watchdog 进程从 8-18 起一直常驻**。
-> **计划任务是每台机各自注册的本地对象，在一台机上 Disable 不会传播到另一台。**
-> 那台若直接重启桥 = **新旧双跑**：两个都全机轮询、都往同一批面板注「继续」，
-> 而且旧那个的结构化 picker 检查还是断的（TB25 实测名册命中 0/13）。
-> ⇒ 顺序必须是 **停旧 → 重启桥 → 验新**，且每台机都要走一遍。
+维护窗口完成 bridge 重启后验四件事：
 
 ```powershell
-# ① 停旧计划任务（只 Disable 不 Unregister，可随时 Enable-ScheduledTask 回滚）
-$t = Get-ScheduledTask -TaskName "AutopilotWatchdog-Autostart" -ErrorAction SilentlyContinue
-if ($t) { "当前: $($t.State)"; Disable-ScheduledTask -TaskName "AutopilotWatchdog-Autostart" | Out-Null }
-else { "本机没有这个任务（新机器/纯 link16 机器 → 跳过）" }
-
-# ② kill 掉还在常驻的旧进程（任务停了不代表已跑起来的那个会退）
-Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
-  Where-Object { $_.CommandLine -match '_autopilot..watchdog' } |
-  ForEach-Object { "kill $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
-
-# ③ 重启桥（看门狗随它起）
-python feishu/feishu_bridge.py stop; python feishu/feishu_bridge.py start
-
-# ④ 验：四样都要看到
+python feishu/service_doctor.py
 python feishu/bridge_watchdog.py status
-#   进程 ✅ / 在看护 N 个面板（其中几个对得上 bot 名）/ 上次巡检时间 / 本机适配自检三行 ✅
-#   ⚠️ 还要看最后那段【换号能力】—— 三行全绿 ≠ failover 是活的，见 9.5b
 ```
 
-#### 9.5a-2 · 【每次 `git pull` 之后】必须重启看门狗，光看 status 变绿不算数
-
-> 🩸 **2026-08-20 tb25-link16 实测**：他拉完代码先跑 `status`，看到 claude 从 🔴 变 ✅ **差点就收工** ——
-> 但**跑着的守护进程还是拉取前的旧字节码**。
-> `status` 是当场新起的解释器（**新代码**），常驻进程是**旧的**，两者给出不一致的能力判断，
-> 而 status 那个 ✅ 是骗人的：真撞限流时干活的是旧进程，照样按旧逻辑失败。
->
-> 这是「**外部看着对、进程里还是旧的**」这一族失效，和
-> 「改得了名册文件、改不了跑着的桥进程内存」同源。
-
-```powershell
-python feishu/bridge_watchdog.py stop
-python feishu/bridge_watchdog.py start     # 只重启这一个部件即可，**不用整体重启桥**、不动那些 bot
-```
-
-✅ **已做成机械检测，不用靠记**：`status` 现在会比对「源码 mtime」与「进程启动时间」，
-源码更新就在**输出最前和最后各印一次**：
-「⚠️ 跑着的进程还在用旧代码：源码比它新 N 分钟……**绿灯不算数**」。
-看到这行就先重启，别信下面任何绿灯。
-
-#### 9.5b · 【每台机各自都要验一次】撞限流时到底切不切得动
-
-> 🩸 **2026-08-20 tb25 实证（这条最阴）**：那台 9 个 profile 有 **7 个「问不到」额度**
-> （ccp/ccp2 的 token 对额度端点是 **403 无权限**——**不是过期**；cc/cck/ccw* 没登录）。
-> 而 TB25 名册 34 个 bot 里 **25 个跑 ccp、2 个跑 ccp2**。
-> 按「问不到额度的号绝不选」这条设计，那 27 个 Claude bot **永远选不出可切的号**
-> ⇒ 限流自动换号在那台对 Claude 会话**完全不触发，而且是静默不触发**。
-> 更要命的是 `status` 前三行照样全绿（它只看进程/名册/桥）。
-> **不报错、看着正常、什么都没发生** —— 本仓最容易翻车的形状。
-
-```powershell
-python feishu/agent_quota.py          # 先看本机各号到底问不问得到（403 会带上原始 body，别按"过期"去查）
-python feishu/bridge_watchdog.py status   # 看末尾【换号能力】那段：每个 runtime 有没有可切的号
-```
-判据：**本机 bot 实际在用的每一个 runtime，都至少要有一个「够用/紧张」的候选号**（跨 runtime 也算数）。
-出现 🔴 就说明那类会话撞限流时切不动 —— 先解决额度问不到的问题，别指望自愈。
-
----
-
-<details>
-<summary>📦 历史存档：旧的计划任务注册步骤（2026-08-20 前 · 仅供回滚参考，别照做）</summary>
-
-（**全机限流自愈 · 第二层保护 · 2026-07-31 新增**）
-
-**为什么必须单独配**：桥自启只保证「消息能进来、面板能开出来」；它管不了**会话开出来之后卡住**。Claude 会话偶发撞 `API Error: 529 Overloaded` / 限流会**静止在那不动**，桥不知道、你也不知道，直到你去看才发现。**看门狗**（`xhs-card-gen/_autopilot/watchdog.py`）就是治这个：轮询 wmux **全部 workspace 的全部面板**，发现「有 API 错 + 静止 2 轮 + 没在自己重试」就往那个面板注一句「继续」+ 飞书报你去哪条线看。**覆盖全机所有 bot 线，不是只管写帖**（v0.11 起 · SSOT = `workspace.list` 实时拓扑，bot 增减自动跟随、零硬编码名单）。
-
-> 🩸 **2026-07-31 血泪**：桥有计划任务、看门狗没有 → 7-30 23:44 重启后桥 14 个 bot 全部自启，**看门狗没人拉**，全机裸奔 22 分钟；而它 7-30 17:45 才刚救过 `tb24-xhs-arch` 的同款 529。**两个都配，才叫配完了。**
->
-> 🩸🩸 **2026-08-17 更狠的一条**：主人问「两台机的看门狗是不是都开着」，一查 **TB25 从来没有过**——仓在、`watchdog.py` 在（37KB·8-06 还改过）、但计划任务不存在、进程 0 个、`watchdog.log` 这个文件根本没被创建过 ⇒ **历史注入次数 0，18+ 个 bot 从上线起一直裸奔**。根因：v0.13（07-31）起唯一启动方式就是本节这个计划任务，在那之前靠 xhs 巡航总控 spawn，而 **TB25 从不跑 xhs 巡航** → 没有任何一条路径会拉起它。**「仓里有代码」≠「它在跑」——本节的验收第 ② ③ 步（进程数 / 日志有没有内容）就是为了戳穿这个，别只确认文件存在。**
->
-> ✅ **上面那条是「当天发现的问题」，不是现状 —— TB25 已于 2026-08-17 当天照本节修好。**
-> 2026-08-20 19:14 由 tb25-link16 在 TB25 实测复核：计划任务 `AutopilotWatchdog-Autostart` 存在且 Ready
-> （`StartBoundary` = 2026-08-17T00:00:00 = 当天建的）· `LastTaskResult=0` · `NumberOfMissedRuns=0` ·
-> 看门狗进程 pid 36952 常驻 · `watchdog.log` 已 175 行、每 30min 一行心跳 ·
-> 且 2026-08-18 07:48:33 真给 `bot-tb25-phd-taoci/worker` 注过一次「继续」。
-> **两台机现在都有看门狗。** 加这一句是因为 2026-08-20 已经有 session 把上面那段血泪记录**当成现状**读、
-> 并据此得出「TB25 从来没有过看门狗」的错误结论 —— 血泪记录只记「那一刻发现了什么」，
-> **后来修没修必须另写一行，否则它会被永远当成现状。**
-
-⚠️ **前提**：这台机得有 `xhs-card-gen` 仓（看门狗代码在那）。纯 link16 机器跳过本节。
-
-```powershell
-# ① 探路径（**别写死** · 两台机布局不同：TB24 = <root>\Post\xhs-card-gen，TB25 = <root>\Post\tools\xhs-card-gen
-#    ——2026-08-17 TB25 实证：照抄写死那版在这里 Test-Path 返 False、注册不下去）
-$py   = (Get-Command pythonw).Source                     # 用 pythonw：无控制台窗口，每 10min 不闪黑框
-$repo = @("$env:VIBECODING_ROOT\Post\xhs-card-gen", "$env:VIBECODING_ROOT\Post\tools\xhs-card-gen") |
-        Where-Object { Test-Path "$_\_autopilot\watchdog.py" } | Select-Object -First 1
-$py; $repo; Test-Path "$repo\_autopilot\spawn_worker.py"  # 期望：两个路径 + True（$repo 空 = 这台没有该仓 → 跳过本节）
-
-# ② 建任务（机器无关 · 两个触发器：登录快速上岗 + 每 10min 幂等自愈）
-$action  = New-ScheduledTaskAction -Execute $py -Argument "`"$repo\_autopilot\spawn_worker.py`" ensure-watchdog" -WorkingDirectory $repo
-$t1      = New-ScheduledTaskTrigger -AtLogOn -User "$env:COMPUTERNAME\$env:USERNAME"; $t1.Delay = "PT2M"   # 排在桥(PT1M)后面
-$t2      = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Minutes 10)
-$t2.Repetition.Duration = $null                          # 无限重复；**不挂在登录上**，所以本次会话内就生效
-$settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-$principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName "AutopilotWatchdog-Autostart" -Action $action -Trigger @($t1,$t2) `
-  -Settings $settings -Principal $principal -Description "全机看门狗常驻服务:限流/API错自愈,覆盖全部 wmux workspace" -Force
-
-# ③ 验收（不用重启）
-Start-ScheduledTask -TaskName "AutopilotWatchdog-Autostart"; Start-Sleep 10
-Get-ScheduledTaskInfo AutopilotWatchdog-Autostart | Select-Object LastRunTime,LastTaskResult,NextRunTime  # 期望 0 + NextRunTime 有值
-@(Get-CimInstance Win32_Process -Filter "Name like 'python%'" | ? { $_.CommandLine -match 'watchdog' }).Count  # 期望 1
-Get-Content "$repo\_autopilot\watchdog.log" -Tail 2                                                    # 期望见「上岗 v0.13」
-```
-
-**为什么一个任务同时是「开机自启」和「崩溃自愈」**：动作 `ensure-watchdog` 是**幂等**的——读 `watchdog.pid` 判活，**活着就 no-op、死了才起**。所以每 10 分钟无脑触发一次完全无害（实测连触发 2 次仍是同一个 pid、不双开），而且**不跑巡航时也保活**。
-
-| 症状 | 病因 / 修 |
-|---|---|
-| `NextRunTime` 空 | 只建了登录触发器、漏了 `$t2` → 重跑 ② |
-| 进程数 = 0 且 `LastTaskResult` 非 0 | `$py`/`$repo` 不对 → 重跑 ① |
-| 看门狗活着但从不注「继续」 | 正常且是好事：要「有 API 错 + 静止 2 轮(4min) + 没在 retry」三条同时满足才注入（防自激三道闸） |
-| **对着同一个面板每 10min 注一次、注不停** | **已知缺陷（2026-08-17 · 待改三档闸）**：它只会「注继续」这一招，对**注了也没用**的错会永远空转 + 每次刷你一条飞书（实证 TB24 一个 401 面板 20:58→00:18 徒劳注 22 次）。四类错要分开对待：**① 可注**（`ECONNRESET` / `529` / `500` / `Connection closed·lost mid-response` / `Stream idle timeout`）**② 要人**（`401`/`403`/`Please run /login` → 只告警一次，说清去哪条线 `/login`）**③ 等时间**（`You've hit your weekly limit · resets <时间>` → 只告警一次 + 报恢复时刻）**④ 换会话**（`Prompt is too long` → 注继续照样炸，要 `/compact` 或开新会话）。⚠️ 两台机形状差很远：TB24 「注了没用」只占 8/145 = 5.5%（大头是 97 次 ECONNRESET），**TB25 占 30/72 = 42%**（周额度 24 + login 6）→ **TB25 上岗后近一半注入会是徒劳空转**，三档闸对它不是优化是必需品 |
-| 想临时停 | `Disable-ScheduledTask -TaskName AutopilotWatchdog-Autostart` + 手动 kill 看门狗进程（否则它还常驻着） |
-
----
-
-</details>
+判据：Link16 watchdog 进程数恰好为 1、状态有最近巡检时间、日志可写；legacy 任务不存在或为
+`Disabled`。拉取过 watchdog 源码后，状态若报告运行进程仍是旧代码，只在维护窗口重启该部件并再次验收。
+候选账号检查按本机实际 registry 里的 runtime/profile 做，不引用固定账号名。
 
 ## 附录 A · 排错速查
 
@@ -599,8 +489,8 @@ Get-Content "$repo\_autopilot\watchdog.log" -Tail 2                             
 | `node ~/wmux-rpc.js` 报找不到文件 / ENOENT | §3 第 2 步 `~/wmux-rpc.js` 没放 |
 | rpc `timeout` / `closed before response` / `no transport` | wmux daemon 没开（打开 wmux GUI）或 `~/.wmux-tcp-port` 缺 |
 | 桥起了会话但里面没出 Claude/Codex | 跑 `agent_profile_cli.py doctor --profile <name>`；检查 registry、本机 profile home/CLI 与名册 `profile`，不要补裸 alias |
-| 敲 `ccp`/`cxp` 冒 `wsl: …` + `execvpe(/bin/bash) failed`，直接回到提示符 | 命令被交给了 **System32 的 WSL bash**（`CreateProcess` 把 System32 排在 PATH 前）。执行处必须走 `agent_runtime.resolve_shell()`，绝不传裸名 `bash`。查：`python -c "import subprocess;subprocess.call(['bash','-lc','echo HI'])"` —— 打不出 `HI` 就是中招（PLAN-923 · BUG-1） |
-| 开新 Git Bash 冒一串 ``syntax error near unexpected token `('``，且 `type ccp` 显示 is aliased | CLI 输出带 `\r`，`unalias` 拿到 `cc<CR>` 删不掉老 alias → 函数定义撞 alias。查：`agent_profile_cli.py list --names \| od -c` 有没有 `\r`（PLAN-923 · BUG-2） |
+| 敲某个 `<profile>` 冒 `wsl: …` + `execvpe(/bin/bash) failed`，直接回到提示符 | 命令被交给了 **System32 的 WSL bash**（`CreateProcess` 把 System32 排在 PATH 前）。执行处必须走 `agent_runtime.resolve_shell()`，绝不传裸名 `bash`。查：`python -c "import subprocess;subprocess.call(['bash','-lc','echo HI'])"` —— 打不出 `HI` 就是中招（PLAN-923 · BUG-1） |
+| 开新 Git Bash 冒一串 ``syntax error near unexpected token `('``，且 `type <profile>` 显示 is aliased | CLI 输出带 `\r`，`unalias` 拿到旧名删不掉老 alias → 函数定义撞 alias。查：`agent_profile_cli.py list --names \| od -c` 有没有 `\r`（PLAN-923 · BUG-2） |
 | 拿不准「现在到底哪些号能起」 | `python feishu/agent_profile_cli.py selftest` —— 一张矩阵 + `N/N 全绿`，比逐个 doctor 可靠（它会真启动一次） |
 | 下载/安装异常慢，拿不准直连还是代理 | 不按旧机器经验猜。对实际目标先跑 `python feishu/network_route.py probe --url <URL>`；执行安装用 `run ... -- <命令>`。它从 `.env` 读 `PROXY_URL`，双路都失败就停止；不改 v2rayN/系统代理，也不识别网络名。 |
 | 桥连不到 `.env` / 凭证空 | `VIBECODING_ROOT` 没设且上溯找不到 `.env`（§1）；或 §6 没 register |

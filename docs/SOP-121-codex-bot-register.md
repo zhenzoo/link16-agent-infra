@@ -26,33 +26,37 @@ last_reviewed: 2026-08-26
 
 Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史按 profile 隔离；同事只 clone Link16 时不依赖任何人的 `.claude-personal`：
 
-1. **建立 Link16 基线 profile**：
+1. **建立或选择 local registry 中的隔离 Codex profile**：
    ```powershell
+   # 新机若还没有 local registry：先用 profile_bootstrap.py --init-registry 建立
    python feishu/profile_bootstrap.py --apply
-   python feishu/agent_profile_cli.py doctor --profile cxp
+   python feishu/agent_profile_cli.py doctor --profile <codex-profile>
    ```
-2. **人工登录 CXP**：重开 Git Bash 后输入 `cxp`，按 Codex 原生页面登录；不得复制别人的 `auth.json`、sessions 或 history。登录后运行：
+2. **人工登录所选 profile**：重开 Git Bash 后输入用户自己命名的 profile 函数，按 Codex 原生页面登录；不得复制别人的 `auth.json`、sessions 或 history。登录后运行：
    ```powershell
-   python feishu/agent_profile_cli.py selftest --profile cxp
+   python feishu/agent_profile_cli.py selftest --profile <codex-profile>
    ```
-3. **个人增强可选**：只有当前用户本来就维护 `$agent-profile-governance` / `govctl` 时，才按 [`SOP-160`](SOP-160-codex-personal-migration.md) 叠加 skills、hooks 与用户级入口治理；这不是建 bot 或运行桥的前置条件。
+3. **确认 repo-owned skill 与 hooks**：`profile_bootstrap.py --doctor` 必须确认 `$HOME/.agents/skills/feishu` hash 正确，并确认所选隔离 Codex home 的 `hooks.json` 已无损合并三类 bridge hooks。损坏 JSON 必须先人工修复，安装器不会覆盖。
+   其它个人 adapters 另见可选的 [`SOP-160`](SOP-160-codex-personal-migration.md)，不是建 bot 或运行桥的前置条件。
 
-> 可选的 Codex skills 不复制进每个 `CODEX_HOME`。没有个人 adapters 时，CXP 仍可正常运行 Link16 与 provider 原生能力。
+> Codex 的 repo-owned `feishu` skill 按官方用户级位置安装，不复制进每个 `CODEX_HOME`。没有个人 adapters 时，
+> 所选 Codex profile 仍可正常运行 Link16 与 provider 原生能力。
 
 ## 建 bot（增量步 · 其余照 SOP-120）
 
-1. **注册应用 → 显式选择成熟 CXP profile**：
+1. **注册应用 → 显式选择已通过 doctor 的 Codex profile**：
    ```powershell
-   python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile cxp --background
+   python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <codex-profile> --background
    ```
-   OAuth 扫码 / 自动写 `.env` / 自动补 `agent-registry.json` stub 全同 SOP-120；脚本先从 Link16 registry 解析 `cxp` 为 Codex 并 doctor，注册成功后自动 upsert 本机运行名册。
+   OAuth 扫码 / 自动写 `.env` / 自动补 `agent-registry.json` stub 全同 SOP-120；脚本先从 Link16 effective
+   local registry 解析所选 profile 为 Codex 并 doctor，注册成功后自动 upsert 本机运行名册。
 
 2. **核对运行时名册**（注册脚本已自动写；身份只允许一个 `profile`）：
    ```jsonc
    {
       "name": "<key>",
       "app_id_env": "FEISHU_BRIDGE_<KEY>_APP_ID",
-      "profile": "cxp",                          // ← runtime/home/launcher 全由 registry 派生
+      "profile": "<codex-profile>",              // ← runtime/home/launcher 全由 registry 派生
       "cwd": "<workspace 绝对路径>",               // ← 该 bot 的工作目录
       "codex_transport": "app-server-canary",     // ← typed-event 干净卡（省略也是它·见下「默认 canary」）
       "delivery_contract": "milestone-v1"         // ← 投递契约
@@ -60,7 +64,8 @@ Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史�
    ```
    > `codex_transport` / `delivery_contract` 是投递协议，不是账号身份；可保留。禁止再加 `agent/account/codex_home`。**别写 `cli-legacy`** —— 那是已弃用的应急回退口。
 
-3. **运行 Link16 doctor/selftest**；只有维护者明确要新增 registry 中不存在的新 profile 时，才进入 `$agent-profile-governance` 的跨环境治理流程。
+3. **运行 Link16 doctor/selftest**；registry 中没有目标 profile 时，用
+   `profile_bootstrap.py --register-profile <name> --runtime codex --profile-home <home>` 先预览再 `--apply`。
 
 4. **其余全照 [`SOP-120 §4`](SOP-120-feishu-register.md) 清单**：按用途选能力档；普通 Codex agent 使用 `core + group-a2a`，不默认申请 Drive、plain `im:chat` 或听全群。仍需人工拉进共享群、私聊认主、双机同步 `.env`，并核对 `agent-registry.json` 的 `repo`/`machine`。
 
@@ -74,7 +79,7 @@ Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史�
    ```
    CODEX_HOME=... FEISHU_CODEX_EVENT_STREAM=1 python feishu/codex_app_server_worker.py --bot <key> --cwd <cwd> ...
    ```
-   最终回复和进度卡都由 typed-event observer 产出：前者取 `agentMessage.phase=final_answer`，后者只保留工具类型 / 次数 / 仓库相对路径（**不带命令原文**）。worker 起时带 `FEISHU_CODEX_EVENT_STREAM=1`，`codex_bridge_stop.py` 与 `codex_bridge_posttool.py` 读到就自动让路 → **不会双投，也不依赖当前 `CODEX_HOME` 是否安装 hooks**。
+   最终回复和进度卡都由 typed-event observer 产出：前者取 `agentMessage.phase=final_answer`，后者只保留工具类型 / 次数 / 仓库相对路径（**不带命令原文**）。worker 起时带 `FEISHU_CODEX_EVENT_STREAM=1`，`codex_bridge_stop.py` 与 `codex_bridge_posttool.py` 读到就自动让路 → **不会双投，默认 typed transport 不依赖 hooks 产出 final**。bootstrap 仍安装 hooks，作为 `cli-legacy` 回退与 `UserPromptSubmit` 回址捕获的部署完整性保障。
 
 ## 验收
 

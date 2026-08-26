@@ -1,3 +1,22 @@
+---
+doc_type: README
+doc_id: README
+title: Link 16 · 用飞书遥控本机 AI Agent
+status: active
+purpose: 向人介绍 Link16 的可见能力、最快上手路径与文档地图。
+owns:
+  - 人类向仓库概览
+  - 最短可运行示例
+  - 文档导航
+does_not_own:
+  - agent 角色与硬边界（见 ROLE-010、AGENTS.md、CLAUDE.md）
+  - 完整安装步骤（见 SOP-100）
+  - 架构与精确合同（见 docs/ARCH-*、docs/SPEC-*）
+read_when:
+  - 第一次了解或部署 Link16
+last_reviewed: 2026-08-26
+---
+
 # Link 16 · 用飞书（Lark）遥控你电脑上的 Claude Code
 
 > 手机上 @ 一句「把昨天那版重构完再跑一遍测试」，家里那台电脑上的 Claude Code 就真的开始干活，
@@ -71,6 +90,7 @@ Claude Code 很强，但它被钉在**一台电脑的一个终端窗口**里。�
 >
 > **不懂 terminal 也可以**：在你已经使用的 Claude / Codex / QX 桌面客户端里说
 > **「开始部署 Link16」**。agent 跑命令；你只会看到 GitHub/飞书/provider 登录链接和绿色验收结果。
+> agent 的共同部署职责与人工停点见 [`docs/ROLE-010-link16-deployment-engineer.md`](docs/ROLE-010-link16-deployment-engineer.md)。
 
 ```powershell
 # 0) 展示 7 项 Windows 清单；默认不修改，确认后才 apply
@@ -80,27 +100,37 @@ python feishu/windows_bootstrap.py --apply --yes
 # 1) 装 Python 依赖
 pip install -r feishu/requirements.txt
 
-# 2) 从桌面快捷方式【打开】wmux（见上一节）
+# 2) 建本机隔离 profile registry（示例同时选 Claude 与 Codex；也可只给其中一组）
+python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work
+python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --apply
+python feishu/profile_bootstrap.py                   # 预览 profile/入口/feishu skill 安装
+python feishu/profile_bootstrap.py --apply
+python feishu/profile_bootstrap.py --doctor
 
-# 3) 本机体检：Python/node/wmux/编码/凭据 逐项打勾，缺什么给你可粘贴的修复命令
+# 3) 从桌面快捷方式【打开】wmux（见上一节）
+
+# 4) 本机体检：Python/node/wmux/编码/凭据 逐项打勾，缺什么给你可粘贴的修复命令
 python feishu/preflight.py
 
-# 4) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
-python feishu/register_feishu_app.py --name my-first-bot --bot my-first-bot
+# 5) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
+python feishu/register_feishu_app.py --name my-first-bot --bot my-first-bot --profile <所选profile> --background
 
-# 5) 起桥
+# 6) 起桥
 python feishu/feishu_bridge.py start
 python feishu/feishu_bridge.py status     # 每只 bot 应显示「进程=在跑 · 凭据✅」
+python feishu/service_installer.py plan   # 开机自启 before/after；明确同意后才 apply
+python feishu/service_doctor.py           # 文件/配置/运行/真实收发四层验收
 
-# 6) 在飞书里【私聊】这只新 bot 发一句「在吗」
+# 7) 在飞书里【私聊】这只新 bot 发一句「在吗」
 #    ⚠️ 必做：bot 的主人 = 第一个私聊它的人。群里 @ 它不算。
 #    漏了这步不会报错，但它以后的回复会无处可投、降级刷进群。
 ```
 
-gstack 不在默认安装范围。只 clone Link16 已足够运行桥、wmux 和 `ccp` / `ccp2` / `cxp`；
-个人 `claude-config` 只会额外提供 anysearch、push、pull、align 等习惯型 skills，不是运行依赖。
+gstack 不在默认安装范围。clone Link16 会带上 repo-owned `feishu` skill 真源；
+`profile_bootstrap.py` 按本机 local registry 安装用户自己命名的 Claude/Codex profile、Shell 入口和 skill。
+anysearch、push、pull、align 等个人 workflows 只是可选增强，不是运行依赖。
 
-通了之后：@ 它说句话，它会在你指定的仓库目录里开一个 Claude Code 会话干活，干完把结果发回飞书。
+通了之后：@ 它说句话，它会在你指定的仓库目录里用所选 Claude/Codex profile 开会话干活，干完把结果发回飞书。
 
 **卡住了？** 先看 [`docs/SOP-100`](docs/SOP-100-new-machine-setup.md) 的「附录 A · 排错速查」——
 常见症状（依赖没装 / wmux 连不上 / 会话起不来 / 凭据读不到）都在那张表里。
