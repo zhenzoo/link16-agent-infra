@@ -34,10 +34,10 @@ last_reviewed: 2026-08-26
 
 ```bash
 # 1. 一键建应用（官方扫码 · 自动写 .env）
-python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <profile>
+python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <profile> --background
 # 2. 脚本按 profile doctor 后自动 upsert 本机运行名册；只核对非身份字段（见 §1）
 # 3. 选择能力档（见 §2）：默认 core/group-a2a 不追加权限；
-#    docs-publish 或 group-listen 才申请增量 scope，可能需要管理员审批
+#    docs-text/docs-media/docs-import/group-listen 才申请增量 scope，可能需要管理员审批
 # 4. 把 bot 拉进群；各 bot 互报 open_id（跨机靠 bot/v3/info · 群成员 API 不列 bot · 见 §3）
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
 # 6. 重启桥生效（只加了新 bot 就【单起它】·别全局 stop/start 把在跑的会话全杀了）
@@ -123,22 +123,26 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 ## § 2 · 权限三层（★ 本文最关键的一节）
 
-注册不再把“所有历史 bot 开过的权限”当成每只新 bot 的完成条件。`register_feishu_app.py --capability ...` 按实际用途选择；未指定时使用 `core`。
+注册不再把“所有历史 bot 开过的权限”当成每只新 bot 的完成条件。`register_feishu_app.py --capability ...` 按实际用途选择；未指定时使用 `core + group-a2a`。
 
 | 能力档 | 能做什么 | 额外权限 | 审批边界 |
 |---|---|---|---|
-| `core` | DM 收发、发文字/图/文件、接收群内 @ | 无；官方 preset 已带 | Device Grant 创建流内完成 |
+| `core` | DM 收发、发文字/图/文件 | 无；官方 preset 已带 | Device Grant 创建流内完成 |
 | `group-a2a` | 入共享群后与 peer bot 互相 @ | 无额外 umbrella scope；依赖 preset 的 granular `im:chat:read/update`、`im:chat.members:bot_access`、群 @ scope | 权限通常已随 preset；**人工拉群**仍不可省 |
-| `docs-publish` | `send --doc`、媒体嵌 docx、授权 owner、公开链接 | `drive:drive` + 任一 docx 创建/编辑权限 | 云文档应用权限需要企业管理员审批；租户免审规则例外 |
+| `docs-text` | 创建公开可读文字 docx；Markdown/HTML 经 convert-block 写入 | docx 创建/编辑 + block convert；preset 通常已带 | `tb26-baseball` 无 `drive:drive` 真测成功 |
+| `docs-media` | 图片/视频/文件嵌入 docx | 优先 `docs:document.media:upload` | 是否免审以当前租户后台为准；直接 IM 发附件不需要它 |
+| `docs-import` | 把本地源文件上传后走 import task，并显式授权协作者 | Drive/导入/permission 类权限 | 会触发管理员审核的重能力；不用就不开 |
 | `group-listen` | 不被 @ 也主动读取全群 | `im:message.group_msg` | 可选高范围能力；不用就不开 |
 
-本机 `lark-oapi>=1.7.3` 已支持 `register_app(addons=...)`。注册器会把显式能力档的增量 scopes 放进创建流；这能避免事后逐个补，但**不能绕过租户管理员审批**。普通 agent 推荐 `core + group-a2a`，不申请 Drive 与听全群。
+注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant / 创建应用（`create_only=True`，不携带权限 `addons`）；登记成功后，Monitor 按选定 capability 生成链接 2，明确列出这次要开的 tenant scopes，让人审阅后再按飞书页面要求创建版本/发布。默认 `core + group-a2a`；需要文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
+
+**2026-08-26 `tb26-baseball` 真测**：当前 47 scopes 里没有 `drive:drive`，旧 `send --doc` 的源文件上传在 `ccm_import_open` 返回 `99991672`；但直接创建 docx、写入文字、设置任何人凭链接可读均成功，且外部读取器读回正文。显式增加 owner 协作者仍缺 `docs:permission.member:create` 等权限。因此：无 Drive ≠ 无在线文档；准确区别是“公开文字文档可做，旧源文件导入和协作者授权不可做”。
 
 ### § 2.0.1 · 谁能审核，能不能自己发布
 
 - 企业自建应用生产版本原则上由企业管理员审核；管理员可以给某个应用或开发者配置免审。开发者只有同时是管理员、或命中免审规则时，才会表现为“自己确认发布即可”。
 - 云文档应用权限明确需要企业管理员审批；`drive:drive` 开不了不是 Link16 故障，代码不能绕过租户政策。
-- Device Grant preset 的基础能力不需要再手工申请新版本，所以不需要 Drive 的 bot 可以直接运行。
+- Device Grant preset 可能已经带齐基础能力；链接 2 仍然出现，供人核对最终 capability/scopes。若真实权限已齐，Monitor 直接验绿，不伪造重复申请；需要发布或审核时以飞书页面为准。
 - “应用 owner/协作者”“最近可审核该应用的应用管理员”“企业超级管理员”不是同一身份。`bridge_scope_audit.py --reviewers --bot X` 会尽量机械查询并明确标记权限不足；不得把 app owner 自动认成企业管理员。
 
 #### § 2.1 · 一个 bot 的【三个名】+ 全员名册（★ 名单 SSOT = `feishu/agent-registry.json` · 本节只讲概念，名单查工具）
@@ -181,7 +185,9 @@ python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某
 | 本架构能力 | 脚本 / 功能 | 需要的 scope | 一键预置含? |
 |---|---|---|---|
 | 收发文字/图/文件（DM + 桥基础） | `feishu_bridge` · `send_feishu_msg` · `send_feishu_file` · `send --image` | `im:message` 家族 + `im.message.receive_v1` 事件 | ✅ **预置**（所有 bot 都有）|
-| 在线文档 / 媒体在线查看 | `send --doc` · `send_feishu_media` | **`drive:drive` + 任一 docx 创建/编辑权限** | ❌ 可选 `docs-publish` |
+| 公开文字在线文档 | docx-only publish（Markdown convert） | docx 创建/编辑 + block convert | ✅/按 preset；能力档 `docs-text` |
+| 文档内嵌媒体 | docx image/file block | `docs:document.media:upload` | ❌ 可选 `docs-media` |
+| 源文件导入 + 协作者管理 | legacy `send --doc` import | Drive/导入/permission scopes | ❌ 可选 `docs-import` |
 | 进群 + 群内 @ 通讯（a2a） | `send_feishu_msg`(群) · 被 @ 回 | `im:chat:read`/`im:chat:update` + `im:chat.members:bot_access` + `im:message.group_at_msg:readonly` | ✅ **预置就有**（见下实测纠偏）|
 | 听全群历史（不被 @ 也听全程） | 读全群消息 | **`im:message.group_msg`** | ❌ 可选 `group-listen` |
 
@@ -262,12 +268,12 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 > **🔒 登记协议（Publisher 2026-06-20 定规 · 硬规则 · 2026-07-04 大部分已自动化）**：每次用 `register_feishu_app.py` 建新 bot、**或**给任何 bot 开/关权限之后都要回写登记。**register 现在【自动】把新 bot 补进 [`agent-registry.json`](../feishu/agent-registry.json)（目录名单·open_id 现查填好）** → 运行的 agent 只需**核对/补 `repo`**；开/关权限后再跑 auditor 刷新 §2.2 能力矩阵。§2.1 名单已收口为 `agent-registry.json` 的指针·**不再手抄**。`register_feishu_app.py` 跑完会打印这份清单提醒。
 
 - [ ] **注册** `register_feishu_app.py --name X --bot key --profile <profile>`（OAuth 前 profile doctor）
-- [ ] **能力档** — 默认 `core`；需要群协作加 `--capability group-a2a`；只有确实需要才选 `docs-publish` / `group-listen`
+- [ ] **能力档** — 默认 `core + group-a2a`；只有确实需要才选 `docs-text` / `docs-media` / `docs-import` / `group-listen`
 - [ ] **Monitor** — 注册器已自动 arm；`python feishu/registration_monitor.py status --bot key` 能看到 OAuth/权限/认主/入群机械状态
 - [ ] **运行时名册** — ✅ 注册脚本自动 upsert `bridge-bots.local.json`；核对 name/app_id_env/at_name/cwd/profile，禁止 legacy identity 字段
 - [ ] **跨机目录名册** `agent-registry.json` —— ✅ **`register_feishu_app.py` 已【自动】补 stub**（name/machine/send_key/open_id/at_name/verified 现查填好）→ 你只需**核对/补 `repo`**（分管哪个仓·脚本不知道）+ 必要时 machine，共享仓则 `shared:true`。查名册 tool / repo-sync 路由 / 方案B 按名喊全靠它
 - [x] **默认 profile** — 本机 `defaults.profiles` 只写一次；例外 bot 只写 `profile`。机制见 [`ARCH-120`](ARCH-120-agent-profile-runtime.md) 与 [`ARCH-110 §4.2`](ARCH-110-feishu-bridge.md)。
-- [ ] **可选 docs-publish** — 只有要在线文档/媒体时才申请 Drive 权限并走管理员/免审发布
+- [ ] **可选文档能力** — 文字公开链接选 `docs-text`；嵌媒体选 `docs-media`；只有保留旧源文件导入/协作者编辑才选 `docs-import`
 - [ ] **可选 group-listen** — 只有要听全群时才申请 `group_msg`
 - [ ] **拉进共享群** + 互换 open_id（`bot/v3/info`）
 - [ ] **两台机** 各配 `.env`（§5）

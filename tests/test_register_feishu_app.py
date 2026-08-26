@@ -18,6 +18,8 @@ class DeviceGrantRecoveryTests(unittest.TestCase):
             register._run_device_grant("tb26-new")
         self.assertIsNone(call.call_args.kwargs["app_id"])
         self.assertEqual(call.call_args.kwargs["app_preset"], {"name": "tb26-new"})
+        self.assertIsNone(call.call_args.kwargs["addons"])
+        self.assertTrue(call.call_args.kwargs["create_only"])
 
     def test_recovery_passes_existing_cli_app_id_unchanged(self):
         app_id = "cli_existing_app"
@@ -25,6 +27,31 @@ class DeviceGrantRecoveryTests(unittest.TestCase):
             register._run_device_grant("tb26-link16", app_id)
         self.assertEqual(call.call_args.kwargs["app_id"], app_id)
         self.assertEqual(call.call_args.kwargs["app_preset"], {"name": "tb26-link16"})
+
+    def test_first_link_never_receives_capability_addons(self):
+        with mock.patch.object(register.lark, "register_app", return_value={}) as call:
+            register._run_device_grant("tb26-docs")
+        self.assertIsNone(call.call_args.kwargs["addons"])
+        self.assertTrue(call.call_args.kwargs["create_only"])
+
+    def test_default_capabilities_never_include_broad_drive(self):
+        scopes = register.bridge_scope_audit.requested_scopes()
+        self.assertNotIn("drive:drive", scopes)
+
+    def test_no_missing_capabilities_produces_no_fix_scopes(self):
+        self.assertEqual(register.bridge_scope_audit.requested_scopes([], for_fix=True), ())
+
+    def test_second_link_default_scopes_do_not_include_broad_drive(self):
+        scopes = register.bridge_scope_audit.requested_scopes(
+            ["core", "group-a2a"], for_fix=True
+        )
+        self.assertNotIn("drive:drive", scopes)
+
+    def test_second_link_includes_broad_drive_only_for_docs_import(self):
+        scopes = register.bridge_scope_audit.requested_scopes(
+            ["core", "docs-import"], for_fix=True
+        )
+        self.assertIn("drive:drive", scopes)
 
 
 class CredentialSafetyTests(unittest.TestCase):

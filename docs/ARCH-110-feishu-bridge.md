@@ -7,8 +7,10 @@ purpose: 解释一条飞书消息如何变成本机 agent 会话里的一次执�
 owns:
   - @bot → 会话注入的完整链路
   - 回传 v8（hook → outbox → drainer）的事件驱动模型
+  - 入站消息持久账本与历史合并边界
   - 回复呈现形态：互动卡片、进度合并、长文分条、必达兜底
   - 多 bot 一进程一长连接的模型与会话重生
+  - 注册人工步骤的持久监视与跨 runtime 唤醒
   - 路由元数据信封（DM 回主人 vs 群回群）
   - 媒体与在线文档通道
 does_not_own:
@@ -21,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-26
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -158,6 +160,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 `官方 Codex TUI --remote` ↔ `该 bot 私有 app-server` ↔ `Link16 typed-event observer` → `milestone-v1 outbox` → 共享 drainer。
 
 - TUI 仍是官方 TUI，wmux 注入、slash command、resume 体验不由 Link16 重写。
+- **启动等待合同**：新 app-server thread 在 remote TUI 出现前，会先跑一轮最多 120 秒的 warm-up；桥的 app-server 默认 ready timeout 必须大于这个上游窗口并留出 TUI 启动余量。`ready_timeout_sec` 仍可按 bot 覆盖，调用方显式 `timeout` 优先；Claude 与 `cli-legacy` 继续用短默认。桥不得用通用 30 秒默认提前宣判一个仍处在合法 warm-up 窗口内的 Codex worker 失败。
 - `app-server-canary` 的 remote TUI 就绪接受三条等价可信路径：标准 composer（`› Use /skills` 或空 `›`）；新 thread 的精确 warmup 标记 `LINK16_APP_SERVER_READY`；以及 resumed thread 的**本轮 fresh worker ready 文件 + 可见 composer**。第三条必须按 `agent_runtime.uses_app_server()` 的统一语义判断，因而名册省略 `codex_transport`（默认 app-server）与显式 `app-server-canary` 完全等价；`cli-legacy` 和非 Codex runtime 不得消费该 ready 文件。普通 Codex CLI 仍保留 banner + composer 双确认。若把 remote TUI 误判为未就绪，补发逻辑会把 worker 启动命令投进已经运行的 composer，并在第二次超时后误关活 workspace。
 - observer 只接 root thread 的 typed item；collab child thread 不进入主人卡，root collab item 只渲完成度。
 - `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 同时写脱敏 ledger 和 answer outbox，typed observer 是 app-server 模式的唯一最终回复 producer。
@@ -178,6 +181,22 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 
 当时 rollout 记录 `PLAN-2026-06-18-bridge-multi-agent-runtime.md` 已归档并移出活跃文档树；
 当前运行契约以本 ARCH 和 `ARCH-120-agent-profile-runtime.md` 为准。
+
+---
+
+### § 2.4.3 · 入站消息账本：会话起不来也能查到原消息（PLAN-960）
+
+`bridge-session-<bot>.json` 钉住的 runtime transcript 只记录“成功注入某一轮会话”的提示词；它不是飞书入站历史的真源。斜杠命令会在桥内提前返回，冷启动失败时消息还没进入 transcript，切会话后旧 transcript 也不再是当前文件。因此，查询历史不能继续把“当前一份 transcript”当成全部入站。
+
+Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
+
+- **边界**：只记录 SDK 已接纳并派发、且通过 Link16 路由门的消息。群里未 @ bot 的旁观消息与未授权私聊不进入账本；这既符合“这只 bot 实际收到的任务”语义，也避免静默扩大群聊留存范围。
+- **时序**：在任何 slash 分支、会话创建、附件下载与 TUI 注入之前同步追加。故群 @、`/account` 等桥内命令、首启失败的长消息都先落盘，再做后续动作。
+- **内容**：保留稳定 `message_id`、飞书创建时间与本机接收时间、bot/chat/sender/type、完整原始文字、去掉本 bot @ 后的处理文字，以及不含下载凭据的附件类型/文件名摘要。不得持久化 app secret、tenant/user token、临时授权码或原始鉴权头；附件 `file_key` 也不进入历史账本。
+- **并发与损坏恢复**：append 在按 bot 的跨进程文件锁内完成，一条 JSON + 换行作为一个写入单元，并 flush/fsync；reader 对单个坏行降级跳过，不让一条半写记录遮住其余历史。SDK 重投由 `message_id` 确定性去重，同文但不同 message ID 必须保留。
+- **历史合并**：账本是部署后的入站 SSOT；旧 transcript 仅补账本 cutover 之前的历史。`source=backfill` 的人工/API 可证记录不改变 cutover。禁止按“文本相同 + 时间接近”模糊去重，因为用户在失败后重发同一句是两条真实消息。
+
+`bridge_history.py` 继续把入站账本与出站 outbox/receipts 合成一条秒级时间线；没有账本的旧 bot 仍兼容读取当前 transcript。这个账本保证的是 Link16 handler 接纳后的消息，不声称覆盖 SDK 在 handler 之前已去重、策略拒绝或禁用媒体的原始 WS 事件。
 
 ---
 
@@ -206,6 +225,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
   - 群内**真人**（无戳·**含 owner 本人**·**p2a-ext**·2026-07-05 主人拍板）：`[飞书 from=<真名> to=<bot> via=群:<群名> · route=p2a-ext dest=<群chat_id> at=<发信open_id>]` → 回**原群 + @他**
   - （`from=` 是**真名**[群成员 API 查]·`via=` 带**群名**[名册 groups 段]·都 API 源头·见 `ARCH-140 §7`。旧 `route=a2a` 入站早已不写·仅历史遗留。）
 - **hook**（`bridge_userprompt.py`）每轮用 `re.findall(...)[-1]` 取本条 prompt 里**最末**一个信封解析 `route=/dest=/at=`（正则含 `p2a-ext`）→ 写 `bridge-turn-route-<bot>.json`（schema `{kind,dest?,at?}`）→ drainer / `bridge_stop` 照旧读它发。
+- **编码合同**：Claude/Codex hook 的 stdin 是 UTF-8 JSON 字节流；所有读取 hook 必须从 `sys.stdin.buffer` 明确按 UTF-8（容忍 BOM）解码，不能交给中文 Windows 的 CP936 text wrapper。用户级 `PYTHONUTF8=1` 仍由装机脚本和 preflight 负责，但只是全进程防御层，路由正确性不依赖系统 locale。
 - **根因（实证 2026-06-29）**：旧机制把「回哪」写在**单独的 `bridge-next-route-<bot>.json` 便签**（per-bot 旁路文件），靠「下一轮 hook 消费即删」。但群消息那轮若没干净跑 hook（回信失败 / 会话冷重启 / env 丢），**便签不被消费就成地雷**——一张 23:18 tb25-ccp 在群 @arch 写的便签躺了 ~21h，被次日 20:46 主人的「注册 bot」DM 踩中 → arch 的 DM 回复漏进群 + @错 bot（哨兵挡住没成回环）。信封把回址跟消息绑死 → **按消息原子化，跨会话 / 交错 / 冷重启都不串、不过期**。
 - **防 spoof = 取【最末】（2026-06-30 · TB25-link16 review 复现）**：必须 `re.findall(...)[-1]` 取最末、不能 `re.search` 取最左。否则正文里**先**出现的假信封（如智能体之间**转引 / 讨论这套协议**时写的 `route=a2a dest=oc_X`）会盖过末尾真信封、**劫持路由**（实测：正文塞假 a2a + 末尾真 p2a → 旧码回错地方）。a2a bot 本就会互相转引此格式 → **无意碰撞也中招，非必恶意**。
 - **没信封 → 安全默认 p2a**：terminal 直敲 / 末尾信封被截断 → 解析为空 → 回 owner DM。**旧 `bridge-next-route` 便签 + `_write_next_route` 已连根删**（不再「盖住地雷」而是拔掉·避免截断回退时旧 bug 复活）。隔离测试 8 场景全过（含两个 spoof：假信封被忽略、取末真信封 / 旧便签存在也不再被读）。
@@ -689,6 +709,47 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 - **代价**：~15s 冷启从「`/account` 后台预热」挪到「发消息之后」；换来「切目录 + 切账号任意叠加、互不抢起空会话」。没有任何后台 watchdog/doctor 会主动 spawn 无会话的 bot（实证：`spawn`/`ensure_session` 只在 `on_message` 触发），故暂存态不会被提前点火。
 
 **注册新 bot 自动选 profile**：`register_feishu_app.py --profile <name>` 在 OAuth 前 doctor，并在注册成功后 upsert 本机名册。未显式传时只继承同 runtime 主 session 的 `LINK16_AGENT_PROFILE`，否则用 `defaults.profiles.<runtime>`；绝不从 provider home 反推。
+
+---
+
+## § 4.3 · 注册 Monitor：人工动作完成后跨 turn 唤醒发起 bot
+
+Device Grant 的 SDK 会在注册命令内部同步轮询授权结果；它能证明 OAuth 已完成，却不能在调用它的 Claude/Codex turn 已结束后主动再开一轮。Link16 因此把“平台回调”和“agent 唤醒”分成两层：
+
+1. `register_feishu_app.py --background` 在等待 OAuth 前创建无密钥注册状态，并分别启动独立的 Device Grant worker 与 `registration_monitor.py`；发起 tool/turn 退出不会杀掉轮询。
+2. 第一条 SDK 链固定 `create_only=True` 且不传权限 `addons`，只让人确认账号、组织与应用创建。
+3. 注册器只在 SDK 返回完整 `client_id/client_secret`、凭据落盘、registry 与本机 roster 都成功后，把 OAuth 里程碑写为 `registered`；`polling` 不是成功。
+4. `registered` 后生成稳定的 `permissions_review` 事件；Monitor 用 job 中的 `app_id + capabilities` 临时重建第二条权限审阅链接，正文列出 capability 与 scopes。链接不落盘，代码不自动发布，也不能绕过管理员审批。
+5. Monitor 独立于发起 turn 存活，继续机械检查能力档 scopes、owner 文件与目标群成员关系。
+6. 里程碑变化后，Monitor 根据状态中钉死的 `notify_bot` 查本机 roster，经 `ensure_session()` + `_inject()` 把一条注册事件注回原 bot；该链对 Claude 与 Codex 相同，不读取任何 runtime transcript 私有格式。
+
+状态文件位于 `feishu/_state/bridge-registration-<job-id>.json`，状态机为：
+
+```text
+armed → oauth_waiting → registered → permissions_review → manual_pending → ready
+                     ↘ failed / expired / cancelled
+```
+
+每个里程碑使用稳定事件 ID `<job-id>:<stage>`。投递语义是 **at-least-once**：正常轮询与进程重启不会重复已确认事件；若进程恰在 TUI 已提交、receipt 尚未落盘之间崩溃，可能带同一 event ID 重投，接收方必须把该 ID 当幂等键。不得宣称 exactly-once。
+
+### 能力档决定“完成”，不是全量 scope
+
+- `core`：DM、发消息与 IM 图片/文件；官方注册预置已满足，不追加权限。
+- `group-a2a`：预置的 granular `im:chat:read/update`、`im:chat.members:bot_access`、群 @ scope，加上“实际已入目标群”；不要求旧 umbrella `im:chat`，也不要求听全群。
+- `docs-text`：docx-only 创建/写入/Markdown 转块/公开链接。2026-08-26 在 `tb26-baseball` 无 `drive:drive` 时真测成功，并由外部读取器读回正文；它与旧导入链不是同一能力。
+- `docs-media`：图片/视频/文件嵌入 docx，优先请求窄 scope `docs:document.media:upload`。直接通过飞书 IM 发图片/文件只依赖 `im:resource`，不属于本档。
+- `docs-import`：旧的“上传源文件 → import task → 授权 owner”完整链。`drive:file:upload` 不能授权 `ccm_import_open` 素材上传，真测返回 `99991672`；只有明确需要保留源文件导入或协作者编辑时，才申请 Drive/导入/permission 类权限。
+- `group-listen`：只有不被 @ 也要读取全群时才要求 `im:message.group_msg`。
+
+本机 SDK 虽支持 `register_app(addons=...)`，但 Link16 默认不把权限并入第一条创建链。第二条权限链接只包含所选能力的 tenant scopes：默认 `core + group-a2a` 不含 broad Drive，也不含听全群；显式 `docs-import` 才会带 `drive:drive`。能力审计必须看具体 API 路径，不能再用“有/无 drive:drive”代替全部文档能力。
+
+### 并发、持久化与秘密边界
+
+- “查 session → `ensure_session` → `_inject`”整体持有按目标 bot 的跨进程锁；桥真人消息、cron、watchdog 与 Monitor 使用同一把锁，防双 spawn 和 paste 交错。
+- 注册器与 Monitor 更新同一 job 时必须锁内重读、合并，以唯一临时文件 + `os.replace` 原子替换。
+- 状态与日志只允许 app ID、env 键名、bot/profile/capability、群 ID、阶段、时间和脱敏错误；严禁 app secret、tenant/user token、Device Grant 临时码与授权 URL。
+- scopes API 或群 API 报错属于 `unknown/retry`，不得伪装成“未授权/未入群”；owner 文件必须存在且含有效 open_id 才算完成。
+- 应用 owner、应用审核管理员、企业超级管理员是三个概念。API 只能返回哪一层就标哪一层，查不到姓名时写“不可判定”，禁止用 app owner 冒充企业管理员。
 
 ---
 

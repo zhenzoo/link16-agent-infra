@@ -6,7 +6,7 @@
 —— 不管是自己的还是别人的 bot，定位到【精准原始数据·精确到秒】，双向合并成一条时间线。别再手敲读 receipts/outbox/jsonl。
 
 数据全在【本地电脑】(不读飞书 App·不靠飞书 API)：
-  · 入站(你→bot) = 钉死的会话 JSONL(全文 + ISO 时间·见 bridge-session-<bot>.json 的 jsonl)
+  · 入站(你→bot) = bridge-inbound-<bot>.jsonl（会话前先落盘）+ cutover 前 legacy transcript
   · 出站(bot→你) = bridge-outbox-<bot>.jsonl(每条卡完整正文) + bridge-receipts-<bot>.jsonl(真实回执:几点几秒/via/送达)
   · 飞书 API(--feishu·走 bridge_feishu_probe) 只用来交叉核对【送达时机】：text 消息读得到全文，
     互动卡片正文飞书服务器统一返回「请升级客户端」占位串(与你客户端版本【无关】·卡片在 App 里渲染正常)。
@@ -30,13 +30,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bridge_env import bots_config_path                    # noqa: E402
+import bridge_inbound                                      # noqa: E402
 from jsonl_reply_extract import _is_real_user_message, _user_text  # noqa: E402  复用 SSOT 解析
 
 PROJECT = Path(__file__).resolve().parent.parent
 STATE_DIR = PROJECT / "feishu" / "_state"   # link16: 桥运行态(会话/outbox/收据)·sibling 脚本统一名(原 xhs 借住的 _autopilot)
 LOGS = Path(__file__).resolve().parent / "_logs"
 BOTS_CONFIG = bots_config_path(PROJECT)
-MARKER_RE = re.compile(r"\s*\[飞书-[^\]]+\]\s*$")          # 注入消息末尾的 [飞书-<bot>] 标记 → 显示时剥掉
+MARKER_RE = re.compile(r"\s*\[飞书(?:-[^\]]+|[^\]]*)\]\s*$")  # 兼容旧 [飞书-bot] 与当前路由信封
 PREVIEW_CHARS = 300
 
 
@@ -94,10 +95,62 @@ def _inbound_from_jsonl(bot):
                     continue
                 txt = MARKER_RE.sub("", _user_text(r)).strip()
                 if txt:
-                    evs.append({"ts": ts, "dir": "in", "kind": "user", "text": txt})
+                    evs.append({"ts": ts, "dir": "in", "kind": "user", "text": txt,
+                                "source": "legacy-transcript"})
     except OSError:
         pass
     return evs, jp
+
+
+def _ledger_text(record):
+    text = str(record.get("text") or "").strip()
+    if text:
+        return text
+    raw = str(record.get("raw_text") or "").strip()
+    if raw:
+        return raw
+    resources = record.get("resources") or []
+    if resources:
+        labels = []
+        for item in resources:
+            if not isinstance(item, dict):
+                continue
+            labels.append(str(item.get("file_name") or item.get("type") or "附件"))
+        return "[附件] " + "、".join(labels or ["未命名附件"])
+    return f"[无文本消息·type={record.get('message_type') or 'unknown'}]"
+
+
+def _inbound_from_ledger(bot):
+    records = bridge_inbound.read_records(STATE_DIR, bot)
+    events = []
+    for record in records:
+        try:
+            ts = float(record.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        events.append({
+            "ts": ts,
+            "dir": "in",
+            "kind": "user",
+            "text": _ledger_text(record),
+            "source": record.get("source") or "inbound-ledger",
+            "message_id": record.get("message_id"),
+            "chat_id": record.get("chat_id"),
+            "chat_type": record.get("chat_type"),
+            "sender": record.get("sender"),
+        })
+    return events, bridge_inbound.native_cutover_ts(records)
+
+
+def _merged_inbound(bot):
+    """Ledger is authoritative after native cutover; transcript only fills older history."""
+    ledger, cutover = _inbound_from_ledger(bot)
+    legacy, jp = _inbound_from_jsonl(bot)
+    if not ledger:
+        return legacy, jp
+    if cutover is not None:
+        legacy = [event for event in legacy if event["ts"] < cutover]
+    return sorted(legacy + ledger, key=lambda event: event["ts"]), jp
 
 
 def _outbound_from_outbox(bot, include_progress):
@@ -198,7 +251,7 @@ def _render_text(ev, full):
 
 
 def gather(bot, recent, include_progress):
-    inbound, jp = _inbound_from_jsonl(bot)
+    inbound, jp = _merged_inbound(bot)
     outbound = _outbound_from_outbox(bot, include_progress)
     evs = sorted(inbound + outbound, key=lambda e: e["ts"])
     shown = evs[-recent:] if recent and recent > 0 else evs
@@ -213,8 +266,10 @@ def cmd_list():
             continue
         jp = _session_jsonl(name)
         has_sess = bool(jp and os.path.exists(jp))
+        has_inbound = bridge_inbound.ledger_path(STATE_DIR, name).exists()
         has_out = (STATE_DIR / f"bridge-outbox-{name}.jsonl").exists()
-        out.append(f"  {name:22} 会话:{'✅' if has_sess else '—'}  出站记录:{'✅' if has_out else '—'}  cwd={b.get('cwd', '?')}")
+        out.append(f"  {name:22} 入站账本:{'✅' if has_inbound else '—'}  legacy会话:{'✅' if has_sess else '—'}  "
+                   f"出站记录:{'✅' if has_out else '—'}  cwd={b.get('cwd', '?')}")
     print("可查的 bot（--bot <名> 看时间线）：\n" + "\n".join(out))
 
 
@@ -242,15 +297,17 @@ def main():
     shown, jp, n_in, n_out = gather(a.bot, a.recent, a.progress)
 
     if a.json:
-        print(json.dumps({"bot": a.bot, "jsonl": jp, "n_inbound_total": n_in, "n_outbound_total": n_out,
+        print(json.dumps({"bot": a.bot, "inbound_ledger": str(bridge_inbound.ledger_path(STATE_DIR, a.bot)),
+                          "legacy_jsonl": jp, "n_inbound_total": n_in, "n_outbound_total": n_out,
                           "events": [{"ts": e["ts"], "time": _fmt(e["ts"]), "dir": e["dir"],
                                       "kind": e["kind"], "text": e["text"]} for e in shown]},
                          ensure_ascii=False, indent=2))
         return
 
     print(f"📨 {a.bot} · 消息时间线（近 {len(shown)} 条 · 全部本地原始记录 · 时间=本机时区，精确到秒）")
-    if not jp or not os.path.exists(jp):
-        print("⚠️ 当前没有钉死的活会话 JSONL → 入站(你发的)全文取不到，只显示出站(bot 回的)。")
+    has_ledger = bridge_inbound.ledger_path(STATE_DIR, a.bot).exists()
+    if not has_ledger and (not jp or not os.path.exists(jp)):
+        print("⚠️ 当前既没有入站账本，也没有可读的 legacy 会话 transcript → 只能显示出站。")
     print("─" * 72)
     for ev in shown:
         print(f"[{_fmt(ev['ts'])}] {_who(ev, a.bot)} ▸ {_render_text(ev, a.full)}")

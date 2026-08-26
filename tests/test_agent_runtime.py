@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "feishu"))
 
 import agent_runtime  # noqa: E402
+import codex_app_server_worker  # noqa: E402
 import feishu_bridge  # noqa: E402
 
 
@@ -69,6 +70,7 @@ class AgentProfileTests(unittest.TestCase):
         self.assertIn('LINK16_AGENT_PROFILE="cck"', kimi)
         self.assertIn('CLAUDE_CONFIG_DIR=', kimi)
         self.assertIn('XHS_AUTOPILOT="1"', kimi)
+        self.assertIn("unset CLAUDE_CODE_CHILD_SESSION;", kimi)
         self.assertNotIn("API_KEY", kimi)
         self.assertIn('LINK16_AGENT_PROFILE="cxp"', codex)
         self.assertIn(".codex-personal", codex)
@@ -77,6 +79,13 @@ class AgentProfileTests(unittest.TestCase):
         self.assertIn("--dangerously-bypass-hook-trust", codex)
         self.assertIn('"resume" "abc 123"', codex)
         self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
+        self.assertNotIn("CLAUDE_CODE_CHILD_SESSION", codex)
+
+    def test_bridge_claude_worker_clears_parent_harness_marker(self):
+        bot = {"name": "claude-bot", "profile": "ccp"}
+        with patch.object(agent_runtime, "_require_profile_available"):
+            command = agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
+        self.assertTrue(command.startswith("unset CLAUDE_CODE_CHILD_SESSION;"))
 
     def test_standalone_profile_is_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "LINK16_AGENT_PROFILE 未设置"):
@@ -215,12 +224,35 @@ class AgentProfileTests(unittest.TestCase):
                     "FEISHU_BRIDGE_NEW_APP_SECRET",
                     "@new-bot",
                     "cxp",
+                    cwd="C:\\work\\new-bot",
                 )
             self.assertEqual(row["profile"], "cxp")
+            self.assertEqual(row["cwd"], "C:/work/new-bot")
             self.assertNotIn("agent", row)
             self.assertNotIn("codex_home", row)
             persisted = json.loads(local.read_text(encoding="utf-8"))["bots"][0]
             self.assertEqual(persisted, row)
+
+    def test_switching_to_claude_removes_stale_codex_transport_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "bridge-bots.local.json"
+            committed = Path(tmp) / "bridge-bots.json"
+            local.write_text(json.dumps({"bots": [{
+                "name": "baseball",
+                "profile": "cxp",
+                "codex_transport": "app-server-canary",
+                "delivery_contract": "milestone-v1",
+            }]}), encoding="utf-8")
+            committed.write_text('{"bots":[]}', encoding="utf-8")
+            with (
+                patch.object(agent_runtime, "ROSTER_LOCAL_PATH", local),
+                patch.object(agent_runtime, "ROSTER_COMMITTED_PATH", committed),
+            ):
+                agent_runtime.persist_account("baseball", "ccp2")
+            row = json.loads(local.read_text(encoding="utf-8"))["bots"][0]
+            self.assertEqual(row["profile"], "ccp2")
+            self.assertNotIn("codex_transport", row)
+            self.assertNotIn("delivery_contract", row)
 
     def test_session_reuse_requires_exact_recorded_profile(self):
         bot = {"name": "codex-bot", "profile": "cxp"}
@@ -627,6 +659,23 @@ class BridgeProcessSnapshotTests(unittest.TestCase):
 
 
 class AppServerReadySignalTests(unittest.TestCase):
+    def test_runtime_specific_ready_timeout_contract_and_overrides(self):
+        default_codex = {"name": "codex", "agent": "codex"}
+        self.assertGreater(
+            feishu_bridge._ready_timeout(default_codex),
+            codex_app_server_worker.WARMUP_TIMEOUT_SEC,
+        )
+        self.assertEqual(feishu_bridge._ready_timeout({"agent": "claude"}), 30)
+        self.assertEqual(feishu_bridge._ready_timeout({
+            "agent": "codex", "codex_transport": "cli-legacy",
+        }), 30)
+        self.assertEqual(feishu_bridge._ready_timeout({
+            **default_codex, "ready_timeout_sec": 77,
+        }), 77)
+        self.assertEqual(feishu_bridge._ready_timeout({
+            **default_codex, "ready_timeout_sec": 77,
+        }, 0.25), 0.25)
+
     def _with_ready_file(self, bot, callback):
         with tempfile.TemporaryDirectory() as tmp:
             previous = feishu_bridge.STATE_DIR

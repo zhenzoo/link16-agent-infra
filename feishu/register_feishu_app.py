@@ -12,15 +12,10 @@
     python orchestrator/register_feishu_app.py --name "xhs总控-ws2" --bot ws2
     → 写 FEISHU_BRIDGE_WS2_APP_ID / FEISHU_BRIDGE_WS2_APP_SECRET（bridge-bots.json 的 app_id_env 指它）
 
-预置内容（官方）：40+ 权限 + 6 事件（含 im.message.receive_v1）+ WebSocket 长连接订阅，
-免进开发者后台、免发版。文档: https://open.feishu.cn/document/mcp_open_tools/scan-to-create-an-app-in-one-click
-
-🚨 建完必做一步（ARCH-101 §2.11 · 2026-06-21 改为一键全开）：一键预置(40+)【不含】所有**应用身份/tenant**权限。
-脚本末尾打印**一条**一键开通链（`feishu_docs.auth_url(app_id, APP_IDENTITY_MANUAL_SCOPES)`），**一次开齐**：
-  · 云文档/媒体在线查看 = `drive:drive` + `docx:document`(:create)（**创建 docx 必须 docx·只给 drive:drive 会报 99991672**）
-  · 群跨机 a2a = `im:chat` · 收群内@ = `im:message.group_at_msg` · 听全群 = `im:message.group_msg`
-Claude 注册完把它【发给 Publisher】，Publisher 点开 → **全部勾选**开通（选**应用身份/tenant**）→ 创建版本并发布。
-一次开齐、别事后逐个补（2026-06-21 -3 漏 docx 踩坑教训）。不做则此 bot 只能 DM 收发消息/图、不能 send --doc、不能进群 a2a。
+官方 preset 提供消息、事件与 WebSocket 基础能力；注册默认分成两条人工链接：
+第一条只创建应用，第二条按 `--capability` 精确列出 tenant 权限供人审阅/发布。
+默认 core + group-a2a 不申请 broad Drive 或听全群。`--background` 把
+Device Grant 和人工步骤监督从当前 Claude/Codex turn 生命周期中解耦。
 """
 import argparse
 import os
@@ -52,6 +47,8 @@ for _s in (sys.stdout, sys.stderr):
             pass
 
 import lark_oapi as lark  # noqa: E402
+import bridge_scope_audit  # noqa: E402
+import registration_monitor  # noqa: E402
 
 ENV_PATH = resolve_env_path()   # 跨机解析·不写死盘符
 
@@ -222,12 +219,22 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
     return stub
 
 
-def _run_device_grant(name, app_id=None):
+def _run_device_grant(name, app_id=None, job_id=None):
     """创建新应用，或用 cli_... App ID 续接同一次 Device Grant。"""
+    def qr(info):
+        on_qr(info)
+        if job_id:
+            registration_monitor.record_stage(job_id, "oauth_waiting", app_id=app_id)
+            registration_monitor.notify_oauth_link(
+                job_id, info.get("url"), info.get("expire_in")
+            )
+
     return lark.register_app(
-        on_qr_code=on_qr,
+        on_qr_code=qr,
         on_status_change=on_status,
         app_preset={"name": name},
+        addons=None,
+        create_only=True,
         app_id=app_id,
     )
 
@@ -241,8 +248,23 @@ def main():
                     help="目标 runtime；不给时由 --profile 推导，无 profile 则兼容默认 claude")
     ap.add_argument("--profile", default=None,
                     help="Link16 agent profile（如 cck/cxp）；不给则取同 runtime 的本机默认")
+    ap.add_argument("--cwd", default=None,
+                    help="新 bot 的机器本地工作目录；只写入 gitignored local roster")
     ap.add_argument("--app-id", default=None,
                     help="续接已由本次 Device Grant 创建的应用，避免回传中断后重复创建")
+    ap.add_argument("--capability", action="append", choices=tuple(bridge_scope_audit.CAPABILITY_SPECS),
+                    help="注册能力包，可重复；不给=core + group-a2a，不默认申请 broad Drive")
+    ap.add_argument("--notify-bot", default=None,
+                    help="人工步骤完成后唤醒哪只 Link16 bot；不给取 FEISHU_BRIDGE_SESSION")
+    ap.add_argument("--group", default="交流水吧",
+                    help="group-a2a 的人工入群验收名片段；默认 交流水吧")
+    ap.add_argument("--no-monitor", action="store_true",
+                    help="只用于测试/故障隔离：不启动独立注册监督器")
+    ap.add_argument("--background", action="store_true",
+                    help="把 Device Grant 轮询放进独立后台进程；授权链接经 Link16 回调，不依赖本轮 tool timeout")
+    ap.add_argument("--job-id", help=argparse.SUPPRESS)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="只显示 profile/cwd/capability/增量 scopes，不创建应用、不写文件")
     ap.add_argument("--trusted-same-owner-devices", action="store_true",
                     help="仅当目标是同一所有者的受信设备时，显示 envsync 后续指引")
     args = ap.parse_args()
@@ -275,16 +297,85 @@ def main():
             + "；".join(doctor["errors"])
         )
 
+    selected_cwd = None
+    if args.cwd:
+        selected_cwd_path = Path(args.cwd).expanduser().resolve()
+        if not selected_cwd_path.is_dir():
+            ap.error(f"--cwd 不是已存在目录：{selected_cwd_path}")
+        selected_cwd = str(selected_cwd_path).replace("\\", "/")
+
     if args.bot:
         b = args.bot.upper().replace("-", "_")   # env key 用下划线(连字符非法/巡检正则[A-Z0-9_]扫不到)·与名册约定一致
         id_key, sec_key = f"FEISHU_BRIDGE_{b}_APP_ID", f"FEISHU_BRIDGE_{b}_APP_SECRET"
     else:
         id_key, sec_key = "FEISHU_BRIDGE_APP_ID", "FEISHU_BRIDGE_APP_SECRET"
 
-    result = _run_device_grant(args.name, args.app_id)
+    capabilities = bridge_scope_audit.normalize_capabilities(args.capability)
+    permission_scopes = bridge_scope_audit.requested_scopes(capabilities, for_fix=True)
+    if args.dry_run:
+        print("=== register dry-run（零写入）===")
+        print(f"bot={args.bot or args.name}")
+        print(f"profile={selected_profile.name} runtime={runtime}")
+        print(f"cwd={selected_cwd or '(repo default)'}")
+        print(f"capabilities={','.join(capabilities)}")
+        print("registration_links=2")
+        print("first_link=create-only;addons=(none)")
+        print(f"second_link_scopes={','.join(permission_scopes) or '(none)'}")
+        return
+    monitor = registration_monitor.get_job(args.job_id) if args.job_id else None
+    monitor_bot = args.bot or args.name
+    if not monitor and not args.no_monitor:
+        monitor = registration_monitor.arm_job(
+            monitor_bot,
+            capabilities,
+            notify_bot=args.notify_bot,
+            group=args.group if "group-a2a" in capabilities else None,
+            app_id=args.app_id,
+            id_env=id_key,
+            secret_env=sec_key,
+            launch=True,
+        )
+        print(
+            f"\n🛰️ 独立注册监督已启动：job={monitor['job_id']} · "
+            f"回调目标={monitor.get('notify_bot') or '未绑定（仅持久记录）'}",
+            flush=True,
+        )
+
+    if args.background:
+        if not monitor:
+            ap.error("--background 需要注册监督器；不要同时给 --no-monitor")
+        child_args = [arg for arg in sys.argv[1:] if arg != "--background"]
+        child_args += ["--job-id", monitor["job_id"]]
+        pid = registration_monitor.launch_registration_worker(
+            [sys.executable, str(Path(__file__).resolve()), *child_args]
+        )
+        registration_monitor._mutate(
+            monitor["job_id"], lambda item: item.update({"registrar_pid": pid})
+        )
+        print(
+            f"✅ Device Grant 已独立后台运行：job={monitor['job_id']} · pid={pid}\n"
+            "   授权链接会由 registration-monitor 自动注回发起 session；本命令现在即可退出。",
+            flush=True,
+        )
+        return
+
+    try:
+        result = _run_device_grant(
+            args.name,
+            args.app_id,
+            job_id=monitor.get("job_id") if monitor else None,
+        )
+    except Exception as exc:
+        if monitor:
+            registration_monitor.record_stage(monitor["job_id"], "failed", error=exc)
+        raise
     app_id = result.get("client_id")
     secret = result.get("client_secret")
     if not app_id or not secret:
+        if monitor:
+            registration_monitor.record_stage(
+                monitor["job_id"], "failed", error=_credential_failure_summary(result)
+            )
         print(f"❌ 没拿到凭据：{_credential_failure_summary(result)}", flush=True)
         sys.exit(1)
     write_env(app_id, secret, id_key, sec_key)
@@ -301,6 +392,7 @@ def main():
         sec_key,
         at_name,
         selected_profile.name,
+        cwd=selected_cwd,
     )
     print(
         f"\n✅ 已自动登记运行时名册：{row['name']} · profile={row['profile']} "
@@ -308,33 +400,31 @@ def main():
         flush=True,
     )
 
-    # 一键预置(40+)【不含】的【应用身份/tenant】权限——注册后【一条链全开】，免事后逐个手动补
-    # (SSOT: feishu_docs.APP_IDENTITY_MANUAL_SCOPES = 云文档在线查看 drive:drive+docx:document(:create) + 群a2a im:chat + 收群@ + 听全群)。
-    try:
-        import feishu_docs
-        link = feishu_docs.auth_url(app_id, feishu_docs.APP_IDENTITY_MANUAL_SCOPES)
-    except Exception:  # noqa: BLE001 — 拿不到也别挡注册成功
-        link = (f"https://open.feishu.cn/app/{app_id}/auth?q="
-                "drive:drive,docx:document,docx:document:create,im:chat,"
-                "im:message.group_at_msg,im:message.group_msg&op_from=openapi&token_type=tenant")
-    print("\n🚨 还差最后一步——把下面这【一条】链接发给 Publisher，点开 → 全部勾选开通"
-          "（**选应用身份/tenant**）→ 创建版本并发布。一次开齐，别事后再手动补：\n"
-          f"   {link}\n"
-          "   覆盖：① 云文档/媒体在线查看 drive:drive + docx:document(:create)（send --doc / send_feishu_media·创建docx必须 docx）\n"
-          "        ② 群跨机 a2a im:chat（拉群 + 获取/更新群信息）  ③ 收群内@ group_at_msg  ④ 听全群 group_msg\n"
-          "（不做这步 bot 仍能 DM 收发消息/图，但不能发在线文档、不能进群 a2a。Claude：请把此链接转发给 Publisher。）\n"
-          "   开完仍需【人工】把 bot 拉进共享群（API 加不了·见 ARCH-102 §2.1）。",
+    if monitor:
+        monitor = registration_monitor.record_stage(monitor["job_id"], "registered", app_id=app_id)
+        monitor = registration_monitor.request_permission_review(monitor["job_id"])
+
+    permission_link = bridge_scope_audit.fix_auth_url(app_id, permission_scopes)
+
+    labels = [bridge_scope_audit.CAPABILITY_SPECS[name]["label"] for name in capabilities]
+    print("\n🔐 第二步：请人工审阅本次能力与权限，并按飞书页面要求创建版本/发布：\n"
+          f"   capability: {', '.join(capabilities)}\n"
+          f"   能力: {'；'.join(labels)}\n"
+          f"   tenant scopes: {', '.join(permission_scopes) or '无（只用官方 preset）'}\n"
+          f"{permission_link}\n"
+          "   第一条链接只创建应用；本链接不自动发布。如飞书把其中某项标为需审核，以开发者后台"
+          "的实时标识为准；监督器会持续复查真实授权状态。",
           flush=True)
 
     # 🔒 登记协议：建完必回写。§4 见 docs/SOP-120。agent-registry stub 上面已【自动】补·其余照单核对。
     print("\n📋 建完【必做登记】（④ 已自动 · 完整见 docs/SOP-120 §4）：\n"
           f"   ① ✅ bridge-bots.local.json 已自动登记（profile={selected_profile.name}）—— 运行时 roster·桥靠它 spawn\n"
           "      换运行档案只改 profile（或飞书 `/account <profile>`）；不要再写 agent/home/account 重复字段。\n"
-          "   ② 上面那【一条】链一次开齐 drive:drive + docx:document(:create) + im:chat + 群listen → 创版本并发布\n"
-          "   ③ 人工把 bot 拉进共享群「交流水吧」（API 加不了·a2a 唯一人工闸）\n"
+          f"   ② 打开上面的第二条链接，人工核对本次 capability：{', '.join(capabilities)}\n"
+          f"   ③ 人工把 bot 拉进共享群「{args.group}」（仅 group-a2a 需要·API 加不了）\n"
           "   ④ ✅ agent-registry.json 已【自动】补 stub（谁是谁·跨机目录）→ 你只需核对/补 repo + machine（脚本不知道它管哪个仓）\n"
           "   ⑤ 跑  python feishu/bridge_scope_audit.py --all-env  → 刷新 SOP-120 §2.2 能力矩阵\n"
-          "   ⑥ 重启桥 stop→start → 验：群里 @它能回 + 它 send_feishu_msg 喊别的 bot 能达\n"
+          "   ⑥ 不自动重启整座桥；由监督器验权/认主/入群并回调发起 session\n"
           "   —— 两个名册各司其职：bridge-bots(运行时·跑哪些) + agent-registry(目录·谁是谁·本步已自动)。",
           flush=True)
 

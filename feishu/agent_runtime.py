@@ -46,6 +46,7 @@ CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
 CODEX_TRANSPORT_APP_SERVER = "app-server-canary"
 CODEX_TRANSPORT_LEGACY = "cli-legacy"
 _CODEX_LEGACY_ALIASES = {"cli-legacy", "bare-cli", "standard", "legacy", "cli"}
+CLAUDE_HARNESS_ENV_KEYS = ("CLAUDE_CODE_CHILD_SESSION",)
 
 
 def codex_transport(bot) -> str:
@@ -68,6 +69,11 @@ def uses_app_server(bot) -> bool:
 def _q(value) -> str:
     """Quote a path/value for the git-bash command line used by wmux."""
     return '"' + str(value).replace("\\", "/").replace('"', '\\"') + '"'
+
+
+def _unset_shell_env(keys) -> str:
+    safe = [key for key in keys if re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(key))]
+    return ("unset " + " ".join(safe) + "; ") if safe else ""
 
 
 @dataclass(frozen=True)
@@ -529,6 +535,9 @@ def persist_account(bot_name: str, alias: str, why: str = "") -> dict:
             raise ValueError(f"本机名册里没有 bot '{bot_name}'")
         for key in ("agent", "runtime", "account", "claude_config_dir", "codex_home"):
             hit.pop(key, None)
+        if profile.runtime != "codex":
+            hit.pop("codex_transport", None)
+            hit.pop("delivery_contract", None)
         hit["profile"] = profile.name
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         hit["_account_why"] = (
@@ -551,6 +560,7 @@ def upsert_runtime_bot(
     app_secret_env: str,
     at_name: str,
     profile_name_: str,
+    cwd: str | None = None,
 ) -> dict:
     """Create/update one machine-local runtime row after app registration."""
     profile = profile_spec(profile_name_)
@@ -569,8 +579,13 @@ def upsert_runtime_bot(
             "at_name": at_name,
             "profile": profile.name,
         })
+        if cwd is not None:
+            hit["cwd"] = str(cwd).replace("\\", "/")
         for key in ("agent", "runtime", "account", "claude_config_dir", "codex_home"):
             hit.pop(key, None)
+        if profile.runtime != "codex":
+            hit.pop("codex_transport", None)
+            hit.pop("delivery_contract", None)
         return dict(hit)
 
     return _update_local_roster(mutate)
@@ -638,7 +653,8 @@ def standalone_worker_cmd(
         prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
     if profile.runtime == "claude":
         command = (
-            prefix
+            _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS)
+            + prefix
             + env_text
             + f"CLAUDE_CONFIG_DIR={_q(profile.home_path.as_posix())} "
             + "claude --dangerously-skip-permissions"
@@ -683,7 +699,8 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         if profile.launcher == "launch-sh":
             prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
         return (
-            prefix
+            _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS)
+            + prefix
             + env
             + f"CLAUDE_CONFIG_DIR={_q(config_dir)} "
             + f"claude --dangerously-skip-permissions --settings {_q(hooks_json)}"

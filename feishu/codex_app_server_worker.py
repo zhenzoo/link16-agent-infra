@@ -24,6 +24,7 @@ from bridge_events import CONTRACT, MilestoneAccumulator, normalize_codex_notifi
 
 
 WARMUP_MARKER = "LINK16_APP_SERVER_READY"
+WARMUP_TIMEOUT_SEC = 120
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -257,7 +258,7 @@ def _start_or_resume_thread(rpc: RpcConnection, *, state_dir: Path, bot: str, cw
             "input": [{"type": "text", "text": f"Reply exactly {WARMUP_MARKER}."}],
         },
     )["turn"]["id"]
-    deadline = time.time() + 120
+    deadline = time.time() + WARMUP_TIMEOUT_SEC
     while time.time() < deadline:
         try:
             message = rpc.notifications.get(timeout=1)

@@ -47,6 +47,7 @@ INBOX_ROOT = STATE_DIR / "inbox"   # 入站附件落地（你发飞书的图/文
 
 REPLY_POLL_SEC = 2
 READY_TIMEOUT_SEC = 30            # 等 spawn 出的 worker 起好最多 30 秒（spawn 探就绪保送达后 claude/codex ~10-15s 出提示符）
+CODEX_APP_SERVER_READY_TIMEOUT_SEC = 150  # worker fresh thread 合法 warm-up=120s，再留 remote TUI 启动余量
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
 CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_send 单卡 / 超了 SDK 自动分条
 # 注入策略（2026-06-28 修正）：
@@ -93,6 +94,8 @@ from jsonl_reply_extract import extract  # noqa: E402  (find_ask_picker 退役·
 import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
+import bridge_injection  # noqa: E402  (桥/cron/watchdog/注册监督器跨进程共享注入锁)
+import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持久化)
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
 from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
 
@@ -502,19 +505,17 @@ def load_session(bot_name):
 
 def save_session(bot_name, rec):
     STATE_DIR.mkdir(exist_ok=True)
-    f = _session_file(bot_name)
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, f)   # 原子替换 · 防多线程(ensure_session in to_thread vs 事件循环)并发写撕裂 JSON
+    bridge_injection.atomic_write_json(_session_file(bot_name), rec)
 
 
 def _merge_session(bot_name, patch):
     """读改写会话注册表：保留已有键（pty/jsonl/chat_id/mirror…），只覆盖 patch 给的键。
     防「ensure_session/pin 自愈写 {workspace_id,pty,jsonl} 时把 chat_id/mirror 冲掉」。"""
-    rec = load_session(bot_name) or {}
-    rec.update(patch)
-    save_session(bot_name, rec)
-    return rec
+    with bridge_injection.injection_lock(STATE_DIR, "session-state", bot_name):
+        rec = load_session(bot_name) or {}
+        rec.update(patch)
+        save_session(bot_name, rec)
+        return rec
 
 
 def receipt(bot_name, rec):
@@ -760,9 +761,21 @@ def _app_server_ready_signal(bot, since):
         return False
 
 
+def _ready_timeout(bot, explicit=None):
+    """Ready wait precedence: call override > roster override > runtime default."""
+    if explicit is not None:
+        return float(explicit)
+    configured = bot.get("ready_timeout_sec")
+    if configured is not None:
+        return float(configured)
+    if agent_runtime.uses_app_server(bot):
+        return float(CODEX_APP_SERVER_READY_TIMEOUT_SEC)
+    return float(READY_TIMEOUT_SEC)
+
+
 def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
     """spawn worker 后轮询屏幕，看到该 runtime 的 ready marker = 就绪可注入。"""
-    timeout = float(timeout or bot.get("ready_timeout_sec") or READY_TIMEOUT_SEC)
+    timeout = _ready_timeout(bot, timeout)
     wait_started = time.time()
     deadline = time.time() + timeout
     trust_sent = False
@@ -907,7 +920,7 @@ def _reuse_check(bot, rec):
     return True, True, ""
 
 
-def ensure_session(bot):
+def _ensure_session_unlocked(bot):
     """返回 (workspace_id, pty, created, jsonl)。jsonl=该会话钉死的 transcript 路径(str)或 None。
     复用活会话时带出已钉的 jsonl；新 spawn 时探测新建 jsonl 钉死它（彻底绕开 marker+mtime 猜文件的串台坑）。"""
     rec = load_session(bot["name"])
@@ -959,6 +972,12 @@ def ensure_session(bot):
     return ws, pty, True, jsonl
 
 
+def ensure_session(bot):
+    """跨进程串行地复用或创建 bot 会话，防两个外部触发器同时 spawn。"""
+    with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
+        return _ensure_session_unlocked(bot)
+
+
 def _composer_holds_paste(screen, marker):
     """读屏判「我注入的内容还卡在输入框(composer)里没提交吗」（§2.12b 闭环校验用）。
     composer = 屏幕【最后一个 `❯` 之后】的内容（提交后原文进 scrollback·scrollback 不带 `❯`→取最后一个 `❯` 干净避开）。
@@ -997,7 +1016,7 @@ def _busy_or_queued(screen):
     return bool(re.search(r"\(\s*\d+s\s*·", screen))   # 生成中状态行的耗时锚 `(47s ·`
 
 
-def _inject(pty, workspace_id, marker):
+def _inject_unlocked(pty, workspace_id, marker):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
@@ -1024,6 +1043,12 @@ def _inject(pty, workspace_id, marker):
             return True                          # → 不误报「没提交」·且【别再按回车】(防把排队消息重复入队)·2026-07-20 根治
         wmux("enter", pty, *allow)               # 空闲却卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
+
+
+def _inject(pty, workspace_id, marker):
+    """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
+    with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
+        return _inject_unlocked(pty, workspace_id, marker)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
@@ -1927,7 +1952,8 @@ def run(bot_name=None):
 
         async def on_message(msg):
             sender = (msg.sender.open_id or "") if msg.sender else ""
-            text = (msg.content_text or "").strip()
+            raw_text = msg.content_text or ""
+            text = raw_text.strip()
             is_group = getattr(msg, "chat_type", "") == "group"
             if is_group:
                 if not getattr(msg, "mentioned_bot", False):
@@ -1944,6 +1970,15 @@ def run(bot_name=None):
             if not is_group and not is_allowed(bot, sender):
                 blog(bot["name"], f"拒绝 open_id={sender}（非主人/非白名单）: {text[:50]!r}")
                 return
+            # accepted inbound 的持久真源：在 slash / session spawn / 附件下载 / TUI 注入之前同步落盘。
+            # 群未@与未授权 DM 已在上面返回，不扩大留存范围；file_key/raw payload 不进账本。
+            try:
+                bridge_inbound.append_message(
+                    STATE_DIR, bot["name"], msg, raw_text=raw_text, text=text
+                )
+            except Exception as ledger_error:  # noqa: BLE001 — 处理继续，但必须把留存故障显式打进桥日志
+                blog(bot["name"], f"⚠️ 入站账本写入失败 message_id={getattr(msg, 'id', '')}: "
+                                  f"{type(ledger_error).__name__}: {str(ledger_error)[:180]}")
             # 交互卡片被转发进来 → 飞书只递【占位】：content_text="[interactive]" 或正文被替换成「请升级至最新版本客户端」。
             # 卡片真内容飞书【不下发给 bot】——2026-07-10 实测钉死：user_dsl 已不随转发下发(连自家卡/同会话/几十秒前都没有)、
             # 占位图 resources 下载报 14005(跨/同 app 都 Resource Deleted)、get-message 只回占位。→ 归一化成空，让它走下面
