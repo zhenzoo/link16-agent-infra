@@ -216,7 +216,7 @@ def test_告警走的是DM而不是webhook():
 
 
 
-def test_陈旧检测_源码比进程新就必须报警(monkeypatch):
+def test_陈旧检测_源码比进程新就必须报警(monkeypatch, tmp_path):
     """🩸 tb25-link16 2026-08-20 实测的操作坑：git pull 后先跑 status 看到绿灯就差点收工，
     而**跑着的守护进程还是拉取前的旧字节码** —— status 是当场新起的解释器（新代码），
     常驻进程是旧的，两者给出不一致的能力判断，那个绿灯是骗人的。
@@ -227,6 +227,11 @@ def test_陈旧检测_源码比进程新就必须报警(monkeypatch):
     class _R:
         def __init__(self, o):
             self.stdout = o
+    # 不依赖真实 checkout 的 mtime：仓库放超过一小时后，原测试会把“进程起于一小时前”
+    # 错当成比源码新并自红。临时文件明确代表“刚更新的源码”，才是本用例要测的前提。
+    (tmp_path / "bridge_watchdog.py").touch()
+    (tmp_path / "agent_quota.py").touch()
+    monkeypatch.setattr(w, "HERE", tmp_path)
     monkeypatch.setattr(w, "_pids", lambda: [12345])
     # 进程起于一小时前，源码是现在的 mtime ⇒ 必须判陈旧
     old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
