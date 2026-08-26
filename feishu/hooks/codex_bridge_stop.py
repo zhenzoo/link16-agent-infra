@@ -12,6 +12,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import turn_delivery_guard  # noqa: E402
+
 
 def _read_stdin_json():
     """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
@@ -55,10 +58,11 @@ def main():
     # route into the answer record before the asynchronous drainer sees a later
     # turn, matching the Claude bridge's per-turn routing guarantee.
     try:
-        route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
-        if isinstance(route, dict):
-            rec["route"] = route
+        active_route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
+        if isinstance(active_route, dict):
+            rec["route"] = turn_delivery_guard.public_route(active_route)
     except (OSError, ValueError):
+        active_route = None
         pass
     outbox = outdir / f"bridge-outbox-{bot}.jsonl"
     try:
@@ -66,7 +70,10 @@ def main():
         with open(outbox, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
-        pass
+        return
+    turn_delivery_guard.compare_and_clear(
+        outdir, bot, (active_route or {}).get("turn_key")
+    )
 
 
 if __name__ == "__main__":

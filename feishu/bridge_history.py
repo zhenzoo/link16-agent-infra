@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bridge_env import bots_config_path                    # noqa: E402
 import bridge_inbound                                      # noqa: E402
+import bridge_outbound                                     # noqa: E402
 from jsonl_reply_extract import _is_real_user_message, _user_text  # noqa: E402  复用 SSOT 解析
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -177,7 +178,9 @@ def _outbound_from_outbox(bot, include_progress):
                     if k == "answer":
                         t = (r.get("text") or "").strip()
                         if t:
-                            out.append({"ts": float(ts), "dir": "out", "kind": "answer", "text": t})
+                            out.append({"ts": float(ts), "dir": "out", "kind": "answer", "text": t,
+                                        "session": r.get("session"), "anchor": r.get("anchor"),
+                                        "source": "legacy-outbox"})
                     elif k == "ask":
                         qs = r.get("questions") or []
                         heads = " / ".join(str(q.get("header") or "?") for q in qs if isinstance(q, dict))
@@ -204,6 +207,28 @@ def _outbound_from_outbox(bot, include_progress):
     evs = _parse(STATE_DIR / f"bridge-outbox-{bot}.jsonl")
     evs += _parse(STATE_DIR / "_pre-cutover-archive" / f"bridge-outbox-{bot}.jsonl")
     return evs
+
+
+def _outbound_from_ledger(bot):
+    events = []
+    for row in bridge_outbound.read_records(STATE_DIR, bot):
+        try:
+            ts = float(row.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        events.append({
+            "ts": ts, "dir": "out", "kind": "answer", "text": text,
+            "source": "outbound-ledger", "origin": row.get("origin"),
+            "route": row.get("route"), "target": row.get("target"),
+            "message_id": row.get("message_id"), "session": row.get("session"),
+            "anchor": row.get("anchor"), "answer_id": row.get("answer_id"),
+            "fragment_id": row.get("fragment_id"),
+            "part": row.get("part"), "total": row.get("total"),
+        })
+    return events
 
 
 def _delivery_summary(bot, since_ts):
@@ -252,7 +277,29 @@ def _render_text(ev, full):
 
 def gather(bot, recent, include_progress):
     inbound, jp = _merged_inbound(bot)
-    outbound = _outbound_from_outbox(bot, include_progress)
+    outbound_ledger = _outbound_from_ledger(bot)
+    delivered_parts = {}
+    for event in outbound_ledger:
+        if event.get("origin") != "bridge_outbox" or not event.get("answer_id"):
+            continue
+        try:
+            part, total = int(event.get("part")), int(event.get("total"))
+        except (TypeError, ValueError):
+            continue
+        key = (event.get("session"), event.get("anchor"), event.get("answer_id"), total)
+        delivered_parts.setdefault(key, set()).add(part)
+    delivered_turns = {
+        (session, anchor)
+        for (session, anchor, _answer_id, total), parts in delivered_parts.items()
+        if total > 0 and parts == set(range(1, total + 1))
+        and (session is not None or anchor is not None)
+    }
+    outbound = [
+        event for event in _outbound_from_outbox(bot, include_progress)
+        if event.get("kind") != "answer"
+        or (event.get("session"), event.get("anchor")) not in delivered_turns
+    ]
+    outbound += outbound_ledger
     evs = sorted(inbound + outbound, key=lambda e: e["ts"])
     shown = evs[-recent:] if recent and recent > 0 else evs
     return shown, jp, len(inbound), len(outbound)
@@ -267,7 +314,8 @@ def cmd_list():
         jp = _session_jsonl(name)
         has_sess = bool(jp and os.path.exists(jp))
         has_inbound = bridge_inbound.ledger_path(STATE_DIR, name).exists()
-        has_out = (STATE_DIR / f"bridge-outbox-{name}.jsonl").exists()
+        has_out = ((STATE_DIR / f"bridge-outbox-{name}.jsonl").exists()
+                   or bridge_outbound.ledger_path(STATE_DIR, name).exists())
         out.append(f"  {name:22} 入站账本:{'✅' if has_inbound else '—'}  legacy会话:{'✅' if has_sess else '—'}  "
                    f"出站记录:{'✅' if has_out else '—'}  cwd={b.get('cwd', '?')}")
     print("可查的 bot（--bot <名> 看时间线）：\n" + "\n".join(out))
@@ -299,8 +347,15 @@ def main():
     if a.json:
         print(json.dumps({"bot": a.bot, "inbound_ledger": str(bridge_inbound.ledger_path(STATE_DIR, a.bot)),
                           "legacy_jsonl": jp, "n_inbound_total": n_in, "n_outbound_total": n_out,
-                          "events": [{"ts": e["ts"], "time": _fmt(e["ts"]), "dir": e["dir"],
-                                      "kind": e["kind"], "text": e["text"]} for e in shown]},
+                          "events": [{key: value for key, value in {
+                              "ts": e["ts"], "time": _fmt(e["ts"]), "dir": e["dir"],
+                              "kind": e["kind"], "text": e["text"],
+                              "message_id": e.get("message_id"), "origin": e.get("origin"),
+                              "route": e.get("route"), "target": e.get("target"),
+                              "answer_id": e.get("answer_id"), "fragment_id": e.get("fragment_id"),
+                              "part": e.get("part"),
+                              "total": e.get("total"),
+                          }.items() if value is not None} for e in shown]},
                          ensure_ascii=False, indent=2))
         return
 

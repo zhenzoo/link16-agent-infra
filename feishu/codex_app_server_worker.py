@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from bridge_events import CONTRACT, MilestoneAccumulator, normalize_codex_notification
+import turn_delivery_guard
 
 
 WARMUP_MARKER = "LINK16_APP_SERVER_READY"
@@ -162,13 +163,17 @@ class MilestoneObserver:
                 event_id = str(event.get("event_id") or "")
                 if event_id and event_id in self.final_event_ids:
                     continue
+                active_route = _load_route(self.state_dir, self.bot)
                 record = _answer_record(
                     event,
                     session=self.root_thread,
-                    route=_load_route(self.state_dir, self.bot),
+                    route=turn_delivery_guard.public_route(active_route),
                 )
                 if record:
                     _append_jsonl(outbox, record)
+                    turn_delivery_guard.compare_and_clear(
+                        self.state_dir, self.bot, (active_route or {}).get("turn_key")
+                    )
                     if event_id:
                         self.final_event_ids.add(event_id)
                 continue

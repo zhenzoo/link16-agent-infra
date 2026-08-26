@@ -29,14 +29,14 @@ class FakeDelivery:
         self.cards = []
         self.plain = []
 
-    async def new_card(self, text, route=None):
+    async def new_card(self, text, route=None, purpose="answer", fragment=None):
         self.cards.append((text, route))
         return None if self.fail else f"m{len(self.cards)}"
 
     async def edit_card(self, _mid, _text):
         return True
 
-    async def send_plain(self, text, route=None):
+    async def send_plain(self, text, route=None, purpose="answer", fragment=None):
         self.plain.append((text, route))
         return not self.fail
 
@@ -165,6 +165,85 @@ class FallbackLinkTests(unittest.IsolatedAsyncioTestCase):
         payload = {"text": f"[工作台]({url})"}
         await feishu_bridge._send_checked(channel, "ou_owner", payload, "bot", "text")
         self.assertIn("\n" + url, channel.payloads[0]["text"])
+
+
+class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.bot = {"app_id": "app", "app_secret": "secret"}
+        self.receipts = []
+        self.route_to_dest = lambda route: (route.get("dest") or "oc_dm", route.get("at"))
+
+    async def test_route_kind_not_target_prefix_selects_format(self):
+        interactive, texts = [], []
+
+        def card(_aid, _secret, target, payload, message_uuid=None):
+            interactive.append((target, payload, message_uuid))
+            return f"card-{len(interactive)}"
+
+        def text(_aid, _secret, target, body, at=None, message_uuid=None):
+            texts.append((target, body, at, message_uuid))
+            return f"text-{len(texts)}"
+
+        fragment = {"answer_id": "a", "fragment_id": "f", "part": 1,
+                    "total": 1, "content_sha256": "h"}
+        with mock.patch.object(feishu_bridge, "_send_interactive_message", side_effect=card), \
+             mock.patch.object(feishu_bridge, "_send_group_text", side_effect=text), \
+             mock.patch.object(feishu_bridge, "receipt", side_effect=lambda _bot, row: self.receipts.append(row)):
+            dm = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "DM", {"kind": "p2a", "dest": "oc_dm"},
+                "answer", fragment, self.route_to_dest,
+            )
+            human = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "真人", {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_human"},
+                "answer", fragment, self.route_to_dest,
+            )
+            peer = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "机器人", {"kind": "a2a", "dest": "oc_group", "at": "ou_peer"},
+                "answer", fragment, self.route_to_dest,
+            )
+        self.assertTrue(dm["ok"] and human["ok"] and peer["ok"])
+        self.assertEqual([row[0] for row in interactive], ["oc_dm", "oc_group"])
+        self.assertIn("<at id=ou_human></at>", json.dumps(interactive[1][1], ensure_ascii=False))
+        self.assertEqual(texts, [("oc_group", "机器人", "ou_peer", "f")])
+
+    async def test_group_progress_is_skipped_but_robot_prefixed_final_is_not(self):
+        calls = []
+        with mock.patch.object(
+                feishu_bridge, "_send_interactive_message",
+                side_effect=lambda *_args, **_kwargs: calls.append("card") or "mid"), \
+             mock.patch.object(feishu_bridge, "receipt"):
+            progress = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "普通进度", {"kind": "p2a-ext", "dest": "oc_group"},
+                "progress", None, self.route_to_dest,
+            )
+            final = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "🤖 最终结论", {"kind": "p2a-ext", "dest": "oc_group"},
+                "answer", None, self.route_to_dest,
+            )
+        self.assertEqual(progress, "skip-progress")
+        self.assertTrue(final["ok"])
+        self.assertEqual(calls, ["card"])
+
+    async def test_empty_card_id_falls_back_once_and_empty_text_id_stays_failed(self):
+        texts = []
+        fragment = {"answer_id": "a", "fragment_id": "f", "part": 1,
+                    "total": 1, "content_sha256": "h"}
+        route = {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_human"}
+        with mock.patch.object(feishu_bridge, "_send_interactive_message", return_value=None), \
+             mock.patch.object(feishu_bridge, "_send_text_message",
+                               side_effect=lambda *_args: texts.append(_args) or "text-mid"), \
+             mock.patch.object(feishu_bridge, "receipt", side_effect=lambda _bot, row: self.receipts.append(row)):
+            card = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "答案", route, "answer", fragment, self.route_to_dest,
+            )
+            plain = await feishu_bridge._deliver_routed_plain(
+                self.bot, "bot", "答案", route, "answer", fragment, self.route_to_dest,
+            )
+        self.assertFalse(card["ok"])
+        self.assertTrue(plain["ok"])
+        self.assertEqual(len(texts), 1)
+        self.assertTrue(any(row.get("fallback") == "text" for row in self.receipts))
+        self.assertTrue(any(row.get("degraded") is True for row in self.receipts))
 
 
 class DocumentReconciliationTests(unittest.IsolatedAsyncioTestCase):

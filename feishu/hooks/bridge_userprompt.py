@@ -15,6 +15,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import turn_delivery_guard  # noqa: E402
+
 
 def _read_stdin_json():
     """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
@@ -41,7 +44,6 @@ def main():
         inp = {}
     prompt = inp.get("prompt") or ""
     sd = _state_dir()
-    turnp = sd / f"bridge-turn-route-{bot}.json"
 
     # 桥把回址焊进【本条消息】的信封 [飞书 … route=<p2a|p2a-ext|a2a> dest=.. at=..]，永远缀在消息【末尾】。
     # 取【最末】一个信封 → 防正文里先出现的假信封劫持路由(spoof·2026-06-30 TB25-link16 review 复现：
@@ -57,10 +59,9 @@ def main():
         route = {"kind": "p2a"}
 
     try:
-        sd.mkdir(parents=True, exist_ok=True)
-        tmp = turnp.with_suffix(".tmp")
-        tmp.write_text(json.dumps(route, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, turnp)
+        turn_delivery_guard.activate(
+            sd, bot, route, session=inp.get("session_id") or inp.get("thread_id"),
+        )
     except OSError:
         pass
 

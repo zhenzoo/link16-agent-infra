@@ -93,6 +93,7 @@ sys.path.insert(0, str(PROJECT / "scripts"))      # 让 webhook 兜底能 import
 from jsonl_reply_extract import extract  # noqa: E402  (find_ask_picker 退役·答题侧改结构化 bridge-picker 状态·ARCH-101 §2.10)
 import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
+import bridge_outbound  # noqa: E402 (统一自动/主动出站历史)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
 import bridge_injection  # noqa: E402  (桥/cron/watchdog/注册监督器跨进程共享注入锁)
 import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持久化)
@@ -1436,23 +1437,179 @@ def _tenant_token(app_id, app_secret):
     return t
 
 
-def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None):
-    """群内发【纯文字】消息(+真·@ <at user_id=…>)·返回 message_id|None。
-    为什么不发卡片：飞书把【收到的卡片】渲成占位 "[interactive]" → 对端 bot 读不到正文(也读不到哨兵)；
-    纯文字 content_text 对端能直接读 → agent↔agent 必走此路（2026-06-18 实证）。"""
+def _send_text_message(app_id, app_secret, target, text, at_open_id=None, message_uuid=None):
+    """Send one text message and return its real message_id (or None)."""
     import urllib.request
     content = (f'<at user_id="{at_open_id}"></at> ' if at_open_id else "") + sanitize_outbound_links(text or "")
     content = _seal_bare_urls(content)   # 机械闸：a2a 群纯文字也封口裸 URL（防 autolink 贪婪·2026-06-24）
     tok = _tenant_token(app_id, app_secret)
-    body = json.dumps({"receive_id": chat_id, "msg_type": "text",
-                       "content": json.dumps({"text": content}, ensure_ascii=False)}).encode("utf-8")
+    data = {"receive_id": target, "msg_type": "text",
+            "content": json.dumps({"text": content}, ensure_ascii=False)}
+    if message_uuid:
+        data["uuid"] = str(message_uuid)
+    body = json.dumps(data).encode("utf-8")
+    receive_id_type = "chat_id" if str(target).startswith("oc_") else "open_id"
     req = urllib.request.Request(
-        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+        f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
         data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"})
     with urllib.request.urlopen(req, timeout=10) as r:
         d = json.loads(r.read().decode("utf-8"))
     return (d.get("data") or {}).get("message_id") if d.get("code") == 0 else None
+
+
+def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None, message_uuid=None):
+    """A2A compatibility wrapper: peer bots must receive readable text."""
+    return _send_text_message(
+        app_id, app_secret, chat_id, text, at_open_id, message_uuid,
+    )
+
+
+def _card_payload(text, at=None, mark=False):
+    content = text
+    if at:
+        content = f"<at id={at}></at> " + content
+    return {
+        "schema": "2.0",
+        "config": {"streaming_mode": False, "wide_screen_mode": True},
+        "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]},
+    }
+
+
+def _send_interactive_message(app_id, app_secret, target, payload, message_uuid=None):
+    """Create one non-streaming interactive message through the public REST API."""
+    import urllib.request
+    tok = _tenant_token(app_id, app_secret)
+    data = {
+        "receive_id": target,
+        "msg_type": "interactive",
+        "content": json.dumps(payload, ensure_ascii=False),
+    }
+    if message_uuid:
+        data["uuid"] = str(message_uuid)
+    receive_id_type = "chat_id" if str(target).startswith("oc_") else "open_id"
+    req = urllib.request.Request(
+        f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+        data=json.dumps(data, ensure_ascii=False).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    return (result.get("data") or {}).get("message_id") if result.get("code") == 0 else None
+
+
+def _fragment_receipt(fragment):
+    return {
+        key: fragment.get(key)
+        for key in ("answer_id", "fragment_id", "part", "total", "content_sha256")
+        if isinstance(fragment, dict) and fragment.get(key) is not None
+    }
+
+
+def _record_automatic_outbound(bot_name, route, target, text, mid, fragment):
+    extra = {
+        key: fragment.get(key)
+        for key in ("answer_id", "fragment_id", "part", "total", "content_sha256",
+                    "session", "anchor", "source_ts")
+        if isinstance(fragment, dict) and fragment.get(key) is not None
+    }
+    return bridge_outbound.append_delivery(
+        STATE_DIR, bot_name, origin="bridge_outbox",
+        route={key: route.get(key) for key in ("kind", "dest", "at") if route.get(key)},
+        target=target, text=text, message_id=mid, **extra,
+    )
+
+
+async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, route_to_dest):
+    effective = route if isinstance(route, dict) else (_load_turn_route(bot_name) or {"kind": "p2a"})
+    kind = effective.get("kind") or "p2a"
+    target, at = route_to_dest(effective)
+    base = {"tid": "drain", "route": effective, "target": target, **_fragment_receipt(fragment)}
+    if not target:
+        receipt(bot_name, {**base, "kind": "new_card", "delivered": False,
+                           "via": None, "err": "no_target", "len": len(text or "")})
+        return {"ok": False, "message_id": None}
+    if purpose == "progress" and kind in {"p2a-ext", "a2a"}:
+        return "skip-progress"
+
+    message_uuid = (fragment or {}).get("fragment_id")
+    if kind == "a2a":
+        try:
+            mid = await asyncio.to_thread(
+                _send_group_text, bot["app_id"], bot["app_secret"], target,
+                text or "", at, message_uuid,
+            )
+            ok = bool(mid)
+            history_recorded = bool(mid) and _record_automatic_outbound(
+                bot_name, effective, target, text, mid, fragment,
+            )
+            receipt(bot_name, {**base, "kind": "group_text", "requested": "text",
+                               "delivered": ok, "via": "group_text" if ok else None,
+                               "mid": mid, "err": None if ok else "empty_message_id",
+                               "history_recorded": history_recorded,
+                               "len": len(text or "")})
+            return {"ok": ok, "message_id": mid}
+        except Exception as exc:  # noqa: BLE001
+            receipt(bot_name, {**base, "kind": "group_text", "requested": "text",
+                               "delivered": False, "via": None,
+                               "err": str(exc)[:120], "len": len(text or "")})
+            return {"ok": False, "message_id": None}
+
+    try:
+        mid = await asyncio.wait_for(
+            asyncio.to_thread(
+                _send_interactive_message, bot["app_id"], bot["app_secret"], target,
+                _card_payload(text, at if kind == "p2a-ext" else None), message_uuid,
+            ), CARD_SEND_TIMEOUT,
+        )
+        ok = bool(mid)
+        history_recorded = bool(mid) and _record_automatic_outbound(
+            bot_name, effective, target, text, mid, fragment,
+        )
+        receipt(bot_name, {**base, "kind": "new_card", "requested": "interactive",
+                           "delivered": ok, "via": "card" if ok else None, "mid": mid,
+                           "history_recorded": history_recorded,
+                           "fallback": None if ok else "text",
+                           "err": None if ok else "empty_message_id", "len": len(text or "")})
+        return {"ok": ok, "message_id": mid}
+    except Exception as exc:  # noqa: BLE001
+        blog(bot_name, f"🃏 new_card 失败({str(exc)[:80] or type(exc).__name__})")
+        receipt(bot_name, {**base, "kind": "new_card", "requested": "interactive",
+                           "delivered": False, "via": None, "fallback": "text",
+                           "err": str(exc)[:120] or type(exc).__name__, "len": len(text or "")})
+        return {"ok": False, "message_id": None}
+
+
+async def _deliver_routed_plain(bot, bot_name, text, route, purpose, fragment, route_to_dest):
+    effective = route if isinstance(route, dict) else (_load_turn_route(bot_name) or {"kind": "p2a"})
+    kind = effective.get("kind") or "p2a"
+    target, at = route_to_dest(effective)
+    base = {"tid": "drain", "route": effective, "target": target, **_fragment_receipt(fragment)}
+    if not target:
+        receipt(bot_name, {**base, "kind": "send_plain", "delivered": False,
+                           "via": None, "err": "no_target", "len": len(text or "")})
+        return {"ok": False, "message_id": None}
+    try:
+        mid = await asyncio.to_thread(
+            _send_text_message, bot["app_id"], bot["app_secret"], target, text or "", at,
+            (fragment or {}).get("fragment_id"),
+        )
+        ok = bool(mid)
+        degraded = kind != "a2a"
+        history_recorded = bool(mid) and _record_automatic_outbound(
+            bot_name, effective, target, text, mid, fragment,
+        )
+        receipt(bot_name, {**base, "kind": "send_plain",
+                           "requested": "text" if kind == "a2a" else "interactive",
+                           "delivered": ok, "via": "group_text" if kind in {"a2a", "p2a-ext"} else "text",
+                           "mid": mid, "degraded": degraded,
+                           "history_recorded": history_recorded,
+                           "err": None if ok else "empty_message_id", "len": len(text or "")})
+        return {"ok": ok, "message_id": mid}
+    except Exception as exc:  # noqa: BLE001
+        receipt(bot_name, {**base, "kind": "send_plain", "delivered": False,
+                           "via": None, "err": str(exc)[:120], "len": len(text or "")})
+        return {"ok": False, "message_id": None}
 
 
 # ---------- 外部通道：群名 / 外部真人名字（都 API 源头·绝不硬编码·ARCH-140 §7）----------
@@ -2279,49 +2436,15 @@ def run(bot_name=None):
             (bridge_stop 在 Stop 时读 turn-route 写进记录·不受下一轮 UserPromptSubmit 覆盖·防泄漏)。"""
             return _route_to_dest(_load_turn_route(bname))
 
-        def _card_payload(text, at=None, mark=False):     # 2.0 schema markdown 卡（非流式·可 update_card 原地改）
-            content = text
-            if at:                                         # 群回复：机械 @ 回发信人（卡内 <at id=…>·LLM 不参与=必准）
-                content = f"<at id={at}></at> " + content
-            # mark 参数保留兼容(旧防回环哨兵已废·a2a 新模型不再加哨兵·见 ARCH-140)
-            return {"schema": "2.0", "config": {"streaming_mode": False, "wide_screen_mode": True},
-                    "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]}}
-
-        async def _new_card(text, route=None):            # 发一张新卡·返回 message_id（失败 None）·route 给定=用记录里钉死的本轮路由
-            tgt, at = _route_to_dest(route) if route else _reply_dest()
-            if not tgt:
-                receipt(bname, {"tid": "drain", "kind": "new_card", "delivered": False, "via": None, "err": "no_target", "len": len(text or "")})
-                return None
-            grp = str(tgt).startswith("oc_")
-            if grp:
-                # 群 → 纯文字(+真@)·对端 bot 读得到正文(卡片只给"[interactive]")。进度卡(🤖开头)不往群里刷·只发答案。
-                if (text or "").lstrip().startswith("🤖"):
-                    return "skip-progress"
-                try:
-                    mid = await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
-                                                  tgt, (text or ""), at)
-                    receipt(bname, {"tid": "drain", "kind": "group_text", "delivered": bool(mid), "via": "group_text", "mid": mid, "len": len(text or "")})
-                    return mid
-                except Exception as e:  # noqa: BLE001
-                    blog(bname, f"群纯文字发送失败({str(e)[:80]})")
-                    receipt(bname, {"tid": "drain", "kind": "group_text", "delivered": False, "via": None, "err": str(e)[:120], "len": len(text or "")})
-                    return None
-            try:
-                mid = await asyncio.wait_for(
-                    ch._ensure_card_snapshot(tgt, _rit(tgt), snapshot=_card_payload(text),
-                                             reply_to=None, reply_in_thread=None),
-                    CARD_SEND_TIMEOUT)
-                receipt(bname, {"tid": "drain", "kind": "new_card", "delivered": True, "via": "card", "mid": mid, "len": len(text or "")})
-                return mid
-            except Exception as e:  # noqa: BLE001（含 asyncio.TimeoutError·超时即当失败·drainer 走 send_plain 兜底）
-                blog(bname, f"🃏 new_card 失败({str(e)[:80] or type(e).__name__})")
-                receipt(bname, {"tid": "drain", "kind": "new_card", "delivered": False, "via": None, "err": (str(e)[:120] or type(e).__name__), "len": len(text or "")})
-                return None
+        async def _new_card(text, route=None, purpose="answer", fragment=None):
+            return await _deliver_routed_new(
+                bot, bname, text, route, purpose, fragment, _route_to_dest,
+            )
 
         async def _edit_card(mid, text):                  # 原地改卡（update_card=patch_message·非流式·True=成功）
-            tgt, _at = _reply_dest()
-            if str(tgt).startswith("oc_"):
-                return True   # 群走纯文字·不原地改卡（进度不在群里刷屏）
+            turn_route = _load_turn_route(bname) or {"kind": "p2a"}
+            if turn_route.get("kind") in {"p2a-ext", "a2a"}:
+                return True   # 群进度策略：不在群里刷中间态
             try:
                 r = await asyncio.wait_for(ch.update_card(mid, _card_payload(text)), CARD_SEND_TIMEOUT)
                 ok = bool(getattr(r, "success", False))
@@ -2331,31 +2454,10 @@ def run(bot_name=None):
                 receipt(bname, {"tid": "drain", "kind": "edit_card", "delivered": False, "via": "edit-fail", "err": (str(e)[:120] or type(e).__name__)})
                 return False
 
-        async def _send_plain(text, route=None):          # 最终 fallback·route 同 _new_card·返回送达布尔(给 drainer 判要不要重试·at-least-once)
-            tgt, at = _route_to_dest(route) if route else _reply_dest()
-            if not tgt:
-                receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": False,
-                                "via": None, "err": "no_target", "len": len(text or "")})
-                return False
-            if str(tgt).startswith("oc_"):                 # 群 → 纯文字(+真@)
-                try:
-                    await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
-                                            tgt, (text or ""), at)
-                    receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": True,
-                                    "via": "group_text", "len": len(text or "")})
-                    return True
-                except Exception as e:  # noqa: BLE001
-                    receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": False,
-                                    "via": None, "err": str(e)[:120], "len": len(text or "")})
-                    return False
-            # ⚠️ 留痕（2026-08-02）：旧版这里【一行 return、零回执】—— card_send 回 'webhook' 时消息其实
-            #   降级投进了【群】，但这里只把它折成 True，drainer 照推 HWM、outbox 一片干净 → 「兜底成功了，
-            #   所以没人知道 DM 是坏的」。现在把 via 原样记下：webhook = 投错地方了，肉眼一看就知道。
-            via = await card_send(ch, tgt, text, bname)
-            receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": via != "failed",
-                            "via": via, "degraded": via == "webhook", "target": tgt,
-                            "len": len(text or "")})
-            return via != "failed"
+        async def _send_plain(text, route=None, purpose="answer", fragment=None):
+            return await _deliver_routed_plain(
+                bot, bname, text, route, purpose, fragment, _route_to_dest,
+            )
 
         holder = {}
 

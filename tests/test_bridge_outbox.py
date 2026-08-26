@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -54,7 +55,7 @@ class FakeCards:
         self.edits = []
         self.edit_ok = True
 
-    async def new_card(self, text, route=None):
+    async def new_card(self, text, route=None, purpose="answer", fragment=None):
         self.new.append((text, route))
         return f"m{len(self.new)}"
 
@@ -62,7 +63,7 @@ class FakeCards:
         self.edits.append((mid, text))
         return self.edit_ok
 
-    async def send_plain(self, text, route=None):
+    async def send_plain(self, text, route=None, purpose="answer", fragment=None):
         return True
 
 
@@ -222,6 +223,98 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored["v2_mid"], "message-id")
         self.assertEqual(restored["v2_acked"], {"c1": 1})
         self.assertEqual(restored["v2_route"], {"kind": "p2a"})
+
+    def test_answer_fragments_are_stable_bounded_and_lossless(self):
+        route = {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_user"}
+        record = {"session": "s", "anchor": "a"}
+        samples = [
+            "a" * 2799,
+            "中" * 2800,
+            "🙂" * 2801,
+            ("第一段\n" * 900) + "结尾",
+            "```text\n" + ("x" * 6000) + "\n```",
+        ]
+        for text in samples:
+            with self.subTest(size=len(text)):
+                first = bridge_outbox._answer_fragments(record, text, route)
+                second = bridge_outbox._answer_fragments(record, text, route)
+                self.assertEqual(first, second)
+                self.assertEqual("".join(row["content"] for row in first), text)
+                self.assertTrue(all(len(row["rendered"]) <= bridge_outbox.CARD_BUDGET for row in first))
+                self.assertEqual(len({row["fragment_id"] for row in first}), len(first))
+                if len(first) > 1:
+                    self.assertTrue(all(
+                        row["rendered"].startswith(f"**回复 {row['part']}/{row['total']}**")
+                        for row in first
+                    ))
+
+    async def test_fragment_ack_survives_restart_and_only_missing_parts_retry(self):
+        class FragmentCards:
+            def __init__(self, fail_parts=()):
+                self.fail_parts = set(fail_parts)
+                self.calls = []
+
+            async def new_card(self, text, route=None, purpose="answer", fragment=None):
+                self.calls.append(("card", fragment["part"], fragment["fragment_id"], text))
+                return None if fragment["part"] in self.fail_parts else f"m{fragment['part']}"
+
+            async def edit_card(self, _mid, _text):
+                return True
+
+            async def send_plain(self, text, route=None, purpose="answer", fragment=None):
+                self.calls.append(("plain", fragment["part"], fragment["fragment_id"], text))
+                return False if fragment["part"] in self.fail_parts else f"t{fragment['part']}"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            text = "段落\n" * 1700
+            record = {"kind": "answer", "session": "s", "anchor": "a", "text": text,
+                      "route": {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_user"}}
+            first_state = fresh_state()
+            first_state["answer_delivery"] = bridge_outbox.load_answer_state(tmp, "bot")
+            first = FragmentCards({2})
+            with self.assertRaises(bridge_outbox.RetrySend):
+                await bridge_outbox.drain_batch(
+                    [record], new_card=first.new_card, edit_card=first.edit_card,
+                    send_plain=first.send_plain, state=first_state, coalesce_sec=0,
+                    clock=lambda: 100, force_flush=True,
+                    persist_answer=lambda value: bridge_outbox.save_answer_state(tmp, "bot", value),
+                )
+            self.assertEqual([part for kind, part, _fid, _text in first.calls if kind == "card"], [1, 2])
+
+            second_state = fresh_state()
+            second_state["answer_delivery"] = bridge_outbox.load_answer_state(tmp, "bot")
+            second = FragmentCards()
+            await bridge_outbox.drain_batch(
+                [record], new_card=second.new_card, edit_card=second.edit_card,
+                send_plain=second.send_plain, state=second_state, coalesce_sec=0,
+                clock=lambda: 101, force_flush=True,
+                persist_answer=lambda value: bridge_outbox.save_answer_state(tmp, "bot", value),
+            )
+            self.assertNotIn(1, [part for _kind, part, _fid, _text in second.calls])
+            self.assertEqual(
+                [row["fragment_id"] for row in bridge_outbox._answer_fragments(
+                    record, text.strip(), record["route"]
+                )][1],
+                second.calls[0][2],
+            )
+
+    def test_same_text_on_different_routes_has_different_answer_identity(self):
+        record = {"session": "s", "anchor": "a"}
+        text = "完成"
+        dm = bridge_outbox._answer_fragments(record, text, {"kind": "p2a"})[0]["answer_id"]
+        group = bridge_outbox._answer_fragments(
+            record, text, {"kind": "p2a-ext", "dest": "oc_group", "at": "ou_user"}
+        )[0]["answer_id"]
+        self.assertNotEqual(dm, group)
+
+    def test_malformed_answer_state_root_is_empty_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = bridge_outbox.answer_state_path(tmp, "bot")
+            path.write_text("[]", encoding="utf-8")
+            self.assertEqual(
+                bridge_outbox.load_answer_state(tmp, "bot"),
+                {"version": 1, "answers": {}},
+            )
 
 
 if __name__ == "__main__":

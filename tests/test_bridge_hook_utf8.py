@@ -83,11 +83,13 @@ class BridgeHookUtf8Tests(unittest.TestCase):
             route = json.loads(
                 (state / "bridge-turn-route-tb26-baseball.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(route, {
+            self.assertEqual({key: route.get(key) for key in ("kind", "dest", "at")}, {
                 "kind": "p2a-ext",
                 "dest": "oc_92cf4938",
                 "at": "ou_8781b03a",
             })
+            self.assertTrue(route["active"])
+            self.assertTrue(route["turn_key"])
 
 
 if __name__ == "__main__":
