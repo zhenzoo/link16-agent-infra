@@ -2,8 +2,8 @@
 doc_type: PLAN
 doc_id: PLAN-950
 title: 私有仓同事部署：桌面端一句话开工、机器/profile 引导与隐私加固
-status: active
-plan_version: 3
+status: complete
+plan_version: 4
 purpose: 让不熟悉终端的 Windows 同事仅凭桌面 AI 客户端和一句“开始部署 Link16”，安全完成 7 项官方依赖、private main clone、网络确认、ccp/ccp2/cxp、机器前缀与飞书桥部署。
 owns:
   - 私有协作者从 GitHub 授权到本地 main 可用的部署闭环
@@ -103,9 +103,9 @@ last_reviewed: 2026-08-26
 ### S5 · 分层验收与交付
 
 - [x] S5.1 cheap：py_compile、定向测试、文档/隐私 gate。
-- [ ] S5.2 stage：全仓 pytest、preflight、Git Bash/PowerShell wrapper dry-run 与幂等 apply。
-- [ ] S5.3 e2e：用临时 HOME 走一次桌面部署输出，不实际登录/注册 bot；确认每个暂停点都只要求点击、登录或授权。
-- [ ] S5.4 只提交本计划明确文件，不纳入并发 `PLAN-940/ARCH-110/SOP-121` 工作树；最后 fetch、ff-only、push `main` 与对应 tag。
+- [x] S5.2 stage：全仓 pytest、preflight、Git Bash/PowerShell wrapper dry-run 与幂等 apply。
+- [x] S5.3 e2e：用临时 HOME 走一次桌面部署输出，不实际登录/注册 bot；确认每个暂停点都只要求点击、登录或授权。
+- [x] S5.4 只提交本计划明确文件，不纳入并发 `PLAN-940/ARCH-110/SOP-121` 工作树；最后 fetch、ff-only、push `main` 与对应 tag。
 
 ## 3 · Evaluation ledger
 
@@ -130,6 +130,7 @@ last_reviewed: 2026-08-26
 | 1 | 5/22 | 0/7 | 现有 private/main、profile registry、preflight、网络双路探测可复用；隐私 ignore、端口发现、机器探针、单仓 profile bootstrap 与桌面入口待补 |
 | 2 | 20/22 | 6/7 | 完整 mirror 扫描 205 commits / 0 missing / 0 凭据候选 / 0 敏感文件名；36 项定向测试通过，本机前缀 tb26，真 Git Bash 加载三个 function 通过；待全仓测试与 main push |
 | 3 | 29/31 | 7/8 | 7 项计划与 wmux 收尾落地，个人 skills/gstack 边界去耦；全仓 282 tests + 10 subtests 通过，本机 7 项与桌面快捷方式/defaultShell 验真；待提交、push 后最终 preflight |
+| 4 | 31/31 | 8/8 | 三类变更独立提交并推到远端 main；最终 preflight 15/15 OK、HEAD=origin/main 0/0、真实 Git Bash 三个 profile function 通过，v0.15.0/v0.16.0 发布 |
 
 ### tool_fixes
 
@@ -155,4 +156,7 @@ last_reviewed: 2026-08-26
 
 ### delivered
 
-- 待 S5 完成后填写。
+- `windows_bootstrap.py` 把 7 项已有检测、一次确认、官方安装源、真实 URL 选路与 wmux 收尾做成默认 dry-run / 显式 apply。
+- Link16 单仓可建立 `ccp`/`ccp2`/`cxp` 并运行桥；个人 claude-config skills 与 gstack 均降为明确可选增强。
+- 本机桌面 `wmux.lnk`、Windows Terminal/wmux Git Bash、用户级 `PYTHONUTF8=1`、GitHub 登录与 private main 同步全部机械验真。
+- 完整历史镜像扫描 205 commits，0 missing objects、0 凭据候选、0 敏感文件名；当前树 ignore/输出/首次 `.env` 写入同时加固。
