@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把本机名册里的飞书 bot 权限【拉平】到同一水位，并给出每只 bot 的一键开通链接。
+"""比较本机飞书 bot 的历史权限水位，并给出缺口链接。
+
+这是排障/迁移工具，不是正常注册或文档发送入口；注册按 capability，文档发送用 ``send --doc``。
+``--new-app`` 固定使用 企业租户A 企业 preset，只能用于该企业租户的历史齐平。
 
 背景（PLAN-980）：同一个租户里各 bot 是分批注册的，scope 集合互相不一样 ——
 有的有 `drive:drive` 没有 `drive:file:*`，有的反过来。结果是「某只 bot 能做的事另一只做不了」，
@@ -120,19 +123,40 @@ def chat_count(id_env, sec_env):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="把飞书 bot 的 scope 拉平到同一水位并出开通链接")
+    ap = argparse.ArgumentParser(description="比较历史 scope 水位并出缺口链接（--new-app 仅 企业租户A 企业 preset）")
     ap.add_argument("--extras", action="store_true", help="把额外候选权限也加进目标水位")
     ap.add_argument("--include-admin", action="store_true",
                     help="连需要管理员审批的 drive:drive 也一起要（默认排除）")
     ap.add_argument("--new-app", metavar="APP_ID",
-                    help="给刚注册好的新 bot 出一条【一次性开全】链接（企业租户A 企业预设，54 条）")
+                    help="仅给 企业租户A 企业租户补历史 preset 缺口；不是通用新 bot 注册步骤")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
     if args.new_app:
-        print(f"=== 新 bot 一次性开通链接（{len(ENTERPRISE_PRESET)} 条 · 企业租户A 企业预设 · 不含 drive:drive）")
+        # ⚠️ 不再盲发整份 preset：Device Grant 已经预置了其中 30+ 条，把已到手的再塞进
+        #   q= 串只会把链接撑长（54 条 = 1446 字符 → 飞书整页报「参数不合法」，2026-08-27
+        #   tb26-baseball-2 实证）。先按 app_id 在本机名册里找回凭据、活查已授权，
+        #   只发【真缺的】，再按 feishu_docs.AUTH_URL_MAX_CHARS 拆链。
+        granted, source = set(), "静态 preset（名册里没有这个 app_id · 无法活查）"
+        for b in load_bots():
+            if audit._env_val(b["app_id_env"]) == args.new_app:  # noqa: SLF001
+                granted, _pending, err = all_scopes(b["app_id_env"], b["app_secret_env"])
+                source = (f"活查 {b['name']}：已授权 {len(granted)} 条"
+                          if not err else f"活查失败：{err}")
+                break
+        missing = [s for s in ENTERPRISE_PRESET if s not in granted]
+        if not missing:
+            print(f"=== {args.new_app} 已达 企业租户A 企业水位（{len(ENTERPRISE_PRESET)} 条），无需开通。")
+            return 0
+        urls = feishu_docs.auth_urls(args.new_app, missing)
+        print(f"=== 新 bot 开通链接（缺 {len(missing)}/{len(ENTERPRISE_PRESET)} 条 · "
+              f"企业租户A 企业预设 · 不含 drive:drive · {source}）")
         print("点开 → 勾选【应用身份】→ 创建版本并发布。发布后跑 scope_level.py 复核是否 54 条全到。")
-        print(feishu_docs.auth_url(args.new_app, ENTERPRISE_PRESET))
+        if len(urls) > 1:
+            print(f"⚠️ 拆成 {len(urls)} 条链（单条超 {feishu_docs.AUTH_URL_MAX_CHARS} 字符飞书会报"
+                  f"「参数不合法」）—— 每条都要点开并发布。")
+        for idx, url in enumerate(urls, 1):
+            print(f"[{idx}/{len(urls)}] {url}" if len(urls) > 1 else url)
         return 0
 
     bots = load_bots()
@@ -161,8 +185,9 @@ def main():
 
     for r in rows:
         r["missing"] = sorted(target - r["scopes"]) if not r["error"] else []
-        r["link"] = (feishu_docs.auth_url(r["app_id"], r["missing"])
-                     if r["missing"] and r["app_id"] else None)
+        r["links"] = (feishu_docs.auth_urls(r["app_id"], r["missing"])
+                      if r["missing"] and r["app_id"] else [])
+        r["link"] = r["links"][0] if r["links"] else None
 
     if args.json:
         print(json.dumps([{k: (sorted(v) if isinstance(v, set) else v)
@@ -188,12 +213,21 @@ def main():
     print("\n=== 一键开通链接（点开 → 选【应用身份】→ 创建版本并发布）")
     any_link = False
     for r in rows:
-        if r.get("link"):
+        if r.get("links"):
             any_link = True
-            print(f"\n· {r['name']}（缺 {len(r['missing'])} 条）")
-            print(f"  {r['link']}")
+            urls = r["links"]
+            suffix = f" · 拆成 {len(urls)} 条链，每条都要点" if len(urls) > 1 else ""
+            print(f"\n· {r['name']}（缺 {len(r["missing"])} 条{suffix}）")
+            for idx, url in enumerate(urls, 1):
+                print(f"  [{idx}/{len(urls)}] {url}" if len(urls) > 1 else f"  {url}")
     if not any_link:
         print("  所有 bot 已在同一水位，无需开通。")
+    else:
+        print("")
+        print("💡 点开后如果后台把这些标成【需审核权限】、迟迟批不下来 ——"
+              "先看这只应用的【可用范围有没有开「外部」】（允许被拉进外部群 / 外部用户私聊）。")
+        print("   开了外部，云文档/表格那批权限就从免审翻成需审核；关掉再点同一条链多半当场生效。")
+        print("   2026-08-27 tb26-baseball 实证：关掉外部后 47 → 54 一次到位。见 SOP-120 §4.4。")
 
     if args.extras:
         print("\n=== 额外候选说明")

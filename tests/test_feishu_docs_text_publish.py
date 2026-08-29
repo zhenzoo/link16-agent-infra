@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 import unittest
@@ -58,6 +59,28 @@ class NativeTableSafetyTests(unittest.TestCase):
         self.assertEqual(filled, 1)
         self.assertEqual(failed, [1])
 
+    def test_empty_response_in_table_cell_enters_plain_text_fallback(self):
+        calls = 0
+
+        def api(_method, url, token=None, body=None):
+            nonlocal calls
+            if "blocks/doc/children" in url:
+                return {"code": 0, "data": {"children": [{
+                    "table": {"cells": ["cell-1"]},
+                }]}}
+            calls += 1
+            raise json.JSONDecodeError("empty response", "", 0)
+
+        with mock.patch.object(feishu_docs, "api", side_effect=api):
+            ok, filled, failed = feishu_docs._insert_real_table(
+                "token", "doc", 0, 1, 1, ["content"],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(filled, 0)
+        self.assertEqual(failed, [0])
+        self.assertEqual(calls, 1)
+
     def test_missing_returned_cells_are_reported(self):
         with mock.patch.object(feishu_docs, "api", return_value={
             "code": 0, "data": {"children": [{"table": {"cells": ["cell-1"]}}]},
@@ -75,27 +98,18 @@ class NativeTableSafetyTests(unittest.TestCase):
         }}}
         self.assertEqual(feishu_docs._plain_text_of(blocks, "a"), value)
 
+    def test_native_publish_defaults_to_a_bounded_real_table_budget(self):
+        defaults = feishu_docs.publish_text_as_doc.__kwdefaults__
+        self.assertEqual(defaults["cell_budget"], 24)
+
 
 class BridgeOnlineDocFallbackTests(unittest.TestCase):
     def setUp(self):
         self.bot = {"app_id": "app", "app_secret": "secret"}
 
-    def test_import_chain_stays_first_when_available(self):
+    def test_text_source_uses_native_chain_first(self):
         fake = types.SimpleNamespace(
             publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
-            publish_text_as_doc=mock.Mock(),
-        )
-        with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
-            result, mode = feishu_bridge._publish_online_doc(
-                self.bot, "answer.md", grant_open_id="ou_owner", name="Answer",
-            )
-        self.assertEqual(result["url"], "https://doc/import")
-        self.assertEqual(mode, "online_doc_import")
-        fake.publish_text_as_doc.assert_not_called()
-
-    def test_native_docx_recovers_drive_import_denial(self):
-        fake = types.SimpleNamespace(
-            publish_file_as_doc=mock.Mock(side_effect=RuntimeError("99991672")),
             publish_text_as_doc=mock.Mock(return_value={
                 "url": "https://doc/native", "visibility": True, "granted": False,
             }),
@@ -106,18 +120,31 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
             )
         self.assertEqual(result["url"], "https://doc/native")
         self.assertEqual(mode, "online_doc_native")
-        fake.publish_text_as_doc.assert_called_once()
+        fake.publish_file_as_doc.assert_not_called()
 
-    def test_missing_import_url_enters_native_fallback(self):
+    def test_import_recovers_native_failure(self):
         fake = types.SimpleNamespace(
-            publish_file_as_doc=mock.Mock(return_value={"url": None}),
+            publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
+            publish_text_as_doc=mock.Mock(side_effect=RuntimeError("native denied")),
+        )
+        with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
+            result, mode = feishu_bridge._publish_online_doc(
+                self.bot, "answer.md", grant_open_id="ou_owner", name="Answer",
+            )
+        self.assertEqual(result["url"], "https://doc/import")
+        self.assertEqual(mode, "online_doc_import")
+        fake.publish_file_as_doc.assert_called_once()
+
+    def test_missing_native_url_enters_import_fallback(self):
+        fake = types.SimpleNamespace(
+            publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
             publish_text_as_doc=mock.Mock(return_value={
-                "url": "https://doc/native", "visibility": True, "granted": False,
+                "url": None, "visibility": True, "granted": False,
             }),
         )
         with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
             result, mode = feishu_bridge._publish_online_doc(self.bot, "answer.md")
-        self.assertEqual((result["url"], mode), ("https://doc/native", "online_doc_native"))
+        self.assertEqual((result["url"], mode), ("https://doc/import", "online_doc_import"))
 
     def test_unreadable_native_doc_is_not_reported_as_delivered(self):
         fake = types.SimpleNamespace(

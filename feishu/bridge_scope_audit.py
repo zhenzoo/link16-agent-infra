@@ -131,13 +131,18 @@ def cap_ok(scopes, groups):
     return all(any(scope in scopes for scope in group) for group in groups)
 
 
-def fix_auth_url(app_id, scopes=None):
+def fix_auth_urls(app_id, scopes=None):
+    """开通链（一条或多条·超长自动拆·SSOT = feishu_docs.auth_urls）。"""
+    import feishu_docs  # local import keeps this module importable without the docs deps
+
     selected = tuple(scopes if scopes is not None else REQUIRED_SCOPES)
-    return (
-        f"https://open.feishu.cn/app/{app_id}/auth?q="
-        + ",".join(selected)
-        + "&op_from=openapi&token_type=tenant"
-    )
+    return feishu_docs.auth_urls(app_id, selected)
+
+
+def fix_auth_url(app_id, scopes=None):
+    """单条开通链（兼容旧调用）。scope 多到超长会被飞书判「参数不合法」→ 新代码用 fix_auth_urls()。"""
+    urls = fix_auth_urls(app_id, scopes)
+    return urls[0] if urls else None
 
 
 def _env_val(key):

@@ -19,7 +19,6 @@
     "app_secret_env": "FEISHU_BRIDGE_LOCAL1_APP_SECRET",
     "at_name": "@本机助手",
     "cwd": "$VIBECODING_ROOT/Post/your-repo",
-    "profile": "cxp",
-    "_optional_doc_delivery_fallback": "只有在线文档权限必须管理员审核且用户确认无法获批后，才改为正式字段 doc_delivery_fallback=attachment；默认不要设置"
+    "profile": "cxp"
   }
 }

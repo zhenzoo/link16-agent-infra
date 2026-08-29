@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 import sys
@@ -408,19 +409,6 @@ class DocumentCommandHelpersTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--file-as-text"):
             feishu_bridge._read_send_text(legacy_file="answer.md")
 
-    def test_doc_attachment_fallback_is_explicit_and_validated(self):
-        self.assertIsNone(feishu_bridge._doc_delivery_fallback({"name": "bot"}))
-        self.assertEqual(
-            feishu_bridge._doc_delivery_fallback({
-                "name": "bot", "doc_delivery_fallback": "attachment",
-            }),
-            "attachment",
-        )
-        with self.assertRaisesRegex(SystemExit, "只允许 attachment"):
-            feishu_bridge._doc_delivery_fallback({
-                "name": "bot", "doc_delivery_fallback": "relay",
-            })
-
     def test_attachment_fallback_sends_one_real_file_payload(self):
         sent = []
 
@@ -455,6 +443,41 @@ class DocumentCommandHelpersTests(unittest.TestCase):
         self.assertEqual(sent[0][0], "ou_owner")
         self.assertIsInstance(sent[0][1], FakeOutboundFile)
         self.assertEqual(sent[0][1].kwargs["file_name"], "deliverable.md")
+
+    def test_send_doc_automatically_falls_back_to_attachment(self):
+        class FakeChannel:
+            def __init__(self, **_kwargs):
+                pass
+
+        fake_lark = types.SimpleNamespace(
+            FeishuChannel=FakeChannel,
+            OutboundImage=object,
+            MediaSource=object,
+        )
+        bot = {"name": "bot", "app_id": "app", "app_secret": "secret"}
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "deliverable.md"
+            source.write_text("# 原始文件", encoding="utf-8")
+            with mock.patch.dict(sys.modules, {"lark_channel": fake_lark}), \
+                    mock.patch.object(feishu_bridge, "assert_sender_identity"), \
+                    mock.patch.object(feishu_bridge, "load_bots", return_value=[bot]), \
+                    mock.patch.object(feishu_bridge, "mirror_target", return_value="ou_owner"), \
+                    mock.patch.object(feishu_bridge, "load_owner", return_value="ou_owner"), \
+                    mock.patch.object(feishu_bridge, "_publish_online_doc",
+                                      side_effect=RuntimeError("online denied")), \
+                    mock.patch.object(feishu_bridge, "_send_file_attachment",
+                                      new=mock.AsyncMock(return_value=(True, None))) as attach, \
+                    mock.patch.object(feishu_bridge, "receipt"), \
+                    mock.patch.object(feishu_bridge, "blog"), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                with self.assertRaises(SystemExit) as stopped:
+                    feishu_bridge.cmd_send("bot", "", doc=str(source), as_json=True)
+        self.assertEqual(stopped.exception.code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["delivered"])
+        self.assertEqual(payload["doc_delivery_mode"], "attachment")
+        self.assertTrue(payload["attachment_ok"])
+        attach.assert_awaited_once()
 
     def test_text_document_reports_real_source_size(self):
         with tempfile.TemporaryDirectory() as tmp:

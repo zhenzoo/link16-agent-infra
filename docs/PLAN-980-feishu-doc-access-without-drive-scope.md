@@ -2,7 +2,7 @@
 doc_type: PLAN
 doc_id: PLAN-980
 title: 无 drive:drive 时的飞书在线文档收发通路
-status: active
+status: archived
 plan_version: 1
 purpose: 在企业管理员拒绝给某只 bot 开 drive:drive 的前提下，为「本地文档→在线可看链接」和「在线文档→本地 Markdown」各找到并跑通一条经量化验收的最佳通路。
 owns:
@@ -18,10 +18,12 @@ read_when:
   - 某只 bot 发不出在线文档链接
   - 要把飞书或知识库文档扒成本地 Markdown
   - 评估是否要向管理员申请新的云文档权限
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-29
 ---
 
 # PLAN-980 · 无 drive:drive 时的飞书在线文档收发通路
+
+> 本 PLAN 保留无 `drive:drive` 的实验账本。当前生产选择已由 [PLAN-990](PLAN-990-tenant-and-document-delivery-simplification.md) 收敛为同一 bot 的 `send --doc`：Markdown/TXT 原生 docx 优先，在线失败发原文件附件；本文件早期的跨 bot relay 候选不再是运行策略。
 
 ## 0 · 结论先行
 

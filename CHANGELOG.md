@@ -3,7 +3,10 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
-## Unreleased
+## v0.18.0 — 租户安全路由与文档投递收敛（2026-08-30）
+
+- 租户路由改为 fail-closed：只认租户 API 或当前 bot 内部群里的唯一 tenant key；未知、多 key、仅外部群时不猜，新 `group-a2a` 注册要求显式 `--group`，Monitor 按精确 chat ID 验收。
+- 文档投递收敛为 `send --doc` 单入口：Markdown/TXT 原生 docx 优先，在线失败自动由同一 bot 发原文件附件；`file-as-text` 仅保留为明确的正文聊天模式。大表格写入增加有界 API 预算和 HTTP 空正文局部降级，避免把可用的 `docs-text` 误报成缺权限。
 
 ## v0.17.0 — 自足注册、可靠回传与免 Drive 文档交付（2026-08-27）
 

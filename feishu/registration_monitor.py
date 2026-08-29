@@ -287,21 +287,49 @@ def _owner_check(bot):
     return {"status": "ready"}
 
 
+def _resolve_group_hint(bot):
+    """--group 没给时按 tenant_key 精确判定；判不出则保持 unknown。"""
+    try:
+        import tenant_probe
+
+        name, info = tenant_probe.target_group(bot)
+        return name, (None if name else "租户未判定"), info.get("target_chat_id")
+    except BaseException as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {str(exc)[:120]}", None
+
+
 def _group_check(bot, group):
     try:
         import bridge_feishu_probe
         groups = bridge_feishu_probe.bot_groups(bot)
     except BaseException as exc:  # SystemExit from probe is an unknown check, not absence
         return {"status": "unknown", "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
-    if group:
+    resolved_note = None
+    expected_chat_id = None
+    if not group:
+        group, resolved_note, expected_chat_id = _resolve_group_hint(bot)
+    if not group:
+        return {
+            "status": "unknown",
+            "matched": [],
+            "observed_count": len(groups),
+            "expected_group": None,
+            "group_hint_note": resolved_note or "租户未判定；请显式指定目标群",
+        }
+    if expected_chat_id:
+        matches = [item for item in groups if item.get("chat_id") == expected_chat_id]
+    elif group:
         matches = [item for item in groups if group in (item.get("name") or "")]
-    else:
-        matches = groups
-    return {
+    result = {
         "status": "ready" if matches else "missing",
         "matched": [{"name": item.get("name"), "chat_id": item.get("chat_id")} for item in matches],
         "observed_count": len(groups),
+        "expected_group": group,
+        "expected_chat_id": expected_chat_id,
     }
+    if resolved_note:
+        result["group_hint_note"] = resolved_note
+    return result
 
 
 def _permission_check(state):

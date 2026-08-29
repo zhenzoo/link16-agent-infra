@@ -175,7 +175,9 @@ def bot_groups(bot):
     while True:
         url = f"{BASE}/im/v1/chats?page_size=100" + (f"&page_token={page}" if page else "")
         d = _get(url, {"Authorization": f"Bearer {token}"}).get("data", {})
-        out += [{"chat_id": c.get("chat_id"), "name": c.get("name")} for c in d.get("items", [])]
+        out += [{"chat_id": c.get("chat_id"), "name": c.get("name"),
+                 "tenant_key": c.get("tenant_key"), "external": c.get("external")}
+                for c in d.get("items", [])]
         if d.get("has_more") and d.get("page_token"):
             page = d["page_token"]
         else:

@@ -306,7 +306,6 @@ def load_bots():
             "display_name": s.get("display_name"),
             "codex_transport": s.get("codex_transport"),
             "delivery_contract": s.get("delivery_contract"),
-            "doc_delivery_fallback": s.get("doc_delivery_fallback"),
             "agent_cmd": s.get("agent_cmd"),
             "ready_markers": s.get("ready_markers"),
             "ready_timeout_sec": s.get("ready_timeout_sec"),
@@ -2901,27 +2900,6 @@ def cmd_workspaces():
 
 _TEXT_DOC_SUFFIXES = {".md", ".markdown", ".mark", ".html", ".htm", ".txt"}
 _NATIVE_TEXT_DOC_SUFFIXES = {".md", ".markdown", ".mark", ".txt"}
-_DOC_DELIVERY_FALLBACKS = {None, "attachment"}
-
-
-def _doc_delivery_fallback(bot):
-    """Return the explicit per-bot fallback after permission denial.
-
-    Missing means online-doc only.  Attachment is deliberately opt-in after a
-    user has confirmed that the remaining permissions cannot be approved; even
-    then both online paths are attempted before the persisted fallback runs.
-    """
-    raw = (bot or {}).get("doc_delivery_fallback")
-    value = str(raw).strip().lower() if raw is not None else None
-    value = value or None
-    if value not in _DOC_DELIVERY_FALLBACKS:
-        name = (bot or {}).get("name", "<unknown>")
-        raise SystemExit(
-            f"❌ bot '{name}' 的 doc_delivery_fallback={raw!r} 无效；只允许 attachment 或不设置"
-        )
-    return value
-
-
 def _read_send_text(*, text=None, file_as_text=None, legacy_file=None):
     """Resolve intentional chat text and reject the old ambiguous flag."""
     if legacy_file:
@@ -2955,26 +2933,15 @@ async def _send_file_attachment(channel, target, path):
 
 
 def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
-    """Publish online with import first, then native docx for plain-text sources.
+    """Publish text natively; use import for HTML/Office and as text fallback.
 
-    The native fallback is the no-``drive:drive`` production path discovered in
+    The native path is the no-``drive:drive`` production path discovered in
     PLAN-980.  A returned URL is accepted only when the document was made
     tenant-readable or the intended human was granted access.
     """
     import feishu_docs
 
     errors = []
-    try:
-        result = feishu_docs.publish_file_as_doc(
-            bot["app_id"], bot["app_secret"], path,
-            grant_open_id=grant_open_id, name=name,
-        )
-        if result.get("url"):
-            return result, "online_doc_import"
-        errors.append("import=发布结果缺 doc URL")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"import={str(exc)[:220]}")
-
     if Path(path).suffix.lower() in _NATIVE_TEXT_DOC_SUFFIXES:
         try:
             result = feishu_docs.publish_text_as_doc(
@@ -2991,6 +2958,17 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"native={str(exc)[:220]}")
+
+    try:
+        result = feishu_docs.publish_file_as_doc(
+            bot["app_id"], bot["app_secret"], path,
+            grant_open_id=grant_open_id, name=name,
+        )
+        if result.get("url"):
+            return result, "online_doc_import"
+        errors.append("import=发布结果缺 doc URL")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"import={str(exc)[:220]}")
 
     raise RuntimeError("；".join(errors) or "在线文档发布失败")
 
@@ -3054,8 +3032,8 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
     """独立短进程主动推送一条到飞书 DM（REST·不依赖常驻桥进程）。
     目标优先级：--to > 会话 chat_id > owner open_id（私聊）。文字复用 guaranteed_send 四级兜底。
     --image <path>：把本地图发到 DM（封面/截图/图表/架构图直达手机·SDK upload_media→OutboundImage）。
-    --doc <md/html>：先走 import，再用不依赖 drive:drive 的原生 docx 链；两条均失败且
-    本机名册明确标记 doc_delivery_fallback=attachment 时，才由同一 bot 发送原文件附件。
+    --doc <md/html>：Markdown/TXT 先走原生 docx，HTML/Office 走 import；在线链失败时
+    由同一 bot 自动发送原文件附件。file-as-text 不参与自动降级。
     给「Claude 在终端会话里主动发飞书」用——不是群喇叭 notify.py，是 bot 自己的 DM 通道。"""
     assert_sender_identity(bot_name)
     bot = next((b for b in load_bots() if b["name"] == bot_name), None)
@@ -3107,7 +3085,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                 )
                 doc_url, doc_ok = res.get("url"), True
                 if doc_delivery_mode == "online_doc_native":
-                    blog(bot_name, "send --doc 旧 import 链不可用，已由同 bot 原生 docx 链发布")
+                    blog(bot_name, "send --doc 已由同 bot 原生 docx 链发布")
                 if grant_oid and not res.get("granted", True):
                     blog(bot_name, f"⚠️ send --doc 授权 owner 失败({res.get('grant_error')})·改用链接可见范围")
                 if res.get("public") is False:
@@ -3117,14 +3095,11 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                 doc_ok = False
                 doc_error = str(e)[:500]
                 blog(bot_name, f"send --doc 两条在线链均失败: {doc_error}")
-                if _doc_delivery_fallback(bot) == "attachment":
-                    attachment_ok, attachment_error = await _send_file_attachment(ch, target, doc)
-                    doc_delivery_mode = "attachment"
-                    doc_ok = None
-                    if not attachment_ok:
-                        blog(bot_name, f"send --doc 附件降级失败: {attachment_error}")
-                else:
-                    doc_delivery_mode = "online_doc_failed"
+                attachment_ok, attachment_error = await _send_file_attachment(ch, target, doc)
+                doc_delivery_mode = "attachment"
+                doc_ok = None
+                if not attachment_ok:
+                    blog(bot_name, f"send --doc 附件降级失败: {attachment_error}")
         body = text
         if doc_url:
             title = (doc_name or Path(doc).name).strip()
@@ -3176,16 +3151,6 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
         extra = (f" 图片{'✅' if img_ok else '❌'}" if image else "") + artifact + \
                 (" 对账⚠️未登记" if reconcile_queued is False else "")
         print(f"{'✅ 已送达' if delivered else '❌ 未送达'} via={via}{extra} → {target}（{_send_size_label(text, doc_stats)}）")
-        if doc_delivery_mode == "online_doc_failed" and doc_ok is False:
-            print(
-                f"下一步：先运行 python feishu/bridge_scope_audit.py --bot {bot_name} "
-                "--capability docs-text --capability docs-import --capability docs-media，"
-                "把 fix_link 给用户开权限。"
-            )
-            print(
-                "只有用户确认必须管理员审核且无法获批后，才在本机 bridge-bots.local.json "
-                "为这只 bot 设置 \"doc_delivery_fallback\": \"attachment\"；不得换别的 bot 代发。"
-            )
     sys.exit(0 if delivered else 1)
 
 

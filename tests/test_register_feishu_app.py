@@ -53,6 +53,16 @@ class DeviceGrantRecoveryTests(unittest.TestCase):
         )
         self.assertIn("drive:drive", scopes)
 
+    def test_group_a2a_registration_requires_explicit_group(self):
+        with self.assertRaisesRegex(ValueError, "必须显式给 --group"):
+            register._validate_group_choice(["core", "group-a2a"], None)
+        register._validate_group_choice(
+            ["core", "group-a2a"], "tb24-25交流水吧"
+        )
+
+    def test_core_only_registration_does_not_require_group(self):
+        register._validate_group_choice(["core"], None)
+
 
 class CredentialSafetyTests(unittest.TestCase):
     def test_failure_summary_never_contains_secret_values(self):

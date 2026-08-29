@@ -47,11 +47,43 @@ APP_IDENTITY_MANUAL_SCOPES = CLOUD_DOC_SCOPES + (
 )
 
 
-def auth_url(app_id: str, scopes=CLOUD_DOC_SCOPES) -> str:
-    """某 app 开通指定【应用身份】权限的一键申请链：Publisher 点开 → 开通（选应用身份）→ 创建版本并发布。
-    默认只发云文档(在线查看)scope；要一键开全(云文档+群a2a+听全群)传 scopes=APP_IDENTITY_MANUAL_SCOPES。"""
+# 飞书 /app/<id>/auth?q= 页面对 q 串长度有上限，超了整页报「参数不合法」。
+# 2026-08-27 实证（tb26-baseball-2）：54 条 scope = 1446 字符 → 参数不合法；
+# 18 条 = 523 字符 → 正常开通。取 760 作安全上限（约 25 条 scope 一条链），
+# 超过就拆成多条链，绝不再吐一条注定报错的长链。见 SOP-120 §4.2。
+AUTH_URL_MAX_CHARS = 760
+
+
+def _auth_url_raw(app_id: str, scopes) -> str:
     return (f"https://open.feishu.cn/app/{app_id}/auth?q="
             + ",".join(scopes) + "&op_from=openapi&token_type=tenant")
+
+
+def auth_urls(app_id: str, scopes=CLOUD_DOC_SCOPES, max_chars: int = AUTH_URL_MAX_CHARS):
+    """把 scope 列表切成【每条都点得开】的一组开通链（长度硬闸·见 AUTH_URL_MAX_CHARS）。
+
+    返回 list[str]；scopes 为空返回 []。调用方一律用它，不要自己拼 q= 串。"""
+    selected = [s for s in dict.fromkeys(scopes or ()) if s]
+    if not selected:
+        return []
+    urls, chunk = [], []
+    for scope in selected:
+        probe = chunk + [scope]
+        if chunk and len(_auth_url_raw(app_id, probe)) > max_chars:
+            urls.append(_auth_url_raw(app_id, chunk))
+            chunk = [scope]
+        else:
+            chunk = probe
+    if chunk:
+        urls.append(_auth_url_raw(app_id, chunk))
+    return urls
+
+
+def auth_url(app_id: str, scopes=CLOUD_DOC_SCOPES) -> str:
+    """某 app 开通指定【应用身份】权限的一键申请链（单条·兼容旧调用）。
+
+    ⚠️ scope 多到超长时这一条会被飞书判「参数不合法」——新代码请改用 auth_urls()。"""
+    return _auth_url_raw(app_id, scopes)
 
 # 文档类扩展名 → 只能导成 docx（投资 investigator 确认）
 _DOC_EXT = {".md": "md", ".markdown": "markdown", ".mark": "mark",
@@ -384,9 +416,12 @@ def _text_chunks(text, limit=1800):
 
 def _insert_real_table(token, doc_id, index, rows, cols, texts):
     """建空表块并逐格填字。回 ``(table_ok, filled, failed_indexes)``。"""
-    d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
-            token=token, body={"children": [{"block_type": 31, "table": {"property": {
-                "row_size": rows, "column_size": cols, "header_row": True}}}], "index": index})
+    try:
+        d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
+                token=token, body={"children": [{"block_type": 31, "table": {"property": {
+                    "row_size": rows, "column_size": cols, "header_row": True}}}], "index": index})
+    except json.JSONDecodeError:  # 飞书偶发 HTTP 空正文；整表走完整纯文本兜底
+        return False, 0, list(range(len(texts)))
     if d.get("code") != 0:
         return False, 0, []
     child = ((d.get("data") or {}).get("children") or [{}])[0]
@@ -398,10 +433,14 @@ def _insert_real_table(token, doc_id, index, rows, cols, texts):
             continue
         cell_ok = True
         for part_index, chunk in enumerate(_text_chunks(value)):
-            w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
-                    token=token, body={"children": [{"block_type": 2, "text": {
-                        "elements": [{"text_run": {"content": chunk}}], "style": {}}}],
-                        "index": part_index})
+            try:
+                w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
+                        token=token, body={"children": [{"block_type": 2, "text": {
+                            "elements": [{"text_run": {"content": chunk}}], "style": {}}}],
+                            "index": part_index})
+            except json.JSONDecodeError:  # 同上；不重试非幂等写入，避免正文重复
+                cell_ok = False
+                break
             if w.get("code") != 0:
                 cell_ok = False
                 break
@@ -415,7 +454,7 @@ def _insert_real_table(token, doc_id, index, rows, cols, texts):
 def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                         markdown: str = None, title: str = None,
                         grant_open_id: str = None, perm: str = "edit",
-                        visibility: str = "tenant", cell_budget: int = 400,
+                        visibility: str = "tenant", cell_budget: int = 24,
                         dry_run: bool = False) -> dict:
     """Markdown → 飞书在线文档，只用 docx 权限（不碰云空间上传/导入）。
 
@@ -467,10 +506,12 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                     # 已创建的部分表格无法原子回滚；紧随其后追加完整逐行文本，保证内容不丢。
                     index += 1
             lines = [" | ".join(texts[r * cols:(r + 1) * cols]) for r in range(rows or 0)]
-            for line in [ln for ln in lines if ln.strip()]:
-                for chunk in _text_chunks(line):
-                    _create_text_block(token, doc_id, doc_id, chunk)
-                    index += 1
+            # 大表按一段完整纯文本写入，避免逐行/逐格把单篇文档放大成上百次非幂等 API 写入。
+            # 2026-08-30 实测：144 格 PLAN 在第 25/54 次写入收到 HTTP 空正文；24 格预算下成功。
+            table_text = "\n".join(ln for ln in lines if ln.strip())
+            for chunk in _text_chunks(table_text):
+                _create_text_block(token, doc_id, doc_id, chunk)
+                index += 1
             tables_degraded += 1
             i += 1
             continue
@@ -483,10 +524,14 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
             i += 1
         if not part:
             continue
-        d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/descendant?document_revision_id=-1",
-                token=token,
-                body={"children_id": part, "index": index, "descendants": _subtree(by_id, part)})
-        if d.get("code") != 0:
+        try:
+            d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/descendant?document_revision_id=-1",
+                    token=token,
+                    body={"children_id": part, "index": index,
+                          "descendants": _subtree(by_id, part)})
+        except json.JSONDecodeError:  # HTTP 空正文：保留完整纯文本，不让整篇失败
+            d = None
+        if not d or d.get("code") != 0:
             for bid2 in part:
                 text = _plain_text_of(by_id, bid2)
                 for chunk in _text_chunks(text):

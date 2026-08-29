@@ -239,6 +239,13 @@ def _run_device_grant(name, app_id=None, job_id=None):
     )
 
 
+def _validate_group_choice(capabilities, group):
+    if "group-a2a" in capabilities and not (group or "").strip():
+        raise ValueError(
+            "group-a2a 注册必须显式给 --group：新 bot 入群前没有 tenant_key，不能从同机 bot 猜"
+        )
+
+
 def main():
     ap = argparse.ArgumentParser(description="一键创建飞书智能体应用并写凭据进 .env")
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
@@ -256,8 +263,8 @@ def main():
                     help="注册能力包，可重复；不给=core + group-a2a，不默认申请 broad Drive")
     ap.add_argument("--notify-bot", default=None,
                     help="人工步骤完成后唤醒哪只 Link16 bot；不给取 FEISHU_BRIDGE_SESSION")
-    ap.add_argument("--group", default="交流水吧",
-                    help="group-a2a 的人工入群验收名片段；默认 交流水吧")
+    ap.add_argument("--group", default=None,
+                    help="group-a2a 的人工入群验收名片段；新 bot 必须按 Device Grant 选中的组织显式给出")
     ap.add_argument("--no-monitor", action="store_true",
                     help="只用于测试/故障隔离：不启动独立注册监督器")
     ap.add_argument("--background", action="store_true",
@@ -311,6 +318,10 @@ def main():
         id_key, sec_key = "FEISHU_BRIDGE_APP_ID", "FEISHU_BRIDGE_APP_SECRET"
 
     capabilities = bridge_scope_audit.normalize_capabilities(args.capability)
+    try:
+        _validate_group_choice(capabilities, args.group)
+    except ValueError as exc:
+        ap.error(str(exc))
     permission_scopes = bridge_scope_audit.requested_scopes(capabilities, for_fix=True)
     if args.dry_run:
         print("=== register dry-run（零写入）===")
@@ -404,7 +415,14 @@ def main():
         monitor = registration_monitor.record_stage(monitor["job_id"], "registered", app_id=app_id)
         monitor = registration_monitor.request_permission_review(monitor["job_id"])
 
-    permission_link = bridge_scope_audit.fix_auth_url(app_id, permission_scopes)
+    # 超长的 q= 串会被飞书整页判「参数不合法」（2026-08-27 tb26-baseball-2 实证：54 条 = 1446 字符挂，
+    # 18 条 = 523 字符通）→ 一律走拆链，每条都点得开。SSOT = feishu_docs.AUTH_URL_MAX_CHARS。
+    permission_links = bridge_scope_audit.fix_auth_urls(app_id, permission_scopes)
+    permission_link = (
+        "\n".join(f"   [{i}/{len(permission_links)}] {u}" for i, u in enumerate(permission_links, 1))
+        if len(permission_links) > 1
+        else (permission_links[0] if permission_links else "   （本次无需增量 scope）")
+    )
 
     labels = [bridge_scope_audit.CAPABILITY_SPECS[name]["label"] for name in capabilities]
     print("\n🔐 第二步：请人工审阅本次能力与权限，并按飞书页面要求创建版本/发布：\n"
@@ -417,11 +435,14 @@ def main():
           flush=True)
 
     # 🔒 登记协议：建完必回写。§4 见 docs/SOP-120。agent-registry stub 上面已【自动】补·其余照单核对。
+    group_step = (f"   ③ 人工把 bot 拉进共享群「{args.group}」（API 加不了）\n"
+                  if "group-a2a" in capabilities
+                  else "   ③ 本次未选 group-a2a，不需要入共享群\n")
     print("\n📋 建完【必做登记】（④ 已自动 · 完整见 docs/SOP-120 §4）：\n"
           f"   ① ✅ bridge-bots.local.json 已自动登记（profile={selected_profile.name}）—— 运行时 roster·桥靠它 spawn\n"
           "      换运行档案只改 profile（或飞书 `/account <profile>`）；不要再写 agent/home/account 重复字段。\n"
           f"   ② 打开上面的第二条链接，人工核对本次 capability：{', '.join(capabilities)}\n"
-          f"   ③ 人工把 bot 拉进共享群「{args.group}」（仅 group-a2a 需要·API 加不了）\n"
+          f"{group_step}"
           "   ④ ✅ agent-registry.json 已【自动】补 stub（谁是谁·跨机目录）→ 你只需核对/补 repo + machine（脚本不知道它管哪个仓）\n"
           "   ⑤ 跑  python feishu/bridge_scope_audit.py --all-env  → 刷新 SOP-120 §2.2 能力矩阵\n"
           "   ⑥ 不自动重启整座桥；由监督器验权/认主/入群并回调发起 session\n"

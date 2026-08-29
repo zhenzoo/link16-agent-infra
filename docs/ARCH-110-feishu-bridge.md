@@ -432,9 +432,9 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 **入口**：`python feishu/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`。
 
 **生产链路（全 `tenant_access_token` · 始终使用当前 bot 身份）**：
-1. 先试旧 upload/import 链；它保留 HTML/Office 导入能力，但需要 `drive:drive` 或等价窄口权限。
-2. 旧链被拒且源是 Markdown/TXT 时，自动走 `publish_text_as_doc`：建 docx → Markdown 转块 → 普通块分批写 → 表格逐格写 → 设 `tenant_readable`。这条链不需要 `drive:drive`；表格单元格或普通块失败会追加完整纯文本兜底，不能静默丢内容。
-3. 只有两条在线链都失败，并且用户此前明确确认权限无法获批、为该 bot 设置了 `doc_delivery_fallback=attachment`，才由**同一 bot**发送原文件附件。不存在换基础设施 bot 代发的分支。
+1. Markdown/TXT 先走原生 docx：建文档 → Markdown 转块 → 分批写入 → 设组织内凭链接可读；不依赖 `drive:drive`。失败才试 upload/import 兼容链。
+2. HTML/Office 只走 upload/import；它需要 `drive:drive` 或等价窄口权限。
+3. 在线链全部失败，自动由**同一 bot**发送原文件附件；`file-as-text` 永不参与自动降级，也不存在跨 bot 代发。
 4. 在线文档成功必须同时拿到 URL，并证实“组织内凭链接可读”或 owner 协作者授权成功；否则不报送达。
 5. 飞书 `anyone_readable` 的“任何人”仍要求登录飞书（PLAN-980 E25），不是匿名公网访问；真匿名交付走静态站。
 6. **final 对账（PLAN-921）**：同 bot 的 p2a 回合取得 URL 后写 `kind=doc_delivery`；drainer 去重、持久化并在下一条匹配 answer 追加标题和原始 URL。显式 `--to`、手工 terminal、别的 bot 与 a2a 不登记，避免串收件人。
@@ -445,7 +445,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **边界（诚实）**：① 飞书侧修改不会自动回灌本地源文件。② 每次发布都会在飞书云产生一篇新文档；没有“先清空旧文档再重写”的危险原地更新。③ 企业策略可能禁止外部分享；组织内可见与协作者授权都失败时，桥不会把不可读 URL 当成功。
 
-**SSOT / 不硬编码**：发布原语在 `feishu_docs.py`，生产选择与附件终局兜底在 `feishu_bridge.py`；owner open_id 取桥持久状态，策略只写本机 roster。`send` 是独立短进程、代码即改即用；CLI/receipt 记录链路类型、源字符/字节、错误与 URL。
+**SSOT / 不硬编码**：发布原语在 `feishu_docs.py`，生产选择与附件终局兜底在 `feishu_bridge.py`；owner open_id 取桥持久状态。`send` 是独立短进程、代码即改即用；CLI/receipt 记录链路类型、源字符/字节、错误与 URL。
 
 ## § 2.11b · 在线查看媒体（本地【图片 / 视频 / 任意文件】→ 嵌进 docx → 发链接 · 2026-06-19）
 
