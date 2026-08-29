@@ -102,6 +102,44 @@ class NativeTableSafetyTests(unittest.TestCase):
         defaults = feishu_docs.publish_text_as_doc.__kwdefaults__
         self.assertEqual(defaults["cell_budget"], 24)
 
+    def test_real_table_budget_is_a_hard_cap_not_a_tunable_default(self):
+        self.assertEqual(feishu_docs._bounded_real_table_budget(999), 24)
+        self.assertEqual(feishu_docs._bounded_real_table_budget(12), 12)
+        self.assertEqual(feishu_docs._bounded_real_table_budget(-1), 0)
+
+    def test_failed_table_attempt_does_not_refund_the_document_budget(self):
+        blocks = [
+            {"block_id": "t1", "block_type": 31,
+             "table": {"property": {"row_size": 1, "column_size": 1}},
+             "children": ["c1"]},
+            {"block_id": "c1", "block_type": 32, "children": ["p1"]},
+            {"block_id": "p1", "block_type": 2,
+             "text": {"elements": [{"text_run": {"content": "first"}}]}},
+            {"block_id": "t2", "block_type": 31,
+             "table": {"property": {"row_size": 1, "column_size": 1}},
+             "children": ["c2"]},
+            {"block_id": "c2", "block_type": 32, "children": ["p2"]},
+            {"block_id": "p2", "block_type": 2,
+             "text": {"elements": [{"text_run": {"content": "second"}}]}},
+        ]
+        with mock.patch.object(feishu_docs, "_tenant_token", return_value="token"), \
+                mock.patch.object(feishu_docs, "_create_docx", return_value="doc"), \
+                mock.patch.object(feishu_docs, "_convert_markdown",
+                                  return_value=(blocks, ["t1", "t2"])), \
+                mock.patch.object(feishu_docs, "_insert_real_table",
+                                  return_value=(True, 0, [0])) as insert, \
+                mock.patch.object(feishu_docs, "_create_text_block"), \
+                mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"), \
+                mock.patch.object(feishu_docs, "_set_visibility"):
+            result = feishu_docs.publish_text_as_doc(
+                "app", "secret", markdown="tables", visibility="none", cell_budget=1,
+            )
+
+        insert.assert_called_once()
+        self.assertEqual(result["table_cell_budget_cap"], 1)
+        self.assertEqual(result["table_cells_attempted"], 1)
+        self.assertEqual(result["tables_degraded"], 2)
+
 
 class BridgeOnlineDocFallbackTests(unittest.TestCase):
     def setUp(self):

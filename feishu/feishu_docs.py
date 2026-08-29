@@ -89,6 +89,7 @@ def auth_url(app_id: str, scopes=CLOUD_DOC_SCOPES) -> str:
 _DOC_EXT = {".md": "md", ".markdown": "markdown", ".mark": "mark",
             ".html": "html", ".txt": "txt", ".doc": "doc", ".docx": "docx"}
 _MAX_BYTES = 20 * 1024 * 1024   # 单次 upload_all 上限 20MB
+_MAX_REAL_TABLE_CELLS_PER_DOC = 24  # 全篇硬上限；调用方传更大也不能突破
 
 
 class DocImportError(RuntimeError):
@@ -414,6 +415,11 @@ def _text_chunks(text, limit=1800):
     return [value[i:i + limit] for i in range(0, len(value), limit)]
 
 
+def _bounded_real_table_budget(requested) -> int:
+    """真实表格逐格写入的全篇硬预算；调用方只能调低，不能调高。"""
+    return min(max(int(requested), 0), _MAX_REAL_TABLE_CELLS_PER_DOC)
+
+
 def _insert_real_table(token, doc_id, index, rows, cols, texts):
     """建空表块并逐格填字。回 ``(table_ok, filled, failed_indexes)``。"""
     try:
@@ -454,7 +460,8 @@ def _insert_real_table(token, doc_id, index, rows, cols, texts):
 def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                         markdown: str = None, title: str = None,
                         grant_open_id: str = None, perm: str = "edit",
-                        visibility: str = "tenant", cell_budget: int = 24,
+                        visibility: str = "tenant",
+                        cell_budget: int = _MAX_REAL_TABLE_CELLS_PER_DOC,
                         dry_run: bool = False) -> dict:
     """Markdown → 飞书在线文档，只用 docx 权限（不碰云空间上传/导入）。
 
@@ -463,8 +470,9 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     - **表格无论多小都塞不进 `descendant`**（1x2 的表 9 个块照样 `1770001`）——
       convert 产出的表格结构与该接口不兼容，和块数无关。
       正解是「先建空表块（飞书自动生成单元格）→ 逐格填字」，实测 9/9 成功。
-    - 表格代价是 1+行×列 次请求，所以用 `cell_budget` 封顶；超预算的表降级成逐行文字，
-      **降级会记进返回值，绝不静默丢内容**。
+    - 表格代价是 1+行×列 次请求，所以全篇真实表格最多尝试 24 格；`cell_budget` 只能调低，
+      调用方传更大也会被硬截断。失败尝试同样扣预算，绝不通过失败重置预算。
+    - 超预算的表降级成紧凑纯文本；**降级会记进返回值，绝不静默丢内容**。
 
     visibility: "tenant" 组织内凭链接可读（默认）/ "anyone" 任何已登录飞书的人 / "none" 不动
     """
@@ -474,8 +482,11 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
             raise DocImportError(f"找不到源文件：{file_path}")
         markdown = src.read_text(encoding="utf-8", errors="replace")
     doc_title = title or (src.stem if src else "未命名文档")
+    cell_budget = _bounded_real_table_budget(cell_budget)
+    initial_cell_budget = cell_budget
     if dry_run:
         return {"dry_run": True, "title": doc_title, "chars": len(markdown),
+                "real_table_cell_budget": cell_budget,
                 "chain": ["create_docx", "blocks/convert", "descendant(普通块分批)",
                           "children(表格逐格填)", f"visibility={visibility}",
                           "grant_member" if grant_open_id else "skip-grant"]}
@@ -487,17 +498,20 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
 
     index = i = 0
     tables_real = tables_degraded = batches = 0
-    table_cells_filled = table_cells_failed = 0
+    table_cells_attempted = table_cells_filled = table_cells_failed = 0
     while i < len(first_level):
         bid = first_level[i]
         if (by_id.get(bid) or {}).get("block_type") == 31:
             rows, cols, texts = _table_data(by_id, bid)
-            if rows and cols and rows * cols <= cell_budget:
+            cell_count = rows * cols
+            if rows and cols and cell_count <= cell_budget:
+                # 先扣再写：空响应/部分失败都不能返还预算，保证整篇尝试量有绝对上界。
+                cell_budget -= cell_count
+                table_cells_attempted += cell_count
                 ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts)
                 table_cells_filled += filled
                 table_cells_failed += len(failed)
                 if ok and not failed:
-                    cell_budget -= rows * cols
                     tables_real += 1
                     index += 1
                     i += 1
@@ -550,6 +564,8 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     return {"url": _doc_url(token, doc_id), "token": doc_id, "type": "docx",
             "blocks": len(blocks), "batches": batches,
             "tables_real": tables_real, "tables_degraded": tables_degraded,
+            "table_cell_budget_cap": initial_cell_budget,
+            "table_cells_attempted": table_cells_attempted,
             "table_cells_filled": table_cells_filled,
             "table_cells_failed": table_cells_failed,
             "granted": granted, "grant_error": grant_error,
