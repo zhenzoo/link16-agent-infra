@@ -2331,8 +2331,20 @@ def run(bot_name=None):
 
         _start_drainer()
 
-        async def _remediate(_b):                              # 保守自愈：outbox 卡 → 重启 drainer
-            blog(bname, "🩺 doctor: outbox 卡 → 重启 drainer")
+        # 重启 drainer 只治「它卡住/死了」。水位连续不动说明重启无效，再重启还有害：
+        # 每次重启都会把 drainer 自己的 GIVE_UP_SEC(600s·发不出就放弃解堵) 计时器清零，
+        # 反而让它永远等不到自愈。所以连续 3 次水位没动就停手，把场子交回给 GIVE_UP_SEC。
+        # 不在这里告警 —— bridge_doctor 自己会「卡 N 轮自愈无效·需人工」升级，别发两遍。
+        fuse = {"off": None, "n": 0}
+
+        async def _remediate(_b):
+            off = bridge_outbox.load_hwm(ad, bname)
+            if off != fuse["off"]:                     # 水位动过 = 真在推进 → 重新计数
+                fuse.update(off=off, n=0)
+            fuse["n"] += 1
+            if fuse["n"] > 3:
+                return
+            blog(bname, f"🩺 doctor: outbox 卡 → 重启 drainer（{fuse['n']}/3·水位 {off}）")
             if holder.get("d"):
                 holder["d"].cancel()
             _start_drainer()
