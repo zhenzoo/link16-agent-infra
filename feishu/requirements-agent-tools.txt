@@ -1,0 +1,4 @@
+# 可选 agent 工具；飞书桥运行不依赖，安装失败不得阻塞 Link16。
+# 装：python -m pip install -r feishu/requirements-agent-tools.txt
+
+jina-cli>=0.3.0  # URL→markdown/search/embed/rerank；墙外服务，按 SOP-100 §2.1 走真实 URL 探测

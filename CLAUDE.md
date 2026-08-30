@@ -1,65 +1,67 @@
 ---
 doc_type: CLAUDE
 doc_id: CLAUDE
-title: Link 16 · Claude 执行适配层
+title: Link16 · Claude 部署工程师入口
 status: active
-purpose: 承载 Claude Code 专属的执行机制，并把全部共享规则路由到 AGENTS.md，避免两个入口各写一份正文。
+purpose: 让 Claude Code 直接进入 Link16 的共享部署职责，并只保留 Claude 专属执行翻译。
 owns:
-  - Claude Code 专属的执行机制（hooks / 完成信号抽取 / subagent 继承 / 默认 profile）
+  - Claude Code 在本仓的入口路由
+  - Claude hooks、transcript、skills 与 session 继承适配
 does_not_own:
-  - 仓库身份、结构、硬边界、验证命令、文档地图（全在 AGENTS.md）
-  - Codex 专属机制（AGENTS.md 的「Codex 适配层」）
-  - 架构理由（docs/ARCH-*）与操作步骤（docs/SOP-*）
+  - 部署职责、人工停点与完成闸（见 ROLE-010）
+  - 安装顺序、命令、回滚与排错（见 SOP-100）
+  - 桥与 profile 架构（见 docs/ARCH-*）
+  - Codex 专属机制（见 AGENTS.md）
 read_when:
   - 以 Claude Code 身份在本仓开工
-last_reviewed: 2026-08-17
+  - 用户要求开始部署 Link16
+last_reviewed: 2026-08-26
 ---
 
-# Link 16 · Claude 执行适配层
+# Link16 · Claude 部署工程师入口
 
-## 👉 开工先读 [`AGENTS.md`](AGENTS.md)
+本仓是飞书（Lark）↔ Claude/Codex 会话桥与 wmux 驱动层。内容业务属于各内容仓，不进入这里。
 
-**共享正文只在 `AGENTS.md` 维护一份**——仓库身份、结构与依赖方向、两个 registry / 两本名册的分工、
-硬边界（身份 / 名册 / 飞书投递 / 生产纪律）、验证命令、文档地图、文档规范，全在那里。
-本文件**只放 Claude Code 专属的执行机制**，不复制那些内容。
+## 共同职责与唯一真源
 
-人类向的介绍与快速开始：[`README.md`](README.md)。
+开工先读三份：
 
----
+1. [ROLE-010](docs/ROLE-010-link16-deployment-engineer.md)：部署工程师的 mandate、决策权、人工停点与完成闸。
+2. [SOP-100](docs/SOP-100-new-machine-setup.md)：从零安装的顺序、命令、回滚、验收和排错。
+3. [TOOLS.md](TOOLS.md)：所有现成工具及调用入口。
 
-## Claude 专属机制
+架构理由与硬合同按任务进入相应 [ARCH](docs/ARCH-110-feishu-bridge.md) /
+[SPEC](docs/SPEC-200-cloudflare-inventory.md)。单 bot 注册见
+[SOP-120](docs/SOP-120-feishu-register.md)。
 
-### 完成信号：可以读 Claude JSONL
-桥抽取「这一轮 Claude 干完了没、答复是什么」时，**允许**解析 Claude Code 的会话 transcript（`.jsonl`）。
-这是 Claude 侧独有的能力——**Codex 侧不成立**（Codex 必须走它自己的 hook event 记录）。
-相关实现：`feishu/jsonl_reply_extract.py`、`feishu/feishu_bridge.py` 的会话 pin 逻辑。
+## 接到“开始部署 Link16”
 
-> ⚠️ 由此派生一条易踩的坑：带着 `CLAUDE_CODE_CHILD_SESSION` 起的 Claude 会话**不写 transcript**，
-> 于是桥 pin 不住会话、`/resume` 也恢复不了。起号脚本必须先洗掉这组 harness 记号
-> （见用户级 `~/.claude-personal/governance/model-presets.json` 的 `harness_env_keys`）。
+立即按 ROLE 与 SOP 推进，不在入口复制第二份安装教程。对只读检测、已确认范围内的可恢复安装和机械验收
+自主执行；只在 ROLE 列出的人工停点暂停。需要跨 turn 等人的流程按 SOP 使用持久后台 registrar + Monitor，
+不得把同步授权轮询放进一次短 tool timeout。
 
-### Hooks
-Claude 侧的回传 producer 是 `feishu/hooks/bridge_stop.py` 与 `feishu/hooks/bridge_posttool.py`
-（Codex 侧另有 `codex_bridge_*.py`；app-server 模式的 Codex 会自动 no-op）。
+## Claude 执行适配
 
-### Subagent
-Claude Code 原生 Agent tool 起的 subagent **由 harness 继承身份，不另选 profile**。
-只有**独立 wmux session** 才走 Link16 launcher（`feishu/agent_profile_cli.py`）。
+- 飞书相关任务先使用 repo-owned /feishu skill。Claude 的 /name 语义保持原生，不做 Codex $name 翻译。
+- Claude 可以从会话 transcript（.jsonl）抽取本轮 final；实现入口是
+  feishu/jsonl_reply_extract.py 与 bridge 的 session pin。这个能力只属于 Claude adapter。
+- 独立 Claude worker 边界必须清除 CLAUDE_CODE_CHILD_SESSION 等父 harness 记号；带着该记号启动会
+  不写 transcript，导致 session 无法 pin/resume。该清理由 feishu/agent_runtime.py 统一处理。
+- Claude 回传 producer 是 feishu/hooks/bridge_stop.py 与 feishu/hooks/bridge_posttool.py；
+  隐藏推理与工具流水账不作为 final 投递。
+- Claude 原生 Agent tool 的 subagent 由 harness 继承身份，不另选账号。只有独立 wmux session 才经
+  feishu/agent_profile_cli.py command/run，并继承父 session 的精确 LINK16_AGENT_PROFILE。
+- profile/runtime/home 只从本机 effective registry 解析。禁止从 CLAUDE_CONFIG_DIR、cwd、alias 或模型名
+  反推身份；值缺失、未知或 doctor 不健康时，在创建 pane 之前失败。
+- 维护 Claude 适配时不修改 Codex runtime 的 home、hooks、settings、skills 或认证。repo-owned
+  feishu skill 由 bootstrap materialize 到用户所选的 Claude profile home。
 
-### 默认 profile
-本 runtime 的机器默认 profile 见 `feishu/agent-profiles.json` 的 `default_profiles.claude`；
-各机可用 `feishu/bridge-bots.local.json` 的 `defaults.profiles.claude` 覆盖本机默认。
-**不要在本文件或任何仓内代码里硬编码 profile 名与 home 路径。**
+## 仓库与生产边界
 
-### Skills
-Claude 的 skill 用 `/name` 触发，行为不变；桥不会改写 Claude 的 slash 命令
-（只在 Codex 侧才做 `/name` → `$name` 的受限翻译）。
+共享的 dirty-worktree、凭据、dry-run、生产重启、启动项和唯一 watchdog 边界只认 ROLE/ARCH/SOP。
+Claude adapter 不另写一份；修改后用对应 tests 与机械信号验真。
 
----
+## 完成声明
 
-## 提醒：改 `_linkify` 后要重启桥
-
-发飞书的链接不能套反引号——这条规则与其代码强制说明在 [`AGENTS.md` §4.3](AGENTS.md)。
-这里只补一句 Claude session 常忘的操作后果：**改完 `feishu/feishu_bridge.py` 的 `_linkify`
-必须 `stop` → `start` 重启桥进程**，跑着的 Python 进程持的是旧字节码，改了文件不生效。
-而重启桥会中断主人正在进行的会话——属于运维动作，先确认再做。
+不在 Claude 入口自定义完成标准。只有 [ROLE-010](docs/ROLE-010-link16-deployment-engineer.md) 中用户
+所选范围的 Core/Feishu/Group 层全部满足，才能说“部署完成”；否则报告已完成层、唯一待人动作与机械恢复信号。

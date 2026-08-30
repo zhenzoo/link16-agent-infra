@@ -46,6 +46,7 @@ CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
 CODEX_TRANSPORT_APP_SERVER = "app-server-canary"
 CODEX_TRANSPORT_LEGACY = "cli-legacy"
 _CODEX_LEGACY_ALIASES = {"cli-legacy", "bare-cli", "standard", "legacy", "cli"}
+CLAUDE_HARNESS_ENV_KEYS = ("CLAUDE_CODE_CHILD_SESSION",)
 
 
 def codex_transport(bot) -> str:
@@ -68,6 +69,11 @@ def uses_app_server(bot) -> bool:
 def _q(value) -> str:
     """Quote a path/value for the git-bash command line used by wmux."""
     return '"' + str(value).replace("\\", "/").replace('"', '\\"') + '"'
+
+
+def _unset_shell_env(keys) -> str:
+    safe = [key for key in keys if re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(key))]
+    return ("unset " + " ".join(safe) + "; ") if safe else ""
 
 
 @dataclass(frozen=True)
@@ -189,26 +195,47 @@ def codex_skill_invocation(bot, text: str, cwd=None) -> str | None:
     if requested.casefold() in _CODEX_NATIVE_SLASH:
         return None
 
-    roots = [Path.home() / ".agents" / "skills", _codex_home(bot) / "skills"]
+    roots = []
     if cwd:
-        roots.insert(0, Path(cwd).expanduser() / ".agents" / "skills")
-    seen = set()
+        current = Path(cwd).expanduser().resolve()
+        chain = []
+        cursor = current
+        while True:
+            chain.append(cursor)
+            if (cursor / ".git").exists():
+                break
+            if cursor.parent == cursor:
+                chain = [current]
+                break
+            cursor = cursor.parent
+        roots.extend(path / ".agents" / "skills" for path in chain)
+    roots.append(Path.home() / ".agents" / "skills")
+    seen_roots = set()
+    matches = []
+    seen_files = set()
     for root in roots:
-        key = root.as_posix().casefold()
-        if key in seen or not root.is_dir():
+        key = root.resolve().as_posix().casefold()
+        if key in seen_roots or not root.is_dir():
             continue
-        seen.add(key)
+        seen_roots.add(key)
         for skill_file in root.glob("*/SKILL.md"):
             name = _skill_frontmatter_name(skill_file)
             if name and name.casefold() == requested.casefold():
-                args = (match.group(2) or "").strip()
-                return f"${name}" + (f" {args}" if args else "")
-    return None
+                file_key = skill_file.resolve().as_posix().casefold()
+                if file_key not in seen_files:
+                    seen_files.add(file_key)
+                    matches.append(name)
+    if len(matches) != 1:
+        return None
+    args = (match.group(2) or "").strip()
+    return f"${matches[0]}" + (f" {args}" if args else "")
 
 
 # ---------- Agent Profile SSOT (ARCH-120) ----------
 PROFILE_ENV = "LINK16_AGENT_PROFILE"
-PROFILE_REGISTRY_PATH = Path(__file__).resolve().with_name("agent-profiles.json")
+PROFILE_REGISTRY_PATH = Path(__file__).resolve().with_name("agent-profiles.json")  # legacy committed source
+PROFILE_REGISTRY_LOCAL_PATH = Path(__file__).resolve().with_name("agent-profiles.local.json")
+PROFILE_REGISTRY_ENV = "LINK16_AGENT_PROFILE_REGISTRY"
 ROSTER_LOCAL_PATH = Path(__file__).resolve().with_name("bridge-bots.local.json")
 ROSTER_COMMITTED_PATH = Path(__file__).resolve().with_name("bridge-bots.json")
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -239,8 +266,24 @@ def _expand_home(raw) -> Path:
     return Path(os.path.expandvars(value)).expanduser()
 
 
+def profile_registry_path() -> Path:
+    """Return exactly one effective profile registry, never a merged mapping.
+
+    New installations materialize the gitignored local file.  During the
+    multi-machine migration window only, machines without it continue reading
+    the committed legacy registry.  A present-but-invalid local file is never
+    bypassed: `_profile_document` raises against that exact path.
+    """
+    override = str(os.environ.get(PROFILE_REGISTRY_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    if PROFILE_REGISTRY_LOCAL_PATH.is_file():
+        return PROFILE_REGISTRY_LOCAL_PATH
+    return PROFILE_REGISTRY_PATH
+
+
 def _profile_document(path=None) -> dict:
-    registry = Path(path) if path else PROFILE_REGISTRY_PATH
+    registry = Path(path) if path else profile_registry_path()
     try:
         data = json.loads(registry.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -280,11 +323,20 @@ def profile_specs(path=None) -> list[ProfileSpec]:
             label=str(raw.get("label") or ""),
             recommended=bool(raw.get("recommended")),
         ))
+    if not result:
+        raise ValueError("profile registry 至少需要一个 profile")
     known = {p.name: p.runtime for p in result}
-    for runtime in _PROFILE_RUNTIMES:
+    present_runtimes = {p.runtime for p in result}
+    unknown_defaults = set(defaults) - _PROFILE_RUNTIMES
+    if unknown_defaults:
+        raise ValueError(f"default_profiles 含未知 runtime：{sorted(unknown_defaults)!r}")
+    for runtime in present_runtimes:
         selected = defaults.get(runtime)
         if selected not in known or known[selected] != runtime:
             raise ValueError(f"default_profiles.{runtime} 不是合法 {runtime} profile：{selected!r}")
+    absent_defaults = set(defaults) - present_runtimes
+    if absent_defaults:
+        raise ValueError(f"default_profiles 指向未安装 runtime：{sorted(absent_defaults)!r}")
     return result
 
 
@@ -529,6 +581,9 @@ def persist_account(bot_name: str, alias: str, why: str = "") -> dict:
             raise ValueError(f"本机名册里没有 bot '{bot_name}'")
         for key in ("agent", "runtime", "account", "claude_config_dir", "codex_home"):
             hit.pop(key, None)
+        if profile.runtime != "codex":
+            hit.pop("codex_transport", None)
+            hit.pop("delivery_contract", None)
         hit["profile"] = profile.name
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         hit["_account_why"] = (
@@ -551,6 +606,7 @@ def upsert_runtime_bot(
     app_secret_env: str,
     at_name: str,
     profile_name_: str,
+    cwd: str | None = None,
 ) -> dict:
     """Create/update one machine-local runtime row after app registration."""
     profile = profile_spec(profile_name_)
@@ -569,8 +625,13 @@ def upsert_runtime_bot(
             "at_name": at_name,
             "profile": profile.name,
         })
+        if cwd is not None:
+            hit["cwd"] = str(cwd).replace("\\", "/")
         for key in ("agent", "runtime", "account", "claude_config_dir", "codex_home"):
             hit.pop(key, None)
+        if profile.runtime != "codex":
+            hit.pop("codex_transport", None)
+            hit.pop("delivery_contract", None)
         return dict(hit)
 
     return _update_local_roster(mutate)
@@ -638,7 +699,8 @@ def standalone_worker_cmd(
         prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
     if profile.runtime == "claude":
         command = (
-            prefix
+            _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS)
+            + prefix
             + env_text
             + f"CLAUDE_CONFIG_DIR={_q(profile.home_path.as_posix())} "
             + "claude --dangerously-skip-permissions"
@@ -657,7 +719,8 @@ def standalone_worker_cmd(
         )
         if not codex_exec:
             command += (
-                " --dangerously-bypass-approvals-and-sandbox --search"
+                " --dangerously-bypass-approvals-and-sandbox"
+                " --dangerously-bypass-hook-trust --search"
                 " -c shell_environment_policy.inherit=all"
             )
         if cwd:
@@ -691,7 +754,8 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         if profile.launcher == "launch-sh":
             prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
         return (
-            prefix
+            _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS)
+            + prefix
             + env
             + f"CLAUDE_CONFIG_DIR={_q(config_dir)} "
             + f"claude --dangerously-skip-permissions --settings {_q(hooks_json)}"
@@ -721,6 +785,37 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
             bot=name,
         )
     raise ValueError(f"runtime {spec.name} has no launch command")
+
+
+def ensure_codex_trust(bot, cwd) -> None:
+    """Pre-seed Codex's project trust so a first launch in a new directory never
+    parks on the interactive "Do you trust the contents of this directory?"
+    prompt. The screen-scraping auto-Enter (needs_trust_confirmation) fires too
+    late for the app-server transport: the worker's warmup thread/start is
+    already blocked upstream of the TUI. Codex persists project keys lowercase
+    on Windows and its lookup is case-insensitive (verified 2026-08-25 with a
+    throwaway dir: mixed-case -C input matched the lowercase stored key), so we
+    write exactly that form. No-op for other runtimes — Claude's prompt is
+    already auto-accepted by the ready wait."""
+    if runtime_spec(bot).name != "codex":
+        return
+    profile = resolve_profile(bot, required=True)
+    config = profile.home_path / "config.toml"
+    key = str(cwd).replace("/", "\\").lower()
+    header = f"[projects.'{key}']"
+    try:
+        text = config.read_text(encoding="utf-8") if config.is_file() else ""
+    except OSError:
+        return
+    if header.lower() in text.lower():
+        return
+    try:
+        with config.open("a", encoding="utf-8") as fh:
+            if text and not text.endswith("\n"):
+                fh.write("\n")
+            fh.write(f"\n{header}\ntrust_level = \"trusted\"\n")
+    except OSError:
+        pass
 
 
 def needs_trust_confirmation(bot, screen: str) -> bool:

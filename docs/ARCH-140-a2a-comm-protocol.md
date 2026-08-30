@@ -17,7 +17,7 @@ read_when:
   - 要让一个 agent 去喊另一个 agent 干活
   - 回信发错对象 / 等不到回复
   - 改动 send_feishu_msg.py 的寻址或等待逻辑
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-26
 ---
 # ARCH-140 · Agent↔Agent 通讯协议（a2a comm）—— 新模型「默认回主人 · 发 peer 靠主动带戳」
 
@@ -65,6 +65,8 @@ last_reviewed: 2026-08-17
 | 信封 `route=<p2a\|p2a-ext\|a2a>` | 桥按【来源】给每条注入消息的信封写回址——**三极**：<br>① **`p2a`（默认）**：DM / 群内 **peer bot（有 a2a 戳）** → agent 普通回复**回主人 DM**（发 peer 仍只靠主动 `send_feishu_msg`·防 bot↔bot 环）。<br>② **`p2a-ext dest=<群> at=<发信人>`（第三极·2026-07-05 主人拍板扩到含 owner）**：群消息 + **无** a2a 戳（=不是 peer bot·**任何真人·含 owner 本人**）→ agent 普通回复**自动回【原群】+ @发信人**。主人原话：「只要是群，我在群里 @ 你，你就该在群里回我 + @ 我」——**owner 也不例外**（撤掉旧的「≠owner」排除）。真人不会无限自动回复→无环·安全。<br>③ **`a2a`（历史）**：`send_feishu_msg` 老路·回群+@。<br>群消息信封仍带 `from=<发信人真名>`（群成员 API 查·§7）让 agent 知道谁在说话。 |
 | `msg_type == "text"` | a2a 必走纯文字（飞书把卡片渲成占位 `[interactive]`，对端读不到正文）。 |
 
+呈现矩阵由 route kind 唯一决定：`p2a` 私聊 final 是互动卡片，`p2a-ext` 真人群 final 是 1～N 张互动卡片并 @发起人，a2a 主动消息是纯文字并 @peer。`oc_` 只说明 receive ID 类型，不能用来判断消息格式。
+
 ## §4 · 工具原语（全在 `feishu/`）
 
 | 原语 | 谁用 | 职责 | 工具 |
@@ -83,6 +85,7 @@ last_reviewed: 2026-08-17
 2. **循环靠【路由结构】防死**——反射性回复到不了 peer。**不靠数轮数 / 判长度 / agent 自觉；不再有熔断 / 静音 / 结束工具。**
 3. **a2a 必走纯文字**（卡片对端读不到）。
 4. 读/发都走共享群（`shared_group` 现解析 · 禁硬编码 `oc_`/`ou_`）。
+5. active turn 若正要自动回同一目标，`send_feishu_msg.py` 在联网前拒绝手动补投；确实是额外通知才显式 `--proactive`。不同 peer/不同群不受影响。
 
 ## §6 · 落地状态
 

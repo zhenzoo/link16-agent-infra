@@ -17,7 +17,7 @@ read_when:
   - 改动 wmux_session.py 或任何面板驱动逻辑
   - 面板起不来 / 判活不准需要定位
   - 评估某个 wmux 新 API 能不能用
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-26
 ---
 # WMUX 多窗口编排 · 交接文档（成功方案 + 失败记录）
 
@@ -66,7 +66,7 @@ belongs to. Make sure you are running inside a wmux terminal workspace.
 ```
 但**纯列举类**（`workspace_list` / `surface_list` / `pane_list`）和**所有 `browser_*`** 工具照常能用。
 
-**根因**（证据来自逆向 `%USERPROFILE%\AppData\Local\wmux\app-2.9.1\resources\mcp-bundle\index.js`）：
+**根因**（历史证据来自 `%LOCALAPPDATA%\wmux\app-2.9.1\resources\mcp-bundle\index.js`）：
 - L129713：`var MY_WORKSPACE_ID = process.env.WMUX_WORKSPACE_ID || ""`
 - L129724 `resolveWorkspaceId()`：先看 env；没有就 RPC `a2a.resolve.identity` 拿 PID→workspace 映射表，再沿**父进程 PID 链**往上找自己属于哪个 workspace。
 - L129776-129781 `requireWorkspaceId()`：解析不到就抛上面那句。
@@ -82,7 +82,7 @@ belongs to. Make sure you are running inside a wmux terminal workspace.
 **关键洞察**：`Workspace identity unknown` 只是 **MCP 外壳层**的一道闸。**daemon 自己的 RPC 只认①磁盘上的 auth token ②显式传进来的 `ptyId` + `workspaceId`，根本不在乎调用者是谁。** 而 `workspaceId` 我从 `workspace.list` 就能拿到 → 显式传给 daemon 即可，绕开整道闸。
 
 **daemon 通信协议**（逆向同一文件 L35184-35388）：
-- 传输：Windows 命名管道 `\\.\pipe\wmux-<用户名>`（用户名 `os.userInfo().username`，这里是 `zhuzhen`）。也支持 `~/.wmux-tcp-port` 里的 TCP 端口、和 env `WMUX_SOCKET_PATH`。
+- 传输：Windows 命名管道 `\\.\pipe\wmux-<用户名>`（用户名由 `os.userInfo().username` 动态取）。也支持 `~/.wmux-tcp-port` 里的 TCP 端口、和 env `WMUX_SOCKET_PATH`。
 - 鉴权：token 读 `~/.wmux-auth-token`（纯文本一行），env `WMUX_AUTH_TOKEN` 兜底。
 - 报文：换行分隔 JSON。请求 `{id, method, params, token}\n`，响应 `{id, ok, result|error}\n`，按 `id` 配对。
 
@@ -102,7 +102,7 @@ belongs to. Make sure you are running inside a wmux terminal workspace.
 | 事件轮询 | `events.poll` | `{ workspaceId, cursor?, types?, max? }` |
 | 浏览器 | `browser.*`（navigate/evaluate/screenshot/click.cdp/type.cdp…） | 见 mcp-bundle |
 
-**工具文件**：`%USERPROFILE%\wmux-rpc.js`（Node，自动从 `workspace.list` 取第一个 workspaceId 缓存复用）。
+**工具文件**：仓库自带 [`wmux/wmux-rpc.js`](../wmux/wmux-rpc.js)；`WMUX_RPC_PATH` 或 `~/wmux-rpc.js` 仅是显式兼容 override。
 
 > **🚨 跨 workspace 写守卫（2026-06-13 · 2026-06-16 订正）**：`wmux-rpc.js` 把 `workspace.list` 的**第一个** workspace 当默认「允许写入」目标。**读操作**（`surfaces` / `read` / `panes`）不受限；**带 `ptyId` 的写操作**（`send` / `key`）若目标面板在**别的** workspace，会被守卫拦：`ERR: guard DENIED: pty ... belongs to "..."; allowed workspace is <id>`。
 > - **解法**：写命令尾部加 **`--allow-ws "<目标 wsId>"`** 显式放行（你亲手建的面板，先 `surfaces` 确认 pty 属自己再放行，零误伤）。也可设 env `WMUX_WS=<id>` 改默认。
@@ -130,13 +130,13 @@ node wmux-rpc.js split-here [vertical|horizontal] [--ws <wsId>]   # 默认 verti
 
 **用法**：
 ```powershell
-node %USERPROFILE%\wmux-rpc.js surfaces             # ★ 每次先跑：拿当前 ptyId↔窗口映射
-node %USERPROFILE%\wmux-rpc.js panes                # 列 pane（带 metadata/version）
-node %USERPROFILE%\wmux-rpc.js read  <pty> [行数]    # 读某窗口屏幕
-node %USERPROFILE%\wmux-rpc.js send  <pty> "<文字>"  # 往某窗口打字（不带回车）
-node %USERPROFILE%\wmux-rpc.js key   <pty> enter     # 发回车（=提交）
-node %USERPROFILE%\wmux-rpc.js enter <pty>           # send enter 的简写
-node %USERPROFILE%\wmux-rpc.js rpc   <method> [json] # 逃生口：发任意 RPC
+node wmux/wmux-rpc.js surfaces             # ★ 每次先跑：拿当前 ptyId↔窗口映射
+node wmux/wmux-rpc.js panes                # 列 pane（带 metadata/version）
+node wmux/wmux-rpc.js read  <pty> [行数]    # 读某窗口屏幕
+node wmux/wmux-rpc.js send  <pty> "<文字>"  # 往某窗口打字（不带回车）
+node wmux/wmux-rpc.js key   <pty> enter     # 发回车（=提交）
+node wmux/wmux-rpc.js enter <pty>           # send enter 的简写
+node wmux/wmux-rpc.js rpc   <method> [json] # 逃生口：发任意 RPC
 ```
 env 可覆盖：`WMUX_AUTH_TOKEN` / `WMUX_SOCKET_PATH` / `WMUX_WS`(workspaceId)。
 
@@ -187,7 +187,7 @@ node wmux-rpc.js key   <pty> enter
 
 ## 7. 文件 / 关联
 
-- 工具：`%USERPROFILE%\wmux-rpc.js`
+- 工具：仓库自带 `wmux/wmux-rpc.js`
 - 逆向来源：`…\wmux\app-2.17.1\resources\mcp-bundle\index.js`（明文，可 grep；**版本号目录随升级变**，旧文里的 `app-2.9.1` 现为 `app-2.17.1`）
 - daemon 实现：`…\resources\daemon-bundle\index.js`
 - 记忆条目：`memory/project_wmux_drive_panes_via_daemon_rpc.md`（会自动加载进每个 session）

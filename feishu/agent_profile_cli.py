@@ -218,6 +218,12 @@ def main(argv=None) -> int:
         provider_args = list(getattr(args, "provider_args", []) or [])
         if provider_args[:1] == ["--"]:
             provider_args = provider_args[1:]
+        run_cwd = str(Path(args.cwd).resolve()) if args.cwd else str(Path.cwd().resolve())
+        if args.command == "run" and agent_runtime.profile_spec(profile).runtime == "codex":
+            # `--yolo` bypasses approvals/sandboxing, but Codex project trust is a
+            # separate startup gate. Seed the exact cwd before a normal cx/cxp
+            # terminal launch, matching the bridge app-server path.
+            agent_runtime.ensure_codex_trust({"profile": profile}, run_cwd)
         command = agent_runtime.standalone_worker_cmd(
             profile,
             cwd=args.cwd,
@@ -235,7 +241,7 @@ def main(argv=None) -> int:
                 print(command)
             return 0
 
-        cwd = str(Path(args.cwd).resolve()) if args.cwd else None
+        cwd = run_cwd if args.cwd else None
         return subprocess.call([agent_runtime.resolve_shell(), "-lc", command], cwd=cwd)
     except (KeyError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

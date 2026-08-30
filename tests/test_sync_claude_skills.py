@@ -75,6 +75,24 @@ class SyncClaudeSkillsTests(unittest.TestCase):
         self.assertEqual(report["counts"], {"skip-existing": 1})
         self.assertFalse((self.destination / "claude-compat-source-dir").exists())
 
+    def test_repo_owned_feishu_is_never_generated_and_old_adapter_is_prunable(self):
+        self.write_skill("feishu")
+        stale = self.destination / "claude-compat-feishu"
+        stale.mkdir(parents=True)
+        (stale / "SKILL.md").write_text(
+            "---\nname: feishu\n---\n" + MARKER + "\n", encoding="utf-8"
+        )
+
+        preview = json.loads(self.run_sync("--include-commands", "--prune", "--summary").stdout)
+        self.assertEqual(preview["counts"], {"would-prune": 1})
+        self.assertTrue(stale.exists())
+
+        applied = json.loads(self.run_sync(
+            "--include-commands", "--prune", "--apply", "--summary"
+        ).stdout)
+        self.assertEqual(applied["counts"], {"prune": 1})
+        self.assertFalse(stale.exists())
+
     def test_full_prune_removes_only_marker_owned_single_file_adapter(self):
         command = self.source / "commands" / "explain.md"
         command.write_text("# Explain\n", encoding="utf-8")

@@ -2,10 +2,9 @@
 # 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
 jobs:
 - name: tennis-post-daily
-  desc: 每天 02:05 触发 tennis-post【巡航】：总控开独立 worker 固定写【1 篇】网球公司拆解(读 PLAN-200 §2·先接在制期)
-    → worker 必须跑到 _DONE.md → 总控亲验全闸 + 飞书成套交付主人 + 进度/巡航总结。GPT Image 最多2次但2/2不停工。机制见 docs/ARCH-300。(02:05 错开 xhs autopilot
-    的 01:00)
-  cron: 5 2 * * *
+  desc: 每天 00:05 触发 tennis-post【巡航】：总控开独立 worker 固定写【1 篇】网球公司拆解(读 PLAN-200 §2·先接在制期) → worker 必须跑到 _DONE.md
+    → 总控亲验全闸 + 飞书成套交付主人 + 进度/巡航总结。GPT Image 最多2次但2/2不停工。机制见 docs/ARCH-300。(00:05 错开 xhs autopilot 的 00:00)
+  cron: 5 0 * * *
   tz: Asia/Shanghai
   enabled: true
   prompt: '开启今天的 tennis post 巡航：按本仓 CLAUDE.md「🚀 巡航触发」+ docs/ARCH-300 §2 主循环跑——你当【总控】、自己不写帖，串行开子面板、每篇一个全新
@@ -16,12 +15,15 @@ jobs:
     Step B 定队列：读 docs/PLAN-200-master-roadmap.md §2 看写到哪、先接 posts/ 里在制未发期；没有在制才按弧顺序取下 1 篇(定 PNN+公司+slug、一句话记镜像)，不预取第2篇。
 
     Step C 写完这 1 篇：python _autopilot/spawn_worker.py spawn-writer PNN → 读 _autopilot/worker-prompt.md
-    填占位符 → spawn_worker.py kickoff <pty> "<填好的提示词>" → 按 ARCH-300 §4 的当前 runtime 等待协议只等 _DONE.md；未 DONE 就继续同一 worker，不因旧 _BLOCKED 或 GPT Image 2/2停工。
-    出了 _DONE 就亲跑 check_visual_assets/check_evidence_layout/imagegen_budget --final/check_cards/measure_all/taste_gate/check_copy/check_cover/check_titles/check_done（软件帖另加check_software），确认 SPEC-210 回填；按卡片清单 send_feishu_media 发我(--to 我 open_id·封面在前) + 干净文案飞书在线文档 + 一条进度 DM。worker 面板留存供返修、不关。
+    填占位符 → spawn_worker.py kickoff <pty> "<填好的提示词>" → 按 ARCH-300 §4 的当前 runtime 等待协议只等 _DONE.md；未 DONE
+    就继续同一 worker，不因旧 _BLOCKED 或 GPT Image 2/2停工。 出了 _DONE 就亲跑 check_visual_assets/check_evidence_layout/imagegen_budget
+    --final/check_cards/measure_all/taste_gate/check_copy/check_cover/check_titles/check_done（软件帖另加check_software），确认
+    SPEC-210 回填；按卡片清单 send_feishu_media 发我(--to 我 open_id·封面在前) + 干净文案飞书在线文档 + 一条进度 DM。worker 面板留存供返修、不关。
 
     Step D 收尾：这 1 篇交付后发我巡航总结 DM(是谁/镜像/几张卡/哪些数走 ScraperAPI 或商店/flow实测/哪些渠道具体受阻/全闸复核/是否预算封顶视觉放行) → 停(固定1·绝不起第2篇)。
 
-    GPT Image 规则：每期最多2次；2/2后选最佳登记结果并用本地HTML/CSS、真实素材裁切或确定性合成继续。只剩亮度/舞台光/暗部细节可保留Judge真实FAIL并审计放行；产品/Logo/文字/事实/尺寸/遮挡硬项继续本地修到过。异常自愈见 ARCH-300 §6：worker限流/卡→kickoff注「继续」不/clear；真断网/欠费/服务路绝才DM我。
+    GPT Image 规则：每期最多2次；2/2后选最佳登记结果并用本地HTML/CSS、真实素材裁切或确定性合成继续。只剩亮度/舞台光/暗部细节可保留Judge真实FAIL并审计放行；产品/Logo/文字/事实/尺寸/遮挡硬项继续本地修到过。异常自愈见
+    ARCH-300 §6：worker限流/卡→kickoff注「继续」不/clear；真断网/欠费/服务路绝才DM我。
 
     '
 - name: comment-factcheck-daily

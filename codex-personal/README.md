@@ -1,10 +1,17 @@
-# Codex Personal compatibility layer
+# Codex Personal compatibility layer（maintainer opt-in）
 
 This directory configures Codex Personal without modifying Claude Code's
 configuration. `~/.claude-personal` remains read-only and continues to be the
 upstream source for the user's custom workflows.
 
-## Refresh gstack
+This is a maintainer-only optional layer, not the blank-machine Link16 path.
+Repo-owned `feishu` is deliberately excluded from adapter generation and is
+installed by `feishu/profile_bootstrap.py` from `.agents/skills/feishu`.
+
+## Refresh gstack（可选，默认不安装）
+
+gstack 不属于 Link16 核心依赖，也不属于默认的新机 7 项清单。只有用户明确选择后才执行本节；
+不要因为安装 Codex、wmux 或同步个人 Claude skills 而自动安装/刷新 gstack。
 
 The gstack source checkout lives outside Codex skill discovery at
 `~/.gstack/repos/gstack`. Its official setup generates Codex-format skills.
@@ -46,7 +53,8 @@ python codex-personal/sync_claude_skills.py --include-commands --prune --summary
 The generated adapters live under `~/.agents/skills/claude-compat-*`. Each
 adapter loads the current source workflow from `~/.claude-personal` at runtime
 and translates Claude-specific tool names to Codex surfaces. Scripts and
-references are not copied, so there is no second source of truth.
+references are not copied, so there is no second source of truth. The publisher
+never generates `claude-compat-feishu`; Link16 owns that skill directly.
 
 Prune is accepted only for a full `--include-commands` scan and is invoked by
 `govctl sync -Prune`. It removes only a
@@ -56,7 +64,7 @@ are preserved.
 
 Use `--name envsync --name transcribe` to publish or verify a subset.
 
-## Configure the Personal profile
+## Configure the Personal profile（maintainer-only）
 
 Preview and apply the isolated Personal profile configuration:
 
@@ -67,8 +75,8 @@ python codex-personal/configure_personal.py --apply
 
 This aligns the Mattermost runtime loader, wmux MCP table, and Link16 hooks
 without touching `AGENTS.md`, auth, sessions, history, models, or project trust.
-User-level `AGENTS.md` files are physical generated entries owned by
-`$agent-profile-governance`, with CXP as the mature Codex template.
+User-level entry governance is optional personal configuration. It is not
+required to create a Link16 profile, register a bot, or run the bridge.
 
 ## Updates and authentication
 
@@ -91,7 +99,7 @@ codex mcp login vercel
 codex mcp list
 ```
 
-Update gstack separately, regenerate its Codex overlays with the official
+If the user explicitly opted in, update gstack separately, regenerate its Codex overlays with the official
 setup, then publish them with `refresh_gstack_codex.ps1`. Do not install the
 gstack source checkout directly inside `~/.agents/skills`, because recursive
 discovery sees its internal source skills as duplicates.

@@ -43,6 +43,8 @@ ORCH = Path(__file__).resolve().parent
 PROJECT = ORCH.parent
 sys.path.insert(0, str(ORCH))
 from bridge_env import resolve_env_path, bots_config_path, assert_sender_identity  # noqa: E402
+import bridge_outbound  # noqa: E402
+import turn_delivery_guard  # noqa: E402
 
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
@@ -50,6 +52,7 @@ os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 
 BASE = "https://open.feishu.cn/open-apis"
 ENV_PATH = resolve_env_path()
+STATE_DIR = PROJECT / "feishu" / "_state"
 
 
 def _env(*keys):
@@ -323,6 +326,8 @@ def main():
     ap.add_argument("--list-agents", dest="list_agents", action="store_true",
                     help="列出 .env 里所有可按名字喊的智能体（名字大小写/-↔_ 不敏感）")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
+    ap.add_argument("--proactive", action="store_true",
+                    help="明确这是本轮自动回复之外的额外通知；允许发到相同回址并记入历史")
     a = ap.parse_args()
 
     if a.list_agents:
@@ -348,20 +353,44 @@ def main():
         raise SystemExit(f"❌ 没有可发目标（给 --to/--to-agent/--in，或 bridge-session-{a.bot}.json 要有 chat_id）")
     ats = list(dict.fromkeys(ats))  # 去重保序
 
+    try:
+        guard = turn_delivery_guard.guard_outbound(
+            STATE_DIR, a.bot, target,
+            bridge_session=os.environ.get("FEISHU_BRIDGE_SESSION"),
+            proactive=a.proactive,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(f"❌ {exc}") from exc
+
     # a2a 标记盖章(2026-06-28)：发信方自己盖 [飞书_from_<我>_to_<对方>]——open_id 按 app 隔离·接收方反查不出
     # 发信人，必须发信方盖。接收桥见已有此标记就不重复加(p2a 才补 host 标记·见 feishu_bridge on_message)。
     send_text = f"{a.text} [飞书_from_{a.bot}_to_{a.to_agent}]" if a.to_agent else a.text
 
     # 发完即返回：a2a 回信由【桥自动投进发起方会话】(见 ARCH-140 新模型)，不再守望/轮询/--wait。
     ok, info = send_msg(a.bot, target, send_text, ats)
+    if a.to_agent:
+        route = {"kind": "a2a", "dest": target, "at": ats[-1] if ats else None}
+    else:
+        route = {"kind": "direct", "dest": target}
+    history_recorded = False
+    if ok and info:
+        history_recorded = bridge_outbound.append_delivery(
+            STATE_DIR, a.bot, origin="send_feishu_msg", route=route,
+            target=target, text=a.text, message_id=info,
+            proactive_override=a.proactive,
+        )
     out = {"ok": ok, "bot": a.bot, "to": target, "to_agent": a.to_agent, "at": ats,
-           "message_id": info if ok else None, "err": None if ok else info}
+           "message_id": info if ok else None, "err": None if ok else info,
+           "proactive_override": a.proactive, "guard": guard,
+           "history_recorded": history_recorded if ok else False}
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     else:
         tgt = f"{a.to_agent}（{target}）" if a.to_agent else target
         print(f"{'✅ 已发' if ok else '❌ 失败'} → {tgt}"
               + (f" @{len(ats)}个" if ats else "") + (f" · {info}" if not ok else ""))
+        if ok and not history_recorded:
+            print("⚠️ 消息已发出，但本地历史账本写入失败；不要重发，请修复账本后按 message_id 补记。")
     sys.exit(0 if ok else 1)
 
 

@@ -37,6 +37,16 @@ class CommittedRosterIsTemplateOnly(unittest.TestCase):
             "不许有单 bot 兜底默认：它会把没配名册的机器接到别人的飞书应用上",
         )
 
+    def test_local_example_is_safe_to_copy_before_registration(self):
+        raw = json.loads(
+            (ROOT / "feishu" / "bridge-bots.local.example.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            raw.get("bots"), [],
+            "SOP-100 会让新机器直接复制 local example；它的 bots 必须为空，"
+            "否则会留下一个带假凭据键的可运行 bot",
+        )
+
 
 class MissingRosterFailsClosed(unittest.TestCase):
     def _load_with_roster(self, roster_dir):

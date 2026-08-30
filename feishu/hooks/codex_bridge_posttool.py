@@ -8,6 +8,14 @@ import time
 from pathlib import Path
 
 
+def _read_stdin_json():
+    """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stream.read()
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    return json.loads(text.lstrip("\ufeff"))
+
+
 def _label(tool_name, tool_input):
     tool_input = tool_input or {}
     if tool_name in ("Bash", "Shell", "PowerShell"):
@@ -34,7 +42,7 @@ def main():
     if os.environ.get("FEISHU_CODEX_EVENT_STREAM") == "1":
         return
     try:
-        inp = json.loads(sys.stdin.read().lstrip("\ufeff"))
+        inp = _read_stdin_json()
     except Exception:  # noqa: BLE001
         return
     tool_name = inp.get("tool_name")

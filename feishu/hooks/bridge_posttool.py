@@ -19,6 +19,14 @@ import time
 from pathlib import Path
 
 
+def _read_stdin_json():
+    """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stream.read()
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    return json.loads(text.lstrip("\ufeff"))
+
+
 def _project_dir():
     p = os.environ.get("CLAUDE_PROJECT_DIR")
     if p and os.path.isdir(p):
@@ -31,7 +39,7 @@ def main():
     if not bot:
         return
     try:
-        inp = json.load(sys.stdin)
+        inp = _read_stdin_json()
     except Exception:                             # noqa: BLE001
         return
     sid = inp.get("session_id", "")
