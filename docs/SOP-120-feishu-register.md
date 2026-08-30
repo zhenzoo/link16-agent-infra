@@ -53,7 +53,9 @@ python feishu/feishu_bridge.py start --bot <新bot>
 
 > 🚨 **第 7 步不能省：主人必须【私聊】新 bot 一次（2026-08-02 血的教训 · 见 [`ARCH-110 §2.5.3`](ARCH-110-feishu-bridge.md)）。**
 > bot 的 owner 是**第一个私聊 @ 它的人**自动认下的；**群里 @ 它不算**（群消息按设计**绝不** auto-claim owner，否则 peer bot 会夺 owner）。
-> 没认主 → 该 bot 的普通回复（`route=p2a` 要投主人 DM）**无处可投**，兜底链会退到「群里 @ 过它的那个 peer bot」→ bot 给 bot 发私聊 → 飞书 `230013` → 全部降级**刷进群**。
+> 没认主 → 该 bot 的普通回复（`route=p2a` 要投主人 DM）**无处可投** → receipts 记 `delivered=false`／`via=null`／`err=no_target`，重试到 `GIVE_UP_SEC`(600s) 后放弃解堵。
+> **2026-08-30 起没有任何兜底通道**（`_webhook_fallback`／`notify.py`／看门狗 `notify_webhook` 全部删除），所以【不会】再降级刷进群 —— 发不出去就是发不出去，主人靠「bot 不吭声」自己察觉。
+> （历史：拆除前它会退到「群里 @ 过它的那个 peer bot」→ bot 给 bot 发私聊 → 飞书 `230013` → 全部刷进群，正是 taoci-7 刷群 767 条那次事故的形状。）
 > **实证**：`tb25-phd-taoci-7/8/9/10` 建号后只在群里被 @ 过、从没被私聊 → 合计 **18 万+ 次 230013**、往交流水吧刷了 **767 条**；而 `taoci-4/5/6` 主人私聊过 → 同一份代码**一次没犯**。
 > **补救**（bot 已在跑、不想重启）：`load_owner` 每次现读盘不缓存 → 直接补写 `feishu/_state/bridge-owner-<bot>.json` = `{"open_id": "<主人在该 app 下的 open_id>"}` 即**热生效**。
 > ⚠️ **open_id 是 per-app 的**——同一个人在每个应用下 open_id 不同，**不能跨 bot 复制**；用该 bot 自己的凭据查群成员 API（`_chat_members`）现取。
@@ -352,7 +354,8 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 | `open_id` | ❌ 必换 | **per-app**。2026-08-27 实测同一个人在三个应用下：`ou_ffcb0d…` / `ou_ca0efa…` / `ou_878174…` |
 
 **⚠️ 最大的坑**：`bridge-owner-<bot>.json` 里存的是**上一个应用下**的主人 open_id。留着 → 桥以为已认主 →
-拿一个在新应用下不存在的 open_id 投 DM → `230013` → 兜底链降级 → **刷群**（ARCH-110 §2.5.3 的 taoci-7 事故类型）。
+拿一个在新应用下不存在的 open_id 投 DM → `230013` → **投递失败并如实记账**（`delivered=false`）。
+（2026-08-30 拆除兜底之前，这里会降级**刷群** —— 即 ARCH-110 §2.5.3 的 taoci-7 事故类型。现在不会了，但 open_id 用错依然是错，只是错得看得见。）
 第二个坑：`register_feishu_app.append_registry_stub` 对**已存在的名字是幂等跳过**，
 所以重建后它**不会**刷新 `agent-registry.json` 里的 `open_id` → a2a 寻址会打到死 id。
 两个坑都由 [`feishu/reset_bot_identity.py`](../feishu/reset_bot_identity.py) 机械处理，**别靠人记得删哪几个文件**。
