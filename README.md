@@ -123,7 +123,8 @@ python feishu/service_doctor.py           # 文件/配置/运行/真实收发四
 
 # 7) 在飞书里【私聊】这只新 bot 发一句「在吗」
 #    ⚠️ 必做：bot 的主人 = 第一个私聊它的人。群里 @ 它不算。
-#    漏了这步不会报错，但它以后的回复会无处可投、降级刷进群。
+#    漏了这步不会当场报错，但它以后的回复【无处可投】：receipts 记 delivered=false·err=no_target，
+#    重试到 GIVE_UP_SEC 后放弃。2026-08-30 起【没有任何兜底通道】，所以不会再降级刷进群 —— 消息就是发不出去。
 ```
 
 gstack 不在默认安装范围。clone Link16 会带上 repo-owned `feishu` skill 真源；
