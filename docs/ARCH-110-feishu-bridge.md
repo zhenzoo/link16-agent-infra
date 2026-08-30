@@ -39,7 +39,7 @@ last_reviewed: 2026-08-17
 
 ```
 你的飞书群
-├ 机器人「xhs-card」  = scripts/notify.py(webhook) · 单向播报 · 纯脚本「又笨又稳」
+├ ~~机器人「xhs-card」 = notify.py(webhook) 群喇叭~~ · **2026-08-30 整条拆除**（见 §兜底）
 │    瘦身后只发: 真告警(卡死/限流自愈/桥挂/escape) + 关键里程碑(ready/发布页铺好/已入库)
 │    砍掉: 每小时巡检 + 逐条进度  →  想知道进度就「@ 智能体问」
 └ 智能体「tb24-xhs-autopilot」等(可 N 个) = feishu/feishu_bridge.py · 飞书 SDK · 双向对话
@@ -239,8 +239,9 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
   - **自然实验（钉死因果·非推测）**：`taoci-4/5/6` 同一份代码、同样症状，主人 2026-07-30 12:50:50 私聊它们 → **12:51:11 自动认主人写下 owner 文件 → 230013 当场归零、之后 3 天干净**。差别只有「有没有 owner 文件」。
 - **修**（`feishu_bridge.py`）：
   1. **群坐标绝不进 DM 坐标**：`_merge_session` 只在 `not is_group` 时写。三个消费方（`mirror_target` / `send` CLI / 文档授权）要的都是**主人的私聊坐标**。群里被 @ 但还没认主 → 日志明说「请主人私聊它一句完成认主」，不再静默降级。
-  2. **降级必留痕**：`_webhook_fallback` 收 `reason`（真实报错）+ `intended`（本该投的 DM 目标），**成功/失败都写 receipts**，并把原因**印在发到群的那条消息头上**（`⚠️ 降级原因：…`）——看到刷屏的人当场知道为什么，不用翻日志反推。`guaranteed_send` 把 `_send_checked` 的真实错误一路带进来。
-  3. **drainer `_send_plain` 补回执**：旧版这里**一行 return、零回执**，`card_send` 回 `'webhook'`（=投错地方了）被折成 `True` → HWM 照推 → outbox 一片干净。现在把 `via` 原样记下并标 `degraded`。
+  2. **未送达必留痕**：`_record_undelivered()` 收 `reason`（真实报错）+ `intended`（本该投的 DM 目标），写 receipts（`delivered:false`/`via:null`）。`guaranteed_send` 把 `_send_checked` 的真实错误一路带进来。
+     > **2026-08-30 契约反转**：原来这里是 `_webhook_fallback`——降级投进群、并把原因印在群消息头上。主人拍板**整条拆除**：兜底给失败开了一条特殊通道，让「没送到」长得像「送到了」。现在只留痕、不改投，`guaranteed_send` 真失败一律回 `'failed'`。
+  3. **drainer `_send_plain` 补回执**：旧版这里**一行 return、零回执**，`card_send` 回 `'webhook'`（=投错地方了）被折成 `True` → HWM 照推 → outbox 一片干净。现在把 `via` 原样记下（`failed` = 没送到，肉眼一看就知道；`degraded` 字段随 webhook 一起退休）。
   4. **顺带修一个必炸的空指针**：`_route_to_dest` 的 `ALLOWED_OPEN_IDS[0]` —— 该常量是 **`set`**（`_load_allowed` 返回 set），取下标必抛 `TypeError: 'set' object is not subscriptable`。它**只在 mirror_target 为空时才走到**，此前一直被「会话 open_id 恒有值（哪怕是错的 peer）」挡着没暴露；修掉污染后它就是 no-owner 新 bot 的必经路 → 一并改成 `next(iter(sorted(...)), None)`。
 - **验**：① 单测 `tests/test_dm_fallback_traceability.py` 6 项（兜底成功也留痕 / 原因印进群消息 / 真实报错一路带到底 / owner 盖过被污染的 session）；全仓 111 项通过。② **线上热修**：`load_owner` 每次现读盘、**不缓存** → 直接补写 `bridge-owner-<bot>.json` 即**热生效、无需重启桥**。四个 bot 补写后最后一次 230013 都在补写**前 2–5 秒**，之后 **200 条回执全部 delivered、0 条降级**。
 - **预防（新 bot 上线清单）**：注册完 **主人必须私聊它一句**完成认主（同 `SOP-125` 改名后那条）。否则该 bot 的 `route=p2a` 回信无处可投。**只在群里 @ 它不算认主**（群消息按设计绝不 auto-claim owner）。
@@ -254,7 +255,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 - **进度卡（原地长大 + 满则轮换）**：PostToolUse hook 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**——你看到的是**同一张卡在长大**（实时显示 💭思考 / 📝文字 / ✏️📖🔧 全工具 + 头部 🔧/💭/🪙 计数）。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随【信息量】有界增长，**不随时间线性刷屏**。
 - **Codex milestone 工具摘要（PLAN-916）**：commentary 保持原样；每个相邻工具段集总为“实际调用次数 + 工具/运行时类别 + 访问/修改/新增路径”。路径仓库相对化、每组最多 5 个，超出显示“另有 N 个”；只读段明确写“修改：无”。header 显示“计划完成度 + 实际工具次数”，不暴露内部里程碑/工具段计数。完整命令、参数、输出、绝对路径和 reasoning 不进入任何持久层或卡片。
 - **答案卡（同款·超长拆连续多卡）**：Stop hook 把该轮最终回复 + 过程小结 footer 写 outbox；drainer 发答案卡，**>2800 字按行拆成连续多卡**（card1 满→card2 接着写·**不再退 markdown**）。
-- **最终兜底**：只有 `new_card`/`update_card` **彻底失败**才退 `guaranteed_send`（互动卡→markdown→text→webhook·每级验真送达）。
+- **逐级降级（仍是同一条 DM）**：只有 `new_card`/`update_card` **彻底失败**才退 `guaranteed_send`（互动卡→markdown→text·每级验真送达）。**没有第四级**——2026-08-30 起发不到就是发不到，绝不改投群/别的 bot。
 - **发出前链接检查（PLAN-921）**：卡片、markdown/text 兜底与群纯文字共用 `outbound_links.sanitize_outbound_links`。本地绝对路径、`/D:/...`、`file:///`、UNC、仓库相对路径从 Markdown 链接解除，改成“标签 + 明文代码路径”；普通行内网页链接不动；独占一行的外链及飞书 docx / Cloudflare Pages 会另露原始 URL。代码区、锚点和图片 Markdown 保持既有语义。处理幂等，多级 fallback 重跑不会重复加 URL。
 - **drainer deps**（注入·见 `feishu_bridge.run()`）：`new_card(text)->message_id`（`_ensure_card_snapshot` 发卡）· `edit_card(mid,text)->bool`（`update_card`）· `send_plain(text)`（`card_send` 兜底）。`coalesce_sec` 只作「相邻 update 最小间隔（批量化）」，**轮换靠字数/失败·不靠时间**。
 - **裸 URL 自动 `_linkify`** 成 `[url](url)` 可点（飞书卡片不自动 linkify 裸网址）。
@@ -274,13 +275,13 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
   | `[id] 收到 <谁>: <前80字>` | 消息进来 + 通过鉴权（owner/白名单） |
   | `[id] 已注入 pty=… pinned=有/无` | 已把话发进 bot 会话；`pinned` = 这会话的 jsonl 是否已钉死 |
   | `[id] 📌 钉定 transcript …xxx.jsonl` | （首轮/换会话）探测并钉死了它自己的 jsonl |
-  | `[id] 回复 <谁> via=card/markdown/text/webhook stream_ok=… len=… 耗时` | 最终怎么发出去、走第几级、多少字、花多久 |
+  | `[id] 回复 <谁> via=card/markdown/text/failed stream_ok=… len=… 耗时` | 最终怎么发出去、走第几级、多少字、花多久 |
 
 - **怎么一眼判断健不健康**：
   - 正常 = 看到「收到 → 已注入 →（必要时📌钉定）→ 回复 via=…」闭环。
   - `via=card stream_ok=True` = 流式卡片正常送达 ✅
   - `via=markdown` / `via=text` = 卡片那级出问题但**已降级送达**（你手机仍收到）⚠️ 可观察
-  - `via=webhook` = 前三级全失败、走了喇叭兜底（该查飞书应用权限 / 网络）🔴
+  - `via=failed` = 三级全失败、**消息没送到**（该查飞书应用权限 / 网络）🔴 —— 已无兜底通道，这是刻意的
   - 只看到「收到 + 已注入」却**迟迟没有「回复」那行** = 这轮还没答完（长任务正常）或卡在解析（配合 `status` + `/screen` 看现场）。
 - **进程 / 会话活性**：`python feishu/feishu_bridge.py status`（看每 bot 进程在不在、会话活没活）。
 - **outbox 投递健康（v8）**：`python feishu/bridge_doctor.py`（每 bot outbox backlog / 是否 stuck·doctor_loop 已在桥内自愈·这是手动巡检版）。
@@ -300,7 +301,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
   - **真用户消息**：带 `[飞书-<bot>]` 标记 = 飞书来的（你已在飞书里打过）→ **丢弃不回搬**；无标记 = 终端敲的 → 搬到飞书 DM（`🧑 你（终端）`）。
   - **assistant 终答**（`end_turn` 且有文本）：归属「飞书来的轮」→ **跳过**（@-路径已发 · 防重发）；归属「终端轮」→ 搬到飞书 DM（`🖥 [终端会话]` · 长文 SDK 自动分条）。
 - **搬到哪**：bot 的 **owner open_id（私聊 DM）**（`bridge-owner-<bot>.json` · 首个 @ 它的人即 owner · 开机即有 ·「优先私聊」满足）。
-- **用什么发**：镜像 / 主动推送 / 短回复一律走 **`card_send`** = 飞书**互动卡片**（CardKit `channel.stream` · 和 @-路径同款好看可交互排版）· 卡片装不下（>`CARD_SAFE_CHARS`）或失败才退 `guaranteed_send`（markdown→text→webhook）。**不发裸文字消息。**
+- **用什么发**：镜像 / 主动推送 / 短回复一律走 **`card_send`** = 飞书**互动卡片**（CardKit `channel.stream` · 和 @-路径同款好看可交互排版）· 卡片装不下（>`CARD_SAFE_CHARS`）或失败才退 `guaranteed_send`（markdown→text）。**不发裸文字消息。**
 - **进度卡 与 答案 分家 `_deliver_turn`**（v7.16 · 2026-06-15）：① 一张**流式进度卡**实时刷 💭思考 / 🔧工具 / 🪙token（`channel.stream` + emit·答完定格「✅ 完成·见下↓」·**绝不放答案**）；② 答案**永远只走 `card_send` 发一张卡**（一次性·瞬间·任何时长可靠·≤容量单卡 / 超容量分条）。卡片不碰答案 → **结构上不可能双发**，又**保留实时进度**。每轮 2 张卡（进度卡 + 答案卡）。**裸 URL 自动 `_linkify` 成 `[url](url)` 可点**（飞书卡片不自动 linkify 裸网址）。（v7.15 曾砍掉进度卡=过度化简·v7.16 撤回）
 
 **防回环 + 防重发（两道独立闸 · 原则「宁漏不重」）**：
@@ -314,7 +315,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 ```
 python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/open_id>] --json
 ```
-→ 独立短进程重建 `FeishuChannel`（REST · 不依赖常驻桥）→ 推到持久化的 `chat_id` / owner open_id → 复用 `guaranteed_send` 四级兜底 → 打印 `{delivered, via, to}`。**这是 Claude 在终端会话里主动发飞书的唯一正道**（`scripts/notify.py` 是群喇叭 · 只用于机械告警 · 绝不用于对话回复）。
+→ 独立短进程重建 `FeishuChannel`（REST · 不依赖常驻桥）→ 推到持久化的 `chat_id` / owner open_id → 复用 `guaranteed_send` 逐级降级 → 打印 `{delivered, via, to}`。**这是 Claude 在终端会话里主动发飞书的唯一正道**（群喇叭 `notify.py` 已于 2026-08-30 删除）。
 
 **配套 · 送达回执**（解决「我只知道写了不知道发没发」）：桥每发一条往 `_autopilot/bridge-receipts-<bot>.jsonl` 追加一行 `{tid, ts, kind, delivered, via, len, …}`。终端会话 `Read` 这文件尾巴即可确认「我上一条到底送达没、走第几级」（事后确认 · 非同轮）。
 
@@ -725,7 +726,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 - **消息串行**：同一 bot 同时收多条消息 → per-bot `asyncio.Lock` 串行处理（Zara 式「运行中消息排队下一轮」· 防并发注入交错丢回复 · 2026-06-15 修）。
 - **owner 自动信任**：每个 bot **首个 @ 它的人自动成 owner**（之后只认它 · 免手维护白名单 · open_id 是 per-app 的故必须如此 · 保留 `.env` 全局白名单兼容）。
 - **消息样式**：回复走**飞书互动卡片流式发**（实时进度 + 最终答案 + 过程小结），超长自动转分条普通消息，详见 §2.6——你（bot 会话）不用自己管发送格式，桥统一处理；你只管把答案写好（markdown 写法即可）。
-- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python feishu/feishu_bridge.py send --bot <bot> --file reply.md --json`（独立 REST · 绕卡片超时 · 走 bot 自己的 DM 通道 · **绝不用 `scripts/notify.py` 群喇叭**）。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python feishu/feishu_bridge.py doctor`。
+- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python feishu/feishu_bridge.py send --bot <bot> --file reply.md --json`（独立 REST · 绕卡片超时 · 走 bot 自己的 DM 通道；群喇叭 `notify.py` 已于 2026-08-30 删除）。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python feishu/feishu_bridge.py doctor`。
 
 ---
 

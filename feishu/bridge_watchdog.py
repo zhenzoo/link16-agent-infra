@@ -321,7 +321,7 @@ def _alert_target(bot_name):
             return oid                      # 该 bot 视角下的主人 open_id（DM 直达）
     except Exception:                       # noqa: BLE001
         pass
-    return None                             # 交给调用方退 webhook，别静默
+    return None                             # 交给调用方如实报失败，别静默
 
 
 def notify(bot_name, kind, text):
@@ -330,8 +330,12 @@ def notify(bot_name, kind, text):
     这是本 plan 相对旧看门狗最重要的一处改动：旧的调 xhs `scripts/notify.py`，
     走的是**飞书自定义机器人 webhook**（另一个群）——所以主人在 DM 里永远看不到（实测）。
 
-    返回 True = **确认送出去了**（DM 或 webhook 任一成功）。调用方必须认这个返回值：
-    告警是整套设计里唯一面向人的出口，它失败而流程照打 ✅，就是又一个假绿灯。"""
+    返回 True = **DM 确认送出去了**。调用方必须认这个返回值：
+    告警是整套设计里唯一面向人的出口，它失败而流程照打 ✅，就是又一个假绿灯。
+
+    2026-08-30 主人拍板拆掉 webhook 退路：兜底给失败开了一条特殊通道，让「没送到」
+    长得像「送到了」。发不到主人自己会察觉（bot 不吭声就是信号），届时他直接找 link16
+    或上机器看。所以这里 DM 失败就是失败，不改投任何地方。"""
     if kind in _STATEFUL_KINDS:
         alerts = _alerts_load()
         key = f"{bot_name}:{kind}"
@@ -361,11 +365,10 @@ def notify(bot_name, kind, text):
                            env=env, creationflags=NO_WINDOW)
         ok = r.returncode == 0
         if not ok:
-            # 🩸 DM 发不出去时**必须退回 webhook**，绝不能只写日志就算了 ——
-            # 告警是整套设计里**唯一面向人的出口**，它静默失败 = 「干成了但没人知道」，
-            # 正是本 plan 立项时要根治的形状。
-            log(f"[{bot_name}] DM 发不出（{(r.stderr or r.stdout or '')[:100]}）→ 退回 webhook")
-            ok = notify_webhook(f"[{bot_name}] {text}")
+            # 2026-08-30 起不再改投任何通道：喊清楚、如实返回 False，让调用方把「没通知到」
+            # 记进心跳账（见下面 failover 的 undelivered 记录），主人上机器时一眼看得见。
+            log(f"[{bot_name}] ❌ DM 告警发不出（{(r.stderr or r.stdout or '')[:100]}）"
+                f"·不改投别处（兜底已拆除）")
         log(f"[{bot_name}] DM 告警 {kind} → {'✅' if ok else '❌ ' + (r.stderr or '')[:120]}")
         return ok
     except Exception as e:                             # noqa: BLE001
@@ -373,36 +376,21 @@ def notify(bot_name, kind, text):
         return False
 
 
-def notify_webhook(text):
-    """**桥不可用时**的退路（飞书自定义机器人 webhook · 纯标准库 · 强制绕代理）。
-
-    为什么留这条：会话级事件（撞限流/换号/接手）一律走 bot 自己的 DM，主人才看得见；
-    但「桥自己死了」这类事件**恰恰发不出 DM**——双通道冗余的意义就只在这一种情况。
-    没配 webhook 就静默跳过（只记日志），**不因为缺一个可选通道而让守护进程报错**。"""
-    url = _webhook_url()
-    if not url:
-        log("（没配 webhook，桥级告警只进日志）")
-        return False
-    try:
-        import urllib.request
-        body = json.dumps({"msg_type": "text", "content": {"text": text}}).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 国内端点·绕代理
-        with opener.open(req, timeout=15) as r:
-            ok = json.loads(r.read().decode("utf-8", "replace")).get("code") == 0
-        log(f"webhook 告警 → {'✅' if ok else '❌'}")
-        return ok
-    except Exception as e:                               # noqa: BLE001
-        log(f"webhook 告警失败：{e}")
-        return False
+def _notify_bridge_down():
+    """「桥进程挂了」不属于任何单个 bot，但仍然走 DM —— 不需要第二条通道。
 
 
-def _webhook_url():
-    for key in ("FEISHU_WATCHDOG_WEBHOOK_URL", "FEISHU_XHS_WEBHOOK_URL"):
-        v = agent_quota._env_value(key)
-        if v and "PASTE_" not in v:
-            return v
-    return None
+    挑名册里第一个能解析出告警目标的 bot 代为播报 —— 选的是【发信人】，
+    不是第二条通道：消息仍然只进主人那一个 DM。
+    """
+    text = ("⚠️ 看门狗：飞书桥进程挂了（之前在线）· "
+            "恢复：在 link16-agent-infra 仓跑 python feishu/feishu_bridge.py start")
+    for spec in fb.load_bots():
+        name = spec.get("name")
+        if name and _alert_target(name):
+            return notify(name, "bridge_down", text)
+    log("⚠️ 桥挂了，但名册里没有任何 bot 能解析出告警目标 → 只进日志")
+    return False
 
 
 def _heartbeat_write(panes, acted):
@@ -521,6 +509,10 @@ def scan_background(cwd):
                 files.append({"path": str(p.relative_to(root)).replace("\\", "/"),
                               "age_min": round(age, 1),
                               "size": p.stat().st_size})
+    这里原本发群喇叭 webhook，理由写着「桥挂了就发不出 DM」。**那句是错的**：
+    notify() 是 shell 出 send_feishu_msg.py，它直连飞书 REST、不经过桥进程。
+    2026-08-30 实测：停掉 tb24-notes-3 的桥进程后用它发 DM 仍然 ✅ 已发。
+    于是 webhook 的最后一条存在理由也没了，随全部兜底一起拆除。
     except Exception as e:                              # noqa: BLE001
         log(f"文件活动扫描失败（不致命）：{e}")
     files.sort(key=lambda f: f["age_min"])
@@ -828,7 +820,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         log(f"✅ {bot_name} {cur} → {tgt} 换号 + 接手完成（已通知主人）")
     else:
         log(f"⚠️ {bot_name} {cur} → {tgt} 换号 + 接手【动作成功，但主人没被通知到】"
-            f" —— DM 与 webhook 都没送出去。去 {bot_name} 的面板看一眼确认。")
+            f" —— DM 没送出去（已无兜底通道·这是刻意的）。去 {bot_name} 的面板看一眼确认。")
         try:
             alerts = _alerts_load()
             alerts.setdefault("undelivered", []).append(
@@ -1038,9 +1030,7 @@ def cmd_run(auto=True):
             elif ba is False and bridge_seen_alive and not bridge_alerted:
                 log("⚠️ 飞书桥进程挂了（之前在线）")
                 bridge_alerted = True
-                # 桥挂了就发不出 DM → 这是双通道冗余存在的唯一理由，退回 webhook
-                notify_webhook("⚠️ 看门狗：飞书桥进程挂了（之前在线）· "
-                               "恢复：在 link16-agent-infra 仓跑 python feishu/feishu_bridge.py start")
+                _notify_bridge_down()
 
             _heartbeat_write(len(ptys), acted)
             if tick % HEARTBEAT_EVERY == 0:
@@ -1215,7 +1205,7 @@ def cmd_status(verbose=False):
         print(f"🔴 **有 {len(und)} 次换号【没通知到主人】**（动作成了但唯一面向人的出口断了）：")
         for u in und[-3:]:
             print(f"     {u.get('at')} {u.get('bot')} {u.get('from')}→{u.get('to')}")
-        print("     查：该 bot 的 feishu/_state/bridge-owner-<bot>.json 在不在、webhook 配了没")
+        print("     查：该 bot 的 feishu/_state/bridge-owner-<bot>.json 在不在、凭据配了没")
 
     # ④ 跨机自检
     print("\n本机适配自检：")

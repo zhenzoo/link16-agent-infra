@@ -208,11 +208,27 @@ def test_告警冷却_状态类会冷却_动作类必发(tmp_path, monkeypatch):
     assert len(sent) == 2, "动作类告警绝不能被冷却吞掉"
 
 
-def test_告警走的是DM而不是webhook():
-    """本 plan 的立项起因就是「告警发去了 webhook，主人在 DM 里什么都看不到」。"""
+def test_告警只走DM_不许再有任何改投别处的通道():
+    """本 plan 的立项起因就是「告警发去了 webhook，主人在 DM 里什么都看不到」。
+    2026-08-30 主人拍板把 webhook 整条拆除（连「桥挂了」那条也走 DM ——
+    实测停掉 tb24-notes-3 的桥后 send_feishu_msg 仍能发出，所谓「双通道冗余的唯一理由」是错的）。
+    这是【反向闸】：谁再想加第二条通道，这条必须先红。"""
     src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
-    body = src[src.index("def notify("):src.index("def _webhook_url")]
+    body = src[src.index("def notify("):src.index("def _notify_bridge_down")]
     assert "send_feishu_msg.py" in body, "会话级告警必须走 bot 自己的 DM"
+    assert "notify_webhook" not in body, "DM 失败不许改投 webhook"
+    for banned in ("def notify_webhook", "def _webhook_url", "FEISHU_XHS_WEBHOOK_URL",
+                   "FEISHU_WATCHDOG_WEBHOOK_URL"):
+        assert banned not in src, f"{banned} 已随兜底一起拆除，不许复活"
+    # 用 tokenize 剥掉注释和字符串（含 docstring）再判 —— 只按行首 # 过滤会把
+    # 文档里的历史说明误判成活代码，那种尺子会一直红、久了就被人注释掉。
+    import io as _io, tokenize as _tk
+    code = []
+    for tok in _tk.generate_tokens(_io.StringIO(src).readline):
+        if tok.type not in (_tk.COMMENT, _tk.STRING):
+            code.append(tok.string)
+    live = [t for t in code if "webhook" in t.lower()]
+    assert live == [], f"出现了活的 webhook 代码符号：{live}"
 
 
 
@@ -291,20 +307,22 @@ def test_告警目标_必须用那个bot自己的owner文件(tmp_path, monkeypat
     assert w._alert_target("b") == "ou_B", "绝不能串到别的 bot 的 open_id"
 
 
-def test_告警_DM失败必须退webhook而不是静默(tmp_path, monkeypatch):
-    """告警是整套设计里【唯一面向人的出口】，它静默失败 = 干成了但没人知道。"""
+def test_告警_DM失败必须如实报False而不是改投别处(tmp_path, monkeypatch):
+    """告警是整套设计里【唯一面向人的出口】，它静默失败 = 干成了但没人知道。
+
+    2026-08-30 主人拍板拆掉 webhook 退路（契约反转）：以前 DM 失败要退回群喇叭，
+    现在**不许改投任何地方**。理由是当天亲眼见到的——兜底给失败开了条特殊通道，
+    让「没送到」长得像「送到了」：那个群机器人 2026-07 被加了关键词校验，748 次全被拒，
+    洪水时医生朝它喊「需人工」，主人 42 分钟一无所知。
+    发不到主人自己会察觉（bot 不吭声就是信号）。所以这里锁死：DM 失败 → 如实 False。"""
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(w, "ALERTS_PATH", tmp_path / "a.json")
     monkeypatch.setattr(w, "_alert_target", lambda b: None)
     monkeypatch.setattr(w.subprocess, "run",
                         lambda *a, **k: type("R", (), {"returncode": 1, "stderr": "没有可发目标", "stdout": ""})())
-    hit = []
-    monkeypatch.setattr(w, "notify_webhook", lambda t: hit.append(t) or True)
-    assert w.notify("botx", "handed", "换号成功") is True
-    assert hit, "DM 发不出时必须退回 webhook"
-    # webhook 也失败 → notify 必须如实返回 False，让调用方降级
-    monkeypatch.setattr(w, "notify_webhook", lambda t: False)
-    assert w.notify("botx", "handed", "再来一条") is False, "两条路都断了就必须如实报 False"
+    assert w.notify("botx", "handed", "换号成功") is False, "DM 发不出就必须如实报 False"
+    assert not hasattr(w, "notify_webhook"), "webhook 通道已拍板拆除·不许复活"
+    assert not hasattr(w, "_webhook_url"), "webhook URL 解析已随之退休"
 
 
 def test_换号配额_不因告警送达与否而改变():

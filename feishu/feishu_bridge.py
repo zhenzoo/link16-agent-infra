@@ -88,7 +88,6 @@ for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"
 os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(PROJECT / "scripts"))      # 让 webhook 兜底能 import notify
 from jsonl_reply_extract import extract  # noqa: E402  (find_ask_picker 退役·答题侧改结构化 bridge-picker 状态·ARCH-101 §2.10)
 import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
@@ -96,10 +95,6 @@ import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·�
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
 from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
 
-try:
-    import notify as _notify  # scripts/notify.py · 纯标库 webhook（绕代理 3 重试）· 必达最后一道兜底
-except Exception:  # noqa: BLE001
-    _notify = None
 
 
 def _ts():
@@ -113,7 +108,7 @@ def _force_utf8_std():
     于是 `blog()` 里一个 ❌ 就抛 UnicodeEncodeError。**实证不是理论风险**：tb24 的
     `_logs/bridge-tb24-xhs-autopilot.log` 里，`blog()` 第 115 行抛 gbk 编码错 → 冒泡到
     lark_channel 的 handler → 「FeishuChannel: handler for %r raised」= 那条飞书消息整个没处理。
-    连带 `_webhook_fallback` 也中招：日志抛错被它外层 except 吞成「兜底失败」，
+    连带兜底记账也中招：日志抛错被外层 except 吞掉，
     **消息其实已经发出去了，却记成 delivered=False**。
 
     改 stdout 而不是改每一处 print：`blog()` 只是众多出口之一，飞书 SDK 自己的 logger 也写 stderr，
@@ -135,7 +130,7 @@ def blog(name, msg):
     """带时间戳的桥日志（flush · 给 bridge-<bot>.log）。**绝不因编码抛错**。
 
     第二层保险：`main()` 已经把 stdout 顶成 UTF-8，但本模块也会被别的工具 import（那条路不过 main），
-    此时 stdout 可能仍是 GBK。日志抛错的代价太大——`_webhook_fallback` 会把它吞成「兜底失败」，
+    此时 stdout 可能仍是 GBK。日志抛错的代价太大——会被外层 except 吞掉，
     于是消息明明发出去了却记成没送达。所以这里降级成打问号，也绝不让一行日志掀翻调用方。
     """
     line = f"[{_ts()}][{name}] {msg}"
@@ -1124,12 +1119,12 @@ def _drive_picker(pty, workspace_id, answers, picker):
         return False
 
 
-# ---------- 必达发送：检查 SendResult · 重试 · 卡片→markdown→纯文本→webhook 四级兜底 ----------
+# ---------- 必达发送：检查 SendResult · 重试 · 卡片→markdown→纯文本 三级降级（同一条 DM·不改投别处）----------
 async def _send_checked(channel, chat_id, payload, name, kind):
     """单次 channel.send + 检查 SendResult.success（带 retryable 重试）。绝不抛。
     返回 (ok: bool, err|None, transient: bool)。**transient**=True 表【瞬时网络错/可重试】（DNS 解析不了 /
     ConnectionError / 或 retryable API 错——会自己恢复·该【耐心重投】）；False=【真失败】（非 retryable API 错·
-    如 230013 目标非法——重试没用·该走兜底）。上层 guaranteed_send 据此决定「重投 vs webhook」。"""
+    如 230013 目标非法——重试没用）。上层 guaranteed_send 据此决定「耐心重投 vs 记账放弃」。"""
     # 机械闸：所有 markdown/text 出站在此封口裸 URL（防飞书 autolink 贪婪吞 CJL·2026-06-24）。
     # 卡片路径(card_send)走 _linkify 已包 [url](url)·不经此处；此处覆盖 guaranteed_send 的 markdown/text 必达路径。
     if isinstance(payload, dict):
@@ -1164,120 +1159,35 @@ async def _send_checked(channel, chat_id, payload, name, kind):
     return False, last, transient
 
 
-def _peer_dm_fallback(text, name, why):
-    """兜底第一顺位：借【另一个 bot】的凭据私聊主人。失败返回 None，成功返回代发的 bot 名。
+def _record_undelivered(text, name, reason=None, intended=None):
+    """DM 没送到 —— 只如实记录，【绝不改投别处】。
 
-    为什么加这层（2026-08-30）：原来唯一的兜底是群喇叭 webhook，而 2026-07 有人在飞书后台
-    给那个群机器人加了【关键词校验】—— 从此每条兜底都被拒（19024 Key Words Not Found），
-    实测成功 11 次 / 失败 748 次。8-30 洪水那天医生一直在喊「需人工」，喊的正是这条死通道，
-    主人 42 分钟一无所知。关键词只存在于飞书后台、代码看不见也改不了，**修好了也能再被悄悄改坏**。
+    2026-08-30 主人拍板拆掉全部兜底。理由是这一天亲眼见到的：兜底给失败开了一条
+    特殊通道，让「没送到」长得像「送到了」。三次同形状事故都是它：
+      · 2026-08-02 taoci-7：DM 坏了几十小时没人知道，因为兜底一直「成功」刷群 767 条；
+      · 2026-07-06 主人已拍板砍掉【瞬时错】走 webhook 那半（见 guaranteed_send 注释）；
+      · 2026-08-30 洪水：医生喊「需人工」喊进了早被关键词校验拒收的群喇叭（748 次失败），
+        主人 42 分钟一无所知。
+    主人的判断：DM 发不到他自己会察觉（bot 不吭声就是信号），届时直接找 link16 或上机器看。
+    与其多一条会静默失效的通道，不如让失败就是失败。
 
-    peer DM 结构上更硬：① 每个 bot 是独立飞书应用、独立 token，A 发不出去不影响 B；
-    ② 直接进【私聊】（主人真会看），不是群；③ 不依赖任何后台可变设置。
-
-    ⚠️ open_id 按飞书应用隔离 —— 同一个人在每个 app 里 id 不同（实测 16 个 bot 16 个值）。
-    所以必须用【peer 自己记的】主人 open_id，绝不能拿失败 bot 的 id 配 peer 的 token。
-    provisional（工具推的·未经真 DM 证实）的 owner 一律跳过：推错了就发给陌生人。
+    所以这里只做两件事：① 日志喊清楚 ② receipts 记 delivered=False + 真实报错 + 本该投的目标
+    （留痕要求承自 2026-08-02，不因为拆了兜底就丢）。返回 False —— 上层据此判「没送到」。
     """
-    try:
-        import feishu_rest
-    except ImportError:
-        return None
-    body = (f"[{name} · 私聊发不出，由 {{peer}} 代发]\n⚠️ 降级原因：{why}\n" + (text or "")[:3000])
-    try:                                                 # 名册读不了也不能让兜底自己抛
-        roster = load_bots()
-    except Exception:                                    # noqa: BLE001
-        return None
-    tried = 0
-    for peer in roster:
-        pname = peer.get("name")
-        if pname == name or tried >= 3:                  # 别用出问题的那个·最多试 3 个
-            continue
-        rec = load_owner_record(pname)
-        oid = rec.get("open_id")
-        if not oid or rec.get("provisional"):            # 没认过主 / 只是推测 → 不冒险
-            continue
-        aid = os.environ.get(peer.get("app_id_env") or "")
-        sec = os.environ.get(peer.get("app_secret_env") or "")
-        if not (aid and sec):
-            continue
-        tried += 1
-        try:
-            # ⚠️ 只用底层 api()：feishu_rest 的 tenant_token / send_msg 失败时会 sys.exit(2)/(1)，
-            # 在兜底路径里调它们 = 一次 token 失败就把整个桥进程杀掉，比没有兜底还糟。
-            t = feishu_rest.api("POST",
-                                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-                                body={"app_id": aid, "app_secret": sec})
-            tok = (t or {}).get("tenant_access_token")
-            if not tok:
-                continue
-            d = feishu_rest.api(
-                "POST", "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
-                token=tok,
-                body={"receive_id": oid, "msg_type": "text",
-                      "content": json.dumps({"text": body.replace("{peer}", pname)},
-                                            ensure_ascii=False)})
-            if (d or {}).get("code") == 0:
-                return pname
-        except Exception:                                # noqa: BLE001 — 兜底自己绝不能抛
-            continue
-    return None
-
-
-def _webhook_fallback(text, name, reason=None, intended=None):
-    """最后一道兜底：scripts/notify.py webhook（纯标库绕代理 3 重试 · 但发到群不是 DM）。
-    返回 ok。webhook 喇叭机器人只能发文字（发不了图）。
-
-    ⚠️ 留痕（2026-08-02·根治「兜底成功了，所以没人知道 DM 是坏的」）：本函数是【降级投递】——
-    消息本该进 owner DM，却改投了群。旧版只 blog 一行、**outbox/receipts 零记录**，于是
-    「兜底成功」= 上层看到 ok → HWM 照推 → 长得跟正常送达一模一样，DM 已坏几十小时没人知道
-    （2026-08-02 实证：taoci-7 刷群 767 条才被主人肉眼发现）。现在：
-      ① `reason`(真实报错·如 230013) + `intended`(本该投的 DM 目标) 一律写进 receipts，
-      ② 并【印在发到群的正文头上】——谁看到刷屏，谁当场就知道为什么，不用再翻日志反推。"""
     why = str(reason or "未知原因")[:160]
-    peer = _peer_dm_fallback(text, name, why)   # 先试 peer 私聊：进 DM 且不依赖飞书后台设置
-    if peer:
-        blog(name, f"兜底 ✅ 由 {peer} 代发主人私聊 · 原因={why}")
-        receipt(name, {"tid": "fallback", "kind": "peer_dm_fallback", "delivered": True,
-                       "via": f"peer-dm:{peer}", "err": None, "reason": why,
-                       "intended": intended, "len": len(text or "")})
-        return True
-    if _notify is None:
-        blog(name, f"webhook 兜底不可用（notify 未 import）· 原因={why}")
-        receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": False,
-                       "via": None, "err": "notify_not_imported", "reason": why,
-                       "intended": intended, "len": len(text or "")})
-        return False
-    try:
-        url = _notify.find_webhook_url()
-        if not url:
-            blog(name, f"webhook 兜底无 URL（.env FEISHU_XHS_WEBHOOK_URL 未配）· 原因={why}")
-            receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": False,
-                           "via": None, "err": "no_webhook_url", "reason": why,
-                           "intended": intended, "len": len(text or "")})
-            return False
-        body = (f"[{name} · DM 回传失败转群兜底]\n"
-                f"⚠️ 降级原因：{why}" + (f"（本该私聊投给 {intended}）" if intended else "") + "\n"
-                + (text or "")[:3500])
-        ok, detail = _notify.send_feishu(url, body)
-        blog(name, f"webhook 兜底 {'✅送达群' if ok else '❌仍失败:' + str(detail)[:120]} · 原因={why}")
-        receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": bool(ok),
-                       "via": "webhook-group" if ok else None,
-                       "err": None if ok else str(detail)[:120], "reason": why,
-                       "intended": intended, "len": len(text or "")})
-        return ok
-    except Exception as e:  # noqa: BLE001
-        blog(name, f"webhook 兜底抛错: {str(e)[:120]} · 原因={why}")
-        receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": False,
-                       "via": None, "err": str(e)[:120], "reason": why,
-                       "intended": intended, "len": len(text or "")})
-        return False
+    blog(name, f"❌ DM 未送达·不改投任何通道（兜底已于 2026-08-30 全部拆除）· 原因={why}"
+               + (f" · 本该投给 {intended}" if intended else ""))
+    receipt(name, {"tid": "fallback", "kind": "undelivered", "delivered": False,
+                   "via": None, "err": why, "reason": why,
+                   "intended": intended, "len": len(text or "")})
+    return False
 
 
 async def guaranteed_send(channel, chat_id, text, name):
     """必达发送一段文本：markdown（SDK 自动分条长文）→ 失败退纯文本（飞书 text 不解析 md·最稳）
-    → 再失败：【瞬时网络错】返回 'failed'（**不 webhook**·交给上层耐心重投投【对的目标】）·【真失败】才退 webhook（到群）。
-    绝不抛。返回 'markdown'|'text'|'webhook'|'failed'。"""
+    → 再失败一律返回 'failed'：瞬时错交上层耐心重投【对的目标】，真失败如实记账。
+    2026-08-30 起【没有任何替代通道】—— 发不到就是发不到，绝不改投群/别的 bot（见 _record_undelivered）。
+    绝不抛。返回 'markdown'|'text'|'failed'。"""
     text = (text or "").strip() or "（空回复）"
     ok, err_md, _ = await _send_checked(channel, chat_id, {"markdown": text}, name, "markdown")
     if ok:
@@ -1285,15 +1195,15 @@ async def guaranteed_send(channel, chat_id, text, name):
     ok, err_tx, transient = await _send_checked(channel, chat_id, {"text": text}, name, "text")
     if ok:
         return "text"
-    # 瞬时网络错（DNS/连接·会恢复）→ 【不走 webhook】·返回 'failed' → 上层 _deliver 抛 RetrySend → 桥现有耐心
-    # 重投对着【正确的 DM 目标】投到恢复（根治 webhook「假成功发错群」短路耐心重投·2026-07-06 主人拍板）。
+    # 瞬时网络错（DNS/连接·会恢复）→ 返回 'failed' → 上层 _deliver 抛 RetrySend → 桥现有耐心
+    # 重投对着【正确的 DM 目标】投到恢复（2026-07-06 主人拍板砍掉这半的 webhook）。
     if transient:
-        blog(name, "send 全失败·瞬时网络错 → 不 webhook·交耐心重投(RetrySend)投对的目标")
+        blog(name, "send 全失败·瞬时网络错 → 交耐心重投(RetrySend)投对的目标")
         return "failed"
-    # 真失败（非 retryable·如 230013 目标非法·重试没用）→ webhook 最后兜底（发到群·至少让人看到）
-    # 把【真实报错】+【本该投的 DM 目标】一路带进兜底 → receipts 留痕 + 印在群消息头（2026-08-02·见 _webhook_fallback）。
-    return "webhook" if await asyncio.to_thread(
-        _webhook_fallback, text, name, (err_tx or err_md), chat_id) else "failed"
+    # 真失败（非 retryable·如 230013 目标非法·重试没用）→ 如实记账，【不改投任何通道】。
+    # 2026-08-30 主人拍板把 2026-07-06 只做了一半的事做完：兜底整个拆除，理由见 _record_undelivered。
+    await asyncio.to_thread(_record_undelivered, text, name, (err_tx or err_md), chat_id)
+    return "failed"
 
 
 # 裸 URL：到 空白/<>)] 即止，且排除 `*` 与所有非 ASCII —— 否则 `https://x**（中文…` 会把 **+后续正文整段吞进 href
@@ -1424,8 +1334,8 @@ def _inbox_dir(bot_name):
 
 async def card_send(channel, target, text, name):
     """发飞书【互动卡片】（2.0 schema markdown·**非流式**·裸 URL 自动包成可点链接），
-    卡片装不下(>CARD_SAFE_CHARS) 或失败 → 退 guaranteed_send 四级兜底（markdown→text→webhook）。
-    返回 'card'|'markdown'|'text'|'webhook'|'failed'。所有【主动推送】（send CLI / 短回复 / drainer DM 兜底）默认走这个。
+    卡片装不下(>CARD_SAFE_CHARS) 或失败 → 退 guaranteed_send 逐级降级（markdown→text·仍是同一条 DM）。
+    返回 'card'|'markdown'|'text'|'failed'。所有【主动推送】（send CLI / 短回复 / drainer DM 兜底）默认走这个。
     2026-06-18：从 `channel.stream`（流式卡·`update_card_element_content` typewriter·背 ~10min 服务端强超时
     200850/300309 → 长答案/慢 turn 静默截断）改成 `_ensure_card_snapshot` 一次性非流式卡
     （= drainer `_new_card` 同款·v8.1.0 已证无 10min 死）。全桥发卡引擎至此统一为非流式。"""
@@ -1677,7 +1587,7 @@ def run(bot_name=None):
             return acc, drc
 
         async def reply(chat_id, text=None, md=None):
-            # 所有短回复（斜杠命令应答 / 起会话提示 / 错误）走互动卡片（失败退 markdown→text→webhook）
+            # 所有短回复（斜杠命令应答 / 起会话提示 / 错误）走互动卡片（失败退 markdown→text）
             await card_send(channel, chat_id, md if md is not None else text, bot["name"])
 
         async def _do_cd(chat_id, target_dir):
@@ -2068,7 +1978,8 @@ def run(bot_name=None):
             #   把它当 DM 坐标存下来 = 给 mirror_target 埋雷 —— 它的兜底链是
             #   `load_owner() or sess["open_id"] or sess["chat_id"]`，新 bot 没 owner 文件时就直接取到
             #   【peer bot 的 open_id】→ bot 给 bot 发私聊 → 飞书 230013 "Bot has NO availability to this user"
-            #   （非 retryable）→ guaranteed_send 退 webhook → 消息全刷进群。实证：taoci-7/8/9/10 建号起就这样，
+            #   （非 retryable）→ 旧版 guaranteed_send 退 webhook → 消息全刷进群。实证：taoci-7/8/9/10 建号起就这样，
+#   （那条 webhook 兜底已于 2026-08-30 整个拆除，现在发不到就是发不到、如实记账）
             #   57720 次 230013、767 条刷进交流水吧；而 taoci-4/5/6 在主人 DM 过它们（2026-07-30 12:51 自动认主人）
             #   之后 230013 当场归零 —— 同一份代码，差别只在「有没有 owner 文件」。
             #   is_allowed 早就【绝不在群消息里 auto-claim owner】(2026-06-18 修)，但这条 _merge_session 是同一个坑的
@@ -2379,12 +2290,12 @@ def run(bot_name=None):
                     receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": False,
                                     "via": None, "err": str(e)[:120], "len": len(text or "")})
                     return False
-            # ⚠️ 留痕（2026-08-02）：旧版这里【一行 return、零回执】—— card_send 回 'webhook' 时消息其实
+            # ⚠️ 留痕（2026-08-02 立·2026-08-30 兜底拆除后仍必要）：旧版这里【一行 return、零回执】——
             #   降级投进了【群】，但这里只把它折成 True，drainer 照推 HWM、outbox 一片干净 → 「兜底成功了，
-            #   所以没人知道 DM 是坏的」。现在把 via 原样记下：webhook = 投错地方了，肉眼一看就知道。
+            #   所以没人知道 DM 是坏的」。现在把 via 原样记下：failed = 没送到，肉眼一看就知道。
             via = await card_send(ch, tgt, text, bname)
             receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": via != "failed",
-                            "via": via, "degraded": via == "webhook", "target": tgt,
+                            "via": via, "target": tgt,
                             "len": len(text or "")})
             return via != "failed"
 
@@ -2416,9 +2327,12 @@ def run(bot_name=None):
                 holder["d"].cancel()
             _start_drainer()
 
-        async def _notify(msg):                                # 真路绝才喊人：群喇叭 webhook（机械状态）
+        async def _notify(msg):                                # 真路绝才喊人 —— 只进日志
+            # 2026-08-30 主人拍板：不再有替代通道。这里原本发群喇叭 webhook，而那个群机器人
+            # 早在 2026-07 被加了关键词校验，748 次全被拒 —— 8-30 洪水时医生就是朝着这条
+            # 死通道喊「需人工」，主人 42 分钟一无所知。与其留一条会静默失效的通道，
+            # 不如让它就是日志：bot 不吭声本身就是主人能察觉的信号。
             blog(bname, msg)
-            await asyncio.to_thread(_webhook_fallback, msg, bname)
 
         async def _recover_pending(_b):                        # 投递保证：撞 compact 被吃的消息·必达重投/通知（§2.13）
             st, p = bridge_outbox.pending_status(ad, bname, timeout=PENDING_TIMEOUT_SEC)

@@ -169,7 +169,7 @@ fi
   ```
   扫码（**只有你能扫**）→ 自动写 `.env` 的 `FEISHU_BRIDGE_LOCAL1_APP_ID` / `FEISHU_BRIDGE_LOCAL1_APP_SECRET`。
 - **白名单**：`.env` 的 `FEISHU_BRIDGE_ALLOWED_OPEN_IDS`（你的飞书 open_id · 全 bot 共享）。可不填——桥有「首个 @ 它的人自动成 owner」兜底。
-- **群喇叭（可选）**：`FEISHU_XHS_WEBHOOK_URL`，只在本机也跑 `scripts/notify.py` 机械告警时才要。
+- ~~群喇叭 `FEISHU_XHS_WEBHOOK_URL`~~：**2026-08-30 已废弃**，不用再配。告警一律走 bot 自己的 DM，`notify.py` 已删除（拆除理由见 `ARCH-110` §兜底）。
 - 桥**免代理**（飞书国内端点直连，自动剥 PROXY 环境变量）。
 
 ---
