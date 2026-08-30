@@ -1328,6 +1328,122 @@ def failover_readiness(rows=None):
     return out
 
 
+# ---------- 陈旧检测 · 全部常驻进程（2026-08-30 · tuf19-link16 发现的盲区）----------
+# 第一层盲区：_running_stale() 的机制是对的（源码 mtime > 进程启动时间 ⇒ 跑着的是旧字节码、
+# 绿灯不算数），但【观察范围】只有看门狗自己 —— _pids() 筛 PID_NAME + " run"，watched 只两个文件。
+# 于是桥、codex worker、cron 天生看不见。实证（2026-08-30 tb24）：重启了 16 只桥和看门狗、
+# 自以为铺完，实际漏了 codex worker(pid 848) 和 cron(pid 28848)。
+#
+# 第二层盲区（tuf19 拿自己当反例证的·比第一层更值钱）：**「该盯哪几类」这份清单本身也会漏。**
+# 他的点名表明明打印了 cron 那一行，写改法建议时却只写了桥和 codex worker 两类。
+# 所以这里【不维护类型清单】—— 改成从进程实际在跑的脚本反推：
+#   CommandLine → 入口 .py → 该文件 + 它直接 import 的本仓模块 的最新 mtime → 比进程启动时间。
+# 谁在跑什么就查什么，第五类常驻进程出现时天然被覆盖，不需要有人记得回来加一行。
+# 只认【模块级】import（行首无缩进）：那些在进程启动时就加载、并冻结在内存里。
+# 函数内部的懒加载不算 —— feishu_bridge 的 /handoff 路径里有一句 `import bridge_watchdog`，
+# 若把它也算依赖，我每改一次看门狗就会把 16 只桥全标成「旧」。那种天天喊狼来了的尺子，
+# 最后一定被人无视 —— 今天已经修过一条这样的测试了，别再造第二把。
+_IMPORT_RE = re.compile(r"^(?:from|import)\s+([A-Za-z_][\w.]*)", re.M)
+
+
+def _entry_script(cmdline):
+    """CommandLine → 它在跑的入口 .py（限本仓 feishu/ 内）。认不出返回 None。"""
+    for tok in re.findall(r"[^\s\"']+\.py", cmdline or ""):
+        cand = Path(tok.replace("/", os.sep))
+        try:
+            if not cand.is_absolute():
+                cand = HERE / cand.name
+            if cand.exists() and cand.resolve().parent == HERE.resolve():
+                return cand.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def _entry_mtime(entry):
+    """入口 .py + 它【直接 import 的本仓模块】的最新 mtime。读不了就退回只看入口自己。"""
+    files = {entry}
+    try:
+        src = entry.read_text(encoding="utf-8", errors="replace")
+        for name in _IMPORT_RE.findall(src):
+            dep = HERE / (name.split(".")[0] + ".py")
+            if dep.exists():
+                files.add(dep.resolve())
+    except OSError:
+        pass
+    try:
+        return max(f.stat().st_mtime for f in files)
+    except (OSError, ValueError):
+        return 0
+
+
+def stale_processes(procs=None, mtime_of=None):
+    """哪些常驻进程还在跑旧字节码 → [{script, pid, started, newest, bot}]。
+
+    procs / mtime_of 可注入，便于不起真进程就测。绝不抛 —— 巡检里的任何一步抛异常
+    都会掐掉整轮看护，这是本仓反复踩过的形状。
+    """
+    procs = _python_procs() if procs is None else procs
+    rows, cache = [], {}
+    for pid, started, cmd in procs or []:
+        try:                                           # 单个进程算不出来就跳过它，别掐掉整轮
+            entry = _entry_script(cmd)
+            if not entry:
+                continue                               # 不是本仓的常驻进程 → 不管
+            if entry not in cache:
+                cache[entry] = (mtime_of or _entry_mtime)(entry)
+            newest = cache[entry]
+            if not newest or started >= newest:
+                continue
+            bot = re.search(r"--bot\s+(\S+)", cmd)
+        except Exception:                              # noqa: BLE001 —— 巡检主循环里，绝不抛
+            continue
+        rows.append({"script": entry.name, "pid": pid, "started": started, "newest": newest,
+                     "bot": bot.group(1) if bot else "", "holds": _holds(entry.name, cmd)})
+    return rows
+
+
+def _holds(script, cmd):
+    """这个进程【现在管着什么】—— tuf19 2026-08-30 的点：同样是旧字节码，
+    手上有没有活决定后果完全不同（他那台旧 cron 无害，我这台旧 cron 手上有 00:00/00:05 两条巡航）。
+    只报「旧」不够，得让人一眼判出要不要现在动手。绝不抛。"""
+    m = re.search(r"--bot\s+(\S+)", cmd or "")
+    if m:
+        return m.group(1)
+    if script == "bridge_cron.py":
+        try:
+            import bridge_cron
+            on = [j for j in bridge_cron.load_jobs() if j.get("enabled")]
+            return f"{len(on)} 条已启用定时器" + (f"（最近：{on[0].get('name')}）" if on else "")
+        except Exception:                              # noqa: BLE001
+            return ""
+    return ""
+
+
+def _python_procs():
+    """[(pid, started_epoch, cmdline)]。查不到就返回空表 —— 查不到【不等于】没陈旧，
+    调用方必须把空表当「这次没测到」，不能当「全新」。绝不抛。"""
+    ps = ("Get-CimInstance Win32_Process | Where-Object {$_.Name -like 'python*'} | "
+          "Select-Object ProcessId,CreationDate,CommandLine | ConvertTo-Json -Depth 3")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=30, creationflags=NO_WINDOW)
+        rows = json.loads(r.stdout or "[]")
+    except Exception:                                  # noqa: BLE001
+        return []
+    if isinstance(rows, dict):
+        rows = [rows]
+    out = []
+    for row in rows or []:
+        m = re.search(r"(\d{13})", str(row.get("CreationDate") or ""))
+        if not m:
+            continue                                   # 读不到启动时间 → 宁可漏报也别误报
+        out.append((row.get("ProcessId"), int(m.group(1)) / 1000,
+                    str(row.get("CommandLine") or "")))
+    return out
+
+
 def _running_stale():
     """跑着的守护进程是不是【还在跑旧代码】。返回 (是否陈旧, 说明)。
 
@@ -1377,6 +1493,19 @@ def cmd_status(verbose=False):
     stale, why = _running_stale()
     if stale:
         print(why)
+
+    # 全部常驻进程逐行点名（2026-08-30）：上面那条只查看门狗自己，另外三类它天生看不见。
+    # 「重启清单漏一类」以前靠人记，2026-08-30 就漏了两个（codex worker + cron）。
+    rows = stale_processes()
+    if rows:
+        print(f"⚠️ **{len(rows)} 个常驻进程还在跑旧字节码**（源码比进程新 ⇒ 它们的行为不是你以为的那份）：")
+        for r in sorted(rows, key=lambda x: x["started"]):
+            who = f"（管着 {r['holds']}）" if r.get("holds") else ""
+            print(f"     · {r['script']}{who} pid={r['pid']} 起于 "
+                  f"{datetime.fromtimestamp(r['started'], TZ):%m-%d %H:%M}"
+                  f"（源码改于 {datetime.fromtimestamp(r['newest'], TZ):%m-%d %H:%M}）")
+        print("     重启：桥 `feishu_bridge.py stop && start` · cron `bridge_cron.py stop && start` · "
+              "看门狗 `bridge_watchdog.py stop && start`；**codex worker 要那只 bot 的会话重启才换代码**。")
 
     # ① 在看护几个面板（真拓扑，不是名册条数）
     ws_by_pty, ptys = scan_topology()

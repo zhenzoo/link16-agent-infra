@@ -688,3 +688,97 @@ def test_R6_已接进巡检主循环():
     src = inspect.getsource(w.cmd_run)
     assert "hwm_corrupt_unseen" in src, "R6 必须真的在每轮巡检里被调用"
     assert "_alerts_save" in src, "seen 水位必须落盘，否则重启后重复报"
+
+
+# ─────────── 陈旧检测 · 全部常驻进程（2026-08-30 · tuf19-link16 报的两层盲区）───────────
+# 第一层：_running_stale() 只查看门狗自己 → 桥 / codex worker / cron 天生看不见。
+# 第二层（更值钱）：「该盯哪几类」这份清单本身也会漏 —— tuf19 的点名表打印了 cron，
+#   写建议时却把它漏了。所以实现【不许】维护类型清单，必须从进程实际在跑的脚本反推。
+
+def _proc(pid, started, cmd):
+    return (pid, started, cmd)
+
+
+def test_陈旧_从进程实际在跑的脚本反推(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "HERE", tmp_path)
+    (tmp_path / "feishu_bridge.py").write_text("# x", encoding="utf-8")
+    procs = [_proc(1, 100.0, f"python {tmp_path}/feishu_bridge.py --bot botA")]
+    rows = w.stale_processes(procs=procs, mtime_of=lambda e: 200.0)   # 源码比进程新
+    assert len(rows) == 1 and rows[0]["script"] == "feishu_bridge.py"
+    assert rows[0]["bot"] == "botA"
+
+
+def test_陈旧_进程比源码新就不报(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "HERE", tmp_path)
+    (tmp_path / "feishu_bridge.py").write_text("# x", encoding="utf-8")
+    procs = [_proc(1, 300.0, f"python {tmp_path}/feishu_bridge.py")]
+    assert w.stale_processes(procs=procs, mtime_of=lambda e: 200.0) == []
+
+
+def test_陈旧_没见过的脚本类型也能被覆盖(tmp_path, monkeypatch):
+    """核心：第五类常驻进程出现时【不需要有人回来加一行】。
+    2026-08-30 就是栽在这 —— 硬编码清单里没有 cron，于是没人发现它在跑旧代码。"""
+    monkeypatch.setattr(w, "HERE", tmp_path)
+    (tmp_path / "某个还没发明的常驻件.py").write_text("# x", encoding="utf-8")
+    procs = [_proc(9, 100.0, f"python {tmp_path}/某个还没发明的常驻件.py --bot botZ")]
+    rows = w.stale_processes(procs=procs, mtime_of=lambda e: 200.0)
+    assert len(rows) == 1, "从进程反推 ⇒ 新类型天然被覆盖，不该依赖任何预置清单"
+
+
+def test_陈旧_不许再出现硬编码的类型清单():
+    """反向闸：谁把实现改回「列几类 + 各自源码集」，这条必须先红。
+    那正是 tuf19 亲手示范会漏的那一层 —— 漏的不是检测，是清单。"""
+    import inspect
+    src = inspect.getsource(w.stale_processes) + inspect.getsource(w._entry_script)
+    assert "_STALE_GROUPS" not in src, "类型清单会腐坏，实现必须从进程反推"
+    assert not hasattr(w, "_STALE_GROUPS")
+
+
+def test_陈旧_只认模块级import_懒加载不算(tmp_path, monkeypatch):
+    """feishu_bridge 的 /handoff 路径里有一句函数内 `import bridge_watchdog`。
+    若把它也算依赖，每改一次看门狗就会把 16 只桥全标成「旧」——
+    天天喊狼来了的尺子最后一定被人无视（今天已经修过一条这样的测试）。"""
+    monkeypatch.setattr(w, "HERE", tmp_path)
+    entry = tmp_path / "feishu_bridge.py"
+    entry.write_text("import bridge_outbox\n\ndef f():\n    import bridge_watchdog\n", encoding="utf-8")
+    (tmp_path / "bridge_outbox.py").write_text("# dep", encoding="utf-8")
+    lazy = tmp_path / "bridge_watchdog.py"
+    lazy.write_text("# lazy", encoding="utf-8")
+    os.utime(tmp_path / "bridge_outbox.py", (100, 100))
+    os.utime(entry, (100, 100))
+    os.utime(lazy, (9_999_999_999, 9_999_999_999))     # 懒加载的那个「刚改过」
+    assert w._entry_mtime(entry.resolve()) == 100, "只有模块级 import 才算依赖"
+
+
+def test_陈旧_外部脚本不管_读不到启动时间不误报(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "HERE", tmp_path)
+    procs = [_proc(1, 100.0, r"python C:\别的项目\whatever.py")]
+    assert w.stale_processes(procs=procs, mtime_of=lambda e: 200.0) == [], "非本仓脚本不该被点名"
+    assert w._python_procs.__doc__ and "不等于" in w._python_procs.__doc__, \
+        "查不到进程 ≠ 没陈旧，这个语义必须写在文档里别被后人当成『全新』"
+
+
+def test_陈旧_报出它现在管着什么(tmp_path, monkeypatch):
+    """tuf19 的第二点：同样是旧字节码，手上有没有活决定后果完全不同
+    （他那台旧 cron 无害；tb24 那台手上有 00:00/00:05 两条巡航）。"""
+    monkeypatch.setattr(w, "HERE", tmp_path)
+    (tmp_path / "feishu_bridge.py").write_text("# x", encoding="utf-8")
+    procs = [_proc(1, 100.0, f"python {tmp_path}/feishu_bridge.py --bot tb24-voiceover")]
+    assert w.stale_processes(procs=procs, mtime_of=lambda e: 200.0)[0]["holds"] == "tb24-voiceover"
+
+
+def test_陈旧_任何一步抛异常都不许掐掉巡检(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "HERE", tmp_path)
+    (tmp_path / "feishu_bridge.py").write_text("# x", encoding="utf-8")
+    procs = [_proc(1, 100.0, f"python {tmp_path}/feishu_bridge.py")]
+    def boom(_e): raise RuntimeError("mtime 读不了")
+    try:
+        w.stale_processes(procs=procs, mtime_of=boom)
+    except RuntimeError:
+        pytest.fail("stale_processes 绝不能抛 —— 它跑在巡检主循环里")
+
+
+def test_陈旧_已接进status():
+    """反向闸：写好了却没接进 status，就还是没人看（正是它要治的病）。"""
+    import inspect
+    assert "stale_processes()" in inspect.getsource(w.cmd_status)
