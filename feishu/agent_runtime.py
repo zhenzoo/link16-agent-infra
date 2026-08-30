@@ -644,13 +644,22 @@ def standalone_worker_cmd(
             + "claude --dangerously-skip-permissions"
         )
     else:
+        # Interactive workers historically own their sandbox policy, but a
+        # non-interactive ``codex exec`` caller may be deliberately supplying
+        # a stricter permission profile.  Do not silently punch through that
+        # boundary or enable search on its behalf.
+        codex_exec = bool(provider_args) and str(provider_args[0]) == "exec"
         command = (
             prefix
             + env_text
             + f"CODEX_HOME={_q(profile.home_path.as_posix())} "
-            + "codex --dangerously-bypass-approvals-and-sandbox --search "
-            + "-c shell_environment_policy.inherit=all"
+            + "codex"
         )
+        if not codex_exec:
+            command += (
+                " --dangerously-bypass-approvals-and-sandbox --search"
+                " -c shell_environment_policy.inherit=all"
+            )
         if cwd:
             command += f" -C {_q(str(cwd))}"
     if provider_args:
