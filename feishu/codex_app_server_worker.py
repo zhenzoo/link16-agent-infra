@@ -16,11 +16,13 @@ import queue
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 from bridge_events import CONTRACT, MilestoneAccumulator, normalize_codex_notification
+import bridge_injection
 import turn_delivery_guard
 
 
@@ -28,6 +30,7 @@ WARMUP_MARKER = "LINK16_APP_SERVER_READY"
 WARMUP_TIMEOUT_SEC = 120
 RECONNECT_MAX_BACKOFF = 30      # 秒·重连退避上限
 RECONNECT_ALERT_AFTER = 120     # 秒·重连这么久还挂不回去 → 告诉主人一声（走 outbox·飞书看得见）
+EXIT_SLOT_TAKEN = 3             # 退出码·席位已被别的速记员占着（调用方据此别重试）
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -72,7 +75,15 @@ class RpcConnection:
         # TUI resume can broadcast a >1 MiB thread snapshot on this connection.
         # The observer still discards it unless it is a typed milestone, but
         # the transport must accept the frame to remain subscribed.
-        self.ws = connect(url, open_timeout=5, close_timeout=2, max_size=None)
+        #
+        # proxy=None 不是保险起见 —— 这条连接的对端是 127.0.0.1 上的 app-server，
+        # 而 websockets 默认 proxy=True（读 HTTPS_PROXY 等环境变量）。本机 HTTPS_PROXY 是
+        # **用户级**变量，于是每个进程都继承，包括桥经 wmux 起的 worker：一条本该走 loopback 的
+        # 连接，实际被第三方代理进程转发（2026-08-31 实测 tuf19：速记员唯一的 established 连接
+        # 打在 127.0.0.1:7897 上，5588 那一端的客户端 socket 属于代理进程）。
+        # 后果就是 08-29 那次事故的形状：loopback 不会无缘无故断，**闲置三天的代理隧道会**。
+        # 所以对端是本机时一律直连，不给代理经手的机会。
+        self.ws = connect(url, open_timeout=5, close_timeout=2, max_size=None, proxy=None)
         self.next_id = 1
         self.pending: dict[int, queue.Queue] = {}
         self.notifications: queue.Queue[dict] = queue.Queue()
@@ -118,6 +129,38 @@ class RpcConnection:
             self.ws.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+class ObserverSlotTaken(RuntimeError):
+    """这只 bot 已经有速记员在岗 —— 第二个必须当场退场，不能并肩上工。"""
+
+
+def acquire_observer_slot(state_dir, bot):
+    """占住「速记员席位」：同一只 bot，同一时刻只允许一个进程在抄。
+
+    两个速记员同时抄同一条 thread = 同一条 final 写两遍 outbox = 主人收到重复消息。
+    所以这不是约定、是硬闸：**拿不到席位就当场拒绝启动** —— 还没连 app-server、还没写过一行就退，
+    而不是先跑起来再发现撞车。锁由操作系统持有，进程崩了席位自动腾出，不留要人工清理的残留。
+    """
+    lock = bridge_injection.ProcessFileLock(
+        bridge_injection.lock_path(state_dir, "observer", bot), timeout=0
+    )
+    try:
+        return lock.acquire()
+    except TimeoutError:
+        raise ObserverSlotTaken(str(bot)) from None
+
+
+def observer_command(*, bot, url, thread_id, cwd, state_dir):
+    """速记员进程怎么起 —— 唯一真源。worker 起它、人工重挂、测试拼它，都只经过这里。"""
+    return [
+        sys.executable, "-u", str(Path(__file__).resolve()), "observe",
+        "--bot", str(bot),
+        "--url", str(url),
+        "--thread", str(thread_id),
+        "--cwd", str(cwd),
+        "--state-dir", str(state_dir),
+    ]
 
 
 def _attach_rpc(url: str, *, thread_id: str, cwd) -> "RpcConnection":
@@ -360,6 +403,76 @@ def _start_or_resume_thread(rpc: RpcConnection, *, state_dir: Path, bot: str, cw
     return thread_id
 
 
+def _drain_notifications(rpc, stop):
+    """把 worker 自己那条连接的通知队列倒掉（它不再是速记员，取了就扔）。"""
+    while not stop.is_set():
+        try:
+            rpc.notifications.get(timeout=1)
+        except queue.Empty:
+            continue
+        except Exception:            # noqa: BLE001 —— 连接没了就收工，别把 worker 拖下水
+            return
+
+
+def _run_observer_child(command, env, log_path, stop, box, delay=2):
+    """看着速记员那个子进程；它非预期退出就把它拉回来。
+
+    **杀掉它就是升级**：子进程重新从磁盘读代码，于是回程能热更新、主讲人一动不动 ——
+    这正是 2026-08-30 那次「worker 跑着旧字节码，可重启它等于掐掉主人的会话」所缺的那条路。
+    """
+    while not stop.is_set():
+        started = time.time()
+        try:
+            with open(log_path, "a", encoding="utf-8") as log:
+                proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                        stderr=subprocess.STDOUT, env=env)
+        except Exception:            # noqa: BLE001 —— 起不来也不许掀掉整个会话
+            stop.wait(delay)
+            delay = min(delay * 2, 30)
+            continue
+        box["proc"] = proc
+        code = proc.wait()
+        if stop.is_set() or code == EXIT_SLOT_TAKEN:   # 席位被别人占着 → 重试只会刷屏，退场
+            return
+        delay = 2 if time.time() - started > 60 else min(delay * 2, 30)
+        stop.wait(delay)
+
+
+def observe(args) -> int:
+    """速记员：挂到【已经在跑】的 app-server 上，把里程碑写进 outbox。独立进程，不碰 TUI。
+
+    为什么要独立成进程（2026-08-29 与 08-30 两次事故的同一个结构）：观察者原本是 worker 里的
+    一个线程，而 worker 同时是 TUI 的父进程 —— 于是「回程坏了要重启回程」在拓扑上等于
+    「掐掉主人正在用的会话」。断线那次只能靠外挂进程救回来，旧字节码那次只能干等自然重启，
+    都是被这个绑定逼出来的。坐自己的椅子之后，回程随时可以单独重启，主讲人一动不动。
+    """
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    cwd = Path(args.cwd).expanduser().resolve()
+    if not args.url or not args.thread:
+        raise SystemExit("observe 需要 --url 和 --thread")
+    try:
+        slot = acquire_observer_slot(state_dir, args.bot)
+    except ObserverSlotTaken:
+        print(f"[{args.bot}] 已有速记员在岗 → 本进程退出（两个一起抄会重复投递）", flush=True)
+        return EXIT_SLOT_TAKEN
+    observer = None
+    try:
+        rpc = _attach_rpc(args.url, thread_id=args.thread, cwd=cwd)
+        observer = MilestoneObserver(
+            rpc, bot=args.bot, root_thread=args.thread, state_dir=state_dir, workspace_root=cwd,
+            reconnect=lambda: _attach_rpc(args.url, thread_id=args.thread, cwd=cwd),
+        )
+        observer.start()
+        print(f"[{args.bot}] 速记员上岗 thread={args.thread} url={args.url}", flush=True)
+        while observer.thread.is_alive():
+            time.sleep(1)
+        return 0
+    finally:
+        if observer:
+            observer.stop.set()
+        slot.release()
+
+
 def run(args) -> int:
     codex = Path(args.codex).expanduser().resolve()
     if not codex.is_file():
@@ -390,7 +503,8 @@ def run(args) -> int:
         )
         rpc = None
         tui = None
-        observer = None
+        observer_stop = threading.Event()
+        observer_box = {}
         try:
             rpc = _wait_rpc(url)
             rpc.request(
@@ -408,12 +522,17 @@ def run(args) -> int:
                 json.dumps({"thread_id": root_thread, "cwd": str(cwd)}, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            observer = MilestoneObserver(
-                rpc, bot=args.bot, root_thread=root_thread, state_dir=state_dir,
-                workspace_root=cwd,
-                reconnect=lambda: _attach_rpc(url, thread_id=root_thread, cwd=cwd),
-            )
-            observer.start()
+            # 速记员搬进自己的进程（不再是本进程里的线程）：这样「重启回程」不必掐掉主人的会话。
+            threading.Thread(
+                target=_run_observer_child,
+                args=(observer_command(bot=args.bot, url=url, thread_id=root_thread,
+                                       cwd=cwd, state_dir=state_dir),
+                      env, state_dir / f"observer-{args.bot}.log", observer_stop, observer_box),
+                daemon=True,
+            ).start()
+            # 本进程这条连接从此只用来起/接 thread、不再消费事件；但 reader 仍会往队列里堆通知，
+            # 没人取就是一天涨几百 MB 的内存泄漏（速记员搬走之后才出现的新账）→ 定期丢弃。
+            threading.Thread(target=_drain_notifications, args=(rpc, observer_stop), daemon=True).start()
             command = [
                 str(codex),
                 "--remote", url,
@@ -441,8 +560,10 @@ def run(args) -> int:
             return tui.wait()
         finally:
             _clear_owned_ready_state(ready_path, os.getpid())
-            if observer:
-                observer.stop.set()
+            observer_stop.set()
+            child = observer_box.get("proc")
+            if child and child.poll() is None:
+                child.terminate()
             if rpc:
                 rpc.close()
             if tui and tui.poll() is None:
@@ -451,14 +572,25 @@ def run(args) -> int:
                 server.terminate()
 
 
-def main():
+def build_parser():
+    """命令行长什么样 —— 单独拿出来，测试才能把 observer_command 拼的那条【原样解析回来】，
+    杜绝「命令拼得出、自己却解析不了」这类只在真跑时才炸的漂移。"""
     parser = argparse.ArgumentParser()
+    # 位置参数可省 → 老的纯 flag 调用（agent_runtime 拼的那条）语义完全不变。
+    parser.add_argument("mode", nargs="?", default="run", choices=["run", "observe"])
     parser.add_argument("--bot", required=True)
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--codex-home", default="~/.codex-personal")
     parser.add_argument("--codex", default=str(_codex_native_default()))
-    raise SystemExit(run(parser.parse_args()))
+    parser.add_argument("--url", default=None, help="observe：app-server 的 ws 地址")
+    parser.add_argument("--thread", default=None, help="observe：要蹲守的 thread id")
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    raise SystemExit(observe(args) if args.mode == "observe" else run(args))
 
 
 if __name__ == "__main__":

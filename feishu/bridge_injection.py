@@ -78,10 +78,14 @@ class ProcessFileLock:
         self.release()
 
 
+def lock_path(state_dir, kind: str, identity: str) -> Path:
+    """锁文件叫什么，只有这一处说了算 —— 谁要独占同一个东西，就必须算出同一个路径。"""
+    return Path(state_dir) / f"bridge-lock-{_safe(kind)}-{_safe(identity)}.lck"
+
+
 @contextmanager
 def injection_lock(state_dir: Path, kind: str, identity: str, timeout: float = 60.0):
-    path = Path(state_dir) / f"bridge-lock-{_safe(kind)}-{_safe(identity)}.lck"
-    with ProcessFileLock(path, timeout=timeout):
+    with ProcessFileLock(lock_path(state_dir, kind, identity), timeout=timeout):
         yield
 
 
