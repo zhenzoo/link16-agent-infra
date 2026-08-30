@@ -142,19 +142,55 @@ def save_progress_state(state_dir, bot, state):
 
 
 def load_hwm(state_dir, bot):
+    """读「已发到第几字节」的水位书签。
+
+    ⚠️ 书签损坏必须 fail-CLOSED —— 2026-08-30 tb24-voiceover 洪水事故的根因就在这里。
+    那天 10:06 机器断电重启（Kernel-Power 41），NTFS 把刚写过、还没落盘的本文件还成
+    21 个 0x00。旧实现一律 `except → return 0`，而 0 在本模块的语义是「一条都还没发过」
+    —— 于是 drainer 从第 0 字节重放整个 outbox（当时 800MB / 20127 条 8 月 7 日起的历史），
+    医生又因书签迟迟不推进每 97 秒把它重启一次，同一批最老的消息被反复重发 40 余轮、
+    42 分钟砸出 3667 条。
+
+    「文件不存在」和「文件读不出来」是两件事，必须分开：
+      · 不存在 → 真·新 bot，从 0 开始是对的；
+      · 存在但解析失败 → 损坏，退到【当前 outbox 末尾】并立刻钉死。
+    宁可漏发尾部几条（可从 outbox 人工捞回），也绝不重发全部历史。
+    """
     p = hwm_path(state_dir, bot)
+    if not os.path.exists(p):
+        return 0                                     # 真·新 bot：从头开始才是对的
     try:
         return int(json.loads(open(p, encoding="utf-8").read()).get("offset", 0))
     except (OSError, ValueError, json.JSONDecodeError):
-        return 0
+        pass
+    try:                                             # 损坏 → 退到当前末尾（fail-closed）
+        safe = os.path.getsize(outbox_path(state_dir, bot))
+    except OSError:
+        safe = 0
+    try:                                             # 留痕：别让这种事再一次静默发生
+        with open(os.path.join(state_dir, f"bridge-hwm-corrupt-{bot}.log"), "a",
+                  encoding="utf-8") as f:
+            f.write(f"{int(time.time())} HWM 损坏 → fail-closed 退到 outbox 末尾 {safe}\n")
+    except OSError:
+        pass
+    save_hwm(state_dir, bot, safe)                   # 立刻钉死·免得每轮重启都再踩一次
+    return safe
 
 
 def save_hwm(state_dir, bot, offset):
+    """原子 + 持久地写书签。
+
+    fsync 不能省：`os.replace` 只保证「换名」这一步原子，不保证 tmp 的【内容】已经落盘。
+    断电时元数据（文件名/大小）可能已进日志、数据块还在页缓存里 —— 重启后就得到一个
+    长度正确、内容全 NUL 的文件，正是 2026-08-30 事故的形态。
+    """
     p = hwm_path(state_dir, bot)
     tmp = p + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(json.dumps({"offset": int(offset)}))
+            f.flush()
+            os.fsync(f.fileno())                     # ← 内容真正落盘后才换名
         os.replace(tmp, p)
     except OSError:
         pass
@@ -338,7 +374,15 @@ def parse_picker_reply(text, picker):
 
 # ---------- 纯函数：增量读完整行 ----------
 def read_new_records(path, offset):
-    """从 offset 增量读【完整行】(到最后一个 \\n)；返回 (records, new_offset)。"""
+    """从 offset 增量读【完整行】(到最后一个 \\n)；返回 (records, new_offset)。
+
+    ⚠️ 别在这里加「单批封顶」。2026-08-30 事故后试过封顶 2MB（想让 HWM 稳步推进、
+    免得医生误判卡死），差分测试当场证伪：卡片标题的计数器（`计划 6/6 · 工具 194 次`）
+    是按整批累计算的，一封顶就变成 `计划 0/6 · 工具 38 次`，8MB 样本上还多出 2 张卡、
+    正文多 1187 字符 —— 等于悄悄改了发给主人的消息。实测 4.455% 的回合超过 2MB，
+    这不是边界情况。防重放交给 load_hwm 的 fail-closed，防空转交给 doctor 的重启熔断，
+    都不需要动这里的切分边界。
+    """
     if not os.path.exists(path):
         return [], offset
     size = os.path.getsize(path)
