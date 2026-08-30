@@ -21,7 +21,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-30
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -153,6 +153,7 @@ python feishu/windows_bootstrap.py --skip claude --apply --yes
 | **Windows Terminal + wmux** | 两者默认 shell 都选 Git Bash；脚本在应用未运行时保留未知字段并安全配置，正在运行时才显示一次 GUI 动作。 |
 | **node** | `node --version`（仓库自带的 `wmux/wmux-rpc.js` 要 node 跑）。 |
 | **PowerShell 脚本策略** | 若启动时报「禁止运行脚本」，检查 `Get-ExecutionPolicy -List`；对普通用户设 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force`，重开终端后验收 profile 函数。 |
+| **OpenSSH Server** | 仅在这台机要参加用户级 `envsync` 时必装；Link16 桥本身不依赖。`Get-Service sshd` 查无服务就是未安装，见 §1.4。 |
 
 ### 1.1 · Private 仓登录与 main-only clone
 
@@ -223,6 +224,43 @@ python feishu/profile_bootstrap.py --doctor
 - Claude 的 `feishu` 安装到各所选 profile home；Codex 按官方用户级规则安装到 `$HOME/.agents/skills/feishu`，供同一 Windows 用户的 Codex profiles 共用。
 - 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
 - 重开 Git Bash，用用户自己命名的 profile 函数进入对应账号并在官方页面登录；不复制别人的认证文件。
+
+### 1.4 · 装 OpenSSH Server（仅 `envsync` 的硬前置 · 要管理员）
+
+`.env` 里的密钥不上任何云；用户选择使用 `envsync` 时，跨机只走家庭局域网点对点 SSH。
+Windows 10/11 默认通常只有 SSH client、没有 server。没有 sshd 时 `envsync` 会在 preflight 停止，
+但不影响 Link16 桥、wmux 或 bot 本身运行。
+
+> ⚠️ 以下安装动作需要管理员权限。agent 会话若弹 UAC 必须停手，把整段转给主人执行；
+> 不要在无人值守流程里等待提权窗口。
+
+```powershell
+# 探测不用管理员
+Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe"   # False = 服务端没装
+Get-Service sshd -ErrorAction SilentlyContinue      # 查无此服务 = 没装
+
+# 账号身份与当前进程是否提权是两件事；管理员身份以本地组成员为准
+Get-LocalGroupMember -Group Administrators
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()`
+  ).IsInRole('Administrators')
+
+# 以下需要管理员 PowerShell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service sshd -StartupType Automatic; Start-Service sshd
+if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True `
+    -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+}
+Get-Service sshd | Select-Object Name, Status, StartType    # Running / Automatic
+```
+
+不要用 `$env:USERPROFILE` 的目录名猜 SSH 登录名；改过用户名的机器上目录名不会跟着变，
+应以 `$env:USERNAME` / `Get-LocalUser` 为准。管理员组账号的公钥由 sshd 读取
+`$env:ProgramData\ssh\administrators_authorized_keys`，普通账号才使用 `~/.ssh/authorized_keys`。
+完整注册、公钥安装、冲突与删除闸见用户级 `envsync` skill。
+
+`ping` 不通不等于 SSH 不通：Windows 防火墙常挡 ICMP，最终判据是 SSH 是否能连接；
+`envsync` 的 preflight 会在 ping 失败后继续尝试真实 SSH。
 
 ---
 

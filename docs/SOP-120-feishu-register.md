@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-08-27
+last_reviewed: 2026-08-30
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -50,6 +50,10 @@ python feishu/feishu_bridge.py start --bot <新bot>
 > 🔄 **第 8 步是多机条件步骤，不是 Link16 单机注册依赖。** 注册器只写本机 `.env`；若另一台受信机器也要用
 > 该应用主动发送，用户需用自己的安全凭据同步方案更新那台机器。Link16 不内置、不要求私人 `envsync` skill，
 > 更不会把 `.env` 或 secret 提交进 Git。只在本机运行该 bot 时跳过第 8 步。
+
+> ⏳ **OAuth、权限审批与主人私聊认主都是人工停点。** 注册器必须用 `--background` 长时运行，
+> 并由 `registration_monitor.py` 观察机械信号；不能同步干等，也不能用短 timeout 杀掉授权进程。
+> 认主完成信号是 `feishu/_state/bridge-owner-<bot>.json` 出现。
 
 > 🚨 **第 7 步不能省：主人必须【私聊】新 bot 一次（2026-08-02 血的教训 · 见 [`ARCH-110 §2.5.3`](ARCH-110-feishu-bridge.md)）。**
 > bot 的 owner 是**第一个私聊 @ 它的人**自动认下的；**群里 @ 它不算**（群消息按设计**绝不** auto-claim owner，否则 peer bot 会夺 owner）。
@@ -226,6 +230,20 @@ python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某
 | tb25_link16_2 | TB25 | ✅ | ✅ | ✅ | ✅ | ✅ | 39 |
 
 > **2026-07-02 更新（全量复核 + rename）**：`bridge_scope_audit.py --all-env` 全跑 —— **26 应用（本机 19 + 跨机 7）权限全齐 ✅**（在线文档+群读写+收群@+听全群·39~47 scope），**无缺权限 bot**；且 §2.1 gather 实测 **全部在交流水吧群 ✅**。本次 rename：`tb25-codex`→`tb25-speech-codex`（三名合一）、`.env` 键 `COACHO`→`TB25_COACHO`（对齐习惯）——上面矩阵里的 `tb25_codex`/`coacho` 行名随之作废。**本矩阵 = 历史快照·以 `--all-env` 现跑 + §2.1 登记表为准。**
+
+> **2026-08-15 新增**：`tb25-agentic-cad-codex`（profile `cxp` / Codex · cwd `D:/410_VibeCoding/Post/tools/agentic-cad`
+> · App ID `cli_0000000000000007` · open_id `ou_00000000000000000000000000000014`）。
+> `--all-env` 现跑：**五项权限全 ✅（41 scope）** · `bridge_doctor` `status=ok`。
+> 由 `Lab/2026-08-12-agentic-cad-print` 毕业成正式仓库时一并注册（agentic CAD 全链路项目）。
+>
+> ⚠️ **本次踩坑 → 流程该补的两条**：
+> ① **注册脚本不能用短 timeout 跑**。它是「取码 → 轮询 → 拿凭据 → 写 .env」一条龙，**没有续接能力**；
+>    中途被杀 = 主人已授权但凭据没接住，只能重来（且飞书里留下一个孤儿应用要手动删）。**放后台跑满有效期。**
+> ② **等主人做人工动作时要 arm Monitor**（盯 `feishu/_state/bridge-owner-<bot>.json` 出现），
+>    别干等、更别让主人手动回来喊。本次漏了这步 → 主人白点一次授权 + 两次手动通知。
+>
+> 💡 **顺带验证可用**：`feishu_bridge.py start --bot <X>` 能**只起一个 bot**，
+>    新注册后不必整桥 `stop→start` 惊动全舰队。
 > **2026-06-29 更新**：新增 **tb25-link16**（切流时建·App `cli_…`）+ **tb25-link16-2**（本日建·App `cli_0000000000000005`），均 `--bot ... --raw` 审计 39 scope 全绿（drive/im:chat/group_msg/收群@ 齐）→ 现 **24 应用**。两者 cwd 均 `…\Post\tools\link16-agent-infra`（同仓多实例）。
 >
 > **2026-06-26 更新（全绿里程碑）**：Publisher 一次性把所有缺权限 bot 全开发布——**22 个应用现在 im:chat（群读写）+ group_msg（听全群）+ drive/docx + 收群@ 全部齐全 ✅**（`bridge_scope_audit.py --all-env` 复核：本机 default/config/social_media 从 36→39、tb25_codex 38→40、tb25_xhs_card_gen_2 39→40，以及 cartoonmv(-1)/yoach/teno/api_doc/ccp/tennis_post/xhs_card_gen/lab 八个工具 bot 全部补齐 im:chat）。**自此无缺权限 bot**；再有变动跑 `--all-env` 即知。
@@ -282,7 +300,8 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 - [ ] **可选 group-listen** — 只有要听全群时才申请 `group_msg`
 - [ ] **拉进共享群** —— ⚠️ **先跑 `python feishu/tenant_probe.py --bot <新bot>` 看它该进哪个群**（[§ 4.2](#-42--该进哪个群--按租户判定绝不按名字前缀猜)），别默认交流水吧；然后互换 open_id（`bot/v3/info`）
 - [ ] **两台机** 各配 `.env`（§5）
-- [ ] **重启桥** stop→start
+- [ ] **起桥** —— 只加了新 bot 就 **`python feishu/feishu_bridge.py start --bot <新bot>` 单起它**（别全局 stop→start 把在跑的会话全杀了）；只有改了 committed 名册才需整桥重启
+- [ ] 🚨 **主人【私聊】新 bot 一句话完成认主** —— 机械信号 = `feishu/_state/bridge-owner-<bot>.json` 出现（漏了会导致 DM 明确失败 · 见 §0 红字）
 - [ ] 验：群里 `@新bot` 一句能回 + 让它 `send_feishu_msg` @ 另一台的 bot 能送达
 - [ ] 🔄 **回写登记**：`agent-registry.json` 目录条目上一步 register 已**自动补**（核对 `repo`/machine 即可，别忘）；开/关权限后跑 `python feishu/bridge_scope_audit.py --all-env` 刷新 **§2.2 能力矩阵**。（§2.1 名单已是 `agent-registry.json` 的指针·不再手抄）
 
