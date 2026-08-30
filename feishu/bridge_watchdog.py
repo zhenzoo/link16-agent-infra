@@ -379,6 +379,10 @@ def notify(bot_name, kind, text):
 def _notify_bridge_down():
     """「桥进程挂了」不属于任何单个 bot，但仍然走 DM —— 不需要第二条通道。
 
+    这里原本发群喇叭 webhook，理由写着「桥挂了就发不出 DM」。**那句是错的**：
+    notify() 是 shell 出 send_feishu_msg.py，它直连飞书 REST、不经过桥进程。
+    2026-08-30 实测：停掉 tb24-notes-3 的桥进程后用它发 DM 仍然 ✅ 已发。
+    于是 webhook 的最后一条存在理由也没了，随全部兜底一起拆除。
 
     挑名册里第一个能解析出告警目标的 bot 代为播报 —— 选的是【发信人】，
     不是第二条通道：消息仍然只进主人那一个 DM。
@@ -509,10 +513,6 @@ def scan_background(cwd):
                 files.append({"path": str(p.relative_to(root)).replace("\\", "/"),
                               "age_min": round(age, 1),
                               "size": p.stat().st_size})
-    这里原本发群喇叭 webhook，理由写着「桥挂了就发不出 DM」。**那句是错的**：
-    notify() 是 shell 出 send_feishu_msg.py，它直连飞书 REST、不经过桥进程。
-    2026-08-30 实测：停掉 tb24-notes-3 的桥进程后用它发 DM 仍然 ✅ 已发。
-    于是 webhook 的最后一条存在理由也没了，随全部兜底一起拆除。
     except Exception as e:                              # noqa: BLE001
         log(f"文件活动扫描失败（不致命）：{e}")
     files.sort(key=lambda f: f["age_min"])
