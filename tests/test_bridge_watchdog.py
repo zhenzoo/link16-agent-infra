@@ -460,5 +460,152 @@ def test_说不准必须走告警而不是被忽略():
     assert "notify(" in seg, "「说不准」必须发告警，绝不能静默跳过"
     assert "failover" not in seg, "「说不准」绝不能触发换号（不知道切到哪安全）"
 
+# ─────────── R5 · Codex 回合被服务端掐断（2026-08-25 tb24-voiceover 静默 17 小时那次）───────────
+#
+# 现场：Codex 已经把答复写完，紧接着的续跑请求被 OpenAI 判成 invalid_prompt，
+# 这一轮以 task_complete{error, last_agent_message: null} 收尾 ⇒ 桥没有 final 可回传（主人零通知）、
+# 自主推进的 loop 就地断掉（没有任何东西会再踢它）。R1 只认 "API Error:"、R2 只认限流横幅，都不认它。
+
+import json as _json
+
+
+def _rollout(*events):
+    """拼一段假 rollout：每个 event 是 (类型, 额外字段)。真文件里键的空格风格不统一，这里故意两种都掺。"""
+    out = []
+    for i, (typ, extra) in enumerate(events):
+        payload = {"type": typ, "turn_id": f"turn-{i}", **extra}
+        line = _json.dumps({"timestamp": f"2026-08-25T07:5{i}:00.000Z",
+                            "type": "event_msg", "payload": payload}, ensure_ascii=False)
+        out.append(line if i % 2 else line.replace('", "', '","'))
+    return "\n".join(out)
+
+
+_POLICY_ERR = {"error": {"message":
+               "Invalid prompt: your prompt was flagged as potentially violating our usage policy. "
+               "Please try again with a different prompt: "
+               "https://platform.openai.com/docs/guides/reasoning#advice-on-prompting"},
+               "last_agent_message": None}
+
+
+def test_r5_认得出被安全分类器掐断的回合():
+    dead = w.find_dead_turn(_rollout(("task_started", {}), ("task_complete", _POLICY_ERR)))
+    assert dead is not None, "这正是看门狗当天全程 0 动作的那个洞"
+    assert dead["policy"] is True
+    assert "flagged as potentially violating" in dead["error"]
+
+
+def test_r5_防抢跑_新回合已经起来了就绝不动手():
+    """比 R1 的 retry 标记更硬：后面出现更新的 task_started = 它已经在跑，注入只会打断它。"""
+    屏 = _rollout(("task_started", {}), ("task_complete", _POLICY_ERR), ("task_started", {}))
+    assert w.find_dead_turn(屏) is None
+
+
+def test_r5_主人自己按了中断不算故障():
+    assert w.find_dead_turn(_rollout(("task_started", {}), ("turn_aborted", {}))) is None
+
+
+def test_r5_正常收尾不算():
+    好 = {"error": None, "last_agent_message": "干完了"}
+    assert w.find_dead_turn(_rollout(("task_started", {}), ("task_complete", 好))) is None
+
+
+def test_r5_限流是R2的活_绝不抢():
+    """限流有双源判定 + 换号一整套（R2）。R5 抢过来只会白注一句「继续」，还把 R2 的计数打乱。"""
+    限流 = {"error": {"message": "You've hit your weekly limit · resets Aug 27, 6pm"}}
+    assert w.find_dead_turn(_rollout(("task_started", {}), ("task_complete", 限流))) is None
+
+
+def test_r5_防误判_正文原样贴了这句话也不算():
+    """**这就是 R5 不读屏的全部理由。**
+
+    这个错的屏幕文本是一句大白话，正文可以原样出现 —— 写下这条规则的当天，
+    主人就把这句话原文贴进了另一个 bot 的会话里。判据只认 Codex 自己写的
+    task_complete.error 结构化字段，所以正文里出现多少次都伪造不出来。
+    （这里故意让假正文把 task_complete 这个词也一起贴进去，把预筛那一层也压上。）"""
+    正文 = _json.dumps({"timestamp": "2026-08-26T00:00:00.000Z", "type": "response_item",
+                        "payload": {"type": "message", "role": "user", "content": [{"type": "input_text",
+                        "text": "帮我查一下：task_complete 里报 Invalid prompt: your prompt was flagged "
+                                "as potentially violating our usage policy 是什么原因？"}]}},
+                       ensure_ascii=False)
+    好 = _rollout(("task_started", {}), ("task_complete", {"last_agent_message": "查完了"}))
+    assert w.find_dead_turn(好 + "\n" + 正文) is None
+
+
+def test_r5_防自激_注入文本本身不能命中任何判据():
+    """和 R1 同款闸：注进去的话如果自己命中判据，下一轮读回来就是无限循环。"""
+    assert w.find_pane_error(w.POLICY_NUDGE_TEXT) is None
+    assert w._POLICY_RE.search(w.POLICY_NUDGE_TEXT) is None
+    assert w._LIMIT_RE.search(w.POLICY_NUDGE_TEXT) is None
+
+
+def test_r5_认不出thread就明说认不出_而不是当没事(monkeypatch):
+    """「尺子坏了但输出正常」是本仓最常见的故障形状 —— 认不出 thread 必须能被看见（进心跳行）。"""
+    monkeypatch.setattr(w, "_is_codex", lambda _b: True)
+    monkeypatch.setattr(w, "codex_thread_id", lambda _b: None)
+    assert w.codex_dead_turn("某个codex bot", {}) == (None, False), "第二个值 = 认不认得出，必须是 False"
+
+    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
+    body = src[src.index("def cmd_run("):]
+    assert "r5_blind" in body and "R5 覆盖" in body, "认不出的数量必须打进心跳行，别只在函数里返回就完事"
+
+
+def test_r5_尾巴读不到回合事件就算认不出_而不是报一切正常(monkeypatch):
+    """单个回合的输出撑爆 ROLLOUT_TAIL_BYTES 时，尾巴里可能一条回合事件都没有。
+    这时这把尺子**对它没有读数** —— 必须算「认不出」进心跳账，绝不能返回「一切正常」。"""
+    monkeypatch.setattr(w, "_is_codex", lambda _b: True)
+    monkeypatch.setattr(w, "codex_thread_id", lambda _b: "t-1")
+    monkeypatch.setattr(w, "codex_rollout_tail", lambda *a, **k: '{"payload": {"type": "reasoning"}}')
+    assert w.codex_dead_turn("某bot", {}) == (None, False)
+
+
+def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypatch):
+    """把 cmd_run 的**真循环**跑一轮（靠 time.sleep 抛异常收尾），面板 I/O 与网络全部打桩。
+
+    单测判据全绿 ≠ 接线是通的 —— 本仓最贵的一课就是「尺子对、但那根线早断了」
+    （xhs 那版看门狗 bot 名恒为 None，照常报警、只是标注一直是错的，烂了两个月）。
+    所以这里守的是**从判据到动手**这一整条：读到掐断 → 注 POLICY_NUDGE_TEXT → 发 policy_nudged。"""
+    class _一轮就够(Exception):
+        pass
+
+    注了, 喊了 = [], []
+    monkeypatch.setattr(w, "scan_topology", lambda: ({"pty-1": "ws-voiceover"}, ["pty-1"]))
+    monkeypatch.setattr(w, "read_pane", lambda *a, **k: "• Ran node scripts/audit.mjs")
+    monkeypatch.setattr(w, "live_bot_by_pty", lambda: {"pty-1": "假codex-bot"})
+    monkeypatch.setattr(w, "_iter_bots", lambda: [{"name": "假codex-bot"}])
+    monkeypatch.setattr(w, "_profile_of", lambda *a, **k: "cxp")
+    monkeypatch.setattr(w, "at_picker", lambda *a, **k: False)
+    monkeypatch.setattr(w, "bridge_alive", lambda: True)
+    monkeypatch.setattr(w, "_heartbeat_write", lambda *a, **k: None)
+    monkeypatch.setattr(q, "collect", lambda *a, **k: [])
+    monkeypatch.setattr(w, "_is_codex", lambda _b: True)
+    monkeypatch.setattr(w, "codex_dead_turn", lambda *a, **k: (
+        {"turn": "turn-掐断", "error": "Invalid prompt: ... flagged as potentially violating ...",
+         "policy": True}, True))
+    monkeypatch.setattr(w, "nudge_pane", lambda pty, text=None: 注了.append((pty, text)) or True)
+    monkeypatch.setattr(w, "notify", lambda bot, kind, text: 喊了.append((bot, kind)) or True)
+
+    def _炸(_s):
+        raise _一轮就够
+    monkeypatch.setattr(w.time, "sleep", _炸)
+
+    with pytest.raises(_一轮就够):
+        w.cmd_run(auto=False)
+
+    assert 注了 == [("pty-1", w.POLICY_NUDGE_TEXT)], f"应当往面板注 R5 那句，实际 {注了}"
+    assert ("假codex-bot", "policy_nudged") in 喊了, f"必须发 DM，绝不静默地救；实际 {喊了}"
+
+
+def test_r5_只在回合收尾时动手_结构上不会打断正在跑的活():
+    """守住循环里的接线：R5 唯一的动手条件来自 find_dead_turn，而它要求最后一个事件是 task_complete。"""
+    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
+    body = src[src.index("def cmd_run("):]
+    i = body.index("R5 · Codex")
+    seg = body[i:i + 3200]
+    assert "codex_dead_turn(" in seg
+    assert "POLICY_NUDGE_TEXT" in seg, "R5 要注的是自己那句，不是 R1 的 NUDGE_TEXT"
+    assert "POLICY_NUDGE_MAX" in seg, "连着被掐 N 次必须停手，别无限白撞"
+    assert 'notify(bot_name, "policy_stuck"' in seg, "停手之后【绝不静默】——静默正是这套东西要根治的病"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
