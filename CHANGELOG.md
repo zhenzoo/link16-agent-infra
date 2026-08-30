@@ -3,6 +3,44 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.18.1 — 文档表格写入硬闸（2026-08-30）
+
+- 原生 docx 的真实表格逐格写入改为全篇最多 24 格的不可突破硬上限：调用方只能调低，不能调高；预算在请求前扣除，失败也不返还，彻底阻断大表格请求放大。超限或空响应统一保留完整纯文本并继续交付。
+
+## v0.18.0 — 租户安全路由与文档投递收敛（2026-08-30）
+
+- 租户路由改为 fail-closed：只认租户 API 或当前 bot 内部群里的唯一 tenant key；未知、多 key、仅外部群时不猜，新 `group-a2a` 注册要求显式 `--group`，Monitor 按精确 chat ID 验收。
+- 文档投递收敛为 `send --doc` 单入口：Markdown/TXT 原生 docx 优先，在线失败自动由同一 bot 发原文件附件；`file-as-text` 仅保留为明确的正文聊天模式。大表格写入增加有界 API 预算和 HTTP 空正文局部降级，避免把可用的 `docs-text` 误报成缺权限。
+
+## v0.17.0 — 自足注册、可靠回传与免 Drive 文档交付（2026-08-27）
+
+- 注册采用 runtime-neutral Monitor：OAuth、权限审阅/验真、认主、入群都能跨 turn 回调原 bot；默认两个人工链接，第一条只创建应用，第二条按 capability 明列 tenant scopes，代码不代替发布或管理员审批。
+- 权限从“全量默认开”改为 `core/group-a2a/docs-text/docs-media/docs-import/group-listen` 能力档；默认不申请 broad Drive，scope auditor 明确 app owner 不等于企业管理员。
+- 新增 accepted-inbound durable ledger；群 @、桥内 slash、会话首启失败前的长消息先保留全文，再与 cutover 前 transcript 和出站记录合并。Codex app-server ready wait 覆盖合法 120 秒 warm-up。
+- 新机部署补真空白机自举、安装后复查、Windows Terminal 安全配置、多 Python 语义版本选择与 Claude harness 环境清理；Codex 基线不再依赖私人 govctl，Jina 从桥核心依赖拆为可选工具。
+- 桥、cron、watchdog、注册回调共用跨进程 session/TUI 锁；cron 对 composer 未提交如实失败，不再假绿。
+- 修复中文 Windows 上 Claude/Codex hook 把 UTF-8 stdin 当 CP936 解码、导致群回址退化到主人 DM：全部 6 个 JSON hook 改读原始 UTF-8 字节并补真实中文 `p2a-ext` 回归；装机自动持久化用户级 `PYTHONUTF8=1`，不要求修改系统区域 UTF-8 Beta。
+- 真人群最终答案继续使用互动卡片并按容量稳定分片；本地 64 位 fragment ID 与飞书 36 位 UUIDv5 分离，卡片、a2a 文字和 fallback 共用同一 provider 幂等键，旧积压无需清账即可续送。
+- 新增不依赖 `drive:drive` 的原生 docx 发布：`send --doc` 先试 import，再由同一 bot 把 Markdown/TXT 转块写入；只有两条在线链都失败且用户确认无法获批时才发原文件附件，禁止跨 bot 代发。
+- 原生表格逐格写入增加长单元格分块、失败索引与完整逐行文本兜底；在线 URL 必须同时通过组织可见或协作者授权闸，避免“文档建了但人打不开”假送达。
+- 权限工具补分享设置 capability；`capability_probe` 默认跳过会生成孤儿素材的上传探针。主动文字文件参数改名为 `--file-as-text`，旧 `send --file` 在联网前硬拒并指向真附件工具。
+
+## v0.16.0 — Private 同事桌面化部署（2026-08-26）
+
+- 「开始部署 Link16」成为唯一新机入口：桌面 AI 用户只点 GitHub/provider/飞书登录链接，agent 负责命令和验收。
+- 新增 mixed-port 功能探测、机型/年份前缀建议、`ccp` / `ccp2` / `cxp` 独立账号函数和 private-main 机械验收。
+- 补齐 `.env`/私钥 ignore，停止 token 片段和 SDK 凭据返回体输出；不同同事默认不再同步整份 `.env`。
+- 将现役 registry 明确为 private 受信边界内的运维元数据；对外公开仍必须先完成 PLAN-926 和历史处理。
+- 新增 Windows 7 项安装计划：已有组件不重装，Claude/Codex 走官方原生安装器；wmux 自动补桌面快捷方式并复核 Git Bash。
+- 明确 Link16 核心不依赖个人 `claude-config`；anysearch/push/pull/align 等为个人增强，gstack 从默认部署与 Codex 迁移步骤中移除。
+
+## v0.15.0 — TB26 装机收口（2026-08-26）
+
+- Windows Terminal 与 wmux 的默认 Git Bash 由“人工习惯”升为 `preflight.py` 机械验收；wmux 安装/升级后必须静态检查 store，并新开临时 workspace 验 `MSYSTEM=MINGW64`。
+- 新增 `feishu/network_route.py`：按实际下载 URL 并行比较 direct / `.env` 的 `PROXY_URL`，只给一次子进程注入所选线路；不改 v2rayN/系统代理，不包含 企业租户A Remote/Staff 网络特例。
+- 飞书注册支持 `--app-id cli_...` 续接已创建但凭据回传中断的应用；最低 `lark-oapi` 升至 1.7.3，并补测试与 SOP。
+- 新机器首次建 bot 前只确认一次目标飞书组织；同机后续沿用，显式指定覆盖。空 local roster 模板改为不可运行的 `bots: []`。
+
 ## v0.14.0 — 撞限流自动接管：会话不再死在 weekly limit 上（2026-08-20）
 
 **WHY**：2026-08-20 17:11 `tb24-voiceover` 撞 ccp2 的 weekly limit 停住，**主人在飞书上零通知**，

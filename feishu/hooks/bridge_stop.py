@@ -21,6 +21,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import turn_delivery_guard  # noqa: E402
+
 
 def _project_dir():
     p = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -263,13 +266,21 @@ def _trace(msg):
         pass
 
 
+def _read_stdin_json():
+    """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stream.read()
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    return json.loads(text.lstrip("\ufeff"))
+
+
 def main():
     bot = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not bot:
         _trace("EXIT 无 FEISHU_BRIDGE_SESSION（非桥会话）")
         return                                    # 非桥会话 → 不管（env-scope 隔离）
     try:
-        inp = json.load(sys.stdin)
+        inp = _read_stdin_json()
     except Exception:                             # noqa: BLE001
         return
     tp = inp.get("transcript_path")
@@ -325,8 +336,10 @@ def main():
     # （Claude 串行·下一轮 UserPromptSubmit 还没开火覆盖它）→ drainer 异步 drain answer 时按记录里钉死的 route
     # 投递·不受下一轮覆盖（防 p2a 答案漏进 a2a 群）。progress 走 _reply_dest(turn 内·无竞态)·此处只管 answer。
     try:
-        route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
+        active_route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
+        route = turn_delivery_guard.public_route(active_route)
     except (OSError, ValueError, json.JSONDecodeError):
+        active_route = None
         route = None
     try:
         outbox.parent.mkdir(exist_ok=True)
@@ -341,6 +354,9 @@ def main():
     # 正文已落 outbox → 推进 cursor 到「本轮真正取走正文的最后一行」：下一次 Stop 只看更后面的记录，
     # 结构上杜绝「同一段正文被下一轮再拼一遍」（2026-08-16 tb24-voiceover 全量重发事故的硬保证）。
     _write_cursor(outdir, bot, sid, r.get("consumed_line") or 0, tp)
+    turn_delivery_guard.compare_and_clear(
+        outdir, bot, (active_route or {}).get("turn_key")
+    )
     _trace(f"OK bot={bot} 已写 {len(cards)} 条 answer → {outbox}")
 
 

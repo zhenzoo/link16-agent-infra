@@ -233,6 +233,24 @@ def at_picker(pane_text, bot_name):
     return bool(find_ask_picker(pane_text))
 
 
+# ---------- R6 · 水位书签损坏（断电后已自动修好，但主人必须知道）----------
+# bridge_outbox.load_hwm 读到损坏的书签时会 fail-closed 退到 outbox 末尾、并追加一行日志。
+# 那个动作【本身是对的】（不重放历史），但它同时意味着两件主人该知道的事：
+#   ① 这台机崩过一次（断电/蓝屏，不是正常关机）；
+#   ② 崩溃前最后一批还没送达的消息被跳过了 —— 它们仍在 outbox 里，可人工捞回。
+# 2026-08-30 洪水那次就是这个形状，而当时这条日志还不存在，42 分钟里没有任何人知道发生了什么。
+# 加这条规则的唯一理由：那个日志此前【只有写入方、没有读取方】—— 又一个静默的留痕。
+def hwm_corrupt_unseen(bot_name, seen):
+    """返回 (新增条数, 最后一行)。读不到/没有 → (0, "")。绝不抛。"""
+    try:
+        p = STATE_DIR / f"bridge-hwm-corrupt-{bot_name}.log"
+        lines = [ln for ln in p.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    except (OSError, ValueError):
+        return 0, ""
+    n = len(lines) - int(seen or 0)
+    return (n, lines[-1]) if n > 0 else (0, "")
+
+
 # ---------- R4 · 飞书桥看护 ----------
 
 def bridge_alive():
@@ -262,12 +280,137 @@ def _allow(pty):
     return []
 
 
-def nudge_pane(pty):
-    """往卡住的面板注「继续」。返回 True=注了。"""
+def nudge_pane(pty, text=None):
+    """往卡住的面板注一句话（默认 NUDGE_TEXT）。返回 True=注了。"""
     allow = _allow(pty)
-    rpc(["send", pty, NUDGE_TEXT] + allow)
+    rpc(["send", pty, text or NUDGE_TEXT] + allow)
     rpc(["key", pty, "enter"] + allow)
     return True
+
+
+# ---------- R5 · Codex 回合被服务端掐断（含 OpenAI 安全分类器 invalid_prompt）----------
+#
+# 🩸 2026-08-25 tb24-voiceover 实证（这条规则的立项现场，别删这段）：
+#   07:51:02 Codex 已经把答复写完了（rollout 里躺着完整的 agent_message），
+#   07:51:04 紧接着的续跑请求被 OpenAI 判成 `invalid_prompt`：
+#     "Invalid prompt: your prompt was flagged as potentially violating our usage policy."
+#   于是这一轮以 `task_complete{error, last_agent_message: null}` 收尾 ⇒ 两处同时断：
+#     ① 桥只在 `final` 事件上回传 → **主人在飞书一个字都没收到**；
+#     ② 自主推进的 loop 被就地掐死 → **没有任何东西会再踢它一脚**。
+#   主人当天三次手动追问（15:43 / 15:45 / 15:47）被同一个分类器逐条拦下，
+#   到 08-26 01:12 才自己恢复 —— 单这一天静默烧掉 **17 小时 18 分**。
+#   而看门狗全程 0 动作：R1 只认 "API Error:"、R2 只认限流横幅，**这个错谁都不认**。
+#   （不是我们的 prompt 有问题：openai/codex #39745 #40327 #7250 同期大量同形报告，
+#     服务端分类器误伤，Codex 客户端自己也没把它当可恢复错误处理。）
+#
+# ⚠️ 为什么这条**不读屏**（和 R1/R2 反着来，不是随手换了个实现）：
+#   这个错的屏幕文本是一句大白话（"your prompt was flagged…"），**正文可以原样出现**
+#   —— 写下这条规则的当天，主人就把这句话原文贴进了另一个 bot 的会话里。
+#   2026-06-18 那条老教训（读屏分不清「正文提到」和「真报错」）在这儿是**加倍**成立的。
+#   Codex 自己写的 rollout JSONL 里的 `task_complete.error` 是结构化字段、**只有 Codex 自己会写**，
+#   正文再怎么提也伪造不出来 ⇒ 这才是站得住的判据。顺带白拿两样：
+#   「现在到底有没有在跑」（后面有没有更新的 task_started）+ 精确到秒的断点时间。
+_POLICY_RE = re.compile(r"invalid_prompt|flagged as potentially violating", re.I)
+_TURN_EVENTS = ("task_started", "task_complete", "turn_aborted")
+POLICY_NUDGE_TEXT = "继续推进（上一轮在服务端被掐断了，从上次停的地方接着做）"
+POLICY_NUDGE_MAX = 3         # 连着这么多个回合都被掐断 → 停手，改成只告警（别白烧 token）
+ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
+_ROLLOUT_CACHE = {}          # {(bot, thread): Path} —— sessions/ 递归 glob 不便宜，解析一次就存住
+
+
+def find_dead_turn(tail_text):
+    """Codex rollout 的尾巴 → 「最后一个回合是不是以错误收尾、且没有新回合接上」。纯函数。
+
+    返回 {"turn", "error", "policy"} 或 None。**四种情况一律返回 None、绝不动手**：
+      · 最后一个回合事件是 task_started  → 它正在跑
+      · 最后一个是 turn_aborted          → 主人自己按了中断，不是故障
+      · task_complete 但 error 是空的    → 正常收尾
+      · error 命中限流签名               → 那是 R2 的活（双源判定 + 换号），别抢
+    """
+    last = None
+    for line in (tail_text or "").splitlines():
+        if not any(k in line for k in _TURN_EVENTS):
+            continue                      # 便宜的预筛（rollout 绝大多数行是 reasoning / tool 输出）
+        try:
+            payload = json.loads(line).get("payload") or {}
+        except Exception:                 # noqa: BLE001
+            continue                      # 尾部截断出来的半行 → 跳过
+        if payload.get("type") in _TURN_EVENTS:
+            last = payload
+    if not last or last.get("type") != "task_complete":
+        return None
+    err = str(((last.get("error") or {}).get("message") or "")).strip()
+    if not err or _LIMIT_RE.search(err):
+        return None
+    return {"turn": str(last.get("turn_id") or ""), "error": err[:200],
+            "policy": bool(_POLICY_RE.search(err))}
+
+
+def codex_thread_id(bot_name):
+    """这个 bot 当前挂在哪个 Codex thread 上。读桥自己落的状态文件，**读不到就返 None、绝不猜**。"""
+    for name in (f"bridge-codex-app-thread-{bot_name}.json",
+                 f"bridge-codex-app-ready-{bot_name}.json"):
+        try:
+            tid = json.loads((STATE_DIR / name).read_text(encoding="utf-8")).get("thread_id")
+        except Exception:                 # noqa: BLE001
+            continue
+        if tid:
+            return str(tid)
+    return None
+
+
+def codex_rollout_tail(bot_obj, thread_id, bot_name=None, tail=ROLLOUT_TAIL_BYTES):
+    """`<codex_home>/sessions/**/rollout-*-<thread>.jsonl` 的尾巴。找不到返 None（不退而求其次找别的文件——
+    同一个 cwd 上可能挂着好几个 bot，猜错文件就是给别人的故障记在这个 bot 头上）。"""
+    key = (bot_name, thread_id)
+    path = _ROLLOUT_CACHE.get(key)
+    if path is None or not path.exists():
+        try:
+            root = agent_runtime._codex_home(bot_obj) / "sessions"
+        except Exception:                 # noqa: BLE001
+            return None
+        hits = sorted(root.glob(f"**/rollout-*-{thread_id}.jsonl"))
+        if not hits:
+            return None
+        path = hits[-1]
+        _ROLLOUT_CACHE[key] = path
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - tail))
+            return f.read().decode("utf-8", "replace")
+    except Exception:                     # noqa: BLE001
+        return None
+
+
+def _is_codex(bot_obj):
+    """这个 bot 是不是 Codex runtime。认不出就当不是（宁可 R5 对它失明，也别对 Claude 面板乱动手）。"""
+    try:
+        return agent_runtime.runtime_name(bot_obj) == "codex"
+    except Exception:                     # noqa: BLE001
+        return False
+
+
+def codex_dead_turn(bot_name, bot_obj):
+    """R5 的对外入口：这个 bot 是不是「最后一个回合被掐断、现在谁都不会再踢它」。
+
+    返回 (结果, 认不认得出这个 bot 的 thread)。第二个值不是装饰 ——
+    **认不出来要能被看见**（进心跳行），否则又是一条「尺子坏了但输出正常」。
+    """
+    if not _is_codex(bot_obj):
+        return None, False
+    thread = codex_thread_id(bot_name)
+    if not thread:
+        return None, False
+    tail = codex_rollout_tail(bot_obj, thread, bot_name=bot_name)
+    if tail is None:
+        return None, False
+    if not any(k in tail for k in _TURN_EVENTS):
+        # 尾巴里一条回合事件都没有（单个回合的输出超过 ROLLOUT_TAIL_BYTES 时会这样）——
+        # 这把尺子**对它没有读数**，绝不能返回「一切正常」：那就又是一条「尺子坏了但输出正常」。
+        return None, False
+    return find_dead_turn(tail), True
 
 
 # ---------- 告警 ----------
@@ -288,7 +431,7 @@ def _alerts_save(data):
 
 
 # 状态类（会持续成立）→ 冷却；动作类（一次性）→ 必发不吞。
-_STATEFUL_KINDS = {"limit"}
+_STATEFUL_KINDS = {"limit", "policy_stuck", "hwm_corrupt"}
 
 
 def _alert_target(bot_name):
@@ -321,7 +464,7 @@ def _alert_target(bot_name):
             return oid                      # 该 bot 视角下的主人 open_id（DM 直达）
     except Exception:                       # noqa: BLE001
         pass
-    return None                             # 交给调用方退 webhook，别静默
+    return None                             # 交给调用方如实报失败，别静默
 
 
 def notify(bot_name, kind, text):
@@ -330,8 +473,12 @@ def notify(bot_name, kind, text):
     这是本 plan 相对旧看门狗最重要的一处改动：旧的调 xhs `scripts/notify.py`，
     走的是**飞书自定义机器人 webhook**（另一个群）——所以主人在 DM 里永远看不到（实测）。
 
-    返回 True = **确认送出去了**（DM 或 webhook 任一成功）。调用方必须认这个返回值：
-    告警是整套设计里唯一面向人的出口，它失败而流程照打 ✅，就是又一个假绿灯。"""
+    返回 True = **DM 确认送出去了**。调用方必须认这个返回值：
+    告警是整套设计里唯一面向人的出口，它失败而流程照打 ✅，就是又一个假绿灯。
+
+    2026-08-30 主人拍板拆掉 webhook 退路：兜底给失败开了一条特殊通道，让「没送到」
+    长得像「送到了」。发不到主人自己会察觉（bot 不吭声就是信号），届时他直接找 link16
+    或上机器看。所以这里 DM 失败就是失败，不改投任何地方。"""
     if kind in _STATEFUL_KINDS:
         alerts = _alerts_load()
         key = f"{bot_name}:{kind}"
@@ -361,11 +508,10 @@ def notify(bot_name, kind, text):
                            env=env, creationflags=NO_WINDOW)
         ok = r.returncode == 0
         if not ok:
-            # 🩸 DM 发不出去时**必须退回 webhook**，绝不能只写日志就算了 ——
-            # 告警是整套设计里**唯一面向人的出口**，它静默失败 = 「干成了但没人知道」，
-            # 正是本 plan 立项时要根治的形状。
-            log(f"[{bot_name}] DM 发不出（{(r.stderr or r.stdout or '')[:100]}）→ 退回 webhook")
-            ok = notify_webhook(f"[{bot_name}] {text}")
+            # 2026-08-30 起不再改投任何通道：喊清楚、如实返回 False，让调用方把「没通知到」
+            # 记进心跳账（见下面 failover 的 undelivered 记录），主人上机器时一眼看得见。
+            log(f"[{bot_name}] ❌ DM 告警发不出（{(r.stderr or r.stdout or '')[:100]}）"
+                f"·不改投别处（兜底已拆除）")
         log(f"[{bot_name}] DM 告警 {kind} → {'✅' if ok else '❌ ' + (r.stderr or '')[:120]}")
         return ok
     except Exception as e:                             # noqa: BLE001
@@ -373,36 +519,25 @@ def notify(bot_name, kind, text):
         return False
 
 
-def notify_webhook(text):
-    """**桥不可用时**的退路（飞书自定义机器人 webhook · 纯标准库 · 强制绕代理）。
+def _notify_bridge_down():
+    """「桥进程挂了」不属于任何单个 bot，但仍然走 DM —— 不需要第二条通道。
 
-    为什么留这条：会话级事件（撞限流/换号/接手）一律走 bot 自己的 DM，主人才看得见；
-    但「桥自己死了」这类事件**恰恰发不出 DM**——双通道冗余的意义就只在这一种情况。
-    没配 webhook 就静默跳过（只记日志），**不因为缺一个可选通道而让守护进程报错**。"""
-    url = _webhook_url()
-    if not url:
-        log("（没配 webhook，桥级告警只进日志）")
-        return False
-    try:
-        import urllib.request
-        body = json.dumps({"msg_type": "text", "content": {"text": text}}).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 国内端点·绕代理
-        with opener.open(req, timeout=15) as r:
-            ok = json.loads(r.read().decode("utf-8", "replace")).get("code") == 0
-        log(f"webhook 告警 → {'✅' if ok else '❌'}")
-        return ok
-    except Exception as e:                               # noqa: BLE001
-        log(f"webhook 告警失败：{e}")
-        return False
+    这里原本发群喇叭 webhook，理由写着「桥挂了就发不出 DM」。**那句是错的**：
+    notify() 是 shell 出 send_feishu_msg.py，它直连飞书 REST、不经过桥进程。
+    2026-08-30 实测：停掉 tb24-notes-3 的桥进程后用它发 DM 仍然 ✅ 已发。
+    于是 webhook 的最后一条存在理由也没了，随全部兜底一起拆除。
 
-
-def _webhook_url():
-    for key in ("FEISHU_WATCHDOG_WEBHOOK_URL", "FEISHU_XHS_WEBHOOK_URL"):
-        v = agent_quota._env_value(key)
-        if v and "PASTE_" not in v:
-            return v
-    return None
+    挑名册里第一个能解析出告警目标的 bot 代为播报 —— 选的是【发信人】，
+    不是第二条通道：消息仍然只进主人那一个 DM。
+    """
+    text = ("⚠️ 看门狗：飞书桥进程挂了（之前在线）· "
+            "恢复：在 link16-agent-infra 仓跑 python feishu/feishu_bridge.py start")
+    for spec in fb.load_bots():
+        name = spec.get("name")
+        if name and _alert_target(name):
+            return notify(name, "bridge_down", text)
+    log("⚠️ 桥挂了，但名册里没有任何 bot 能解析出告警目标 → 只进日志")
+    return False
 
 
 def _heartbeat_write(panes, acted):
@@ -828,7 +963,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         log(f"✅ {bot_name} {cur} → {tgt} 换号 + 接手完成（已通知主人）")
     else:
         log(f"⚠️ {bot_name} {cur} → {tgt} 换号 + 接手【动作成功，但主人没被通知到】"
-            f" —— DM 与 webhook 都没送出去。去 {bot_name} 的面板看一眼确认。")
+            f" —— DM 没送出去（已无兜底通道·这是刻意的）。去 {bot_name} 的面板看一眼确认。")
         try:
             alerts = _alerts_load()
             alerts.setdefault("undelivered", []).append(
@@ -947,10 +1082,11 @@ def cmd_run(auto=True):
       R3 停在交互 picker           → **什么都不做**（在等主人回答，注回车会替他乱选）
       R2 撞额度上限（屏 + API 双源）→ 换号 + 把原任务交接给新会话
       R1 API/网络错 + 静止 2 轮     → 注「继续」
+      R5 Codex 回合被服务端掐断     → 告警 + 注「继续」；连着 3 个回合都被掐 → 停手只告警
       R4 桥进程 活→死              → 告警（每轮一次·不针对面板）
     要支持一种新的中断类型，就在这张表里加一行。"""
-    log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 限流换号 / R3 picker跳过 / R4 桥看护 · "
-        f"覆盖【全部 workspace 的全部面板】· 一视同仁")
+    log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 限流换号 / R3 picker跳过 / "
+        f"R5 Codex回合被掐断 / R4 桥看护 · 覆盖【全部 workspace 的全部面板】· 一视同仁")
     states = {}                      # {pty: {"hash","err_stuck","lim_stuck","last_nudge"}}
     bridge_seen_alive = False
     bridge_alerted = False
@@ -968,6 +1104,7 @@ def cmd_run(auto=True):
             quota = {r["profile"]: r for r in agent_quota.collect()}
             now = time.time()
             acted = 0
+            r5_seen = r5_blind = 0        # R5 覆盖账：扫到几个 codex bot / 其中几个认不出 thread
 
             for pty in ptys:
                 text = read_pane(pty)
@@ -978,7 +1115,8 @@ def cmd_run(auto=True):
                 ws = (ws_by_pty or {}).get(pty) or "?workspace"
                 bot_name = bot_by_pty.get(pty)
                 st = states.setdefault(pty, {"err_sig": None, "err_stuck": 0,
-                                            "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0})
+                                            "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0,
+                                            "dead_turn": None, "dead_streak": 0, "dead_alert_at": 0.0})
 
                 # ---- R3 · picker → 什么都不做 ----
                 if at_picker(text, bot_name):
@@ -1026,6 +1164,71 @@ def cmd_run(auto=True):
                                f"🔧 {bot_name} 卡在『{err[:60]}』（API/网络错·没在自己重试）· 已自动注「继续」\n"
                                f"面板 {ws} / {pty}｜还卡就去看一眼")
 
+                # ---- R5 · Codex 回合被服务端掐断 → 告警 + 注「继续」（连 3 轮被掐就停手）----
+                # 判据读 Codex 自己的 rollout（结构化），**不读屏** —— 理由见文件上半部 R5 那节的长注释。
+                # 只在「最后一个回合已经收尾」时动手 ⇒ 结构上不可能打断正在跑的活。
+                bot_obj = bots.get(bot_name) if bot_name else None
+                dead, resolved = codex_dead_turn(bot_name, bot_obj) if bot_name else (None, False)
+                if bot_name and _is_codex(bot_obj):
+                    r5_seen += 1
+                    if not resolved:
+                        r5_blind += 1
+                if not dead:
+                    st["dead_turn"], st["dead_streak"] = None, 0
+                    continue
+                fresh = dead["turn"] != st.get("dead_turn")
+                if fresh:
+                    st["dead_turn"] = dead["turn"]
+                    st["dead_streak"] = st.get("dead_streak", 0) + 1
+                why = "被 OpenAI 安全分类器拦下（invalid_prompt）" if dead["policy"] else "以错误收尾"
+                if st["dead_streak"] <= POLICY_NUDGE_MAX:
+                    # 注入受 10min 冷却节流，但**告警不跟着一起哑** —— 冷却期内换个说法照实说，
+                    # 绝不发一条「我已自动注『继续推进』」而其实这轮压根没注（那就是自己造假绿灯）。
+                    poked = (now - st["last_nudge"]) >= NUDGE_COOLDOWN
+                    if poked:
+                        nudge_pane(pty, POLICY_NUDGE_TEXT)
+                        st["last_nudge"] = now
+                        acted += 1
+                        log(f"[R5] {ws}/{bot_name} 上一回合{why}（第 {st['dead_streak']} 次）→ 已注「继续推进」")
+                    if fresh:
+                        做了 = (f"我已自动注「继续推进」（第 {st['dead_streak']}/{POLICY_NUDGE_MAX} 次自动重推）"
+                              if poked else
+                              f"这轮**没注** —— 距上次注入不到 {NUDGE_COOLDOWN // 60} 分钟，等冷却过了再推")
+                        notify(bot_name, "policy_nudged",
+                               f"{bot_name} 上一回合{why}，活已经停在那儿了 · {做了}\n"
+                               f"· 服务端原话：{dead['error'][:120]}\n"
+                               f"· 面板 {ws} / {pty}")
+                elif fresh or (now - st.get("dead_alert_at", 0)) >= ALERT_COOLDOWN:
+                    st["dead_alert_at"] = now
+                    log(f"[R5] {ws}/{bot_name} 连着 {st['dead_streak']} 个回合{why} → 停手，只告警")
+                    notify(bot_name, "policy_stuck",
+                           f"{bot_name} 连着 {st['dead_streak']} 个回合{why} —— 我不再自动重推了（重推也是白撞）\n"
+                           f"· 服务端原话：{dead['error'][:120]}\n"
+                           f"· 这多半是 OpenAI 服务端分类器误伤，不是你的活有问题\n"
+                           f"· 能救的两招：给这个 bot 发 /handoff 换全新 context；或者过一阵再试\n"
+                           f"· 面板 {ws} / {pty}")
+
+            # ---- R6 · 水位书签损坏（每轮扫一遍名册·新增才喊）----
+            try:
+                _al = _alerts_load()
+                for _spec in fb.load_bots():
+                    _bn = _spec.get("name")
+                    if not _bn:
+                        continue
+                    _key = f"{_bn}:hwm_corrupt"
+                    _n, _last = hwm_corrupt_unseen(_bn, _al.get(_key, {}).get("seen", 0))
+                    if _n <= 0:
+                        continue
+                    notify(_bn, "hwm_corrupt",
+                           f"⚠️ 检测到 {_n} 次水位书签损坏（多为断电/非正常关机）。已 fail-closed "
+                           f"自动修复、未重放历史，但崩溃前最后一批未送达的消息被跳过了"
+                           f"（仍在 outbox 里可人工捞回）。最近一条：{_last[:120]}")
+                    _al.setdefault(_key, {})["seen"] = int(_al.get(_key, {}).get("seen", 0)) + _n
+                    acted += 1
+                _alerts_save(_al)
+            except Exception as _e:                       # noqa: BLE001 —— 巡检绝不因它崩
+                log(f"R6 水位损坏扫描失败（不致命）：{_e}")
+
             # ---- R4 · 桥进程活→死（每轮一次·不针对面板）----
             ba = bridge_alive()
             if ba is True:
@@ -1038,13 +1241,13 @@ def cmd_run(auto=True):
             elif ba is False and bridge_seen_alive and not bridge_alerted:
                 log("⚠️ 飞书桥进程挂了（之前在线）")
                 bridge_alerted = True
-                # 桥挂了就发不出 DM → 这是双通道冗余存在的唯一理由，退回 webhook
-                notify_webhook("⚠️ 看门狗：飞书桥进程挂了（之前在线）· "
-                               "恢复：在 link16-agent-infra 仓跑 python feishu/feishu_bridge.py start")
+                _notify_bridge_down()
 
             _heartbeat_write(len(ptys), acted)
             if tick % HEARTBEAT_EVERY == 0:
-                log(f"心跳 · 看护 {len(ptys)} 个面板 / {len(bot_by_pty)} 个有会话的 bot · 本轮动作 {acted}")
+                blind = f" · 其中 {r5_blind} 个认不出 thread（R5 对它们是瞎的）" if r5_blind else ""
+                log(f"心跳 · 看护 {len(ptys)} 个面板 / {len(bot_by_pty)} 个有会话的 bot · "
+                    f"本轮动作 {acted} · R5 覆盖 {r5_seen - r5_blind}/{r5_seen} 个 codex bot{blind}")
         except Exception as e:                           # noqa: BLE001
             log(f"loop 异常（不拖垮守护进程）：{e!r}")
         time.sleep(POLL_SECONDS)
@@ -1215,7 +1418,7 @@ def cmd_status(verbose=False):
         print(f"🔴 **有 {len(und)} 次换号【没通知到主人】**（动作成了但唯一面向人的出口断了）：")
         for u in und[-3:]:
             print(f"     {u.get('at')} {u.get('bot')} {u.get('from')}→{u.get('to')}")
-        print("     查：该 bot 的 feishu/_state/bridge-owner-<bot>.json 在不在、webhook 配了没")
+        print("     查：该 bot 的 feishu/_state/bridge-owner-<bot>.json 在不在、凭据配了没")
 
     # ④ 跨机自检
     print("\n本机适配自检：")

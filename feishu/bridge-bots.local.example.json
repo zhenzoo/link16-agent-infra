@@ -12,14 +12,13 @@
       "codex": "cxp"
     }
   },
-  "bots": [
-    {
-      "name": "local1",
-      "app_id_env": "FEISHU_BRIDGE_LOCAL1_APP_ID",
-      "app_secret_env": "FEISHU_BRIDGE_LOCAL1_APP_SECRET",
-      "at_name": "@本机助手",
-      "cwd": "$VIBECODING_ROOT/Post/your-repo",
-      "profile": "cxp"
-    }
-  ]
+  "bots": [],
+  "_example_bot": {
+    "name": "local1",
+    "app_id_env": "FEISHU_BRIDGE_LOCAL1_APP_ID",
+    "app_secret_env": "FEISHU_BRIDGE_LOCAL1_APP_SECRET",
+    "at_name": "@本机助手",
+    "cwd": "$VIBECODING_ROOT/Post/your-repo",
+    "profile": "cxp"
+  }
 }

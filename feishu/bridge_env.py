@@ -95,8 +95,9 @@ def bots_config_path(project_root):
 def registry_path():
     """跨机 agent 目录（谁是谁 / 在哪台机 / 分管哪个仓 / open_id）的**唯一路径解析入口**。
 
-    为什么要有这个函数（2026-08-17 · PLAN-926 §S1.1）：本仓准备设为 public，而
-    `agent-registry.json` 里是全舰队 51 条真实 open_id + 主机名 —— 公开等于把内网拓扑发出去。
+    为什么要有这个函数（2026-08-17 · PLAN-926 §S1.1）：本仓当前保持 private，
+    但 `agent-registry.json` 仍含全舰队 open_id + 主机名。受信 collaborator 可见；
+    若将来公开，必须先迁出真数据并处理 Git 历史边界。
     解法照抄本文件上面 `bots_config_path` 已经验证过的「local 覆盖 committed」双层套路，
     但**路径解析原先散在三处各拼各的**（`registry.py` / 本文件 `_may_send_as` / `register_feishu_app.py`），
     三处不一致就会「读的和写的不是同一个文件」→ 登记完查不到。收到这里统一。

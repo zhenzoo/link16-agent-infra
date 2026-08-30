@@ -73,11 +73,11 @@ MUTATIONS = [
      "    owner = STATE_DIR / f\"__nonexistent-{bot_name}.json\"",
      "test_告警目标_三级兜底"),
 
-    ("告警送达闸：DM 失败不退 webhook",
+    ("告警送达闸：把 DM 失败谎报成成功",
      FEISHU / "bridge_watchdog.py",
-     "            ok = notify_webhook(f\"[{bot_name}] {text}\")",
-     "            ok = False",
-     "test_告警_DM失败必须退webhook而不是静默"),
+     "        ok = r.returncode == 0",
+     "        ok = True",
+     "test_告警_DM失败必须如实报False而不是改投别处"),
 
     ("信号计数闸：退回「整屏没变才累加」",
      FEISHU / "bridge_watchdog.py",
@@ -96,6 +96,44 @@ MUTATIONS = [
      "        if time.time() - last < ALERT_COOLDOWN:",
      "        if False:",
      "test_告警冷却_状态类会冷却_动作类必发"),
+
+    # ---- R5（2026-08-25 tb24-voiceover 静默 17 小时那次立的规则）----
+    ("R5 防抢跑闸：新回合已经起来了也当没看见",
+     FEISHU / "bridge_watchdog.py",
+     '        if payload.get("type") in _TURN_EVENTS:',
+     '        if payload.get("type") == "task_complete":',
+     "test_r5_防抢跑_新回合已经起来了就绝不动手"),
+
+    ("R5 越界闸：把限流也抢过来自己注「继续」",
+     FEISHU / "bridge_watchdog.py",
+     "    if not err or _LIMIT_RE.search(err):",
+     "    if not err:",
+     "test_r5_限流是R2的活_绝不抢"),
+
+    ("R5 防自激闸：注入文本里混进判据签名",
+     FEISHU / "bridge_watchdog.py",
+     'POLICY_NUDGE_TEXT = "继续推进（上一轮在服务端被掐断了，从上次停的地方接着做）"',
+     'POLICY_NUDGE_TEXT = "继续推进（上一轮 invalid_prompt 被拦下了，接着做）"',
+     "test_r5_防自激_注入文本本身不能命中任何判据"),
+
+    ("R5 接线闸：判据认出来了但循环里不动手",
+     FEISHU / "bridge_watchdog.py",
+     "                if not dead:",
+     "                if True:",
+     "test_r5_端到端_跑一轮真循环_确认真的会注入并告警"),
+
+    # ---- R6（2026-08-30 洪水事故的读取方：那条损坏日志此前只有写入方）----
+    ("R6 去重闸：不记 seen，append-only 的日志会被每轮重报",
+     FEISHU / "bridge_watchdog.py",
+     "    n = len(lines) - int(seen or 0)",
+     "    n = len(lines)",
+     "test_R6_报过就不再重复报"),
+
+    ("R6 接线闸：判据写好了却没挂进巡检（正是它要治的病）",
+     FEISHU / "bridge_watchdog.py",
+     "                    _n, _last = hwm_corrupt_unseen(_bn, _al.get(_key, {}).get(\"seen\", 0))",
+     "                    _n, _last = 0, \"\"",
+     "test_R6_已接进巡检主循环"),
 ]
 
 
