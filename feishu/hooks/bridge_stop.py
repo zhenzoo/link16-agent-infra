@@ -264,13 +264,19 @@ def _trace(msg):
 
 
 def main():
+    # 进场先留一行（2026-08-19）：旧码在「env 缺」之前【一个字都不写】，于是「进程压根没起」和
+    # 「起了但死在读 stdin」在日志上长得一模一样 —— 都是空。黑匣子必须先证明自己上过电。
+    _trace("FIRE pid=%s cwd=%s bot=%r" % (os.getpid(), os.getcwd(), os.environ.get("FEISHU_BRIDGE_SESSION")))
     bot = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not bot:
         _trace("EXIT 无 FEISHU_BRIDGE_SESSION（非桥会话）")
         return                                    # 非桥会话 → 不管（env-scope 隔离）
     try:
         inp = json.load(sys.stdin)
-    except Exception:                             # noqa: BLE001
+    except Exception as _e:                       # noqa: BLE001
+        # 只加一行日志、不动行为：旧码这条 except 是**裸 return**，
+        # 于是「hook 跑了但什么都没写」在日志上和「hook 压根没跑」长得一模一样。
+        _trace(f"EXIT bot={bot} 读/解析 stdin 失败: {_e!r}")
         return
     tp = inp.get("transcript_path")
     sid = inp.get("session_id", "")
@@ -352,4 +358,12 @@ if __name__ == "__main__":
         from bridge_env import force_utf8_std as _f8; _f8()
     except Exception:          # noqa: BLE001
         pass
-    main()
+    try:
+        main()
+    except BaseException:      # noqa: BLE001 —— 异步 hook 的 traceback 没人接，不落黑匣子=白死
+        try:
+            import traceback
+            _trace("CRASH " + " | ".join(traceback.format_exc().splitlines()))
+        except Exception:      # noqa: BLE001
+            pass
+        raise
