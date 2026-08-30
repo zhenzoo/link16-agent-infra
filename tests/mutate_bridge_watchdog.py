@@ -121,6 +121,19 @@ MUTATIONS = [
      "                if not dead:",
      "                if True:",
      "test_r5_端到端_跑一轮真循环_确认真的会注入并告警"),
+
+    # ---- R6（2026-08-30 洪水事故的读取方：那条损坏日志此前只有写入方）----
+    ("R6 去重闸：不记 seen，append-only 的日志会被每轮重报",
+     FEISHU / "bridge_watchdog.py",
+     "    n = len(lines) - int(seen or 0)",
+     "    n = len(lines)",
+     "test_R6_报过就不再重复报"),
+
+    ("R6 接线闸：判据写好了却没挂进巡检（正是它要治的病）",
+     FEISHU / "bridge_watchdog.py",
+     "                    _n, _last = hwm_corrupt_unseen(_bn, _al.get(_key, {}).get(\"seen\", 0))",
+     "                    _n, _last = 0, \"\"",
+     "test_R6_已接进巡检主循环"),
 ]
 
 

@@ -9,6 +9,7 @@
 改判据之前先读懂它们为什么在这儿；改完必须让这里全绿。
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -232,27 +233,42 @@ def test_告警只走DM_不许再有任何改投别处的通道():
 
 
 
-def test_陈旧检测_源码比进程新就必须报警(monkeypatch):
+def test_陈旧检测_源码比进程新就必须报警(tmp_path, monkeypatch):
     """🩸 tb25-link16 2026-08-20 实测的操作坑：git pull 后先跑 status 看到绿灯就差点收工，
     而**跑着的守护进程还是拉取前的旧字节码** —— status 是当场新起的解释器（新代码），
     常驻进程是旧的，两者给出不一致的能力判断，那个绿灯是骗人的。
     与「改得了名册文件、改不了跑着的桥进程内存」同族：**外部看着对、进程里还是旧的**。
-    光靠 SOP 写「记得重启」挡不住，所以做成机械检测 —— 这条用例守它别被改坏。"""
+    光靠 SOP 写「记得重启」挡不住，所以做成机械检测 —— 这条用例守它别被改坏。
+
+    🩸 2026-08-30 这条用例自己也是把【会腐坏的尺子】：它原来直接拿【真实源码文件】的 mtime
+    当「现在」，于是只有刚编辑过 bridge_watchdog.py 的那一小时内才是绿的，平时必红
+    —— 一条时红时绿的断言，久了就会被人当噪音注释掉。改成测试自己造两个受控 mtime 的
+    假源文件（patch HERE），判据不变、结果不再随「上次改代码是多久以前」漂移。"""
     import datetime as _dt
 
     class _R:
         def __init__(self, o):
             self.stdout = o
+
+    # 造一个受控的「源码目录」：mtime 由测试自己钉死，不看真实仓库
+    src_mtime = _dt.datetime(2026, 8, 30, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    for name in ("bridge_watchdog.py", "agent_quota.py"):
+        f = tmp_path / name
+        f.write_text("# fake", encoding="utf-8")
+        os.utime(f, (src_mtime.timestamp(), src_mtime.timestamp()))
+    monkeypatch.setattr(w, "HERE", tmp_path)
     monkeypatch.setattr(w, "_pids", lambda: [12345])
-    # 进程起于一小时前，源码是现在的 mtime ⇒ 必须判陈旧
-    old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: _R(old + chr(10)))
+
+    def _at(delta_h):
+        return (src_mtime + _dt.timedelta(hours=delta_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 进程起于源码之前 ⇒ 跑着的是旧字节码 ⇒ 必须报
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: _R(_at(-1) + chr(10)))
     stale, why = w._running_stale()
     assert stale is True and "旧代码" in why
 
-    # 进程起于将来（= 比源码新）⇒ 不该报
-    new = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: _R(new + chr(10)))
+    # 进程起于源码之后 ⇒ 已经是新代码 ⇒ 不该报
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: _R(_at(+1) + chr(10)))
     assert w._running_stale()[0] is False
 
 
@@ -609,3 +625,66 @@ def test_r5_只在回合收尾时动手_结构上不会打断正在跑的活():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ─────────── R6 · 水位书签损坏（2026-08-30 洪水事故的读取方）───────────
+# 事故形状：断电 → NTFS 把没落盘的 HWM 书签还成全 NUL → load_hwm 旧实现回 0（=一条没发过）
+# → drainer 重放 800MB 历史 → 医生每 97 秒重启它一次 → 42 分钟 3667 条轰炸。
+# 修复后 load_hwm 改 fail-closed 并追加一行损坏日志，但那条日志【只有写入方、没有读取方】
+# —— 又一个静默的留痕。R6 就是补上的那个读取方。
+
+def _write_corrupt_log(tmp_path, bot, n):
+    p = tmp_path / f"bridge-hwm-corrupt-{bot}.log"
+    p.write_text("".join(f"17880600{i:02d} HWM 损坏 → fail-closed 退到 outbox 末尾 {i}\n"
+                         for i in range(n)), encoding="utf-8")
+    return p
+
+
+def test_R6_没有损坏日志时什么都不报(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    assert w.hwm_corrupt_unseen("botx", 0) == (0, "")
+
+
+def test_R6_首次发现要报出全部条数和最后一条(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    _write_corrupt_log(tmp_path, "botx", 3)
+    n, last = w.hwm_corrupt_unseen("botx", 0)
+    assert n == 3
+    assert "fail-closed" in last and last.endswith("2"), "要给出最近的那一条"
+
+
+def test_R6_报过就不再重复报(tmp_path, monkeypatch):
+    """日志是 append-only、永远不会变短 —— 不记 seen 就会每 30 分钟重报一次，直到主人烦死。"""
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    _write_corrupt_log(tmp_path, "botx", 3)
+    assert w.hwm_corrupt_unseen("botx", 3) == (0, "")
+
+
+def test_R6_只报新增的那几条(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    _write_corrupt_log(tmp_path, "botx", 5)
+    n, _ = w.hwm_corrupt_unseen("botx", 3)
+    assert n == 2, "报过 3 条、现在 5 条 → 只该报新增的 2 条"
+
+
+def test_R6_日志坏掉或读不了也绝不抛(tmp_path, monkeypatch):
+    """巡检里的任何一步抛异常都会掐掉整轮看护 —— 这是本仓反复踩过的形状。"""
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    p = tmp_path / "bridge-hwm-corrupt-botx.log"
+    p.write_bytes(bytes([0, 255, 254]) + "半个字".encode("utf-8")[:4] + b"!")  # 二进制垃圾 + 截断的多字节
+    assert w.hwm_corrupt_unseen("botx", 0)[0] >= 0        # 不抛就算过
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path / "根本不存在")
+    assert w.hwm_corrupt_unseen("botx", 0) == (0, "")
+
+
+def test_R6_归入状态类告警_走冷却不刷屏():
+    """损坏日志不会自己消失，若当成动作类必发，就会每轮都发一条。"""
+    assert "hwm_corrupt" in w._STATEFUL_KINDS
+
+
+def test_R6_已接进巡检主循环():
+    """反向闸：判据函数写好了却没挂进 cmd_run，就还是个没人看的日志（正是它要治的病）。"""
+    import inspect
+    src = inspect.getsource(w.cmd_run)
+    assert "hwm_corrupt_unseen" in src, "R6 必须真的在每轮巡检里被调用"
+    assert "_alerts_save" in src, "seen 水位必须落盘，否则重启后重复报"

@@ -233,6 +233,24 @@ def at_picker(pane_text, bot_name):
     return bool(find_ask_picker(pane_text))
 
 
+# ---------- R6 · 水位书签损坏（断电后已自动修好，但主人必须知道）----------
+# bridge_outbox.load_hwm 读到损坏的书签时会 fail-closed 退到 outbox 末尾、并追加一行日志。
+# 那个动作【本身是对的】（不重放历史），但它同时意味着两件主人该知道的事：
+#   ① 这台机崩过一次（断电/蓝屏，不是正常关机）；
+#   ② 崩溃前最后一批还没送达的消息被跳过了 —— 它们仍在 outbox 里，可人工捞回。
+# 2026-08-30 洪水那次就是这个形状，而当时这条日志还不存在，42 分钟里没有任何人知道发生了什么。
+# 加这条规则的唯一理由：那个日志此前【只有写入方、没有读取方】—— 又一个静默的留痕。
+def hwm_corrupt_unseen(bot_name, seen):
+    """返回 (新增条数, 最后一行)。读不到/没有 → (0, "")。绝不抛。"""
+    try:
+        p = STATE_DIR / f"bridge-hwm-corrupt-{bot_name}.log"
+        lines = [ln for ln in p.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    except (OSError, ValueError):
+        return 0, ""
+    n = len(lines) - int(seen or 0)
+    return (n, lines[-1]) if n > 0 else (0, "")
+
+
 # ---------- R4 · 飞书桥看护 ----------
 
 def bridge_alive():
@@ -413,7 +431,7 @@ def _alerts_save(data):
 
 
 # 状态类（会持续成立）→ 冷却；动作类（一次性）→ 必发不吞。
-_STATEFUL_KINDS = {"limit", "policy_stuck"}
+_STATEFUL_KINDS = {"limit", "policy_stuck", "hwm_corrupt"}
 
 
 def _alert_target(bot_name):
@@ -1189,6 +1207,27 @@ def cmd_run(auto=True):
                            f"· 这多半是 OpenAI 服务端分类器误伤，不是你的活有问题\n"
                            f"· 能救的两招：给这个 bot 发 /handoff 换全新 context；或者过一阵再试\n"
                            f"· 面板 {ws} / {pty}")
+
+            # ---- R6 · 水位书签损坏（每轮扫一遍名册·新增才喊）----
+            try:
+                _al = _alerts_load()
+                for _spec in fb.load_bots():
+                    _bn = _spec.get("name")
+                    if not _bn:
+                        continue
+                    _key = f"{_bn}:hwm_corrupt"
+                    _n, _last = hwm_corrupt_unseen(_bn, _al.get(_key, {}).get("seen", 0))
+                    if _n <= 0:
+                        continue
+                    notify(_bn, "hwm_corrupt",
+                           f"⚠️ 检测到 {_n} 次水位书签损坏（多为断电/非正常关机）。已 fail-closed "
+                           f"自动修复、未重放历史，但崩溃前最后一批未送达的消息被跳过了"
+                           f"（仍在 outbox 里可人工捞回）。最近一条：{_last[:120]}")
+                    _al.setdefault(_key, {})["seen"] = int(_al.get(_key, {}).get("seen", 0)) + _n
+                    acted += 1
+                _alerts_save(_al)
+            except Exception as _e:                       # noqa: BLE001 —— 巡检绝不因它崩
+                log(f"R6 水位损坏扫描失败（不致命）：{_e}")
 
             # ---- R4 · 桥进程活→死（每轮一次·不针对面板）----
             ba = bridge_alive()
