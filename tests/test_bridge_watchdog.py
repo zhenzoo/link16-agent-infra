@@ -782,3 +782,33 @@ def test_陈旧_已接进status():
     """反向闸：写好了却没接进 status，就还是没人看（正是它要治的病）。"""
     import inspect
     assert "stale_processes()" in inspect.getsource(w.cmd_status)
+
+
+def test_holds_必须套roster过滤_别机的定时器不算本机的活(monkeypatch):
+    """🩸 2026-08-31 tuf19-link16 报的失真：他那台 status 显示
+    「bridge_cron.py 管着 2 条已启用定时器（最近：tennis-post-daily）」——
+    但那两条是 tb24 的，在他那标 ●别机、根本不会触发。
+
+    根因：cron-jobs/ 是多机共读的一份目录，守护进程【只真触发本机名册里的 bot】
+    （bridge_cron.py:322 的 roster 过滤），而 _holds 直接用了没过滤的 load_jobs()。
+    这一栏存在的全部意义是「让人一眼判出要不要现在动手」，把别机的活算进来恰好把判断带偏
+    ——看着有活、其实空手。
+    """
+    import bridge_cron
+    jobs = [{"bot": "别机的bot", "name": "别机任务", "enabled": True},
+            {"bot": "本机的bot", "name": "本机任务", "enabled": True},
+            {"bot": "本机的bot", "name": "停用的", "enabled": False}]
+    monkeypatch.setattr(bridge_cron, "load_jobs", lambda: jobs)
+    monkeypatch.setattr(bridge_cron, "_roster_bots", lambda: {"本机的bot"})
+    got = w._holds("bridge_cron.py", "python bridge_cron.py run")
+    assert got.startswith("1 条"), f"只该算本机那 1 条，实际：{got}"
+    assert "本机任务" in got and "别机任务" not in got
+
+
+def test_holds_roster取不到时不误伤(monkeypatch):
+    """名册读不出来（新机器/文件损坏）→ 宁可多报也别把本机的活漏掉。"""
+    import bridge_cron
+    monkeypatch.setattr(bridge_cron, "load_jobs",
+                        lambda: [{"bot": "x", "name": "任务", "enabled": True}])
+    monkeypatch.setattr(bridge_cron, "_roster_bots", lambda: set())
+    assert w._holds("bridge_cron.py", "python bridge_cron.py run").startswith("1 条")

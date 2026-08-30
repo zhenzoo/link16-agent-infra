@@ -1413,7 +1413,14 @@ def _holds(script, cmd):
     if script == "bridge_cron.py":
         try:
             import bridge_cron
-            on = [j for j in bridge_cron.load_jobs() if j.get("enabled")]
+            # ⚠️ 必须套 roster 过滤（2026-08-31 tuf19-link16 报的失真）：cron-jobs/ 是多机共读的
+            # 一份目录，但守护进程【只真触发本机名册里的 bot】（bridge_cron.py:322）。
+            # 少这道过滤，tuf19 那台就把 tb24 的两条巡航算成了自己手上的活 ——
+            # 而这一栏存在的全部意义就是「让人一眼判出要不要现在动手」，把别机的活算进来
+            # 恰好把这个判断带偏（看着有活、其实空手）。
+            roster = bridge_cron._roster_bots()
+            on = [j for j in bridge_cron.load_jobs()
+                  if j.get("enabled") and (not roster or j.get("bot") in roster)]
             return f"{len(on)} 条已启用定时器" + (f"（最近：{on[0].get('name')}）" if on else "")
         except Exception:                              # noqa: BLE001
             return ""
