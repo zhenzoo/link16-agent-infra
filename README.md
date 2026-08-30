@@ -1,3 +1,22 @@
+---
+doc_type: README
+doc_id: README
+title: Link 16 · 用飞书遥控本机 AI Agent
+status: active
+purpose: 向人介绍 Link16 的可见能力、最快上手路径与文档地图。
+owns:
+  - 人类向仓库概览
+  - 最短可运行示例
+  - 文档导航
+does_not_own:
+  - agent 角色与硬边界（见 ROLE-010、AGENTS.md、CLAUDE.md）
+  - 完整安装步骤（见 SOP-100）
+  - 架构与精确合同（见 docs/ARCH-*、docs/SPEC-*）
+read_when:
+  - 第一次了解或部署 Link16
+last_reviewed: 2026-08-26
+---
+
 # Link 16 · 用飞书（Lark）遥控你电脑上的 Claude Code
 
 > 手机上 @ 一句「把昨天那版重构完再跑一遍测试」，家里那台电脑上的 Claude Code 就真的开始干活，
@@ -37,8 +56,10 @@ Claude Code 很强，但它被钉在**一台电脑的一个终端窗口**里。�
 | 依赖 | 说明 |
 |---|---|
 | **Windows** | 桥依赖 Windows 计划任务做开机自启。macOS 未适配（wmux 本身支持 macOS，是本仓这一侧还没做）。 |
+| **GitHub CLI (`gh`)** | 验证每位 collaborator 自己的 GitHub 账号，再 clone private `main`；不共享 token。 |
 | **Python 3.12+** | `pip install -r feishu/requirements.txt`（lark-oapi + lark-channel-sdk） |
 | **Node.js** | 桥用一个 node 脚本跟 wmux daemon 通信（脚本仓库自带，见 `wmux/wmux-rpc.js`） |
+| **Git for Windows / Git Bash** | Windows Terminal 与 wmux 的默认 shell；安装/升级后由 `preflight.py` 检查，不靠 `.bashrc` alias |
 | **wmux** ⭐ | **必装，且必须开着** —— 见下节 |
 | **飞书账号** | 用来创建 bot 应用；注册流程是扫码 OAuth，仓库里有一键脚本 |
 | **Claude Code 或 Codex CLI** | 面板里真正干活的那个 |
@@ -64,31 +85,52 @@ Claude Code 很强，但它被钉在**一台电脑的一个终端窗口**里。�
 
 ## 快速开始
 
-> 完整装机（含开机自启、看门狗）见 [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md)。
+> 完整装机（含 Git Bash 默认终端、按 URL 自动选择直连/代理、开机自启、看门狗）见 [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md)。
 > 下面只是「跑出第一只能对话的 bot」。命令以 **PowerShell** 为准（Windows 自带）。
+>
+> **不懂 terminal 也可以**：在你已经使用的 Claude / Codex / QX 桌面客户端里说
+> **「开始部署 Link16」**。agent 跑命令；你只会看到 GitHub/飞书/provider 登录链接和绿色验收结果。
+> agent 的共同部署职责与人工停点见 [`docs/ROLE-010-link16-deployment-engineer.md`](docs/ROLE-010-link16-deployment-engineer.md)。
 
 ```powershell
-# 0) 装依赖
+# 0) 展示 7 项 Windows 清单；默认不修改，确认后才 apply
+python feishu/windows_bootstrap.py
+python feishu/windows_bootstrap.py --apply --yes
+
+# 1) 装 Python 依赖
 pip install -r feishu/requirements.txt
 
-# 1) 装并【打开】wmux（见上一节）
+# 2) 建本机隔离 profile registry（示例同时选 Claude 与 Codex；也可只给其中一组）
+python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work
+python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --apply
+python feishu/profile_bootstrap.py                   # 预览 profile/入口/feishu skill 安装
+python feishu/profile_bootstrap.py --apply
+python feishu/profile_bootstrap.py --doctor
 
-# 2) 本机体检：Python/node/wmux/编码/凭据 逐项打勾，缺什么给你可粘贴的修复命令
+# 3) 从桌面快捷方式【打开】wmux（见上一节）
+
+# 4) 本机体检：Python/node/wmux/编码/凭据 逐项打勾，缺什么给你可粘贴的修复命令
 python feishu/preflight.py
 
-# 3) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
-python feishu/register_feishu_app.py --name my-first-bot --bot my-first-bot
+# 5) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
+python feishu/register_feishu_app.py --name my-first-bot --bot my-first-bot --profile <所选profile> --background
 
-# 4) 起桥
+# 6) 起桥
 python feishu/feishu_bridge.py start
 python feishu/feishu_bridge.py status     # 每只 bot 应显示「进程=在跑 · 凭据✅」
+python feishu/service_installer.py plan   # 开机自启 before/after；明确同意后才 apply
+python feishu/service_doctor.py           # 文件/配置/运行/真实收发四层验收
 
-# 5) 在飞书里【私聊】这只新 bot 发一句「在吗」
+# 7) 在飞书里【私聊】这只新 bot 发一句「在吗」
 #    ⚠️ 必做：bot 的主人 = 第一个私聊它的人。群里 @ 它不算。
 #    漏了这步不会报错，但它以后的回复会无处可投、降级刷进群。
 ```
 
-通了之后：@ 它说句话，它会在你指定的仓库目录里开一个 Claude Code 会话干活，干完把结果发回飞书。
+gstack 不在默认安装范围。clone Link16 会带上 repo-owned `feishu` skill 真源；
+`profile_bootstrap.py` 按本机 local registry 安装用户自己命名的 Claude/Codex profile、Shell 入口和 skill。
+anysearch、push、pull、align 等个人 workflows 只是可选增强，不是运行依赖。
+
+通了之后：@ 它说句话，它会在你指定的仓库目录里用所选 Claude/Codex profile 开会话干活，干完把结果发回飞书。
 
 **卡住了？** 先看 [`docs/SOP-100`](docs/SOP-100-new-machine-setup.md) 的「附录 A · 排错速查」——
 常见症状（依赖没装 / wmux 连不上 / 会话起不来 / 凭据读不到）都在那张表里。
@@ -130,21 +172,19 @@ python feishu/feishu_bridge.py status     # 每只 bot 应显示「进程=在跑
 | 文件 | 管什么 | 进 git 吗 |
 |---|---|---|
 | `feishu/bridge-bots.local.json` | **运行时**：本机桥要跑哪些 bot、用哪个账号、cwd 在哪 | ❌ 每台机各管各的 |
-| `feishu/agent-registry.json` | **目录**：全舰队谁是谁、在哪台机、分管哪个仓 | ✅（样例见 `feishu/agent-registry.example.json`） |
+| `feishu/agent-registry.json` | **目录**：受信 private 舰队谁是谁、在哪台机、分管哪个仓 | ✅（private collaborator 可见运维元数据；公开前必须走 PLAN-926） |
 
 > 🚨 **第一次用的人注意**：`bridge-bots.local.json` 的语义是「**整盘接管**」——桥只跑它列的 bot。
-> 如果你没有这个文件就去注册 bot，脚本会拿仓库里 committed 的那本做种子，
-> **把别人的 bot 抄进你的名册并被你的桥拉起**（同一个飞书应用两台机各连一条长连接会互相抢）。
-> `feishu/preflight.py` 会检查这一项并提示你先建一本空的。
+> committed 名册与 local example 都是空模板；缺 local 时桥会安全停住。`feishu/preflight.py` 会提示先复制空模板，再由注册脚本 upsert 本机 bot。
 
 ---
 
 ## 边界与现状
 
 - **Windows only**（开机自启依赖计划任务）。macOS 没适配。
-- 设计场景是**一个人的多台电脑**，不是多租户团队协作。
+- 核心场景是**每人的多台电脑**；团队可在 private collaborator 边界下共享代码，但每人的 `.env`、provider 登录、飞书组织和本机 roster 必须隔离。
 - 飞书端走**国内直连**（自动剥代理环境变量）。
-- 目前在 3 台机器上稳定运行，挂着约 20 只 bot。
+- 目前在 4 台 Windows 机器上运行。
 - 变更记录见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 许可 / 免责

@@ -233,7 +233,7 @@ def test_告警只走DM_不许再有任何改投别处的通道():
 
 
 
-def test_陈旧检测_源码比进程新就必须报警(tmp_path, monkeypatch):
+def test_陈旧检测_源码比进程新就必须报警(monkeypatch, tmp_path):
     """🩸 tb25-link16 2026-08-20 实测的操作坑：git pull 后先跑 status 看到绿灯就差点收工，
     而**跑着的守护进程还是拉取前的旧字节码** —— status 是当场新起的解释器（新代码），
     常驻进程是旧的，两者给出不一致的能力判断，那个绿灯是骗人的。
@@ -242,20 +242,20 @@ def test_陈旧检测_源码比进程新就必须报警(tmp_path, monkeypatch):
 
     🩸 2026-08-30 这条用例自己也是把【会腐坏的尺子】：它原来直接拿【真实源码文件】的 mtime
     当「现在」，于是只有刚编辑过 bridge_watchdog.py 的那一小时内才是绿的，平时必红
-    —— 一条时红时绿的断言，久了就会被人当噪音注释掉。改成测试自己造两个受控 mtime 的
-    假源文件（patch HERE），判据不变、结果不再随「上次改代码是多久以前」漂移。"""
+    —— 一条时红时绿的断言，久了就会被人当噪音注释掉。改成测试自己造假源文件、
+    并把进程时间相对【它们的真实 mtime】来算（patch HERE），判据不变、结果不再随「上次改代码是多久以前」漂移。"""
     import datetime as _dt
 
     class _R:
         def __init__(self, o):
             self.stdout = o
-
-    # 造一个受控的「源码目录」：mtime 由测试自己钉死，不看真实仓库
-    src_mtime = _dt.datetime(2026, 8, 30, 12, 0, 0, tzinfo=_dt.timezone.utc)
-    for name in ("bridge_watchdog.py", "agent_quota.py"):
-        f = tmp_path / name
-        f.write_text("# fake", encoding="utf-8")
-        os.utime(f, (src_mtime.timestamp(), src_mtime.timestamp()))
+    # 不依赖真实 checkout 的 mtime：仓库放超过一小时后，原测试会把“进程起于一小时前”
+    # 错当成比源码新并自红。临时文件明确代表“刚更新的源码”，才是本用例要测的前提。
+    (tmp_path / "bridge_watchdog.py").touch()
+    (tmp_path / "agent_quota.py").touch()
+    # 进程启动时间一律相对【这两个假源文件的真实 mtime】来算，不再相对「墙上时钟的现在」
+    src_mtime = _dt.datetime.fromtimestamp(
+        (tmp_path / "bridge_watchdog.py").stat().st_mtime, _dt.timezone.utc)
     monkeypatch.setattr(w, "HERE", tmp_path)
     monkeypatch.setattr(w, "_pids", lambda: [12345])
 
@@ -435,7 +435,7 @@ def test_handoff_命令已接进桥且不切账号():
     """/handoff 与 /close 的三处差别，缺一不可。"""
     src = (HERE.parent / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8")
     i = src.index('if cmd in ("/handoff"')
-    body = src[i:i + 3000]
+    body = src[i:src.index('if cmd == "/new"', i)]
     assert "reset_account" not in body, "/handoff 绝不能切账号（那是 /close 干的）"
     assert "snapshot_handoff" in body, "必须在关会话【之前】快照交接包"
     assert body.index("snapshot_handoff") < body.index("wmux_session.close"), "快照必须在关会话之前"

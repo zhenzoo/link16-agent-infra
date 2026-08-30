@@ -50,6 +50,78 @@ class HookInstallerTests(unittest.TestCase):
         twice = installer.merge_hooks(merged, additions)
         self.assertEqual(merged, twice)
 
+    def test_plan_apply_preserves_unrelated_config_and_is_byte_stable(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / ".codex-work"
+            codex_home.mkdir()
+            target = codex_home / "hooks.json"
+            target.write_text(json.dumps({
+                "custom": {"theme": "dark"},
+                "hooks": {
+                    "Stop": [{"hooks": [
+                        {"type": "command", "command": "play-sound"},
+                        {"type": "command", "command": "python D:/old/hooks/codex_bridge_stop.py"},
+                    ]}],
+                },
+            }), encoding="utf-8")
+            row, _desired = installer.hooks_plan(codex_home, ROOT)
+            self.assertEqual(row["status"], "outdated")
+            installer.apply_hooks(codex_home, ROOT)
+            first = target.read_bytes()
+            self.assertEqual(installer.hooks_plan(codex_home, ROOT)[0]["status"], "ok")
+            self.assertEqual(installer.apply_hooks(codex_home, ROOT)["status"], "ok")
+            self.assertEqual(target.read_bytes(), first)
+            installed = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(installed["custom"], {"theme": "dark"})
+            commands = [
+                hook["command"]
+                for entries in installed["hooks"].values()
+                for entry in entries
+                for hook in entry.get("hooks") or []
+            ]
+            self.assertIn("play-sound", commands)
+            self.assertEqual(sum("codex_bridge_stop.py" in item for item in commands), 1)
+            self.assertEqual(sum("codex_bridge_posttool.py" in item for item in commands), 1)
+            self.assertEqual(sum("bridge_userprompt.py" in item for item in commands), 1)
+
+    def test_missing_installs_and_malformed_or_invalid_shape_fail_closed(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / ".codex-work"
+            row, _desired = installer.hooks_plan(codex_home, ROOT)
+            self.assertEqual(row["status"], "missing")
+            installer.apply_hooks(codex_home, ROOT)
+            self.assertEqual(installer.hooks_plan(codex_home, ROOT)[0]["status"], "ok")
+
+        for original in (
+            b"{broken", b"[]", b'{"hooks": []}', b'{"hooks": {"Stop": {}}}',
+            b'{"hooks": {"Stop": [1]}}',
+            b'{"hooks": {"Stop": [{"hooks": {}}]}}',
+            b'{"hooks": {"Stop": [{"hooks": [1]}]}}',
+        ):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as tmp:
+                codex_home = Path(tmp) / ".codex-work"
+                codex_home.mkdir()
+                target = codex_home / "hooks.json"
+                target.write_bytes(original)
+                row, desired = installer.hooks_plan(codex_home, ROOT)
+                self.assertEqual(row["status"], "conflict")
+                self.assertIsNone(desired)
+                with self.assertRaises(ValueError):
+                    installer.apply_hooks(codex_home, ROOT)
+                self.assertEqual(target.read_bytes(), original)
+
+    def test_missing_hook_source_never_writes(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_home = root / ".codex-work"
+            row, desired = installer.hooks_plan(codex_home, root / "missing-repo")
+            self.assertEqual(row["status"], "conflict")
+            self.assertIsNone(desired)
+            self.assertFalse((codex_home / "hooks.json").exists())
+
 
 class HookPayloadTests(unittest.TestCase):
     def run_hook(self, script: str, payload: dict, state: Path, extra_env=None):

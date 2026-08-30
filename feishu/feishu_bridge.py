@@ -29,11 +29,17 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 # 让本目录可 import 兄弟模块（bridge_env 等）· 直跑脚本时 sys.path[0] 已是本目录·此行兜底子进程/再入场景
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bridge_env import resolve_env_path, bots_config_path, resolve_wmux_rpc  # noqa: E402
+from bridge_env import (  # noqa: E402
+    assert_sender_identity,
+    bots_config_path,
+    resolve_env_path,
+    resolve_wmux_rpc,
+)
 
 # ---------- 路径 / 常量 ----------
 ENV_PATH = resolve_env_path()                             # 跨机解析(VIBECODING_ROOT / 上溯找 .env / legacy 兜底)·不写死盘符
@@ -46,8 +52,12 @@ LOG_DIR = PROJECT / "feishu" / "_logs"
 INBOX_ROOT = STATE_DIR / "inbox"   # 入站附件落地（你发飞书的图/文件）· 按 bot/日期分目录 · scratch（agent 收下后移到目标资产目录）
 
 REPLY_POLL_SEC = 2
-READY_TIMEOUT_SEC = 30            # 等 spawn 出的 worker 起好最多 30 秒（spawn 探就绪保送达后 claude/codex ~10-15s 出提示符）
+READY_TIMEOUT_SEC = 30            # legacy Codex/custom 的默认启动窗口
+CLAUDE_READY_TIMEOUT_SEC = 90     # Claude Code 2.1.240 新机冷启实测约 42s；30s 会误判并把启动命令重复塞进 TUI
+CODEX_APP_SERVER_READY_TIMEOUT_SEC = 150  # worker fresh thread 合法 warm-up=120s，再留 remote TUI 启动余量
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
+STARTUP_FAILURE_MAX_AGE_SEC = 24 * 60 * 60  # /screen 可回看最近一次已关闭失败 pane 的现场
+HANDOFF_RETRY_MAX_AGE_SEC = 6 * 60 * 60     # 已快照但未完成的手动 handoff 可在无活会话时重试
 CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_send 单卡 / 超了 SDK 自动分条
 # 注入策略（2026-06-28 修正）：
 #   入站消息一律走 paste（限速分块·bracketed-paste）注入，不再用裸 send。原因：CC 输入框是 TUI·有吞吐上限，
@@ -91,7 +101,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from jsonl_reply_extract import extract  # noqa: E402  (find_ask_picker 退役·答题侧改结构化 bridge-picker 状态·ARCH-101 §2.10)
 import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
+import bridge_outbound  # noqa: E402 (统一自动/主动出站历史)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
+import bridge_injection  # noqa: E402  (桥/cron/watchdog/注册监督器跨进程共享注入锁)
+import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持久化)
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
 from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
 
@@ -497,19 +510,17 @@ def load_session(bot_name):
 
 def save_session(bot_name, rec):
     STATE_DIR.mkdir(exist_ok=True)
-    f = _session_file(bot_name)
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, f)   # 原子替换 · 防多线程(ensure_session in to_thread vs 事件循环)并发写撕裂 JSON
+    bridge_injection.atomic_write_json(_session_file(bot_name), rec)
 
 
 def _merge_session(bot_name, patch):
     """读改写会话注册表：保留已有键（pty/jsonl/chat_id/mirror…），只覆盖 patch 给的键。
     防「ensure_session/pin 自愈写 {workspace_id,pty,jsonl} 时把 chat_id/mirror 冲掉」。"""
-    rec = load_session(bot_name) or {}
-    rec.update(patch)
-    save_session(bot_name, rec)
-    return rec
+    with bridge_injection.injection_lock(STATE_DIR, "session-state", bot_name):
+        rec = load_session(bot_name) or {}
+        rec.update(patch)
+        save_session(bot_name, rec)
+        return rec
 
 
 def receipt(bot_name, rec):
@@ -541,6 +552,135 @@ def clear_codex_thread(bot_name):
     f = STATE_DIR / f"bridge-codex-app-thread-{bot_name}.json"
     if f.exists():
         f.unlink()
+
+
+def _startup_failure_file(bot_name):
+    return STATE_DIR / f"bridge-startup-failure-{bot_name}.json"
+
+
+def _record_startup_failure(bot, *, workspace_id, pty, cwd, stage, reason, screen):
+    """Save the failed startup screen before its throwaway pane is closed.
+
+    The old error told the user to run ``/screen`` after the workspace had
+    already been destroyed, so the evidence was guaranteed to be gone. Keep
+    only a bounded screen tail and non-secret metadata; never persist the worker
+    command or environment because launchers may source private credentials.
+    """
+    rec = {
+        "ts": int(time.time()),
+        "bot": bot["name"],
+        "runtime": agent_runtime.runtime_name(bot),
+        "profile": agent_runtime.profile_name(bot, required=False),
+        "cwd": str(cwd),
+        "workspace_id": str(workspace_id or ""),
+        "pty": str(pty or ""),
+        "stage": str(stage or "unknown"),
+        "reason": str(reason or "")[:500],
+        "screen_tail": str(screen or "")[-4000:],
+    }
+    try:
+        STATE_DIR.mkdir(exist_ok=True)
+        bridge_injection.atomic_write_json(_startup_failure_file(bot["name"]), rec)
+    except Exception:  # noqa: BLE001 — 诊断留痕失败不得掀翻原启动错误
+        pass
+    return rec
+
+
+def _load_startup_failure(bot_name, max_age=STARTUP_FAILURE_MAX_AGE_SEC):
+    path = _startup_failure_file(bot_name)
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(rec, dict):
+            return None
+        if int(time.time()) - int(rec.get("ts") or 0) > int(max_age):
+            return None
+        return rec
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _clear_startup_failure(bot_name):
+    try:
+        _startup_failure_file(bot_name).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _startup_failure_markdown(bot_name):
+    rec = _load_startup_failure(bot_name)
+    if not rec:
+        return None
+    when = time.strftime("%m-%d %H:%M:%S", time.localtime(int(rec.get("ts") or 0)))
+    screen = str(rec.get("screen_tail") or "")[-1500:] or "（失败前屏幕为空）"
+    return (
+        f"⚠️ 最近一次启动失败现场（{when} · {rec.get('runtime') or 'agent'} · "
+        f"profile `{rec.get('profile') or 'unknown'}` · 阶段 `{rec.get('stage') or 'unknown'}`）\n"
+        f"原因：{rec.get('reason') or '未记录'}\n```\n{screen}\n```"
+    )
+
+
+def _handoff_attempt_file(bot_name):
+    return STATE_DIR / f"bridge-handoff-attempt-{bot_name}.json"
+
+
+def _record_handoff_attempt(bot_name, pack, status, error=""):
+    """Track whether a persisted manual handoff pack was actually delivered."""
+    session_id = str((pack or {}).get("session_id") or "")
+    previous = None
+    try:
+        previous = json.loads(_handoff_attempt_file(bot_name).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    attempts = 1
+    if isinstance(previous, dict) and previous.get("session_id") == session_id:
+        attempts = int(previous.get("attempts") or 0) + (1 if status == "pending" else 0)
+    rec = {
+        "ts": int(time.time()),
+        "bot": bot_name,
+        "session_id": session_id,
+        "status": str(status),
+        "attempts": attempts,
+        "error": str(error or "")[:500],
+    }
+    try:
+        STATE_DIR.mkdir(exist_ok=True)
+        bridge_injection.atomic_write_json(_handoff_attempt_file(bot_name), rec)
+    except Exception:  # noqa: BLE001 — 交接主链优先，状态留痕不得反向阻塞
+        pass
+    return rec
+
+
+def _load_retryable_handoff(bot_name, max_age=HANDOFF_RETRY_MAX_AGE_SEC):
+    """Return a recent manual handoff pack that has not completed delivery.
+
+    Older bridges wrote only ``watchdog-handoff-*.json``. An absent attempt
+    sidecar therefore means "unknown, allow one explicit /handoff retry" rather
+    than "complete"; this is what recovers the 2026-08-26 production failure.
+    """
+    path = STATE_DIR / f"watchdog-handoff-{bot_name}.json"
+    try:
+        if time.time() - path.stat().st_mtime > float(max_age):
+            return None
+        pack = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(pack, dict):
+        return None
+    if pack.get("bot") != bot_name or pack.get("reason") != "主人手动 /handoff":
+        return None
+    try:
+        attempt = json.loads(_handoff_attempt_file(bot_name).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        attempt = None
+    if (
+        isinstance(attempt, dict)
+        and attempt.get("session_id") == str(pack.get("session_id") or "")
+        and attempt.get("status") == "complete"
+    ):
+        return None
+    return pack
 
 
 # ---------- 镜像器高水位（HWM·单独文件·只镜像器一个写者·与会话注册表零争用）----------
@@ -755,9 +895,23 @@ def _app_server_ready_signal(bot, since):
         return False
 
 
+def _ready_timeout(bot, explicit=None):
+    """Ready wait precedence: call override > roster override > runtime default."""
+    if explicit is not None:
+        return float(explicit)
+    configured = bot.get("ready_timeout_sec")
+    if configured is not None:
+        return float(configured)
+    if agent_runtime.uses_app_server(bot):
+        return float(CODEX_APP_SERVER_READY_TIMEOUT_SEC)
+    if agent_runtime.runtime_spec(bot).name == "claude":
+        return float(CLAUDE_READY_TIMEOUT_SEC)
+    return float(READY_TIMEOUT_SEC)
+
+
 def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
     """spawn worker 后轮询屏幕，看到该 runtime 的 ready marker = 就绪可注入。"""
-    timeout = float(timeout or bot.get("ready_timeout_sec") or READY_TIMEOUT_SEC)
+    timeout = _ready_timeout(bot, timeout)
     wait_started = time.time()
     deadline = time.time() + timeout
     trust_sent = False
@@ -794,6 +948,76 @@ def _agent_live(bot, pty):
     except RuntimeError:
         return True                       # 读不到屏 ≠ 死，别误判
     return agent_runtime.is_live(bot, scr)
+
+
+def _startup_retryable_shell(bot, pty, screen=None):
+    """Only a proven bare shell may receive the launch command a second time.
+
+    A slow Claude splash, a modal, an unreadable screen, or a wmux metadata
+    disagreement all fail closed. Reinjecting a full launcher into any of those
+    states can become a user prompt once the TUI finally appears.
+    """
+    try:
+        alive, agent_name = wmux_session.pty_state(pty)
+    except RuntimeError:
+        return False
+    if not alive or agent_name:
+        return False
+    if screen is None:
+        try:
+            screen = read_screen(pty, 80)
+        except RuntimeError:
+            return False
+    return not agent_runtime.is_live(bot, screen)
+
+
+def _finish_worker_startup(bot, workspace_id, pty, cwd):
+    """Wait for one worker startup and perform at most one evidence-gated retry."""
+    if _wait_agent_ready(bot, pty, workspace_id):
+        _clear_startup_failure(bot["name"])
+        return True
+
+    try:
+        screen = read_screen(pty, 100)
+    except RuntimeError as exc:
+        screen = ""
+        screen_error = f"读屏失败：{exc}"
+    else:
+        screen_error = ""
+
+    retried = _startup_retryable_shell(bot, pty, screen)
+    if retried:
+        blog(bot["name"], f"⏳ {pty} 明确停在裸 shell → 补发一次 {agent_runtime.display_name(bot)} 启动命令")
+        try:
+            wmux("send", pty, _worker_cmd(bot, cwd), "--allow-ws", workspace_id)
+            time.sleep(0.3)
+            wmux("enter", pty, "--allow-ws", workspace_id)
+        except Exception as exc:  # noqa: BLE001
+            screen_error = f"补发失败：{exc}"
+        else:
+            if _wait_agent_ready(bot, pty, workspace_id):
+                _clear_startup_failure(bot["name"])
+                return True
+        try:
+            screen = read_screen(pty, 100)
+        except RuntimeError:
+            pass
+        stage = "bare-shell-retry-failed"
+        reason = screen_error or "明确检测到裸 shell；补发一次后仍未就绪"
+    else:
+        stage = "agent-started-not-ready"
+        reason = screen_error or "agent 已在启动或被弹窗阻塞；为防重复输入，未补发启动命令"
+
+    _record_startup_failure(
+        bot,
+        workspace_id=workspace_id,
+        pty=pty,
+        cwd=cwd,
+        stage=stage,
+        reason=reason,
+        screen=screen,
+    )
+    return False
 
 
 # ---------- transcript 定位（钉死每会话自己的 jsonl · 消灭多会话串台）----------
@@ -902,7 +1126,7 @@ def _reuse_check(bot, rec):
     return True, True, ""
 
 
-def ensure_session(bot):
+def _ensure_session_unlocked(bot):
     """返回 (workspace_id, pty, created, jsonl)。jsonl=该会话钉死的 transcript 路径(str)或 None。
     复用活会话时带出已钉的 jsonl；新 spawn 时探测新建 jsonl 钉死它（彻底绕开 marker+mtime 猜文件的串台坑）。"""
     rec = load_session(bot["name"])
@@ -926,23 +1150,18 @@ def ensure_session(bot):
             pass
     before = {str(p) for p, _ in _project_jsonls(bot)}
     cwd = current_cwd(bot)  # 沿用【当前所在目录】：/cd 过则自愈重生仍回那个目录（与账号自愈对称）·/close 清过或没 /cd 过则回名册默认
+    agent_runtime.ensure_codex_trust(bot, cwd)  # Codex 首启 trust 弹窗会在 app-server warmup 上游就把会话挡死 → spawn 前预写目录信任（Claude 侧由就绪等待自动回车，无需预写）
     r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)  # cwd 交给 spawn 单独发 cd + 探就绪(分行不合并)
     ws, pty = r["workspace_id"], r["pty"]
-    if not _wait_agent_ready(bot, pty, ws):
-        # 首发 worker 没起来（瞬时竞态：新 shell 没就绪时被吞 / 首启 trust 提示挡）→ 同壳补发一次再等
-        blog(bot["name"], f"⏳ {pty} 首发 {agent_runtime.display_name(bot)} 未就绪 → 补发一次再等")
+    if not _finish_worker_startup(bot, ws, pty, cwd):
         try:
-            wmux("send", pty, _worker_cmd(bot, cwd), "--allow-ws", ws)
-            time.sleep(0.3)
-            wmux("enter", pty, "--allow-ws", ws)
+            wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
         except Exception:  # noqa: BLE001
             pass
-        if not _wait_agent_ready(bot, pty, ws):
-            try:
-                wmux_session.close(ws)   # 别留没起来的 bash 空 workspace
-            except Exception:  # noqa: BLE001
-                pass
-            raise RuntimeError(f"{agent_runtime.display_name(bot)} 会话起不来（两次都没就绪）——可能 wmux 卡了 / 首启 trust 提示挡住,@ 我发 /screen 看现场")
+        raise RuntimeError(
+            f"{agent_runtime.display_name(bot)} 在 {_ready_timeout(bot):g} 秒启动窗口内未就绪。"
+            "失败现场已保存，请发 /screen 查看；桥没有向仍在启动的 TUI 重复塞命令。"
+        )
     newj = _detect_new_jsonl(bot, before)
     jsonl = str(newj) if newj else None
     _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl,
@@ -951,6 +1170,12 @@ def ensure_session(bot):
                                  "daemon_fp": wmux_session.daemon_fingerprint(),  # 钉死起这会话时的 daemon 实例·下次复用前比对(变了=daemon 重启过=会话已死)
                                  "cwd": cwd})  # 记当前目录(给 /cd 列子目录 + 自愈重生复用)
     return ws, pty, True, jsonl
+
+
+def ensure_session(bot):
+    """跨进程串行地复用或创建 bot 会话，防两个外部触发器同时 spawn。"""
+    with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
+        return _ensure_session_unlocked(bot)
 
 
 def _composer_holds_paste(screen, marker):
@@ -991,7 +1216,7 @@ def _busy_or_queued(screen):
     return bool(re.search(r"\(\s*\d+s\s*·", screen))   # 生成中状态行的耗时锚 `(47s ·`
 
 
-def _inject(pty, workspace_id, marker):
+def _inject_unlocked(pty, workspace_id, marker):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
@@ -1018,6 +1243,12 @@ def _inject(pty, workspace_id, marker):
             return True                          # → 不误报「没提交」·且【别再按回车】(防把排队消息重复入队)·2026-07-20 根治
         wmux("enter", pty, *allow)               # 空闲却卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
+
+
+def _inject(pty, workspace_id, marker):
+    """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
+    with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
+        return _inject_unlocked(pty, workspace_id, marker)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
@@ -1387,23 +1618,190 @@ def _tenant_token(app_id, app_secret):
     return t
 
 
-def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None):
-    """群内发【纯文字】消息(+真·@ <at user_id=…>)·返回 message_id|None。
-    为什么不发卡片：飞书把【收到的卡片】渲成占位 "[interactive]" → 对端 bot 读不到正文(也读不到哨兵)；
-    纯文字 content_text 对端能直接读 → agent↔agent 必走此路（2026-06-18 实证）。"""
+def _send_text_message(app_id, app_secret, target, text, at_open_id=None, message_uuid=None):
+    """Send one text message and return its real message_id (or None)."""
     import urllib.request
     content = (f'<at user_id="{at_open_id}"></at> ' if at_open_id else "") + sanitize_outbound_links(text or "")
     content = _seal_bare_urls(content)   # 机械闸：a2a 群纯文字也封口裸 URL（防 autolink 贪婪·2026-06-24）
     tok = _tenant_token(app_id, app_secret)
-    body = json.dumps({"receive_id": chat_id, "msg_type": "text",
-                       "content": json.dumps({"text": content}, ensure_ascii=False)}).encode("utf-8")
+    data = {"receive_id": target, "msg_type": "text",
+            "content": json.dumps({"text": content}, ensure_ascii=False)}
+    if message_uuid:
+        data["uuid"] = str(message_uuid)
+    body = json.dumps(data).encode("utf-8")
+    receive_id_type = "chat_id" if str(target).startswith("oc_") else "open_id"
     req = urllib.request.Request(
-        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+        f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
         data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"})
     with urllib.request.urlopen(req, timeout=10) as r:
         d = json.loads(r.read().decode("utf-8"))
     return (d.get("data") or {}).get("message_id") if d.get("code") == 0 else None
+
+
+def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None, message_uuid=None):
+    """A2A compatibility wrapper: peer bots must receive readable text."""
+    return _send_text_message(
+        app_id, app_secret, chat_id, text, at_open_id, message_uuid,
+    )
+
+
+def _card_payload(text, at=None, mark=False):
+    content = text
+    if at:
+        content = f"<at id={at}></at> " + content
+    return {
+        "schema": "2.0",
+        "config": {"streaming_mode": False, "wide_screen_mode": True},
+        "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]},
+    }
+
+
+def _send_interactive_message(app_id, app_secret, target, payload, message_uuid=None):
+    """Create one non-streaming interactive message through the public REST API."""
+    import urllib.request
+    tok = _tenant_token(app_id, app_secret)
+    data = {
+        "receive_id": target,
+        "msg_type": "interactive",
+        "content": json.dumps(payload, ensure_ascii=False),
+    }
+    if message_uuid:
+        data["uuid"] = str(message_uuid)
+    receive_id_type = "chat_id" if str(target).startswith("oc_") else "open_id"
+    req = urllib.request.Request(
+        f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+        data=json.dumps(data, ensure_ascii=False).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    return (result.get("data") or {}).get("message_id") if result.get("code") == 0 else None
+
+
+def _fragment_receipt(fragment):
+    return {
+        key: fragment.get(key)
+        for key in ("answer_id", "fragment_id", "part", "total", "content_sha256")
+        if isinstance(fragment, dict) and fragment.get(key) is not None
+    }
+
+
+def _provider_message_uuid(fragment):
+    """Map a durable local fragment key to Feishu's standard request UUID."""
+    fragment_id = (fragment or {}).get("fragment_id")
+    if not fragment_id:
+        return None
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"link16:feishu:fragment:{fragment_id}",
+    ))
+
+
+def _record_automatic_outbound(bot_name, route, target, text, mid, fragment):
+    extra = {
+        key: fragment.get(key)
+        for key in ("answer_id", "fragment_id", "part", "total", "content_sha256",
+                    "session", "anchor", "source_ts")
+        if isinstance(fragment, dict) and fragment.get(key) is not None
+    }
+    return bridge_outbound.append_delivery(
+        STATE_DIR, bot_name, origin="bridge_outbox",
+        route={key: route.get(key) for key in ("kind", "dest", "at") if route.get(key)},
+        target=target, text=text, message_id=mid, **extra,
+    )
+
+
+async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, route_to_dest):
+    effective = route if isinstance(route, dict) else (_load_turn_route(bot_name) or {"kind": "p2a"})
+    kind = effective.get("kind") or "p2a"
+    target, at = route_to_dest(effective)
+    base = {"tid": "drain", "route": effective, "target": target, **_fragment_receipt(fragment)}
+    if not target:
+        receipt(bot_name, {**base, "kind": "new_card", "delivered": False,
+                           "via": None, "err": "no_target", "len": len(text or "")})
+        return {"ok": False, "message_id": None}
+    if purpose == "progress" and kind in {"p2a-ext", "a2a"}:
+        return "skip-progress"
+
+    message_uuid = _provider_message_uuid(fragment)
+    if kind == "a2a":
+        try:
+            mid = await asyncio.to_thread(
+                _send_group_text, bot["app_id"], bot["app_secret"], target,
+                text or "", at, message_uuid,
+            )
+            ok = bool(mid)
+            history_recorded = bool(mid) and _record_automatic_outbound(
+                bot_name, effective, target, text, mid, fragment,
+            )
+            receipt(bot_name, {**base, "kind": "group_text", "requested": "text",
+                               "delivered": ok, "via": "group_text" if ok else None,
+                               "mid": mid, "err": None if ok else "empty_message_id",
+                               "history_recorded": history_recorded,
+                               "len": len(text or "")})
+            return {"ok": ok, "message_id": mid}
+        except Exception as exc:  # noqa: BLE001
+            receipt(bot_name, {**base, "kind": "group_text", "requested": "text",
+                               "delivered": False, "via": None,
+                               "err": str(exc)[:120], "len": len(text or "")})
+            return {"ok": False, "message_id": None}
+
+    try:
+        mid = await asyncio.wait_for(
+            asyncio.to_thread(
+                _send_interactive_message, bot["app_id"], bot["app_secret"], target,
+                _card_payload(text, at if kind == "p2a-ext" else None), message_uuid,
+            ), CARD_SEND_TIMEOUT,
+        )
+        ok = bool(mid)
+        history_recorded = bool(mid) and _record_automatic_outbound(
+            bot_name, effective, target, text, mid, fragment,
+        )
+        receipt(bot_name, {**base, "kind": "new_card", "requested": "interactive",
+                           "delivered": ok, "via": "card" if ok else None, "mid": mid,
+                           "history_recorded": history_recorded,
+                           "fallback": None if ok else "text",
+                           "err": None if ok else "empty_message_id", "len": len(text or "")})
+        return {"ok": ok, "message_id": mid}
+    except Exception as exc:  # noqa: BLE001
+        blog(bot_name, f"🃏 new_card 失败({str(exc)[:80] or type(exc).__name__})")
+        receipt(bot_name, {**base, "kind": "new_card", "requested": "interactive",
+                           "delivered": False, "via": None, "fallback": "text",
+                           "err": str(exc)[:120] or type(exc).__name__, "len": len(text or "")})
+        return {"ok": False, "message_id": None}
+
+
+async def _deliver_routed_plain(bot, bot_name, text, route, purpose, fragment, route_to_dest):
+    effective = route if isinstance(route, dict) else (_load_turn_route(bot_name) or {"kind": "p2a"})
+    kind = effective.get("kind") or "p2a"
+    target, at = route_to_dest(effective)
+    base = {"tid": "drain", "route": effective, "target": target, **_fragment_receipt(fragment)}
+    if not target:
+        receipt(bot_name, {**base, "kind": "send_plain", "delivered": False,
+                           "via": None, "err": "no_target", "len": len(text or "")})
+        return {"ok": False, "message_id": None}
+    try:
+        mid = await asyncio.to_thread(
+            _send_text_message, bot["app_id"], bot["app_secret"], target, text or "", at,
+            _provider_message_uuid(fragment),
+        )
+        ok = bool(mid)
+        degraded = kind != "a2a"
+        history_recorded = bool(mid) and _record_automatic_outbound(
+            bot_name, effective, target, text, mid, fragment,
+        )
+        receipt(bot_name, {**base, "kind": "send_plain",
+                           "requested": "text" if kind == "a2a" else "interactive",
+                           "delivered": ok, "via": "group_text" if kind in {"a2a", "p2a-ext"} else "text",
+                           "mid": mid, "degraded": degraded,
+                           "history_recorded": history_recorded,
+                           "err": None if ok else "empty_message_id", "len": len(text or "")})
+        return {"ok": ok, "message_id": mid}
+    except Exception as exc:  # noqa: BLE001
+        receipt(bot_name, {**base, "kind": "send_plain", "delivered": False,
+                           "via": None, "err": str(exc)[:120], "len": len(text or "")})
+        return {"ok": False, "message_id": None}
 
 
 # ---------- 外部通道：群名 / 外部真人名字（都 API 源头·绝不硬编码·ARCH-140 §7）----------
@@ -1628,6 +2026,9 @@ def run(bot_name=None):
             alive = bool(rec and rec.get("pty") and await asyncio.to_thread(wmux_session.pty_alive, rec["pty"]))
             if cmd == "/screen":
                 if not alive:
+                    failed = _startup_failure_markdown(bot["name"])
+                    if failed:
+                        await reply(chat_id, md=failed); return
                     await reply(chat_id, "🛌 你现在没有会话（发句话我就给你起一个）"); return
                 shot = await asyncio.to_thread(read_screen, rec["pty"], 40)
                 await reply(chat_id, md="```\n" + shot[-1500:] + "\n```"); return
@@ -1687,29 +2088,50 @@ def run(bot_name=None):
                     import bridge_watchdog as bw
                 except Exception as _e:                                    # noqa: BLE001
                     await reply(chat_id, f"⛔ 交接失败：载不进 bridge_watchdog（{_e}）"); return
+                recovering = False
                 if not alive:
-                    await reply(chat_id, "🛌 当前没有会话可交接。直接发消息我就起一个新的。"); return
-                await reply(chat_id, "🔄 正在交接：快照上一轮 → 关会话 → 起全新 context → 让它先读懂历史……")
-                pack = await asyncio.to_thread(bw.snapshot_handoff, bot["name"], "主人手动 /handoff")
+                    pack = _load_retryable_handoff(bot["name"])
+                    if not pack:
+                        await reply(chat_id, "🛌 当前没有会话可交接，也没有最近失败的交接包。直接发消息我就起一个新的。"); return
+                    recovering = True
+                    keep_dir = str(pack.get("cwd") or current_cwd(bot))
+                    await reply(
+                        chat_id,
+                        f"🔁 检测到上一轮 `/handoff` 已完成快照、但新会话没有起成功。"
+                        f"正在复用 session `{pack.get('session_id')}` 的交接包重试，不会再关一次旧会话……",
+                    )
+                else:
+                    await reply(chat_id, "🔄 正在交接：快照上一轮 → 关会话 → 起全新 context → 让它先读懂历史……")
+                    pack = await asyncio.to_thread(bw.snapshot_handoff, bot["name"], "主人手动 /handoff")
+                    bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
+                    keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
+                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 if not pack.get("transcript"):
                     await reply(chat_id, "⚠️ 没找到上一个会话的 transcript —— 交接会缺历史，仍继续（它只能靠屏尾和 code base）。")
-                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
-                keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
-                await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 clear_codex_thread(bot["name"])                            # codex：清 thread 指针，确保真·新会话
                 _merge_session(bot["name"], {"cwd": keep_dir, "pty": None, "workspace_id": None,
                                              "jsonl": None, "daemon_fp": None})   # 只清 runtime 指针·留账号与目录
+                _record_handoff_attempt(bot["name"], pack, "pending")
                 try:
                     ws2, pty2, _created, _ = await asyncio.to_thread(ensure_session, bot)   # ③ 主动起
                 except Exception as _e:                                    # noqa: BLE001
-                    await reply(chat_id, f"⛔ 新会话起不来：{_e}。发条消息我再试。"); return
+                    _record_handoff_attempt(bot["name"], pack, "failed", str(_e))
+                    await reply(
+                        chat_id,
+                        f"⛔ 新会话起不来：{_e}\n"
+                        "交接包仍保留；发 `/screen` 可看失败现场，修复后再次发 `/handoff` 会直接复用它。",
+                    ); return
                 marker = (bw.build_align_prompt(pack)
                           + f"\n[飞书 from=host to={bot['name']} via=handoff · route=p2a]")
                 ok = await asyncio.to_thread(_inject, pty2, ws2, marker)
+                _record_handoff_attempt(
+                    bot["name"], pack, "complete" if ok else "injection-unconfirmed"
+                )
                 _bgn = len((pack.get("background") or {}).get("procs") or []) \
                     + len((pack.get("background") or {}).get("files") or [])
                 await reply(chat_id, md=(
-                    f"{'✅' if ok else '⚠️'} **已交接给全新会话**（账号 `{agent_runtime.current_account(bot)}` 不变 · 目录 `{keep_dir}`）\n"
+                    f"{'✅' if ok else '⚠️'} **{'已恢复交接并启动全新会话' if recovering else '已交接给全新会话'}**"
+                    f"（账号 `{agent_runtime.current_account(bot)}` 不变 · 目录 `{keep_dir}`）\n"
                     f"· 上一轮 session `{pack.get('session_id')}` 的记录已交给它\n"
                     f"· 在途工作线索 {_bgn} 条一并带过去了\n"
                     f"· 它会**先读历史 + 调研 code base → 汇报 → 停下等你**，不会自作主张往下做\n"
@@ -1903,7 +2325,8 @@ def run(bot_name=None):
 
         async def on_message(msg):
             sender = (msg.sender.open_id or "") if msg.sender else ""
-            text = (msg.content_text or "").strip()
+            raw_text = msg.content_text or ""
+            text = raw_text.strip()
             is_group = getattr(msg, "chat_type", "") == "group"
             if is_group:
                 if not getattr(msg, "mentioned_bot", False):
@@ -1920,6 +2343,15 @@ def run(bot_name=None):
             if not is_group and not is_allowed(bot, sender):
                 blog(bot["name"], f"拒绝 open_id={sender}（非主人/非白名单）: {text[:50]!r}")
                 return
+            # accepted inbound 的持久真源：在 slash / session spawn / 附件下载 / TUI 注入之前同步落盘。
+            # 群未@与未授权 DM 已在上面返回，不扩大留存范围；file_key/raw payload 不进账本。
+            try:
+                bridge_inbound.append_message(
+                    STATE_DIR, bot["name"], msg, raw_text=raw_text, text=text
+                )
+            except Exception as ledger_error:  # noqa: BLE001 — 处理继续，但必须把留存故障显式打进桥日志
+                blog(bot["name"], f"⚠️ 入站账本写入失败 message_id={getattr(msg, 'id', '')}: "
+                                  f"{type(ledger_error).__name__}: {str(ledger_error)[:180]}")
             # 交互卡片被转发进来 → 飞书只递【占位】：content_text="[interactive]" 或正文被替换成「请升级至最新版本客户端」。
             # 卡片真内容飞书【不下发给 bot】——2026-07-10 实测钉死：user_dsl 已不随转发下发(连自家卡/同会话/几十秒前都没有)、
             # 占位图 resources 下载报 14005(跨/同 app 都 Resource Deleted)、get-message 只回占位。→ 归一化成空，让它走下面
@@ -2221,49 +2653,15 @@ def run(bot_name=None):
             (bridge_stop 在 Stop 时读 turn-route 写进记录·不受下一轮 UserPromptSubmit 覆盖·防泄漏)。"""
             return _route_to_dest(_load_turn_route(bname))
 
-        def _card_payload(text, at=None, mark=False):     # 2.0 schema markdown 卡（非流式·可 update_card 原地改）
-            content = text
-            if at:                                         # 群回复：机械 @ 回发信人（卡内 <at id=…>·LLM 不参与=必准）
-                content = f"<at id={at}></at> " + content
-            # mark 参数保留兼容(旧防回环哨兵已废·a2a 新模型不再加哨兵·见 ARCH-140)
-            return {"schema": "2.0", "config": {"streaming_mode": False, "wide_screen_mode": True},
-                    "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]}}
-
-        async def _new_card(text, route=None):            # 发一张新卡·返回 message_id（失败 None）·route 给定=用记录里钉死的本轮路由
-            tgt, at = _route_to_dest(route) if route else _reply_dest()
-            if not tgt:
-                receipt(bname, {"tid": "drain", "kind": "new_card", "delivered": False, "via": None, "err": "no_target", "len": len(text or "")})
-                return None
-            grp = str(tgt).startswith("oc_")
-            if grp:
-                # 群 → 纯文字(+真@)·对端 bot 读得到正文(卡片只给"[interactive]")。进度卡(🤖开头)不往群里刷·只发答案。
-                if (text or "").lstrip().startswith("🤖"):
-                    return "skip-progress"
-                try:
-                    mid = await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
-                                                  tgt, (text or ""), at)
-                    receipt(bname, {"tid": "drain", "kind": "group_text", "delivered": bool(mid), "via": "group_text", "mid": mid, "len": len(text or "")})
-                    return mid
-                except Exception as e:  # noqa: BLE001
-                    blog(bname, f"群纯文字发送失败({str(e)[:80]})")
-                    receipt(bname, {"tid": "drain", "kind": "group_text", "delivered": False, "via": None, "err": str(e)[:120], "len": len(text or "")})
-                    return None
-            try:
-                mid = await asyncio.wait_for(
-                    ch._ensure_card_snapshot(tgt, _rit(tgt), snapshot=_card_payload(text),
-                                             reply_to=None, reply_in_thread=None),
-                    CARD_SEND_TIMEOUT)
-                receipt(bname, {"tid": "drain", "kind": "new_card", "delivered": True, "via": "card", "mid": mid, "len": len(text or "")})
-                return mid
-            except Exception as e:  # noqa: BLE001（含 asyncio.TimeoutError·超时即当失败·drainer 走 send_plain 兜底）
-                blog(bname, f"🃏 new_card 失败({str(e)[:80] or type(e).__name__})")
-                receipt(bname, {"tid": "drain", "kind": "new_card", "delivered": False, "via": None, "err": (str(e)[:120] or type(e).__name__), "len": len(text or "")})
-                return None
+        async def _new_card(text, route=None, purpose="answer", fragment=None):
+            return await _deliver_routed_new(
+                bot, bname, text, route, purpose, fragment, _route_to_dest,
+            )
 
         async def _edit_card(mid, text):                  # 原地改卡（update_card=patch_message·非流式·True=成功）
-            tgt, _at = _reply_dest()
-            if str(tgt).startswith("oc_"):
-                return True   # 群走纯文字·不原地改卡（进度不在群里刷屏）
+            turn_route = _load_turn_route(bname) or {"kind": "p2a"}
+            if turn_route.get("kind") in {"p2a-ext", "a2a"}:
+                return True   # 群进度策略：不在群里刷中间态
             try:
                 r = await asyncio.wait_for(ch.update_card(mid, _card_payload(text)), CARD_SEND_TIMEOUT)
                 ok = bool(getattr(r, "success", False))
@@ -2273,31 +2671,10 @@ def run(bot_name=None):
                 receipt(bname, {"tid": "drain", "kind": "edit_card", "delivered": False, "via": "edit-fail", "err": (str(e)[:120] or type(e).__name__)})
                 return False
 
-        async def _send_plain(text, route=None):          # 最终 fallback·route 同 _new_card·返回送达布尔(给 drainer 判要不要重试·at-least-once)
-            tgt, at = _route_to_dest(route) if route else _reply_dest()
-            if not tgt:
-                receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": False,
-                                "via": None, "err": "no_target", "len": len(text or "")})
-                return False
-            if str(tgt).startswith("oc_"):                 # 群 → 纯文字(+真@)
-                try:
-                    await asyncio.to_thread(_send_group_text, bot["app_id"], bot["app_secret"],
-                                            tgt, (text or ""), at)
-                    receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": True,
-                                    "via": "group_text", "len": len(text or "")})
-                    return True
-                except Exception as e:  # noqa: BLE001
-                    receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": False,
-                                    "via": None, "err": str(e)[:120], "len": len(text or "")})
-                    return False
-            # ⚠️ 留痕（2026-08-02 立·2026-08-30 兜底拆除后仍必要）：旧版这里【一行 return、零回执】——
-            #   降级投进了【群】，但这里只把它折成 True，drainer 照推 HWM、outbox 一片干净 → 「兜底成功了，
-            #   所以没人知道 DM 是坏的」。现在把 via 原样记下：failed = 没送到，肉眼一看就知道。
-            via = await card_send(ch, tgt, text, bname)
-            receipt(bname, {"tid": "drain", "kind": "send_plain", "delivered": via != "failed",
-                            "via": via, "target": tgt,
-                            "len": len(text or "")})
-            return via != "failed"
+        async def _send_plain(text, route=None, purpose="answer", fragment=None):
+            return await _deliver_routed_plain(
+                bot, bname, text, route, purpose, fragment, _route_to_dest,
+            )
 
         holder = {}
 
@@ -2515,6 +2892,78 @@ def cmd_workspaces():
 
 
 _TEXT_DOC_SUFFIXES = {".md", ".markdown", ".mark", ".html", ".htm", ".txt"}
+_NATIVE_TEXT_DOC_SUFFIXES = {".md", ".markdown", ".mark", ".txt"}
+def _read_send_text(*, text=None, file_as_text=None, legacy_file=None):
+    """Resolve intentional chat text and reject the old ambiguous flag."""
+    if legacy_file:
+        raise ValueError(
+            "feishu_bridge.py send 的 --file 已移除："
+            "要把文件正文当聊天文字发送，请用 --file-as-text；"
+            "要发原始文件附件，请用 send_feishu_file.py --file；"
+            "要发布飞书在线文档，请用 --doc。"
+        )
+    return Path(file_as_text).read_text(encoding="utf-8") if file_as_text else text
+
+
+async def _send_file_attachment(channel, target, path):
+    """Send one real Feishu file message and return ``(ok, error)``."""
+    from lark_channel import MediaSource, OutboundFile
+
+    source = Path(path)
+    try:
+        result = await channel.send(target, OutboundFile(
+            source=MediaSource(kind="file", path=str(source.resolve())),
+            file_name=source.name,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)[:250]
+    if bool(getattr(result, "success", False)):
+        return True, None
+    error = getattr(result, "error", None)
+    if error:
+        return False, f"code={getattr(error, 'code', None)} {getattr(error, 'hint', None)}"
+    return False, "unknown"
+
+
+def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
+    """Publish text natively; use import for HTML/Office and as text fallback.
+
+    The native path is the no-``drive:drive`` production path discovered in
+    PLAN-980.  A returned URL is accepted only when the document was made
+    tenant-readable or the intended human was granted access.
+    """
+    import feishu_docs
+
+    errors = []
+    if Path(path).suffix.lower() in _NATIVE_TEXT_DOC_SUFFIXES:
+        try:
+            result = feishu_docs.publish_text_as_doc(
+                bot["app_id"], bot["app_secret"], path,
+                grant_open_id=grant_open_id, title=name, visibility="tenant",
+            )
+            accessible = bool(result.get("visibility") is True
+                              or (grant_open_id and result.get("granted") is True))
+            if result.get("url") and accessible:
+                return result, "online_doc_native"
+            errors.append(
+                "native=文档已创建但未证实收件人可读"
+                f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"native={str(exc)[:220]}")
+
+    try:
+        result = feishu_docs.publish_file_as_doc(
+            bot["app_id"], bot["app_secret"], path,
+            grant_open_id=grant_open_id, name=name,
+        )
+        if result.get("url"):
+            return result, "online_doc_import"
+        errors.append("import=发布结果缺 doc URL")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"import={str(exc)[:220]}")
+
+    raise RuntimeError("；".join(errors) or "在线文档发布失败")
 
 
 def _doc_source_stats(path):
@@ -2576,8 +3025,10 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
     """独立短进程主动推送一条到飞书 DM（REST·不依赖常驻桥进程）。
     目标优先级：--to > 会话 chat_id > owner open_id（私聊）。文字复用 guaranteed_send 四级兜底。
     --image <path>：把本地图发到 DM（封面/截图/图表/架构图直达手机·SDK upload_media→OutboundImage）。
-    --doc <md/html>：本地文件转飞书云文档 → 授权 owner → 发文档链接（在线查看·可复制可改存·见 ARCH-101 §2.11）。
+    --doc <md/html>：Markdown/TXT 先走原生 docx，HTML/Office 走 import；在线链失败时
+    由同一 bot 自动发送原文件附件。file-as-text 不参与自动降级。
     给「Claude 在终端会话里主动发飞书」用——不是群喇叭 notify.py，是 bot 自己的 DM 通道。"""
+    assert_sender_identity(bot_name)
     bot = next((b for b in load_bots() if b["name"] == bot_name), None)
     if not bot:
         print(f"❌ 没有名为 '{bot_name}' 的 bot", file=sys.stderr); sys.exit(2)
@@ -2588,7 +3039,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
         print("❌ 没有可发目标（该 bot 还没人 @ 过 · 先在飞书 @/私聊它一次）", file=sys.stderr); sys.exit(2)
     text = (text or "").strip()
     if not text and not image and not doc:
-        print("❌ 空内容（给 --text / --file / --image / --doc）", file=sys.stderr); sys.exit(2)
+        print("❌ 空内容（给 --text / --file-as-text / --image / --doc）", file=sys.stderr); sys.exit(2)
     img_path = None
     if image:
         img_path = Path(image)
@@ -2617,33 +3068,45 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             except Exception as e:  # noqa: BLE001
                 img_ok = False
                 blog(bot_name, f"send --image 失败: {str(e)[:200]}")
-        doc_ok, doc_url = None, None
+        doc_ok, doc_url, doc_error = None, None, None
+        attachment_ok, attachment_error = None, None
+        doc_delivery_mode = None
         if doc:
             try:
-                import feishu_docs  # 旁挂小工具（ARCH-101 §2.11）
-                res = await asyncio.to_thread(
-                    feishu_docs.publish_file_as_doc, bot["app_id"], bot["app_secret"], doc,
-                    grant_open_id=grant_oid, name=doc_name)
+                res, doc_delivery_mode = await asyncio.to_thread(
+                    _publish_online_doc, bot, doc, grant_open_id=grant_oid, name=doc_name,
+                )
                 doc_url, doc_ok = res.get("url"), True
+                if doc_delivery_mode == "online_doc_native":
+                    blog(bot_name, "send --doc 已由同 bot 原生 docx 链发布")
                 if grant_oid and not res.get("granted", True):
-                    blog(bot_name, f"⚠️ send --doc 授权 owner 失败({res.get('grant_error')})·你点链接可能无权限")
-                if res.get("public") is False:   # 默认设「任何人凭链接可读」·失败只降级为组织内可见·不挡投递
-                    blog(bot_name, f"⚠️ send --doc 公开链接设置失败({res.get('public_error')})·"
-                                   "外人/别的智能体点链接可能打不开（仅组织内可见）")
+                    blog(bot_name, f"⚠️ send --doc 授权 owner 失败({res.get('grant_error')})·改用链接可见范围")
+                if res.get("public") is False:
+                    blog(bot_name, f"⚠️ send --doc 外部分享设置失败({res.get('public_error')})·"
+                                   "访问者至少需要登录飞书")
             except Exception as e:  # noqa: BLE001
                 doc_ok = False
-                blog(bot_name, f"send --doc 失败: {str(e)[:250]}")
+                doc_error = str(e)[:500]
+                blog(bot_name, f"send --doc 两条在线链均失败: {doc_error}")
+                attachment_ok, attachment_error = await _send_file_attachment(ch, target, doc)
+                doc_delivery_mode = "attachment"
+                doc_ok = None
+                if not attachment_ok:
+                    blog(bot_name, f"send --doc 附件降级失败: {attachment_error}")
         body = text
         if doc_url:
             title = (doc_name or Path(doc).name).strip()
-            link_line = f"📄 {title}（飞书在线文档·可复制可编辑）：\n{doc_url}"
+            link_line = f"📄 {title}（飞书在线文档·登录飞书查看）：\n{doc_url}"
             body = (text + "\n\n" + link_line) if text else link_line
         via = await card_send(ch, target, body, bot_name) if body else None
-        return img_ok, via, doc_ok, doc_url
+        return (img_ok, via, doc_ok, doc_url, doc_error,
+                attachment_ok, attachment_error, doc_delivery_mode)
 
-    img_ok, via, doc_ok, doc_url = asyncio.run(_go())
+    (img_ok, via, doc_ok, doc_url, doc_error,
+     attachment_ok, attachment_error, doc_delivery_mode) = asyncio.run(_go())
     delivered = (((via != "failed") if via is not None else True)
-                 and (img_ok is not False) and (doc_ok is not False))
+                 and (img_ok is not False) and (doc_ok is not False)
+                 and (attachment_ok is not False))
     reconcile_queued = None
     if doc_url:
         reconcile_queued = _queue_doc_delivery(
@@ -2654,19 +3117,31 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
         if reconcile_queued is False:
             blog(bot_name, "⚠️ 在线文档已创建，但 final 对账记录写入 outbox 失败")
     receipt(bot_name, {"tid": "push", "kind": "push", "chat_id": target, "delivered": delivered,
-                       "via": via, "image": (bool(img_ok) if image else None),
-                       "doc": (bool(doc_ok) if doc else None), "doc_url": doc_url,
-                       "reconcile_queued": reconcile_queued,
+                        "via": via, "image": (bool(img_ok) if image else None),
+                        "doc": (bool(doc_ok) if doc else None), "doc_url": doc_url,
+                        "doc_delivery_mode": doc_delivery_mode,
+                        "doc_error": doc_error,
+                        "attachment": attachment_ok,
+                        "attachment_error": attachment_error,
+                        "reconcile_queued": reconcile_queued,
                        "len": len(text), "text_chars": len(text), **doc_stats})
     if as_json:
         print(json.dumps({"delivered": delivered, "via": via, "image_ok": img_ok,
                           "doc_ok": doc_ok, "doc_url": doc_url,
+                          "doc_delivery_mode": doc_delivery_mode,
+                          "doc_error": doc_error,
+                          "attachment_ok": attachment_ok,
+                          "attachment_error": attachment_error,
                           "reconcile_queued": reconcile_queued,
                           "bot": bot_name, "to": target, "len": len(text),
                           "text_chars": len(text), **doc_stats}, ensure_ascii=False))
     else:
-        extra = (f" 图片{'✅' if img_ok else '❌'}" if image else "") + \
-                (f" 文档{'✅' if doc_ok else '❌'}{('·'+doc_url) if doc_url else ''}" if doc else "") + \
+        artifact = ""
+        if doc_delivery_mode == "attachment":
+            artifact = f" 文件附件{'✅' if attachment_ok else '❌'}"
+        elif (doc_delivery_mode or "").startswith("online_doc"):
+            artifact = f" 在线文档{'✅' if doc_ok else '❌'}{('·'+doc_url) if doc_url else ''}"
+        extra = (f" 图片{'✅' if img_ok else '❌'}" if image else "") + artifact + \
                 (" 对账⚠️未登记" if reconcile_queued is False else "")
         print(f"{'✅ 已送达' if delivered else '❌ 未送达'} via={via}{extra} → {target}（{_send_size_label(text, doc_stats)}）")
     sys.exit(0 if delivered else 1)
@@ -2719,7 +3194,9 @@ def main():
                     help="(默认)start / run[--bot X] / stop / status / workspaces / send=主动推DM / doctor=一眼健康")
     ap.add_argument("--bot", default=None, help="指定单个 bot：start/stop/run/send 都认它（裸命令 --bot X=只起它·stop --bot X=只停它·不给=全部）")
     ap.add_argument("--text", default=None, help="send：要推送的文本")
-    ap.add_argument("--file", default=None, help="send：从文件读内容（长/多行用这个免 shell 转义）")
+    ap.add_argument("--file-as-text", default=None,
+                    help="send：明确把文件正文作为聊天文字发送（不是附件；长文可能拆成多条）")
+    ap.add_argument("--file", dest="legacy_file", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--image", default=None, help="send：把本地图片发到 DM（可与 --text 同用·封面/截图/图表直达手机）")
     ap.add_argument("--doc", default=None, help="send：本地 md/HTML 转飞书云文档发链接（在线查看·可复制可改存·ARCH-101 §2.11）")
     ap.add_argument("--name", default=None, help="send：--doc 的飞书文档标题（不给=取文件名）")
@@ -2737,9 +3214,14 @@ def main():
     elif args.cmd == "workspaces":
         cmd_workspaces()
     elif args.cmd == "send":
+        try:
+            body = _read_send_text(
+                text=args.text, file_as_text=args.file_as_text, legacy_file=args.legacy_file,
+            )
+        except ValueError as exc:
+            ap.error(str(exc))
         _bots = load_bots()
         bot_name = args.bot or (_bots[0]["name"] if _bots else "default")
-        body = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
         cmd_send(bot_name, body, args.to, args.json, args.image, args.doc, args.name)
     elif args.cmd == "doctor":
         cmd_doctor(args.bot)

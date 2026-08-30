@@ -11,6 +11,7 @@ hook（Stop/PostToolUse）单写 outbox；本 drainer 单读：
 桥侧用真 card_send，测试用 FakeChannel。绝不阻塞、绝不崩。
 """
 import json
+import hashlib
 import os
 import re
 import time
@@ -42,6 +43,50 @@ def progress_state_path(state_dir, bot):
 
 def delivery_state_path(state_dir, bot):
     return Path(state_dir) / f"bridge-delivery-state-{bot}.json"
+
+
+def answer_state_path(state_dir, bot):
+    return Path(state_dir) / f"bridge-answer-state-{bot}.json"
+
+
+def load_answer_state(state_dir, bot):
+    """Load durable per-fragment acknowledgements; never load answer plaintext."""
+    try:
+        raw = json.loads(answer_state_path(state_dir, bot).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"version": 1, "answers": {}}
+    answers = raw.get("answers") if isinstance(raw, dict) else None
+    if not isinstance(raw, dict) or raw.get("version") != 1 or not isinstance(answers, dict):
+        return {"version": 1, "answers": {}}
+    return {"version": 1, "answers": answers}
+
+
+def save_answer_state(state_dir, bot, answer_delivery):
+    """Atomically persist fragment acks before the outbox HWM can advance."""
+    target = answer_state_path(state_dir, bot)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = answer_delivery if isinstance(answer_delivery, dict) else {"version": 1, "answers": {}}
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    try:
+        if target.read_text(encoding="utf-8") == serialized:
+            return True
+    except OSError:
+        pass
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    for delay in (0, 0.02, 0.05, 0.1, 0.2):
+        if delay:
+            time.sleep(delay)
+        try:
+            tmp.write_text(serialized, encoding="utf-8")
+            os.replace(tmp, target)
+            return True
+        except OSError:
+            continue
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return False
 
 
 def load_delivery_state(state_dir, bot):
@@ -109,10 +154,13 @@ def load_progress_state(state_dir, bot):
         return {}
     if not isinstance(raw, dict) or raw.get("contract") != "milestone-v1":
         return {}
+    mid = raw.get("mid")
+    if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
+        mid = None
     return {
         "v2_turn": raw.get("turn"),
         "v2_steps": raw.get("steps") or [],
-        "v2_mid": raw.get("mid"),
+        "v2_mid": mid,
         "v2_card_ids": raw.get("card_ids") or [],
         "v2_acked": raw.get("acked") or {},
         "v2_route": raw.get("route"),
@@ -429,7 +477,9 @@ def write_hooks_settings(state_dir, hooks_dir):
         "hooks": {
         # UserPromptSubmit：每轮开头写 bridge-turn-route（a2a 消费 next-route 旗标 / 否则 p2a）→ per-turn 路由(2026-06-28)
         "UserPromptSubmit": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": f'python "{ups}"', "timeout": 10, "async": True}]}],
+            # Must finish before the model can call proactive send tools; this
+            # active-turn record is the mechanical duplicate-send guard.
+            {"type": "command", "command": f'python "{ups}"', "timeout": 10}]}],
         "Stop": [{"matcher": "*", "hooks": [
             {"type": "command", "command": f'python "{stop}"', "timeout": 15, "async": True}]}],
         "PostToolUse": [{"matcher": PROGRESS_TOOLS, "hooks": [
@@ -471,8 +521,21 @@ def write_hooks_settings(state_dir, hooks_dir):
     raise last_err
 
 
-def _ans_key(r):
-    return ("a", r.get("session"), r.get("anchor"), hash((r.get("text") or "")))
+def _canonical_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _answer_id(record, text, route):
+    identity = {
+        "session": record.get("session"),
+        "anchor": record.get("anchor"),
+        "route": route if isinstance(route, dict) else {"kind": "p2a"},
+        # Use the reconciled text that will actually be delivered, including
+        # appended document URLs.  Python's process-randomized hash() is not a
+        # durable delivery identity.
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+    return hashlib.sha256(_canonical_json(identity).encode("utf-8")).hexdigest()
 
 
 def _ask_key(r):
@@ -566,24 +629,58 @@ def _fit_count(labels, head_len, budget):
     return max(1, k)
 
 
-def _ans_chunks(text, budget=CARD_BUDGET):
-    """长回复按【行】切成 ≤budget 的连续块（不拆行·单行超长才硬切）。"""
-    chunks, cur = [], ""
-    for line in text.split("\n"):
-        while len(line) > budget:
-            if cur:
-                chunks.append(cur)
-                cur = ""
-            chunks.append(line[:budget])
-            line = line[budget:]
-        if cur and len(cur) + 1 + len(line) > budget:
-            chunks.append(cur)
-            cur = line
-        else:
-            cur = (cur + "\n" + line) if cur else line
-    if cur:
-        chunks.append(cur)
+def _split_exact(text, capacity):
+    """Split preferably after a newline while preserving every source char."""
+    if capacity <= 0:
+        raise ValueError("fragment capacity 必须为正数")
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(len(text), start + capacity)
+        if end < len(text):
+            newline = text.rfind("\n", start, end + 1)
+            if newline >= start:
+                end = newline + 1
+        if end <= start:  # defensive; a newline at start still advances by one
+            end = min(len(text), start + capacity)
+        chunks.append(text[start:end])
+        start = end
     return chunks or [text]
+
+
+def _answer_fragments(record, text, route, budget=CARD_BUDGET):
+    """Build stable, lossless final-answer fragments with visible part/total."""
+    answer_id = _answer_id(record, text, route)
+    if len(text) <= budget:
+        contents = [text]
+    else:
+        total = 2
+        while True:
+            prefix = f"**回复 {total}/{total}**\n\n"
+            contents = _split_exact(text, budget - len(prefix))
+            if len(contents) == total:
+                break
+            total = len(contents)
+    total = len(contents)
+    fragments = []
+    for index, content in enumerate(contents, 1):
+        content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        fragment_id = hashlib.sha256(
+            f"{answer_id}:{index}:{total}:{content_sha}".encode("utf-8")
+        ).hexdigest()
+        rendered = content if total == 1 else f"**回复 {index}/{total}**\n\n{content}"
+        if len(rendered) > budget:
+            raise ValueError("fragment 超出 CARD_BUDGET")
+        fragments.append({
+            "answer_id": answer_id, "fragment_id": fragment_id,
+            "part": index, "total": total, "content_sha256": content_sha,
+            "content": content, "rendered": rendered,
+        })
+    return fragments
+
+
+def _ans_chunks(text, budget=CARD_BUDGET):
+    """Compatibility helper for progress/ask cards; preserves every char."""
+    return _split_exact(text, budget)
 
 
 class RetrySend(Exception):
@@ -591,16 +688,21 @@ class RetrySend(Exception):
     progress 不抛(临时进度·可丢)。配 state['partial'] 记已发块数 → 重发不重复。"""
 
 
-GIVE_UP_SEC = 600   # 同一条卡这么久还发不出(多为永久错·如无目标/被拒,非网络) → 放弃推进·别永堵队列
-
-
 async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_sec, clock,
-                      force_flush=False, on_ask=None, on_resume=None):
+                      force_flush=False, on_ask=None, on_resume=None, persist_answer=None):
     """统一卡片流：progress 当前卡 edit_card 原地长大 → 满 CARD_BUDGET 或 edit 失败 → 冻结开新卡接着写(不截断)；
     answer 拆 ≤BUDGET 连续多卡(new_card·失败退 send_plain)·发前先把进度卡刷到最新·保序。
-    deps（均 coroutine）：new_card(text)->mid|None · edit_card(mid,text)->bool · send_plain(text)。
+    deps（均 coroutine）：new_card(text)->mid|{ok,message_id}|None · edit_card(mid,text)->bool · send_plain(text)。
     state = {turn,steps,usage,seg_start,cur_mid,flushed,last_flush,sent}。返回动作数。"""
     n = 0
+
+    def _result(result):
+        if isinstance(result, dict):
+            mid = result.get("message_id")
+            if not isinstance(mid, str) or not mid.strip():
+                mid = None
+            return bool(result.get("ok") and mid), mid
+        return bool(result) and result != "skip-progress", result if isinstance(result, str) else None
 
     def _safe_count(value):
         try:
@@ -659,7 +761,14 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             text = _v2_text(group, snapshot)
             chunks = _ans_chunks(text)
             for chunk in chunks:
-                last_mid = await new_card(chunk, route=state.get("v2_route"))
+                result = await new_card(
+                    chunk, route=state.get("v2_route"), purpose="progress"
+                )
+                ok, mid = _result(result)
+                # Group progress is intentionally suppressed.  Failed progress
+                # is also best-effort and must never leave a dict/sentinel in
+                # state where the next flush would pass it as a message ID.
+                last_mid = mid if ok else None
                 n += 1
             last_ids = [str(step.get("event_id")) for step in group if step.get("event_id")]
         return last_mid, last_ids
@@ -678,6 +787,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         card_steps = [by_id[event_id] for event_id in card_ids]
         text = _v2_text(card_steps, state.get("v2_steps") or [])
         mid = state.get("v2_mid")
+        if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
+            mid = None
+            state["v2_mid"] = None
         if mid and len(text) <= CARD_BUDGET:
             ok = await edit_card(mid, text)
             n += 1
@@ -708,18 +820,30 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             k = _fit_count(seg, len(head) + 2, CARD_BUDGET)
             text = _card_text(head, seg[:k])
             full_fit = state["seg_start"] + k >= len(full)
-            if state["cur_mid"]:
-                ok = await edit_card(state["cur_mid"], text)
+            mid = state.get("cur_mid")
+            if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
+                mid = None
+                state["cur_mid"] = None
+            if mid:
+                ok = await edit_card(mid, text)
                 n += 1
                 if not ok:                                # edit 失败(撞上限?) → 当轮换：弃旧卡开新卡
                     pending_start = max(state.get("flushed", 0), state["seg_start"])
                     pending = [s.get("label", "") for s in full[pending_start:state["seg_start"] + k]]
                     delta = _card_text(head, pending or seg[:k])
-                    state["cur_mid"] = await new_card(delta, route=state.get("progress_route"))
+                    result = await new_card(
+                        delta, route=state.get("progress_route"), purpose="progress"
+                    )
+                    ok, mid = _result(result)
+                    state["cur_mid"] = mid if ok else None
                     state["seg_start"] = pending_start
                     n += 1
             else:
-                state["cur_mid"] = await new_card(text, route=state.get("progress_route"))
+                result = await new_card(
+                    text, route=state.get("progress_route"), purpose="progress"
+                )
+                ok, mid = _result(result)
+                state["cur_mid"] = mid if ok else None
                 n += 1
             if full_fit:
                 break                                     # 收完·此卡保持开放(下次接着 edit 长大)
@@ -728,21 +852,82 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         state["flushed"] = len(full)
         state["last_flush"] = clock()
 
-    async def _deliver(chunks, key, route=None):
-        """逐块发(从已发数 partial 续发·防重复)。任一块失败 → 记进度 + 抛 RetrySend
-        (外层 outbox_drainer 不推 HWM·下轮重发)。全发成 → 清 partial。"""
+    def _persist_answers():
+        if persist_answer and not persist_answer(state["answer_delivery"]):
+            raise OSError("answer fragment state is not durable yet")
+
+    async def _deliver(chunks, key, route=None, *, purpose="answer"):
+        """Send ask/progress compatibility chunks without durable answer IDs."""
         nonlocal n
         start = state.setdefault("partial", {}).get(key, 0)
         for i in range(start, len(chunks)):
-            mid = await new_card(chunks[i], route=route)
-            ok = bool(mid) and mid != "skip-progress"
+            result = await new_card(chunks[i], route=route, purpose=purpose)
+            ok, _mid = _result(result)
             if not ok:                                     # 发卡失败 → 退 send_plain·看它送达没
-                ok = bool(await send_plain(chunks[i], route=route))
+                ok, _mid = _result(await send_plain(
+                    chunks[i], route=route, purpose=purpose
+                ))
             n += 1
             if not ok:
                 state["partial"][key] = i                  # 第 i 块没发出去·下轮从这接着(前面的不重发)
                 raise RetrySend()
         state["partial"].pop(key, None)
+
+    async def _deliver_answer(record, text, route):
+        """Persist each acknowledged fragment so restart retries only missing parts."""
+        nonlocal n
+        fragments = _answer_fragments(record, text, route)
+        answer_id = fragments[0]["answer_id"]
+        ledger = state.setdefault("answer_delivery", {"version": 1, "answers": {}})
+        answers = ledger.setdefault("answers", {})
+        text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        expected = {
+            "text_sha256": text_sha,
+            "route": route if isinstance(route, dict) else {"kind": "p2a"},
+            "total": len(fragments),
+        }
+        saved = answers.setdefault(answer_id, {**expected, "fragments": {}, "completed_at": None})
+        if any(saved.get(name) != value for name, value in expected.items()):
+            raise RuntimeError("answer_id ledger conflict")
+        receipts = saved.setdefault("fragments", {})
+        for fragment in fragments:
+            fid = fragment["fragment_id"]
+            if (receipts.get(fid) or {}).get("acked"):
+                continue
+            meta = {key: fragment[key] for key in (
+                "answer_id", "fragment_id", "part", "total", "content_sha256",
+            )}
+            meta.update({
+                "session": record.get("session"), "anchor": record.get("anchor"),
+                "source_ts": record.get("ts"),
+            })
+            result = await new_card(
+                fragment["rendered"], route=route, purpose="answer", fragment=meta,
+            )
+            ok, mid = _result(result)
+            if not ok:
+                result = await send_plain(
+                    fragment["rendered"], route=route, purpose="answer", fragment=meta,
+                )
+                ok, mid = _result(result)
+            n += 1
+            if not ok:
+                raise RetrySend()
+            receipts[fid] = {
+                "acked": True, "message_id": mid, "part": fragment["part"],
+                "content_sha256": fragment["content_sha256"], "acked_at": int(clock()),
+            }
+            _persist_answers()
+        saved["completed_at"] = int(clock())
+        _persist_answers()
+        completed = sorted(
+            ((value.get("completed_at") or 0, aid) for aid, value in answers.items()
+             if value.get("completed_at")), reverse=True,
+        )
+        for _ts, old_id in completed[SENT_CAP:]:
+            answers.pop(old_id, None)
+        if len(completed) > SENT_CAP:
+            _persist_answers()
 
     for r in recs:
         kind = r.get("kind")
@@ -763,9 +948,6 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 if _route_key(doc.get("route")) == _route_key(route)
             ]
             text = _answer_with_docs(text, matched_docs)
-            key = _ans_key(r)
-            if key in state["sent"]:
-                continue
             await _flush_v2()
             await _flush_progress()                       # 进度卡刷到最新·保序
             full = state.get("steps") or []
@@ -774,15 +956,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["v2_card_ids"] = []
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
-            await _deliver(_ans_chunks(text), key, route)  # 送达失败→抛 RetrySend·下轮重发(不丢·去重)
+            await _deliver_answer(r, text, route)          # 每片成功即落盘；重启只补缺片
             if matched_docs:
                 matched_ids = {id(doc) for doc in matched_docs}
                 state["pending_docs"] = [
                     doc for doc in (state.get("pending_docs") or []) if id(doc) not in matched_ids
                 ]
-            state["sent"].add(key)
-            if len(state["sent"]) > SENT_CAP:
-                state["sent"].clear()
         elif kind == "ask":
             # AskUserQuestion：PreToolUse hook 写来的【结构化 questions】(零读屏) → 渲卡转发，等你回数字/文字。
             questions = r.get("questions")
@@ -853,9 +1032,12 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
     state = {"turn": None, "steps": [], "usage": {}, "seg_start": 0, "cur_mid": None,
              "flushed": 0, "last_flush": clock(), "sent": set(), "picker_active": False,
              "pending_docs": load_delivery_state(state_dir, bot),
+             "answer_delivery": load_answer_state(state_dir, bot),
              **load_progress_state(state_dir, bot)}
-    stuck = {"off": None, "since": 0.0}                   # 某 offset 卡多久(送达重试·防永堵)
-    deps = dict(new_card=new_card, edit_card=edit_card, send_plain=send_plain)
+    deps = dict(
+        new_card=new_card, edit_card=edit_card, send_plain=send_plain,
+        persist_answer=lambda delivery: save_answer_state(state_dir, bot, delivery),
+    )
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
     on_ask = lambda qs, key, sess: picker_write(state_dir, bot, qs, session=sess, key=key)   # noqa: E731
     on_resume = lambda: picker_clear(state_dir, bot)                                          # noqa: E731
@@ -870,12 +1052,10 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                 except RetrySend:                          # 送达失败(网络抽) → 不推 HWM·下轮重发(去重不重复)
                     save_delivery_state(state_dir, bot, state.get("pending_docs") or [])
                     save_progress_state(state_dir, bot, state)
-                    if stuck["off"] != offset:
-                        stuck["off"], stuck["since"] = offset, clock()
-                    if clock() - stuck["since"] >= GIVE_UP_SEC:   # 久发不出(多为永久错) → 放弃·推进解堵
-                        offset = new_off
-                        hwm_save(offset)
-                        stuck["off"] = None
+                    save_answer_state(state_dir, bot, state.get("answer_delivery") or {})
+                    # Never skip a final answer merely because delivery has
+                    # been failing for a while.  Keeping the HWM here preserves
+                    # order and makes the missing fragment auditable/retriable.
                 else:
                     # Persist message id + event revision cursor before HWM.
                     # A controlled bridge restart can then resume the same card
@@ -886,7 +1066,6 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                     save_progress_state(state_dir, bot, state)
                     offset = new_off
                     hwm_save(offset)
-                    stuck["off"] = None
             elif _has_pending(state) and clock() - state["last_flush"] >= coalesce_sec:
                 await drain_batch([], state=state, coalesce_sec=coalesce_sec, clock=clock,
                                   on_ask=on_ask, on_resume=on_resume, **deps)

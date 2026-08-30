@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "feishu"))
 
 import agent_runtime  # noqa: E402
+import codex_app_server_worker  # noqa: E402
 import feishu_bridge  # noqa: E402
 
 
@@ -39,6 +40,40 @@ class CodexSkillInvocationTests(unittest.TestCase):
         self.assertIsNone(agent_runtime.codex_skill_invocation(bot, "/not-installed"))
         self.assertIsNone(agent_runtime.codex_skill_invocation({"agent": "claude"}, "/envsync"))
 
+    def test_discovers_repo_skill_from_nested_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            repo = Path(tmp) / "repo"
+            nested = repo / "src" / "feature"
+            skill = repo / ".agents" / "skills" / "feishu"
+            nested.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                "---\nname: feishu\ndescription: test\n---\n", encoding="utf-8"
+            )
+            with patch.object(Path, "home", return_value=home):
+                actual = agent_runtime.codex_skill_invocation(
+                    {"agent": "codex", "codex_home": str(home / ".codex-work")},
+                    "/feishu status", cwd=nested,
+                )
+        self.assertEqual(actual, "$feishu status")
+
+    def test_duplicate_skill_names_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for folder in ("feishu", "claude-compat-feishu"):
+                skill = home / ".agents" / "skills" / folder
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(
+                    "---\nname: feishu\ndescription: test\n---\n", encoding="utf-8"
+                )
+            with patch.object(Path, "home", return_value=home):
+                self.assertIsNone(agent_runtime.codex_skill_invocation(
+                    {"agent": "codex", "codex_home": str(home / ".codex-work")},
+                    "/feishu status",
+                ))
+
 
 class AgentProfileTests(unittest.TestCase):
     def test_registry_has_nine_profiles_and_cxp_is_codex_default(self):
@@ -47,6 +82,59 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(agent_runtime.default_profile("codex"), "cxp")
         self.assertEqual(agent_runtime.profile_spec("cxp").home, "~/.codex-personal")
         self.assertEqual(agent_runtime.profile_spec("cck").launcher, "launch-sh")
+
+    def test_local_registry_wins_and_invalid_local_never_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            committed = root / "agent-profiles.json"
+            local = root / "agent-profiles.local.json"
+            committed.write_text((ROOT / "feishu" / "agent-profiles.json").read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+            local.write_text(json.dumps({
+                "version": 1,
+                "default_profiles": {"claude": "claude-work", "codex": "codex-work"},
+                "profiles": {
+                    "claude-work": {"runtime": "claude", "home": "~/.claude-work", "launcher": "direct"},
+                    "codex-work": {"runtime": "codex", "home": "~/.codex-work", "launcher": "direct"},
+                },
+            }), encoding="utf-8")
+            with patch.object(agent_runtime, "PROFILE_REGISTRY_PATH", committed), \
+                 patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH", local):
+                self.assertEqual(agent_runtime.profile_registry_path(), local)
+                self.assertEqual([p.name for p in agent_runtime.profile_specs()],
+                                 ["claude-work", "codex-work"])
+                local.write_text("not-json", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "读失败"):
+                    agent_runtime.profile_specs()
+
+    def test_missing_local_uses_explicit_legacy_transition_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            committed = root / "agent-profiles.json"
+            local = root / "agent-profiles.local.json"
+            committed.write_text((ROOT / "feishu" / "agent-profiles.json").read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+            with patch.object(agent_runtime, "PROFILE_REGISTRY_PATH", committed), \
+                 patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH", local):
+                self.assertEqual(agent_runtime.profile_registry_path(), committed)
+                self.assertEqual(agent_runtime.default_profile("codex"), "cxp")
+
+    def test_single_runtime_registry_is_valid_and_other_default_fails_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "agent-profiles.local.json"
+            registry.write_text(json.dumps({
+                "version": 1,
+                "default_profiles": {"claude": "claude-work"},
+                "profiles": {
+                    "claude-work": {
+                        "runtime": "claude", "home": "~/.claude-work", "launcher": "direct",
+                    },
+                },
+            }), encoding="utf-8")
+            self.assertEqual([p.name for p in agent_runtime.profile_specs(registry)], ["claude-work"])
+            self.assertEqual(agent_runtime.default_profile("claude", registry), "claude-work")
+            with self.assertRaises(KeyError):
+                agent_runtime.default_profile("codex", registry)
 
     def test_profile_wins_over_conflicting_legacy_runtime(self):
         bot = {
@@ -69,12 +157,22 @@ class AgentProfileTests(unittest.TestCase):
         self.assertIn('LINK16_AGENT_PROFILE="cck"', kimi)
         self.assertIn('CLAUDE_CONFIG_DIR=', kimi)
         self.assertIn('XHS_AUTOPILOT="1"', kimi)
+        self.assertIn("unset CLAUDE_CODE_CHILD_SESSION;", kimi)
         self.assertNotIn("API_KEY", kimi)
         self.assertIn('LINK16_AGENT_PROFILE="cxp"', codex)
         self.assertIn(".codex-personal", codex)
         self.assertIn("CODEX_HOME=", codex)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", codex)
+        self.assertIn("--dangerously-bypass-hook-trust", codex)
         self.assertIn('"resume" "abc 123"', codex)
         self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
+        self.assertNotIn("CLAUDE_CODE_CHILD_SESSION", codex)
+
+    def test_bridge_claude_worker_clears_parent_harness_marker(self):
+        bot = {"name": "claude-bot", "profile": "ccp"}
+        with patch.object(agent_runtime, "_require_profile_available"):
+            command = agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
+        self.assertTrue(command.startswith("unset CLAUDE_CODE_CHILD_SESSION;"))
 
     def test_standalone_profile_is_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "LINK16_AGENT_PROFILE 未设置"):
@@ -213,12 +311,35 @@ class AgentProfileTests(unittest.TestCase):
                     "FEISHU_BRIDGE_NEW_APP_SECRET",
                     "@new-bot",
                     "cxp",
+                    cwd="C:\\work\\new-bot",
                 )
             self.assertEqual(row["profile"], "cxp")
+            self.assertEqual(row["cwd"], "C:/work/new-bot")
             self.assertNotIn("agent", row)
             self.assertNotIn("codex_home", row)
             persisted = json.loads(local.read_text(encoding="utf-8"))["bots"][0]
             self.assertEqual(persisted, row)
+
+    def test_switching_to_claude_removes_stale_codex_transport_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "bridge-bots.local.json"
+            committed = Path(tmp) / "bridge-bots.json"
+            local.write_text(json.dumps({"bots": [{
+                "name": "baseball",
+                "profile": "cxp",
+                "codex_transport": "app-server-canary",
+                "delivery_contract": "milestone-v1",
+            }]}), encoding="utf-8")
+            committed.write_text('{"bots":[]}', encoding="utf-8")
+            with (
+                patch.object(agent_runtime, "ROSTER_LOCAL_PATH", local),
+                patch.object(agent_runtime, "ROSTER_COMMITTED_PATH", committed),
+            ):
+                agent_runtime.persist_account("baseball", "ccp2")
+            row = json.loads(local.read_text(encoding="utf-8"))["bots"][0]
+            self.assertEqual(row["profile"], "ccp2")
+            self.assertNotIn("codex_transport", row)
+            self.assertNotIn("delivery_contract", row)
 
     def test_session_reuse_requires_exact_recorded_profile(self):
         bot = {"name": "codex-bot", "profile": "cxp"}
@@ -571,6 +692,44 @@ class ClaudeStartupPromptTests(unittest.TestCase):
         self.assertTrue(agent_runtime.is_ready({"agent": "codex"}, "status\n› Use /skills"))
 
 
+class CodexTrustPreseedTests(unittest.TestCase):
+    """2026-08-25 · Codex 首启 trust 弹窗会在 app-server warmup 上游挡死会话
+    （刷屏自动回车来不及）→ spawn 前把目录信任预写进 profile 的 config.toml。
+    Codex 自己持久化的就是小写 key，且查找大小写不敏感（当天 throwaway 目录实测）。"""
+
+    CODEX = {"name": "trustlab-codex", "agent": "codex"}
+    CLAUDE = {"name": "trustlab-claude", "agent": "claude"}
+
+    def _profile(self, home: Path, runtime: str):
+        from types import SimpleNamespace
+        return SimpleNamespace(home_path=home, runtime=runtime, name="test")
+
+    def test_seeds_lowercase_key_into_missing_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                agent_runtime.ensure_codex_trust(self.CODEX, "C:/410_VibeCoding/Post/Some-Repo")
+            text = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn("[projects.'c:\\410_vibecoding\\post\\some-repo']", text)
+            self.assertIn('trust_level = "trusted"', text)
+
+    def test_existing_key_is_not_duplicated_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            config = home / "config.toml"
+            config.write_text("[projects.'C:\\410_VibeCoding\\Post\\Some-Repo']\ntrust_level = \"trusted\"\n", encoding="utf-8")
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                agent_runtime.ensure_codex_trust(self.CODEX, "c:/410_vibecoding/post/some-repo")
+            self.assertEqual(config.read_text(encoding="utf-8").count("projects."), 1)
+
+    def test_claude_runtime_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "claude")):
+                agent_runtime.ensure_codex_trust(self.CLAUDE, "C:/whatever")
+            self.assertFalse((home / "config.toml").exists())
+
+
 class BridgeProcessSnapshotTests(unittest.TestCase):
     def test_groups_exact_bot_names_from_one_snapshot(self):
         actual = feishu_bridge._parse_bridge_processes([
@@ -587,6 +746,23 @@ class BridgeProcessSnapshotTests(unittest.TestCase):
 
 
 class AppServerReadySignalTests(unittest.TestCase):
+    def test_runtime_specific_ready_timeout_contract_and_overrides(self):
+        default_codex = {"name": "codex", "agent": "codex"}
+        self.assertGreater(
+            feishu_bridge._ready_timeout(default_codex),
+            codex_app_server_worker.WARMUP_TIMEOUT_SEC,
+        )
+        self.assertEqual(feishu_bridge._ready_timeout({"agent": "claude"}), 90)
+        self.assertEqual(feishu_bridge._ready_timeout({
+            "agent": "codex", "codex_transport": "cli-legacy",
+        }), 30)
+        self.assertEqual(feishu_bridge._ready_timeout({
+            **default_codex, "ready_timeout_sec": 77,
+        }), 77)
+        self.assertEqual(feishu_bridge._ready_timeout({
+            **default_codex, "ready_timeout_sec": 77,
+        }, 0.25), 0.25)
+
     def _with_ready_file(self, bot, callback):
         with tempfile.TemporaryDirectory() as tmp:
             previous = feishu_bridge.STATE_DIR
@@ -656,6 +832,124 @@ class AppServerReadySignalTests(unittest.TestCase):
                     )
             finally:
                 feishu_bridge.STATE_DIR = previous
+
+
+class BridgeStartupRecoveryTests(unittest.TestCase):
+    BOT = {"name": "test-claude-startup", "agent": "claude"}
+
+    def _with_state_dir(self, callback):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = feishu_bridge.STATE_DIR
+            feishu_bridge.STATE_DIR = Path(tmp)
+            try:
+                callback(Path(tmp))
+            finally:
+                feishu_bridge.STATE_DIR = previous
+
+    def test_slow_live_agent_is_never_given_duplicate_launcher(self):
+        def check(_tmp):
+            with (
+                patch.object(feishu_bridge, "_wait_agent_ready", return_value=False),
+                patch.object(feishu_bridge, "read_screen", return_value="Claude Code is starting…"),
+                patch.object(feishu_bridge.wmux_session, "pty_state", return_value=(True, "Claude Code")),
+                patch.object(feishu_bridge, "wmux") as send,
+            ):
+                self.assertFalse(feishu_bridge._finish_worker_startup(
+                    self.BOT, "ws-test", "pty-test", "C:/repo",
+                ))
+            send.assert_not_called()
+            failure = feishu_bridge._load_startup_failure(self.BOT["name"])
+            self.assertEqual(failure["stage"], "agent-started-not-ready")
+            self.assertIn("未补发启动命令", failure["reason"])
+            self.assertIn("Claude Code is starting", failure["screen_tail"])
+            self.assertIn("最近一次启动失败现场", feishu_bridge._startup_failure_markdown(
+                self.BOT["name"]
+            ))
+
+        self._with_state_dir(check)
+
+    def test_proven_bare_shell_gets_one_retry_and_clears_failure(self):
+        def check(tmp):
+            feishu_bridge._record_startup_failure(
+                self.BOT,
+                workspace_id="old-ws",
+                pty="old-pty",
+                cwd="C:/repo",
+                stage="old",
+                reason="old",
+                screen="old",
+            )
+            with (
+                patch.object(feishu_bridge, "_wait_agent_ready", side_effect=(False, True)),
+                patch.object(
+                    feishu_bridge,
+                    "read_screen",
+                    return_value="remo@host MINGW64 /c/repo\n$ ",
+                ),
+                patch.object(feishu_bridge.wmux_session, "pty_state", return_value=(True, "")),
+                patch.object(feishu_bridge, "_worker_cmd", return_value="launch-claude"),
+                patch.object(feishu_bridge, "blog"),
+                patch.object(feishu_bridge.time, "sleep"),
+                patch.object(feishu_bridge, "wmux") as send,
+            ):
+                self.assertTrue(feishu_bridge._finish_worker_startup(
+                    self.BOT, "ws-test", "pty-test", "C:/repo",
+                ))
+            self.assertEqual(send.call_count, 2)
+            send.assert_any_call(
+                "send", "pty-test", "launch-claude", "--allow-ws", "ws-test"
+            )
+            send.assert_any_call("enter", "pty-test", "--allow-ws", "ws-test")
+            self.assertFalse((tmp / "bridge-startup-failure-test-claude-startup.json").exists())
+
+        self._with_state_dir(check)
+
+    def test_unknown_or_unreadable_screen_fails_closed(self):
+        with patch.object(
+            feishu_bridge.wmux_session, "pty_state", return_value=(True, "")
+        ):
+            self.assertFalse(feishu_bridge._startup_retryable_shell(
+                self.BOT, "pty-test", ""
+            ))
+
+    def test_recent_unfinished_manual_handoff_is_retryable_exactly_until_complete(self):
+        def check(tmp):
+            pack = {
+                "bot": self.BOT["name"],
+                "reason": "主人手动 /handoff",
+                "session_id": "old-session",
+                "cwd": "C:/repo",
+            }
+            path = tmp / f"watchdog-handoff-{self.BOT['name']}.json"
+            path.write_text(json.dumps(pack, ensure_ascii=False), encoding="utf-8")
+
+            # Backward compatibility: the production failure predates the
+            # attempt sidecar, so an absent sidecar is explicitly retryable.
+            self.assertEqual(
+                feishu_bridge._load_retryable_handoff(self.BOT["name"]), pack
+            )
+            pending = feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "pending"
+            )
+            self.assertEqual(pending["attempts"], 1)
+            feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "failed", "startup timed out"
+            )
+            self.assertEqual(
+                feishu_bridge._load_retryable_handoff(self.BOT["name"]), pack
+            )
+            second = feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "pending"
+            )
+            self.assertEqual(second["attempts"], 2)
+            feishu_bridge._record_handoff_attempt(
+                self.BOT["name"], pack, "complete"
+            )
+            self.assertIsNone(
+                feishu_bridge._load_retryable_handoff(self.BOT["name"])
+            )
+
+        self._with_state_dir(check)
 
 
 if __name__ == "__main__":

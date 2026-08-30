@@ -1,204 +1,360 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""bridge_scope_audit.py — 查每个飞书智能体(bot)开通了什么权限 → 映射成「本架构能力」矩阵。
+"""Audit Feishu bot scopes as explicit Link16 capability profiles.
 
-**Use when**：想知道哪个 bot 开了哪些能力（在线文档 / 群 a2a / 听全群…），不用人工去开发者后台一个个看，
-也不靠记忆。直连飞书官方 `GET /application/v6/scopes`（查询租户授权状态·任意 bot 用自己 token 即可调·无需特殊权限）
-拿每个 bot 真实已授权 scope，再按「能力 → 所需 scope」映射打一张矩阵。**这是 ARCH-102 §2.1 登记表的自动更新来源。**
-
-CLI：
-  python orchestrator/bridge_scope_audit.py            # 全 bot 能力矩阵（人读）
-  python orchestrator/bridge_scope_audit.py --bot arch # 单 bot：能力 + 它实际相关 scope
-  python orchestrator/bridge_scope_audit.py --json      # 机读（喂回写 markdown）
-  python orchestrator/bridge_scope_audit.py --raw --bot arch  # 某 bot 全部已授权 scope 原样列
-
-依赖：纯标准库（urllib·绕代理·飞书国内端点）。bot 凭据从 .env（bridge_env 跨机解析）。
+The preset registration path is deliberately useful without requesting broad
+Drive access. Additional scopes are selected by capability instead of by one
+global "open everything" list.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import re
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bridge_env import resolve_env_path, bots_config_path  # noqa: E402
+from bridge_env import bots_config_path, resolve_env_path  # noqa: E402
 
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
 os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
+
 BASE = "https://open.feishu.cn/open-apis"
 ENV = resolve_env_path()
 PROJECT = Path(__file__).resolve().parent.parent
 
-# 能力 → 满足它的 scope。每个能力 = 若干「需求组」，每组内任一 scope 满足即可，所有组都满足才算「有」。
-# ⚠️ 在线文档/媒体 需 drive:drive **且** docx:document(:create)——只有 drive 不够(创建 docx 会报 99991672)。
-# 注意区分只读 vs 读写：im:chat:readonly(读群信息·多为预置) ≠ im:chat(读+更新群·要手动开)。
-CAPS = [
-    ("在线文档/媒体 (drive+docx)",        [["drive:drive"], ["docx:document", "docx:document:create"]]),
-    ("群信息读写 (im:chat·更新群)",        [["im:chat"]]),
-    ("群信息只读 (im:chat:readonly)",      [["im:chat:readonly", "im:chat:read"]]),
-    ("收群内@ (group_at_msg)",            [["im:message.group_at_msg", "im:message.group_at_msg:readonly"]]),
-    ("听全群 (group_msg)",                [["im:message.group_msg", "im:message.group_msg:readonly"]]),
-]
-# 每个 bot【应当】具备的能力（缺则给授权链补）= 在线文档 + 群读写 + 收群@ + 听全群（群只读多为预置·不强求）。
-# 按【能力】判缺(而非裸 scope)——有 docx:document:create 就算在线文档OK·有 readonly listen 就算收群@OK·不误报。
-DESIRED_CAPS = ("在线文档/媒体 (drive+docx)", "群信息读写 (im:chat·更新群)",
-                "收群内@ (group_at_msg)", "听全群 (group_msg)")
-# 授权链一次开全的 scope 全集（点一条链把所有应用身份权限开齐）。
-REQUIRED_SCOPES = ("drive:drive", "docx:document", "docx:document:create",
-                   "im:chat", "im:message.group_at_msg", "im:message.group_msg")
+# Every group is OR; all groups in one capability are AND. Keep checks tied to
+# tested runtime branches, not to broad umbrella scopes that merely imply them.
+CAPABILITY_SPECS = {
+    "core": {
+        "label": "私聊收发",
+        "groups": [
+            ["im:message:send_as_bot"],
+            ["im:message.p2p_msg:readonly", "im:message.p2p_msg"],
+            ["im:resource"],
+        ],
+        "requested": [],  # official one-click preset already supplies these
+        "fix_scopes": ["im:message:send_as_bot", "im:message.p2p_msg:readonly", "im:resource"],
+    },
+    "group-a2a": {
+        "label": "群内@与跨智能体路由",
+        "groups": [
+            ["im:chat", "im:chat:read", "im:chat:readonly"],
+            ["im:message.group_at_msg:readonly", "im:message.group_at_msg"],
+        ],
+        "requested": [],  # official preset supplies the granular chat/@ scopes
+        "fix_scopes": ["im:chat:read", "im:message.group_at_msg:readonly"],
+    },
+    "docs-text": {
+        "label": "文字云文档创建/写入/公开链接",
+        "groups": [
+            ["docx:document", "docx:document:create"],
+            ["docx:document", "docx:document:write_only"],
+            ["docx:document.block:convert"],
+            ["drive:drive.metadata:readonly", "drive:drive"],
+            ["docs:permission.setting:write_only", "docs:permission.member:create", "drive:drive"],
+        ],
+        "requested": [
+            "docx:document:create",
+            "docx:document:write_only",
+            "docx:document.block:convert",
+            "drive:drive.metadata:readonly",
+            "docs:permission.setting:write_only",
+        ],
+    },
+    "docs-media": {
+        "label": "云文档内嵌图片/文件",
+        "groups": [["docs:document.media:upload", "drive:drive"]],
+        "requested": ["docs:document.media:upload"],
+    },
+    "docs-import": {
+        "label": "现有 Markdown/HTML 素材导入链",
+        "groups": [["drive:drive"]],
+        "requested": ["drive:drive"],
+    },
+    "group-listen": {
+        "label": "监听未@的全群消息",
+        "groups": [["im:message.group_msg", "im:message.group_msg:readonly"]],
+        "requested": ["im:message.group_msg"],
+    },
+}
+DEFAULT_CAPABILITIES = ("core", "group-a2a")
+
+# Backwards-compatible exports for older imports. They now mean the safe
+# default profile instead of Drive plus every chat scope.
+CAPS = [(name, spec["groups"]) for name, spec in CAPABILITY_SPECS.items()]
+DESIRED_CAPS = DEFAULT_CAPABILITIES
+REQUIRED_SCOPES = tuple(
+    dict.fromkeys(
+        scope
+        for name in DEFAULT_CAPABILITIES
+        for scope in CAPABILITY_SPECS[name]["requested"]
+    )
+)
+
+
+def normalize_capabilities(values=None):
+    names = list(DEFAULT_CAPABILITIES if values is None else values)
+    bad = [name for name in names if name not in CAPABILITY_SPECS]
+    if bad:
+        raise ValueError(f"未知 capability: {', '.join(bad)}")
+    return tuple(dict.fromkeys(names))
+
+
+def requested_scopes(capabilities=None, for_fix=False):
+    """Scopes for capability planning / the second review link, in stable order."""
+    names = normalize_capabilities(capabilities)
+    return tuple(dict.fromkeys(
+        scope
+        for name in names
+        for scope in CAPABILITY_SPECS[name].get(
+            "fix_scopes" if for_fix else "requested",
+            CAPABILITY_SPECS[name]["requested"],
+        )
+    ))
+
+
+def capability_status(scopes, capabilities=None):
+    names = normalize_capabilities(capabilities)
+    return {
+        name: cap_ok(scopes, CAPABILITY_SPECS[name]["groups"])
+        for name in names
+    }
 
 
 def cap_ok(scopes, groups):
-    """能力满足 = 每个需求组里都至少有一个 scope 已授权。"""
-    return all(any(s in scopes for s in g) for g in groups)
+    return all(any(scope in scopes for scope in group) for group in groups)
 
 
-def fix_auth_url(app_id, scopes=REQUIRED_SCOPES):
-    """某 app 一键开全所需 scope 的授权链(Publisher 点开→开通应用身份→创建版本并发布)。"""
-    return (f"https://open.feishu.cn/app/{app_id}/auth?q="
-            + ",".join(scopes) + "&op_from=openapi&token_type=tenant")
+def fix_auth_urls(app_id, scopes=None):
+    """开通链（一条或多条·超长自动拆·SSOT = feishu_docs.auth_urls）。"""
+    import feishu_docs  # local import keeps this module importable without the docs deps
+
+    selected = tuple(scopes if scopes is not None else REQUIRED_SCOPES)
+    return feishu_docs.auth_urls(app_id, selected)
+
+
+def fix_auth_url(app_id, scopes=None):
+    """单条开通链（兼容旧调用）。scope 多到超长会被飞书判「参数不合法」→ 新代码用 fix_auth_urls()。"""
+    urls = fix_auth_urls(app_id, scopes)
+    return urls[0] if urls else None
 
 
 def _env_val(key):
-    if not ENV.exists():
+    if not ENV.exists() or not key:
         return None
     for line in ENV.read_text(encoding="utf-8", errors="ignore").splitlines():
-        m = re.match(r"^([A-Z0-9_]+)=(.*)$", line.strip())
-        if m and m.group(1) == key:
-            return m.group(2).strip()
+        match = re.match(r"^([A-Z0-9_]+)=(.*)$", line.strip())
+        if match and match.group(1) == key:
+            return match.group(2).strip()
     return None
 
 
 def _req(method, url, tok=None, body=None):
     data = json.dumps(body).encode() if body is not None else None
-    h = {}
+    headers = {}
     if tok:
-        h["Authorization"] = f"Bearer {tok}"
+        headers["Authorization"] = f"Bearer {tok}"
     if data:
-        h["Content-Type"] = "application/json"
+        headers["Content-Type"] = "application/json"
     try:
-        r = urllib.request.urlopen(urllib.request.Request(url, data, h, method=method), timeout=20)
-        return json.loads(r.read())
-    except urllib.error.HTTPError as e:
+        response = urllib.request.urlopen(
+            urllib.request.Request(url, data, headers, method=method), timeout=20
+        )
+        return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
         try:
-            return json.loads(e.read())
+            return json.loads(exc.read())
         except Exception:  # noqa: BLE001
-            return {"code": -1, "msg": f"HTTP {e.code}"}
+            return {"code": -1, "msg": f"HTTP {exc.code}"}
+    except (OSError, TimeoutError) as exc:
+        return {"code": -2, "msg": f"{type(exc).__name__}: {exc}"}
 
 
 def _token(id_env, sec_env):
-    aid = _env_val(id_env)
-    sec = _env_val(sec_env)
-    if not aid or not sec:
+    app_id = _env_val(id_env)
+    secret = _env_val(sec_env)
+    if not app_id or not secret:
         return None, f"缺凭据 {id_env}/{sec_env}"
-    d = _req("POST", f"{BASE}/auth/v3/tenant_access_token/internal", None, {"app_id": aid, "app_secret": sec})
-    if d.get("code") != 0:
-        return None, f"token {d.get('code')}:{d.get('msg')}"
-    return d.get("tenant_access_token"), None
+    result = _req(
+        "POST",
+        f"{BASE}/auth/v3/tenant_access_token/internal",
+        None,
+        {"app_id": app_id, "app_secret": secret},
+    )
+    if result.get("code") != 0:
+        return None, f"token {result.get('code')}:{result.get('msg')}"
+    return result.get("tenant_access_token"), None
 
 
 def granted_scopes(id_env, sec_env):
-    """返回 (set[scope_name], err)。"""
-    tok, err = _token(id_env, sec_env)
-    if err:
-        return set(), err
-    d = _req("GET", f"{BASE}/application/v6/scopes", tok)
-    if d.get("code") != 0:
-        return set(), f"scopes {d.get('code')}:{d.get('msg')}"
-    return {s.get("scope_name") for s in (d.get("data", {}).get("scopes") or []) if s.get("grant_status") == 1}, None
+    """Return (granted scopes, error). An API error is unknown, never absence."""
+    token, error = _token(id_env, sec_env)
+    if error:
+        return set(), error
+    result = _req("GET", f"{BASE}/application/v6/scopes", token)
+    if result.get("code") != 0:
+        return set(), f"scopes {result.get('code')}:{result.get('msg')}"
+    scopes = result.get("data", {}).get("scopes") or []
+    return {
+        item.get("scope_name")
+        for item in scopes
+        if item.get("scope_name") and item.get("grant_status") == 1
+    }, None
+
+
+def reviewer_status(id_env, sec_env):
+    """Best-effort lookup without equating app owner/reviewer to tenant admin."""
+    token, error = _token(id_env, sec_env)
+    app_id = _env_val(id_env)
+    if error:
+        return {"status": "unknown", "error": error}
+
+    collaborators = _req(
+        "GET",
+        f"{BASE}/application/v6/applications/{app_id}/collaborators?user_id_type=open_id",
+        token,
+    )
+    owners = []
+    if collaborators.get("code") == 0:
+        data = collaborators.get("data") or {}
+        items = data.get("items") or data.get("collaborators") or []
+        owners = [
+            item.get("user_id")
+            for item in items
+            if item.get("type") == "owner" and item.get("user_id")
+        ]
+
+    admins = _req("GET", f"{BASE}/user/v4/app_admin_user/list", token)
+    if admins.get("code") == 0:
+        data = admins.get("data") or {}
+        reviewer_ids = data.get("app_admin_user_list") or data.get("user_list") or []
+        return {
+            "status": "ok",
+            "application_owner_ids": owners,
+            "recent_app_reviewer_ids": reviewer_ids,
+            "tenant_admin_name": None,
+            "note": "应用 owner/最近审核人不等于企业超级管理员；当前 API 不返回姓名。",
+        }
+    code = admins.get("code")
+    return {
+        "status": "missing_scope" if code == 99991672 else "unknown",
+        "application_owner_ids": owners,
+        "recent_app_reviewer_ids": None,
+        "tenant_admin_name": None,
+        "error": f"app_admin {code}:{admins.get('msg')}",
+        "note": "只能确认应用 owner；不能据此认定 企业租户A 企业管理员。",
+    }
 
 
 def discover_env_bots():
-    """扫 .env 所有 FEISHU_BRIDGE_*_APP_ID（含裸 default + 跨机 TB25_* bot·不限本机名册）→ [(name, id_env, sec_env)]·去重。"""
-    seen, out = set(), []
+    seen, output = set(), []
     if not ENV.exists():
-        return out
+        return output
     for line in ENV.read_text(encoding="utf-8", errors="ignore").splitlines():
-        m = re.match(r"^(FEISHU_BRIDGE_(?:([A-Z0-9_]+)_)?APP_ID)=", line.strip())
-        if not m:
+        match = re.match(r"^(FEISHU_BRIDGE_(?:([A-Z0-9_]+)_)?APP_ID)=", line.strip())
+        if not match:
             continue
-        id_env = m.group(1)
-        name = (m.group(2) or "default").lower()
+        id_env = match.group(1)
+        name = (match.group(2) or "default").lower()
         if name in seen:
             continue
         seen.add(name)
-        out.append((name, id_env, id_env[:-len("_APP_ID")] + "_APP_SECRET"))
-    return out
+        output.append((name, id_env, id_env[:-len("_APP_ID")] + "_APP_SECRET"))
+    return output
+
+
+def roster_bots():
+    try:
+        config = json.loads(Path(bots_config_path(PROJECT)).read_text(encoding="utf-8"))
+        return [
+            (bot["name"], bot.get("app_id_env"), bot.get("app_secret_env"))
+            for bot in config.get("bots", [])
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False):
+    names = normalize_capabilities(capabilities)
+    scopes, error = granted_scopes(id_env, sec_env)
+    if error:
+        return {"status": "unknown", "error": error, "capabilities": list(names)}
+    caps = capability_status(scopes, names)
+    missing = [name for name, ok in caps.items() if not ok]
+    result = {
+        "status": "ready" if not missing else "missing",
+        "capabilities": caps,
+        "total_scopes": len(scopes),
+        "missing": missing,
+        "scopes": sorted(scopes) if raw else None,
+    }
+    app_id = _env_val(id_env)
+    scopes_to_request = requested_scopes(missing, for_fix=True)
+    result["fix_link"] = fix_auth_url(app_id, scopes_to_request) if app_id and scopes_to_request else None
+    if reviewers:
+        result["reviewers"] = reviewer_status(id_env, sec_env)
+    return result
 
 
 def main():
-    ap = argparse.ArgumentParser(description="飞书 bot 权限 → 能力 矩阵审计（直连官方 scopes API）")
-    ap.add_argument("--bot", help="只查某个 bot（不给=全 bot）")
-    ap.add_argument("--json", action="store_true", help="机读输出")
-    ap.add_argument("--raw", action="store_true", help="列出 bot 全部已授权 scope（配 --bot）")
-    ap.add_argument("--all-env", action="store_true",
-                    help="审 .env 里所有 FEISHU_BRIDGE_*_APP_ID 应用（含 default + 跨机 TB25_* bot·不限本机名册）")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="飞书 bot 权限 → Link16 capability 审计")
+    parser.add_argument("--bot", help="只查某个 bot")
+    parser.add_argument("--capability", action="append", choices=tuple(CAPABILITY_SPECS),
+                        help="要验收的能力；可重复。不给=core + group-a2a")
+    parser.add_argument("--json", action="store_true", help="机读输出")
+    parser.add_argument("--raw", action="store_true", help="列出全部已授权 scope")
+    parser.add_argument("--reviewers", action="store_true", help="尽力查询应用 owner/最近应用审核人")
+    parser.add_argument("--all-env", action="store_true", help="审 .env 里的所有飞书应用")
+    args = parser.parse_args()
 
-    if args.all_env:
-        entries = discover_env_bots()
-    else:
-        try:
-            cfg = json.loads(Path(bots_config_path(PROJECT)).read_text(encoding="utf-8"))
-            entries = [(b["name"], b.get("app_id_env"), b.get("app_secret_env")) for b in cfg.get("bots", [])]
-        except Exception:  # noqa: BLE001
-            entries = [(n, f"FEISHU_BRIDGE_{n.upper()}_APP_ID", f"FEISHU_BRIDGE_{n.upper()}_APP_SECRET")
-                       for n in ["arch", "explore", "twitter", "config", "social_media", "podcast"]]
+    entries = discover_env_bots() if args.all_env else roster_bots()
     if args.bot:
-        entries = [e for e in entries if e[0] == args.bot]
-
-    result = {}
-    for bot, id_env, sec_env in entries:
-        scopes, err = granted_scopes(id_env, sec_env)
-        if err:
-            result[bot] = {"error": err}
-            continue
-        caps = {name: cap_ok(scopes, groups) for name, groups in CAPS}
-        missing = [c for c, _ in CAPS if c in DESIRED_CAPS and not caps[c]]
-        app_id = _env_val(id_env)
-        result[bot] = {"caps": caps, "total_scopes": len(scopes),
-                       "missing": missing,
-                       "fix_link": fix_auth_url(app_id) if (missing and app_id) else None,
-                       "scopes": sorted(scopes) if args.raw else None}
+        entries = [entry for entry in entries if entry[0] == args.bot]
+    capabilities = args.capability or list(DEFAULT_CAPABILITIES)
+    result = {
+        bot: audit_entry(id_env, sec_env, capabilities, args.raw, args.reviewers)
+        for bot, id_env, sec_env in entries
+    }
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
+    labels = [CAPABILITY_SPECS[name]["label"] for name in capabilities]
     print(f"=== 飞书 bot 能力矩阵（{ENV}）===\n")
-    cap_names = [c[0] for c in CAPS]
-    hdr = "bot".ljust(14) + "".join(f" | {n.split('（')[0].split(' (')[0][:14]:<14}" for n in cap_names) + " | #scope"
-    print(hdr)
-    print("-" * len(hdr))
-    for bot, r in result.items():
-        if r.get("error"):
-            print(f"{bot:<14} | {r['error']}")
+    header = "bot".ljust(22) + "".join(f" | {label[:15]:<15}" for label in labels) + " | #scope"
+    print(header)
+    print("-" * len(header))
+    for bot, item in result.items():
+        if item.get("status") == "unknown":
+            print(f"{bot:<22} | 未知（{item['error']}）")
             continue
-        cells = "".join(f" | {'✅ 有' if r['caps'][n] else '— 无':<13}" for n in cap_names)
-        print(f"{bot:<14}{cells} | {r['total_scopes']}")
-    if args.raw and args.bot and args.bot in result and not result[args.bot].get("error"):
-        print(f"\n=== {args.bot} 全部已授权 scope（{result[args.bot]['total_scopes']}）===")
-        for s in result[args.bot]["scopes"]:
-            print(f"  {s}")
-    # 缺权限 → 一键授权链（用户去补）
-    miss = [(b, r) for b, r in result.items() if not r.get("error") and r.get("missing")]
-    if miss:
-        print("\n=== ⚠️ 缺权限的 bot · 一键授权链（点开→开通应用身份→**创建版本并发布**才生效）===")
-        for b, r in miss:
-            print(f"  {b}  缺: {', '.join(r['missing'])}")
-            print(f"    {r['fix_link']}")
-    else:
-        print("\n✅ 所有 bot 应开权限齐全（在线文档 + 群读写 + 收群@ + 听全群）。")
-    print("\n能力→scope 映射见 docs/ARCH-102 §2.2。基础收发消息/图/文件 = 一键预置·所有 bot 都有·不在此差异表。")
+        cells = "".join(
+            f" | {'✅ 有' if item['capabilities'][name] else '— 无':<14}"
+            for name in capabilities
+        )
+        print(f"{bot:<22}{cells} | {item['total_scopes']}")
+        if item.get("missing"):
+            print(f"  缺能力: {', '.join(item['missing'])}")
+            if item.get("fix_link"):
+                print(f"  授权链: {item['fix_link']}")
+        if args.reviewers:
+            print("  审核身份: " + json.dumps(item.get("reviewers"), ensure_ascii=False))
+        if args.raw:
+            for scope in item.get("scopes") or []:
+                print(f"  {scope}")
 
 
 if __name__ == "__main__":
-    try:                       # PLAN-929：GBK 机器上 ✅❌ 打不出来会崩掉整条链，先把输出流顶成 UTF-8
-        from bridge_env import force_utf8_std as _f8; _f8()
-    except Exception:          # noqa: BLE001 — 顶不动也不许挡住本命令
+    try:
+        from bridge_env import force_utf8_std as _force_utf8
+        _force_utf8()
+    except Exception:  # noqa: BLE001
         pass
     main()

@@ -20,6 +20,7 @@ from pathlib import Path
 
 
 MARKER = "<!-- link16-codex-compat-adapter -->"
+REPO_OWNED_SKILL_NAMES = {"feishu"}
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,8 @@ def read_source_items(source_root: Path, include_commands: bool) -> list[SourceI
         if not skill_file.is_file():
             continue
         name, description = frontmatter(skill_file.read_text(encoding="utf-8", errors="replace"), directory.name)
+        if name.casefold() in REPO_OWNED_SKILL_NAMES:
+            continue
         items.append(SourceItem("skill", directory.name, name, description, skill_file))
 
     if include_commands:

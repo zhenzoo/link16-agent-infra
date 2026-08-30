@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -51,9 +52,26 @@ def load_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"hooks.json 无法读取：{exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("hooks.json 顶层必须是 JSON object")
+    hooks = data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("hooks.json 的 hooks 必须是 JSON object")
+    for event, entries in hooks.items():
+        if not isinstance(entries, list):
+            raise ValueError(f"hooks.json 的 {event} 必须是 list")
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ValueError(f"hooks.json 的 {event}[{index}] 必须是 object")
+            event_hooks = entry.get("hooks", [])
+            if not isinstance(event_hooks, list):
+                raise ValueError(f"hooks.json 的 {event}[{index}].hooks 必须是 list")
+            if any(not isinstance(hook, dict) for hook in event_hooks):
+                raise ValueError(f"hooks.json 的 {event}[{index}].hooks 元素必须是 object")
+    return data
 
 
 def _is_bridge_command(command: str | None) -> bool:
@@ -116,6 +134,72 @@ def merge_hooks(existing: dict, additions: dict) -> dict:
     return out
 
 
+def _missing_hook_scripts(additions: dict) -> list[str]:
+    return [
+        hook["command"]
+        for entries in additions.values()
+        for entry in entries
+        for hook in entry.get("hooks") or []
+        if not Path(hook["command"].split('"', 2)[1]).is_file()
+    ]
+
+
+def hooks_plan(codex_home: Path, repo: Path) -> tuple[dict, dict | None]:
+    """Inspect one isolated Codex home without changing it.
+
+    A malformed user file is a conflict, never an empty document: silently
+    replacing it would erase unrelated hooks and could create duplicate sends.
+    """
+    codex_home, repo = Path(codex_home), Path(repo).resolve()
+    target = codex_home / "hooks.json"
+    additions = bridge_hooks(repo)
+    missing = _missing_hook_scripts(additions)
+    if missing:
+        return ({"kind": "codex-bridge-hooks", "path": str(target),
+                 "status": "conflict", "error": "bridge hook script missing",
+                 "missing": missing}, None)
+    existed = target.is_file()
+    try:
+        existing = load_json(target)
+    except ValueError as exc:
+        return ({"kind": "codex-bridge-hooks", "path": str(target),
+                 "status": "conflict", "error": str(exc)}, None)
+    desired = merge_hooks(existing, additions)
+    status = "ok" if existed and existing == desired else ("outdated" if existed else "missing")
+    return ({"kind": "codex-bridge-hooks", "path": str(target), "status": status}, desired)
+
+
+def _atomic_write_json(path: Path, document: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def apply_hooks(codex_home: Path, repo: Path) -> dict:
+    row, desired = hooks_plan(codex_home, repo)
+    if row["status"] == "conflict":
+        raise ValueError(row.get("error") or "Codex bridge hooks conflict")
+    if row["status"] in {"missing", "outdated"}:
+        assert desired is not None
+        _atomic_write_json(Path(row["path"]), desired)
+    after, _desired = hooks_plan(codex_home, repo)
+    if after["status"] != "ok":
+        raise ValueError(f"Codex bridge hooks 安装后未通过体检：{after['status']}")
+    return after
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--codex-home", default=str(default_codex_home()))
@@ -126,28 +210,16 @@ def main():
     codex_home = Path(os.path.expanduser(args.codex_home))
     target = codex_home / "hooks.json"
     repo = Path(args.repo).resolve()
-    additions = bridge_hooks(repo)
-    missing = [
-        hook["command"]
-        for entries in additions.values()
-        for entry in entries
-        for hook in entry.get("hooks") or []
-        if not Path(hook["command"].split('"', 2)[1]).exists()
-    ]
-    if missing:
-        raise SystemExit("bridge hook script missing: " + ", ".join(missing))
-    merged = merge_hooks(load_json(target), additions)
-    text = json.dumps(merged, ensure_ascii=False, indent=2)
+    row, merged = hooks_plan(codex_home, repo)
+    if row["status"] == "conflict":
+        raise SystemExit(row.get("error") or "Codex bridge hooks conflict")
 
     if not args.write:
         print(f"[dry-run] would write: {target}")
-        print(text)
+        print(json.dumps(merged, ensure_ascii=False, indent=2))
         return
 
-    codex_home.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".json.tmp")
-    tmp.write_text(text + "\n", encoding="utf-8")
-    os.replace(tmp, target)
+    apply_hooks(codex_home, repo)
     print(f"wrote {target}")
 
 

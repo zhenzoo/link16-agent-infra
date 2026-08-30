@@ -8,7 +8,7 @@ owns:
   - 认准正确 wmux 项目（有同名项目）
   - 升级前必须确认的契约与方法
   - 两条升级路径的取舍
-  - 四步验收与 10 分钟回退
+  - 五步验收与 10 分钟回退
 does_not_own:
   - wmux 怎么驱动面板（见 ARCH-010）
   - wmux 本体的功能（第三方项目）
@@ -16,7 +16,7 @@ does_not_own:
 read_when:
   - 要升级 wmux
   - 升级后面板行为异常需要回退
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-26
 ---
 # SOP-010 · 升级 wmux（桌面端 + daemon）
 
@@ -32,19 +32,9 @@ last_reviewed: 2026-08-17
 | 架构 | **daemon + MCP + CLI 三件套**，会话托管在 daemon | 纯 Electron、**没有 daemon** |
 | 本机配置 | `~/.wmux/config.json` | `config.toml` |
 
-**认准方法**（一条命令，不靠记忆）：
-
-```bash
-python - <<'EOF'
-import json,struct
-p=r"C:/Users/zhenz/AppData/Local/wmux/app-<版本>/resources/app.asar"
-f=open(p,"rb"); h=f.read(16); n=struct.unpack("<I",h[12:16])[0]
-j=json.loads(f.read(n).decode("utf-8","replace").rsplit("}",1)[0]+"}")
-pk=j["files"]["package.json"]; f.seek(16+n+int(pk["offset"]))
-print(f.read(int(pk["size"])).decode("utf-8","replace")[:400])
-EOF
-```
-`repository.url` 必须是 `github.com/openwong2kim/wmux`。**装错那个 = 没有 daemon = 全舰队的桥当场失联**（我们的 `wmux/wmux-rpc.js` 走的是 daemon 的命名管道）。
+**认准方法**：安装源必须是 `openwong2kim/wmux` 的官网或 GitHub Releases；
+装完后 `~/.wmux-tcp-port` 存在，且 `node wmux/wmux-rpc.js surfaces` 返回 JSON。
+**装错那个 = 没有 daemon = 桥无法开出会话。**
 
 ## 1 · 我们依赖 wmux 的哪些契约（升级前必须确认新版没改）
 
@@ -83,7 +73,9 @@ gh release view v<旧版> -R openwong2kim/wmux                 # GitHub 上的 S
 **B · 命令行（可自动化，本文推荐给 agent 用）**：
 
 ```bash
-gh release download v<新版> -R openwong2kim/wmux -p "update-manifest.json" -p "wmux-<新版>.Setup.exe" -D <scratch>
+# 先对实际 GitHub 目标双路探测，只给本次 gh 子进程注入所选线路
+python feishu/network_route.py run --url https://github.com/openwong2kim/wmux/releases -- \
+  gh release download v<新版> -R openwong2kim/wmux -p "update-manifest.json" -p "wmux-<新版>.Setup.exe" -D <scratch>
 # 必须校验：manifest 里的 sha256 == 实际文件的
 python -c "import hashlib,json,sys;m=json.load(open(r'<scratch>/update-manifest.json'));h=hashlib.sha256(open(r'<scratch>/'+m['setupExe'],'rb').read()).hexdigest();print('MATCH' if h==m['sha256'] else 'MISMATCH 拒绝安装')"
 python feishu/feishu_bridge.py stop        # 停桥（避免升级中途有消息进来起会话）
@@ -98,17 +90,24 @@ python feishu/feishu_bridge.py stop        # 停桥（避免升级中途有消�
 ```bash
 # 1) 版本确实换了 + daemon 活着
 ls ~/AppData/Local/wmux/ | grep app-          # 应出现 app-<新版>
-node ~/wmux-rpc.js rpc system.identify "{}"
+node wmux/wmux-rpc.js rpc system.identify "{}"
 
 # 2) ★ 我们的裸客户端仍被放行（最关键一条）
-node ~/wmux-rpc.js rpc workspace.list "{}"    # 要能返回，且元素带 ptyIds / metadata.agentName
+node wmux/wmux-rpc.js rpc workspace.list "{}"    # 要能返回，且元素带 ptyIds / metadata.agentName
 python -c "import sys;sys.path.insert(0,'feishu');import wmux_session as w;ws=w.workspaces();print(len(ws), ws[0].keys())"
 
-# 3) 建/关 workspace 走得通（验 wmux.internal 那道门）
-python feishu/wmux_session.py spawn --name upgrade-probe --cwd <任意目录>
-python feishu/wmux_session.py close --id <上一步返回的 ws id>
+# 3) 默认 shell 没被安装器改回 PowerShell（静态 + 真 workspace 两层验）
+#    wmux Settings → Default Shell 若漂移，重新选 preflight 发现到的 Git Bash
+python feishu/preflight.py                     # wmux 默认 Shell / Windows Terminal 默认 Shell 都应 [ OK ]
+python feishu/wmux_session.py spawn --name link16-shell-probe --cwd <任意目录> --cmd env --no-shell-init
+node wmux/wmux-rpc.js read <上一步返回的 pty> 80  # 必须看到 MSYSTEM=MINGW64
+python feishu/wmux_session.py close --id <上一步返回的 workspace_id>
 
-# 4) 单 bot 端到端，再放全量
+# 4) 再建/关一个普通 workspace，验 wmux.internal 那道门
+python feishu/wmux_session.py spawn --name upgrade-probe --cwd <任意目录>
+python feishu/wmux_session.py close --id <上一步返回的 workspace_id>
+
+# 5) 单 bot 端到端，再放全量
 python feishu/feishu_bridge.py start --bot <一个低风险 bot>   # 飞书 @ 它发一句，确认有回复
 python feishu/feishu_bridge.py start                          # 全量
 python feishu/feishu_bridge.py status                         # 逐条对 pre-upgrade.txt

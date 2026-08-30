@@ -36,6 +36,11 @@ for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"
     os.environ.pop(_k, None)
 
 
+def token_status_message(bot, token):
+    """tenant token 的任何片段都不进终端/日志。"""
+    return f"✅ tenant_access_token 取到（{bot}，len={len(token)}；内容已隐藏）"
+
+
 def _env(*keys):
     vals = {}
     if ENV_PATH.exists():
@@ -170,7 +175,9 @@ def bot_groups(bot):
     while True:
         url = f"{BASE}/im/v1/chats?page_size=100" + (f"&page_token={page}" if page else "")
         d = _get(url, {"Authorization": f"Bearer {token}"}).get("data", {})
-        out += [{"chat_id": c.get("chat_id"), "name": c.get("name")} for c in d.get("items", [])]
+        out += [{"chat_id": c.get("chat_id"), "name": c.get("name"),
+                 "tenant_key": c.get("tenant_key"), "external": c.get("external")}
+                for c in d.get("items", [])]
         if d.get("has_more") and d.get("page_token"):
             page = d["page_token"]
         else:
@@ -204,7 +211,7 @@ def main():
         ap.error("需要 --bot 或 --all")
     if a.token:
         t = tenant_token(a.bot)
-        print(f"✅ tenant_access_token 取到（{a.bot}）: {t[:12]}…（len={len(t)}）"); return
+        print(token_status_message(a.bot, t)); return
 
     chat = a.chat
     if not chat and a.group is not None:                       # 给了 --group（含空串）

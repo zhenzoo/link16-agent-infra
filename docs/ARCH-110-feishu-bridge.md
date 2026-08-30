@@ -7,8 +7,10 @@ purpose: 解释一条飞书消息如何变成本机 agent 会话里的一次执�
 owns:
   - @bot → 会话注入的完整链路
   - 回传 v8（hook → outbox → drainer）的事件驱动模型
+  - 入站消息持久账本与历史合并边界
   - 回复呈现形态：互动卡片、进度合并、长文分条、必达兜底
   - 多 bot 一进程一长连接的模型与会话重生
+  - 注册人工步骤的持久监视与跨 runtime 唤醒
   - 路由元数据信封（DM 回主人 vs 群回群）
   - 媒体与在线文档通道
 does_not_own:
@@ -21,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-08-17
+last_reviewed: 2026-08-27
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -158,6 +160,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 `官方 Codex TUI --remote` ↔ `该 bot 私有 app-server` ↔ `Link16 typed-event observer` → `milestone-v1 outbox` → 共享 drainer。
 
 - TUI 仍是官方 TUI，wmux 注入、slash command、resume 体验不由 Link16 重写。
+- **启动等待合同**：新 app-server thread 在 remote TUI 出现前，会先跑一轮最多 120 秒的 warm-up；桥的 app-server 默认 ready timeout 必须大于这个上游窗口并留出 TUI 启动余量。`ready_timeout_sec` 仍可按 bot 覆盖，调用方显式 `timeout` 优先；Claude 与 `cli-legacy` 继续用短默认。桥不得用通用 30 秒默认提前宣判一个仍处在合法 warm-up 窗口内的 Codex worker 失败。
 - `app-server-canary` 的 remote TUI 就绪接受三条等价可信路径：标准 composer（`› Use /skills` 或空 `›`）；新 thread 的精确 warmup 标记 `LINK16_APP_SERVER_READY`；以及 resumed thread 的**本轮 fresh worker ready 文件 + 可见 composer**。第三条必须按 `agent_runtime.uses_app_server()` 的统一语义判断，因而名册省略 `codex_transport`（默认 app-server）与显式 `app-server-canary` 完全等价；`cli-legacy` 和非 Codex runtime 不得消费该 ready 文件。普通 Codex CLI 仍保留 banner + composer 双确认。若把 remote TUI 误判为未就绪，补发逻辑会把 worker 启动命令投进已经运行的 composer，并在第二次超时后误关活 workspace。
 - observer 只接 root thread 的 typed item；collab child thread 不进入主人卡，root collab item 只渲完成度。
 - `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 同时写脱敏 ledger 和 answer outbox，typed observer 是 app-server 模式的唯一最终回复 producer。
@@ -181,6 +184,22 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 
 ---
 
+### § 2.4.3 · 入站消息账本：会话起不来也能查到原消息（PLAN-960）
+
+`bridge-session-<bot>.json` 钉住的 runtime transcript 只记录“成功注入某一轮会话”的提示词；它不是飞书入站历史的真源。斜杠命令会在桥内提前返回，冷启动失败时消息还没进入 transcript，切会话后旧 transcript 也不再是当前文件。因此，查询历史不能继续把“当前一份 transcript”当成全部入站。
+
+Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
+
+- **边界**：只记录 SDK 已接纳并派发、且通过 Link16 路由门的消息。群里未 @ bot 的旁观消息与未授权私聊不进入账本；这既符合“这只 bot 实际收到的任务”语义，也避免静默扩大群聊留存范围。
+- **时序**：在任何 slash 分支、会话创建、附件下载与 TUI 注入之前同步追加。故群 @、`/account` 等桥内命令、首启失败的长消息都先落盘，再做后续动作。
+- **内容**：保留稳定 `message_id`、飞书创建时间与本机接收时间、bot/chat/sender/type、完整原始文字、去掉本 bot @ 后的处理文字，以及不含下载凭据的附件类型/文件名摘要。不得持久化 app secret、tenant/user token、临时授权码或原始鉴权头；附件 `file_key` 也不进入历史账本。
+- **并发与损坏恢复**：append 在按 bot 的跨进程文件锁内完成，一条 JSON + 换行作为一个写入单元，并 flush/fsync；reader 对单个坏行降级跳过，不让一条半写记录遮住其余历史。SDK 重投由 `message_id` 确定性去重，同文但不同 message ID 必须保留。
+- **历史合并**：账本是部署后的入站 SSOT；旧 transcript 仅补账本 cutover 之前的历史。`source=backfill` 的人工/API 可证记录不改变 cutover。禁止按“文本相同 + 时间接近”模糊去重，因为用户在失败后重发同一句是两条真实消息。
+
+`bridge_history.py` 继续把入站账本与出站 outbox/receipts 合成一条秒级时间线；没有账本的旧 bot 仍兼容读取当前 transcript。这个账本保证的是 Link16 handler 接纳后的消息，不声称覆盖 SDK 在 handler 之前已去重、策略拒绝或禁用媒体的原始 WS 事件。
+
+---
+
 ## § 2.5 · 回复怎么回到你飞书（v8 · hook→outbox→drainer · 2026-06-16 回传重构）
 
 > 一句话：**不再轮询 jsonl 猜「这轮答完没」**，改成用 **Claude Code 自己的 hook 主动 push**——worker 会话每结束一轮（Stop hook）、每调一个实质工具（PostToolUse hook），就把内容写进该 bot 的 **outbox 文件**；桥的 **drainer** 读 outbox 发飞书。事件驱动、不堵塞、不挑触发源。
@@ -192,7 +211,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
      - **🔒 turn cursor（2026-08-16 加 · 结构性防「整段历史重发」）**：Stop 每次只看 `行号 > cursor` 的记录，`cursor` = 上一次 Stop **真正取走正文的最后一行**（写在 `_state/bridge-stop-cursor-<bot>.json`·和 outbox 同目录·原子落盘·换 session 自动作废）。**anchor 只是「turn 从哪开始」的启发式，会随 Claude Code 记录形状变化失灵；cursor 是硬保证——上一次 Stop 扫过的正文，下一次结构上再也够不着。** 竞态超时（没等到终结态）那条路**不推进** cursor → 晚落盘的 wrap-up 下轮照样补发（自愈不破）。
      - **turn 边界判据（`_is_real_user_message`）只把「带 `sourceToolUseID` 的注入」排除在外**：`/loop` 定时开火与 a2a 注入（`isMeta:true` + `promptSource:"system"` + `queuePriority`，**无** `sourceToolUseID`）**是**真 turn 起点，必须推进 anchor；技能/工具注入（`Base directory for this skill:` 等·带 `sourceToolUseID`）不是。⚠️ 2026-06-21 那版写成「isMeta 一律不算边界」，把定时/a2a 两类真 turn 一起挡了 → anchor 冻在几十轮以前 → Stop 把这期间**所有** `end_turn` 收尾拼成一张越滚越大的卡、**每轮把全部历史重发一遍**（实证 tb24-voiceover 08-16 22:00 前后：anchor 冻在 L1210，收尾卡 1099 → 21176 字、连发 21 轮；主人只发了一句话，收到的是整条链的全量回放）。
   3. **PostToolUse / typed milestone producer**：Claude 保留 `bridge_posttool.py` transcript race-guard；普通 Codex 保留 compact PostToolUse。PLAN-915/916 canary 改由 app-server typed observer 写 `milestone-v1`，commentary 原文 + plan/collab 状态 + 相邻工具安全摘要；raw reasoning/command/output 只在内存中短暂出现并在写 ledger/outbox 前完成 allowlist 投影。
-  4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox（重启不重放）→ answer 立即 `card_send` / progress 限流合并（`coalesce_sec`）发 → 去重集防双发。`milestone-v1` 另持久化 message id、当前卡 event ids、acked revision 与 route；因此 progress-state 与 ledger/outbox 一样只能包含安全公开元数据。edit 失败/卡满时新卡只从 dirty event 续，不复制旧 snapshot。**不再等 turn、不被任何长 turn 阻塞**。
+  4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox → answer 按 route 立即发 interactive/text、progress 限流合并。answer 使用稳定 fragment ID + durable ACK，全部片段确认后才推进 HWM；`milestone-v1` 另持久化 message id、当前卡 event ids、acked revision 与 route。edit 失败/卡满时只从 dirty event 续，不复制旧 snapshot。**不再等 turn、不被任何长 turn 阻塞**。
 - **SSOT / 隔离**：hook 只写 outbox 文件（**不碰飞书凭据**）；唯一持飞书 WS + 凭据的是桥进程；outbox **单写（hook）单读（drainer）**。
 - **⚠️ 过渡铁律**：hook 只在会话 **spawn 那一刻**（`--settings`）挂上 → **重启桥不会给已在跑的旧会话补 hook**。新会话自动带 v8；已在跑的会话（旧桥裸 ccp 起的）要 **respawn**（`/close`+re-@ 或自然重启）才获 v8 auto-mirror（总控下次巡航自动获得）。
 - _(jsonl 钉死 / 唤醒判别那套是 v7 防串台机制·v8 outbound 已不依赖 jsonl·现仅 `/screen`、`cmd_doctor` 显示用·`on_message` 里 re-pin 循环标 vestigial·下轮清理删)_
@@ -205,7 +224,16 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
   - DM / 群内 **peer bot**（有 a2a 戳·**p2a**）：`[飞书 from=<host|peer名> to=<bot> via=<DM|群:群名> · route=p2a]` → 回主人 DM（防 bot↔bot 环）
   - 群内**真人**（无戳·**含 owner 本人**·**p2a-ext**·2026-07-05 主人拍板）：`[飞书 from=<真名> to=<bot> via=群:<群名> · route=p2a-ext dest=<群chat_id> at=<发信open_id>]` → 回**原群 + @他**
   - （`from=` 是**真名**[群成员 API 查]·`via=` 带**群名**[名册 groups 段]·都 API 源头·见 `ARCH-140 §7`。旧 `route=a2a` 入站早已不写·仅历史遗留。）
-- **hook**（`bridge_userprompt.py`）每轮用 `re.findall(...)[-1]` 取本条 prompt 里**最末**一个信封解析 `route=/dest=/at=`（正则含 `p2a-ext`）→ 写 `bridge-turn-route-<bot>.json`（schema `{kind,dest?,at?}`）→ drainer / `bridge_stop` 照旧读它发。
+- **hook**（`bridge_userprompt.py`）每轮用 `re.findall(...)[-1]` 取本条 prompt 里**最末**一个信封解析 `route=/dest=/at=`（正则含 `p2a-ext`）→ 原子写 `bridge-turn-route-<bot>.json`。当前 schema 是 `{kind,dest?,at?,active,turn_key,session,started_at}`：前三项是公开回址，后四项只用于同轮防双发。三个 final producer 成功钉住 answer 后按 `turn_key` compare-and-clear，旧轮不得清掉新轮。drainer/outbox 只携带前三项，不泄漏内部生命周期字段。
+
+**2026-08-26 当前出站合同**（覆盖本文后方所有“群一律纯文字”或“final 永远一张”的历史表述；精确字段见 [`SPEC-210`](SPEC-210-outbound-delivery.md)）：
+
+- `p2a` final → DM interactive；`p2a-ext` final → 原群 1～N 张 interactive + @发起真人；`a2a` → 纯文字 + @peer。
+- progress/answer 用显式 `purpose` 区分，不再根据正文是否以 `🤖` 开头猜。隐藏推理、命令全文、tool input/output 不进入最终卡片。
+- answer 先生成稳定 `answer_id`，再按安全容量切成稳定 `fragment_id` 与 `part/total`。每片确认后落 durable ACK，进程重启只补未确认片；超时不得推进 HWM 冒充成功。
+- 自动与主动成功发送都写 `bridge-outbound-<bot>.jsonl`，携带真实 message_id；history 只按非空 message_id 合并，正文相同但 message_id 不同仍保留。
+- `send_feishu_msg.py` 在网络前检查 active route；向本轮自动回址重复投递默认拒绝，真正额外通知必须显式 `--proactive`。
+- **编码合同**：Claude/Codex hook 的 stdin 是 UTF-8 JSON 字节流；所有读取 hook 必须从 `sys.stdin.buffer` 明确按 UTF-8（容忍 BOM）解码，不能交给中文 Windows 的 CP936 text wrapper。用户级 `PYTHONUTF8=1` 仍由装机脚本和 preflight 负责，但只是全进程防御层，路由正确性不依赖系统 locale。
 - **根因（实证 2026-06-29）**：旧机制把「回哪」写在**单独的 `bridge-next-route-<bot>.json` 便签**（per-bot 旁路文件），靠「下一轮 hook 消费即删」。但群消息那轮若没干净跑 hook（回信失败 / 会话冷重启 / env 丢），**便签不被消费就成地雷**——一张 23:18 tb25-ccp 在群 @arch 写的便签躺了 ~21h，被次日 20:46 主人的「注册 bot」DM 踩中 → arch 的 DM 回复漏进群 + @错 bot（哨兵挡住没成回环）。信封把回址跟消息绑死 → **按消息原子化，跨会话 / 交错 / 冷重启都不串、不过期**。
 - **防 spoof = 取【最末】（2026-06-30 · TB25-link16 review 复现）**：必须 `re.findall(...)[-1]` 取最末、不能 `re.search` 取最左。否则正文里**先**出现的假信封（如智能体之间**转引 / 讨论这套协议**时写的 `route=a2a dest=oc_X`）会盖过末尾真信封、**劫持路由**（实测：正文塞假 a2a + 末尾真 p2a → 旧码回错地方）。a2a bot 本就会互相转引此格式 → **无意碰撞也中招，非必恶意**。
 - **没信封 → 安全默认 p2a**：terminal 直敲 / 末尾信封被截断 → 解析为空 → 回 owner DM。**旧 `bridge-next-route` 便签 + `_write_next_route` 已连根删**（不再「盖住地雷」而是拔掉·避免截断回退时旧 bug 复活）。隔离测试 8 场景全过（含两个 spoof：假信封被忽略、取末真信封 / 旧便签存在也不再被读）。
@@ -218,8 +246,8 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 > **一句话**：网络/DNS 抽一下时，回信不再被【丢】——发不出去就【留着、网络回来自动补发】，且不重复。
 
 - **病（实证 2026-06-29 夜）**：DNS 抽了约 2 分钟，drainer 发卡撞 `getaddrinfo failed`；但旧逻辑「读一条 → 发一条 → **不管成没成都推 HWM（书签）+ 标 sent**」→ 那几条（含注册链接）被**跳过、再不回头**，网络恢复也不补。WS（入站）本就自动重连、**你发的我始终收得到**；丢的只在**出站**。
-- **修**：`drain_batch` 发 **answer / ask** 时，逐块发、记已发数（`state["partial"]`）；任一块发不出 → 抛 `RetrySend`，`outbox_drainer` **不推 HWM、不标 `sent`** → 下一轮重发，直到成功。已发的靠 `sent` + `partial` **去重不重复**。
-- **防永堵**：同一条卡超 `GIVE_UP_SEC`（默认 600s）还发不出（多为**永久错**·如无目标 / 被拒，非网络）→ 放弃推进解堵，不无限 hold。
+- **当前修法（2026-08-26 取代 `sent + partial`）**：answer 先生成稳定 `answer_id/fragment_id`，每片取得 message_id 后立刻写 durable ACK；任一片失败即 `RetrySend` 且不推 HWM，重启只补未 ACK 片。ask 仍用兼容 partial 状态。
+- **不再超时放弃**：旧 `GIVE_UP_SEC=600` 会把未送达 answer 当成功推进 HWM，已删除。永久错误保持可见 backlog，交给 doctor/人工修复，绝不静默丢答案。
 - **`_send_plain` 返回送达布尔**（True=发出 / False=失败），drainer 据此判要不要重试。**progress** 仍 best-effort（临时进度·可丢，不 hold 队列）。
 - **验**：隔离测试（注入断网通断 + 假时钟驱动真 `outbox_drainer`）4 场景全过——断网 2 轮→恢复补发恰 1 次 / 一直在线正常发 / 恢复后多轮不重复 / 永久错到点放弃解堵。
 
@@ -248,16 +276,17 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 
 ---
 
-## § 2.6 · 回复用什么格式发给你（统一卡片流 · v8.1 · 2026-06-16）
+## § 2.6 · 回复用什么格式发给你（route-aware · 2026-08-26）
 
-> **一条铁律贯穿进度 + 回复**：内容都走飞书**互动卡片**；一张卡 `update_card` **原地长大** → 满 ~2800 字（`CARD_BUDGET`）**或 `update_card` 失败** 就冻结、开新卡接着写（**不截断·不重发**）。`guaranteed_send`(markdown) 降为「发卡彻底失败」的最终兜底（几乎不触发）。
+> **当前铁律**：呈现由 route 决定，而不是由目标 ID 的 `oc_` 前缀决定。真人的 `p2a`/`p2a-ext` final 用互动卡片；peer 的 a2a 用纯文字。单卡满约 2800 字时无损拆成 1～N 张有序卡；卡片发送失败降级文字并在 receipt 标明原因。下方较早版本记录只用于解释演进，不得覆盖本段与 `SPEC-210`。
 
 - **进度卡（原地长大 + 满则轮换）**：PostToolUse hook 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**——你看到的是**同一张卡在长大**（实时显示 💭思考 / 📝文字 / ✏️📖🔧 全工具 + 头部 🔧/💭/🪙 计数）。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随【信息量】有界增长，**不随时间线性刷屏**。
 - **Codex milestone 工具摘要（PLAN-916）**：commentary 保持原样；每个相邻工具段集总为“实际调用次数 + 工具/运行时类别 + 访问/修改/新增路径”。路径仓库相对化、每组最多 5 个，超出显示“另有 N 个”；只读段明确写“修改：无”。header 显示“计划完成度 + 实际工具次数”，不暴露内部里程碑/工具段计数。完整命令、参数、输出、绝对路径和 reasoning 不进入任何持久层或卡片。
-- **答案卡（同款·超长拆连续多卡）**：Stop hook 把该轮最终回复 + 过程小结 footer 写 outbox；drainer 发答案卡，**>2800 字按行拆成连续多卡**（card1 满→card2 接着写·**不再退 markdown**）。
-- **逐级降级（仍是同一条 DM）**：只有 `new_card`/`update_card` **彻底失败**才退 `guaranteed_send`（互动卡→markdown→text·每级验真送达）。**没有第四级**——2026-08-30 起发不到就是发不到，绝不改投群/别的 bot。
+- **答案卡（同款·超长拆连续多卡）**：Stop/typed final 把该轮最终回复写 outbox；drainer **>2800 字无损拆成带 part/total 的连续多卡**，不附隐藏推理或工具流水账。
+- **逐级降级（始终同一个目标）**：interactive 创建失败或返回空 message_id 时降级为同目标 text；text 仍失败则保留 outbox/HWM 等待重试，**不退群 webhook**。
+  > **2026-08-30 主人拍板：兜底通道整条拆除**（`_webhook_fallback` / `notify.py` / 看门狗 `notify_webhook` 全部删除）。理由：兜底给失败开了条特殊通道，让「没送到」长得像「送到了」——taoci-7 刷群 767 条、洪水时医生朝着被关键词校验拒收 748 次的群喇叭喊「需人工」，主人 42 分钟一无所知。发不到主人自己会察觉，届时直接找 link16 或上机器看。
 - **发出前链接检查（PLAN-921）**：卡片、markdown/text 兜底与群纯文字共用 `outbound_links.sanitize_outbound_links`。本地绝对路径、`/D:/...`、`file:///`、UNC、仓库相对路径从 Markdown 链接解除，改成“标签 + 明文代码路径”；普通行内网页链接不动；独占一行的外链及飞书 docx / Cloudflare Pages 会另露原始 URL。代码区、锚点和图片 Markdown 保持既有语义。处理幂等，多级 fallback 重跑不会重复加 URL。
-- **drainer deps**（注入·见 `feishu_bridge.run()`）：`new_card(text)->message_id`（`_ensure_card_snapshot` 发卡）· `edit_card(mid,text)->bool`（`update_card`）· `send_plain(text)`（`card_send` 兜底）。`coalesce_sec` 只作「相邻 update 最小间隔（批量化）」，**轮换靠字数/失败·不靠时间**。
+- **drainer deps**（注入·见 `feishu_bridge.run()`）：`new_card(text,route,purpose,fragment)`（按 route 发 interactive/text）· `edit_card(mid,text)->bool`（DM progress 原位更新）· `send_plain(...)`（同目标 text fallback）。`coalesce_sec` 只作相邻 progress update 的批量间隔，answer 轮换只靠容量与逐片 ACK。
 - **裸 URL 自动 `_linkify`** 成 `[url](url)` 可点（飞书卡片不自动 linkify 裸网址）。
 - **🔒 机械闸 `_seal_bare_urls`（2026-06-24）**：卡片路径走 `_linkify` 已包链接·**但 `guaranteed_send`(markdown/text 必达兜底/镜像直发) 不经 `_linkify`** → 裸 URL 紧贴 CJK/全角时飞书**原生 autolink 贪婪**把后续中文整段吞进 href（实证：`https://x.com/…872（中文…)` 渲成一整条超链接·href 里 `%EF%BC%88…`）。修：在**最低发送收口 `_send_checked`**（覆盖 guaranteed_send 的 markdown+text）+ `_send_group_text`（a2a 群）对 payload 跑 `_seal_bare_urls`——裸 URL 紧跟非 ASCII 时插一个空格强制 autolink 在 URL 真末尾终止（只在该精确危险态触发·8 例单测过·URL 本身不改·已 `[](){}` 包的靠负 lookbehind 跳过）。软规则（链接单独成行）只是兜底·这道闸才是确定性保证。**改桥代码需重启桥才生效**（别在活会话中途重启）。
 
@@ -313,13 +342,13 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 
 **配套 · 主动推送 CLI**（解决「我在终端让你发到飞书」· 走 DM 不走群喇叭）：
 ```
-python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/open_id>] --json
+python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <chat_id/open_id>] --json
 ```
 → 独立短进程重建 `FeishuChannel`（REST · 不依赖常驻桥）→ 推到持久化的 `chat_id` / owner open_id → 复用 `guaranteed_send` 逐级降级 → 打印 `{delivered, via, to}`。**这是 Claude 在终端会话里主动发飞书的唯一正道**（群喇叭 `notify.py` 已于 2026-08-30 删除）。
 
 **配套 · 送达回执**（解决「我只知道写了不知道发没发」）：桥每发一条往 `_autopilot/bridge-receipts-<bot>.jsonl` 追加一行 `{tid, ts, kind, delivered, via, len, …}`。终端会话 `Read` 这文件尾巴即可确认「我上一条到底送达没、走第几级」（事后确认 · 非同轮）。
 
-**已知边界**：① tailer 只发**钉死的那个会话**——从没 @ 过的独立终端会话需先 @ bot 一次建立钉定（`doctor` 会显示 `jsonl❌未钉`）。② 没人 @ 过该 bot 则无 DM 目标 → tailer 空转（首个 @ 后即激活）。③ @ 轮回复统一发 **owner DM**（优先私聊·群里 @ 也回 DM）。④ 重启正在跑的轮：tailer 从 HWM 幂等续 → **不丢回复**（B 主赢）。**监控**：`feishu_bridge.py doctor` 一眼每 bot 健康（进程/会话/jsonl 钉没钉/DM/最近 receipt）；每次发送落 `_autopilot/bridge-receipts-<bot>.jsonl`（机械闸·单一真相源）。
+**历史边界（仅 v7 tailer，已被 v8 取代）**：当时 @ 轮统一发 owner DM。当前合同不同：真人群 `p2a-ext` 自动回原群 + @发起人，peer 入站 `p2a` 才回主人 DM；以 §2.5.1 与 `SPEC-210` 为准。
 
 **激活**：改完需 `python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start` 重启桥（常驻进程不会热加载新代码）。
 
@@ -400,31 +429,25 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 ## § 2.11 · 在线查看（本地 md/HTML → 飞书云文档链接 · 2026-06-16 · ROADMAP §11 路线 2）
 
-> 一句话：会话把本地 `.md`/`.html` 文件**转成飞书在线云文档**，发一条**文档链接**到你 DM——你在飞书 App 里直接看（格式完整、可滚动、**可复制、可编辑保存**），不用回电脑、不用隧道、不用 Tailscale。最 Feishu-native 的「在线查看」。
+> 一句话：会话把本地 `.md`/`.html` 文件转成飞书在线文档并发链接——访问者需要登录飞书；能否编辑取决于是否成功加为协作者，组织内凭链接默认是只读。
 
 **入口**：`python feishu/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`。
 
-**链路（全 `tenant_access_token` · bot 身份 · 封装在旁挂小工具 `feishu/feishu_docs.py`·不塞桥主回路）**：
-1. **上传素材** `POST /drive/v1/medias/upload_all`（multipart · `parent_type=ccm_import_open` · `extra={"obj_type":"docx","file_extension":ext}`）→ `data.file_token`。
-2. **建导入任务** `POST /drive/v1/import_tasks`（`type=docx` · `point={mount_type:1, mount_key:""}`=bot 云空间根目录）→ `data.ticket`。
-3. **轮询** `GET /drive/v1/import_tasks/{ticket}`（间隔 2s·上限 ~30 次）→ **成功判据 = `job_status==0` 且 `token` 非空**（坑：status=0 但 token 空 = 仍处理中·别当成功）→ 取 `data.result.{token,url}`。
-4. **授权 owner（关键坑·否则你点链接「无权限」）** `POST /drive/v1/permissions/{token}/members?type=docx`（body `{member_type:"openid", member_id:<owner open_id>, perm:"view", type:"user"}`）。⚠️ body 的 `type:"user"`(成员类别) ≠ query 的 `type=docx`(资源类别)·两个都要传。
-5. **设【任何人凭链接可读】（2026-07-29 起默认开·Publisher 拍板）** `PATCH /drive/v2/permissions/{token}/public?type=docx`（body `{external_access_entity:"open", link_share_entity:"anyone_readable", security_entity/comment_entity/copy_entity:"anyone_can_view"}`·SSOT = `feishu_docs._PUBLIC_LINK_BODY` + `set_public_link()`）。**为什么**：飞书新建文档默认 `link_share_entity=tenant_readable`（**仅本组织内**），主人转给别人、别的智能体拿去读都会「无权限」——每次还要手动去文档里点开分享设置，纯摩擦。现在建完自动设成互联网任何人凭链接可阅读（**只读·不可编辑**）。⚠️ **必须 v2 端点**（v1 是老式 bool 字段、没有 `link_share_entity` 这套 enum）；scope 沿用 `drive:drive`、不用加新权限。失败**不 raise**（文档已建好·只是降级回组织内可见）·返回 `public:false` + `public_error` 让上层 warn。
-6. **发链接**：把 `data.result.url` 用 `card_send` 发到 DM（原始 URL 明文可见且可点）。
-7. **final 对账（PLAN-921）**：桥内同 bot 的 p2a 回合用 `send --doc` 成功取得 URL 后，追加一条 `kind=doc_delivery` 到该 bot outbox；drainer 去重并原子持久化到 `bridge-delivery-state-<bot>.json`，在下一条匹配的 p2a answer 追加“标题 + 原始 docx URL”。answer 真正送达后才清账；失败重试、桥重启都保留。显式 `--to`、手工 terminal、别的 bot 与 a2a 路由不登记，避免串收件人。
+**生产链路（全 `tenant_access_token` · 始终使用当前 bot 身份）**：
+1. Markdown/TXT 先走原生 docx：建文档 → Markdown 转块 → 分批写入 → 设组织内凭链接可读；不依赖 `drive:drive`。失败才试 upload/import 兼容链。
+2. HTML/Office 只走 upload/import；它需要 `drive:drive` 或等价窄口权限。
+3. 在线链全部失败，自动由**同一 bot**发送原文件附件；`file-as-text` 永不参与自动降级，也不存在跨 bot 代发。
+4. 在线文档成功必须同时拿到 URL，并证实“组织内凭链接可读”或 owner 协作者授权成功；否则不报送达。
+5. 飞书 `anyone_readable` 的“任何人”仍要求登录飞书（PLAN-980 E25），不是匿名公网访问；真匿名交付走静态站。
+6. **final 对账（PLAN-921）**：同 bot 的 p2a 回合取得 URL 后写 `kind=doc_delivery`；drainer 去重、持久化并在下一条匹配 answer 追加标题和原始 URL。显式 `--to`、手工 terminal、别的 bot 与 a2a 不登记，避免串收件人。
 
-**支持**：`.md`/`.markdown`/`.mark` 和 `.html` 都导成 docx（文档类只能导成 docx）。≤20MB 走单次上传。
+**支持**：`.md`/`.markdown`/`.mark`/`.txt` 同时有 import 与原生链；`.html`/`.doc`/`.docx` 只走 import。旧链单次上传上限 20MB。
 
-**🚨 前置（一次性·每个要用此功能的 bot 应用·只有 Publisher 能在开发者后台做）**：开**【应用身份/tenant】** scope（桥用 tenant_access_token·**不是用户身份**——2026-06-17 实证：只开用户身份仍 `99991672 Access denied`）。
-> - **采用 `drive:drive` + `docx:document`(:create)**（SSOT = `feishu_docs.CLOUD_DOC_SCOPES`）。⚠️ **2026-06-21 修正**：`drive:drive` 只覆盖 upload/import/query/授权，但**创建 docx**（`POST /docx/v1/documents`·§2.11b 媒体在线查看的第 1 步）**另需 `docx:document` 或 `docx:document:create`**——只给 `drive:drive` 会在创建文档处报 `99991672 One of [docx:document, docx:document:create] is required`。老 bot 一直能发是因为注册预置带了 docx 家族（实测 tb25-cartoonMV 有 `docx:document:create`）；漏了 docx 的新 bot（tb25-cartoonMV-3）才暴露此坑。现 `register_feishu_app.py` 末尾**一条链一次开齐**（`APP_IDENTITY_MANUAL_SCOPES`）。
-> - 等价可选（更细粒度·explore 验过）：`docs:document.media:upload` + `docs:document:import` + `docs:permission.member:create` 三个。改用哪组 = 改 `CLOUD_DOC_SCOPES` 一处。
-> - **为什么必须单独开**：一键创建 SDK（`lark_oapi.register_app`）的 `app_preset` **只支持 `name`/`avatar`/`desc`**（源码 `scene/registration/__init__._apply_app_preset` + 单测确认）、archetype 硬编码 `PersonalAgent`——**无法在创建时预置 scope**；且没有「应用给自己授权」的 API（安全红线）→ scope 只能管理员后台开。
-> - **怎么开**：`register_feishu_app.py` 建完会打印**一键开通链**（`feishu_docs.auth_url(app_id)`），**Claude 把它发给 Publisher** → 点开 → 开通（**务必选「应用身份/tenant_access_token」·不是用户身份**！2026-06-17 podcast/social_media 实证：只开用户身份仍全拒）→ **创建版本并发布**才生效。铺老 bot 同理（各 app_id 一条链）。
-> - 判定够没够：`python feishu/_tmp/_probe_scopes.py <bot>`（4 步都不报 `99991672` = 通）。一键预置建的 app **不含**这权限·必走此步。
+**🚨 前置**：权限必须开在【应用身份/tenant】而不是用户身份。原生文字链最小需要 docx 创建/写入/块转换及分享设置；旧 import/媒体链另需 `drive:drive` 或报错列出的窄口替代。注册后的第二个权限链接与复核步骤以 SOP-120 §4.1 为准，不再把 `drive:drive` 当文字在线文档的硬前置。
 
-**边界（诚实）**：① 你在飞书里改了文档，**改动留在飞书云那篇·不会自动回灌本地 `.md`**——回灌要再加一步（`GET /docs/v1/content` 把文档拉回 markdown 覆盖本地）·是 v2。② 它**会在飞书云存一份文档**（导入到 bot 云空间根目录·可后续归到专用文件夹/定期清）——Publisher 已知此 tradeoff 并接受。③ ~~`type=docx` 与 public 分享 enum 有「不确定」项·首篇先测~~ → **2026-07-29 实测定案**：`drive/v2/permissions/{token}/public?type=docx` 的 `link_share_entity` 支持 `anyone_readable`，本机个人版飞书（`my.feishu.cn`）`lock_switch=false`、可自由设 → 已定为默认（见链路第 5 步）。若换成有安全策略的企业租户、管理员锁了外链，此步会返非 0 → 自动降级为组织内可见并 warn，**属组织策略不是代码问题**。
+**边界（诚实）**：① 飞书侧修改不会自动回灌本地源文件。② 每次发布都会在飞书云产生一篇新文档；没有“先清空旧文档再重写”的危险原地更新。③ 企业策略可能禁止外部分享；组织内可见与协作者授权都失败时，桥不会把不可读 URL 当成功。
 
-**SSOT / 不硬编码**：复用 `scripts/send_card_feishu.py` 的 `api`/`tenant_token`（stdlib·绕代理·不重写 token 逻辑）；owner open_id 取桥已持久化的 `bridge-owner-<bot>.json` / 会话 open_id；不硬编码 folder/盘符/用户名。`send` 的建文档与直发是独立短进程、即改即用；PLAN-921 的 final 对账由常驻 drainer 消费，需重启对应 bot bridge 后生效。CLI/receipt 同时记录正文字符数、文档源字符数/字节数与 doc URL，不再把 doc-only 误报成“0 字”。
+**SSOT / 不硬编码**：发布原语在 `feishu_docs.py`，生产选择与附件终局兜底在 `feishu_bridge.py`；owner open_id 取桥持久状态。`send` 是独立短进程、代码即改即用；CLI/receipt 记录链路类型、源字符/字节、错误与 URL。
 
 ## § 2.11b · 在线查看媒体（本地【图片 / 视频 / 任意文件】→ 嵌进 docx → 发链接 · 2026-06-19）
 
@@ -462,8 +485,10 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 - `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=8` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
-- 配套 `feishu_bridge._wait_claude_ready`：`READY_TIMEOUT_SEC` 60→30、**先读后睡**（首轮不空等）。首发不再被吞后 claude ~10–15s 出 ❯，补发基本用不上。
+- 配套 `feishu_bridge._wait_agent_ready`：**先读后睡**（首轮不空等），并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 为 150s。
 - **超时兜底**：探不到提示符 → 回退原 `sleep(0.4)` 照发，最坏不比旧版差、绝不卡死 / 少发。
+
+**2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。手动 `/handoff` 另以 `bridge-handoff-attempt-<bot>.json` 记录 pending/failed/complete：旧会话已经关掉但新会话没起成时，6 小时内再次发 `/handoff` 会复用原快照重试，不会要求已经不存在的旧会话再活一次；complete 后同一快照不可重放。
 
 **向后兼容**：`spawn(name, cmd, cwd, shell_init)` 签名 / 返回值不变 → autopilot（走 `spawn_worker.py` 的 split-here · 不经 `wmux_session.spawn`）零影响。
 
@@ -693,6 +718,47 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 
 ---
 
+## § 4.3 · 注册 Monitor：人工动作完成后跨 turn 唤醒发起 bot
+
+Device Grant 的 SDK 会在注册命令内部同步轮询授权结果；它能证明 OAuth 已完成，却不能在调用它的 Claude/Codex turn 已结束后主动再开一轮。Link16 因此把“平台回调”和“agent 唤醒”分成两层：
+
+1. `register_feishu_app.py --background` 在等待 OAuth 前创建无密钥注册状态，并分别启动独立的 Device Grant worker 与 `registration_monitor.py`；发起 tool/turn 退出不会杀掉轮询。
+2. 第一条 SDK 链固定 `create_only=True` 且不传权限 `addons`，只让人确认账号、组织与应用创建。
+3. 注册器只在 SDK 返回完整 `client_id/client_secret`、凭据落盘、registry 与本机 roster 都成功后，把 OAuth 里程碑写为 `registered`；`polling` 不是成功。
+4. `registered` 后生成稳定的 `permissions_review` 事件；Monitor 用 job 中的 `app_id + capabilities` 临时重建第二条权限审阅链接，正文列出 capability 与 scopes。链接不落盘，代码不自动发布，也不能绕过管理员审批。
+5. Monitor 独立于发起 turn 存活，继续机械检查能力档 scopes、owner 文件与目标群成员关系。
+6. 里程碑变化后，Monitor 根据状态中钉死的 `notify_bot` 查本机 roster，经 `ensure_session()` + `_inject()` 把一条注册事件注回原 bot；该链对 Claude 与 Codex 相同，不读取任何 runtime transcript 私有格式。
+
+状态文件位于 `feishu/_state/bridge-registration-<job-id>.json`，状态机为：
+
+```text
+armed → oauth_waiting → registered → permissions_review → manual_pending → ready
+                     ↘ failed / expired / cancelled
+```
+
+每个里程碑使用稳定事件 ID `<job-id>:<stage>`。投递语义是 **at-least-once**：正常轮询与进程重启不会重复已确认事件；若进程恰在 TUI 已提交、receipt 尚未落盘之间崩溃，可能带同一 event ID 重投，接收方必须把该 ID 当幂等键。不得宣称 exactly-once。
+
+### 能力档决定“完成”，不是全量 scope
+
+- `core`：DM、发消息与 IM 图片/文件；官方注册预置已满足，不追加权限。
+- `group-a2a`：预置的 granular `im:chat:read/update`、`im:chat.members:bot_access`、群 @ scope，加上“实际已入目标群”；不要求旧 umbrella `im:chat`，也不要求听全群。
+- `docs-text`：docx-only 创建/写入/Markdown 转块/公开链接。2026-08-26 在 `tb26-baseball` 无 `drive:drive` 时真测成功，并由外部读取器读回正文；它与旧导入链不是同一能力。
+- `docs-media`：图片/视频/文件嵌入 docx，优先请求窄 scope `docs:document.media:upload`。直接通过飞书 IM 发图片/文件只依赖 `im:resource`，不属于本档。
+- `docs-import`：旧的“上传源文件 → import task → 授权 owner”完整链。`drive:file:upload` 不能授权 `ccm_import_open` 素材上传，真测返回 `99991672`；只有明确需要保留源文件导入或协作者编辑时，才申请 Drive/导入/permission 类权限。
+- `group-listen`：只有不被 @ 也要读取全群时才要求 `im:message.group_msg`。
+
+本机 SDK 虽支持 `register_app(addons=...)`，但 Link16 默认不把权限并入第一条创建链。第二条权限链接只包含所选能力的 tenant scopes：默认 `core + group-a2a` 不含 broad Drive，也不含听全群；显式 `docs-import` 才会带 `drive:drive`。能力审计必须看具体 API 路径，不能再用“有/无 drive:drive”代替全部文档能力。
+
+### 并发、持久化与秘密边界
+
+- “查 session → `ensure_session` → `_inject`”整体持有按目标 bot 的跨进程锁；桥真人消息、cron、watchdog 与 Monitor 使用同一把锁，防双 spawn 和 paste 交错。
+- 注册器与 Monitor 更新同一 job 时必须锁内重读、合并，以唯一临时文件 + `os.replace` 原子替换。
+- 状态与日志只允许 app ID、env 键名、bot/profile/capability、群 ID、阶段、时间和脱敏错误；严禁 app secret、tenant/user token、Device Grant 临时码与授权 URL。
+- scopes API 或群 API 报错属于 `unknown/retry`，不得伪装成“未授权/未入群”；owner 文件必须存在且含有效 open_id 才算完成。
+- 应用 owner、应用审核管理员、企业超级管理员是三个概念。API 只能返回哪一层就标哪一层，查不到姓名时写“不可判定”，禁止用 app owner 冒充企业管理员。
+
+---
+
 ## § 5 · 验收测试（owned-session 端到端）
 
 - **T1 冷启动自动起会话**：啥都不开 → 建第 2 bot → 群里 @它发一句 → 桥自动 `workspace.new` + ccp → claude 处理 → 回飞书。
@@ -726,7 +792,7 @@ python feishu/feishu_bridge.py send --bot <name> --file reply.md [--to <chat_id/
 - **消息串行**：同一 bot 同时收多条消息 → per-bot `asyncio.Lock` 串行处理（Zara 式「运行中消息排队下一轮」· 防并发注入交错丢回复 · 2026-06-15 修）。
 - **owner 自动信任**：每个 bot **首个 @ 它的人自动成 owner**（之后只认它 · 免手维护白名单 · open_id 是 per-app 的故必须如此 · 保留 `.env` 全局白名单兼容）。
 - **消息样式**：回复走**飞书互动卡片流式发**（实时进度 + 最终答案 + 过程小结），超长自动转分条普通消息，详见 §2.6——你（bot 会话）不用自己管发送格式，桥统一处理；你只管把答案写好（markdown 写法即可）。
-- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python feishu/feishu_bridge.py send --bot <bot> --file reply.md --json`（独立 REST · 绕卡片超时 · 走 bot 自己的 DM 通道；群喇叭 `notify.py` 已于 2026-08-30 删除）。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python feishu/feishu_bridge.py doctor`。
+- **🔑 主动发 DM + 自查送达（档1 自助协议 · v7.14）**：你看到对话里 `[飞书-<bot>]` 标记 → 你就是那个 bot 的后端（不确定就看最近的 `[飞书-X]`，X 即 bot 名）。① **默认 tailer 已自动把你的回复回传 DM**，你不用管；**只在用户显式说「走 DM 发给我」或你怀疑没送达时**手动发：`python feishu/feishu_bridge.py send --bot <bot> --file-as-text reply.md --json`（这是明确把正文发进聊天框；要发原始附件用 `send_feishu_file.py --file`）。旧 `send --file` 会机械报错，防止把附件误拆成消息。② **自查上一条送没送**：Read `_autopilot/bridge-receipts-<bot>.jsonl` 尾部（`delivered`/`via`/`timed_out`），或跑 `python feishu/feishu_bridge.py doctor`。
 
 ---
 
