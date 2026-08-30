@@ -76,13 +76,17 @@ class RpcConnection:
         # The observer still discards it unless it is a typed milestone, but
         # the transport must accept the frame to remain subscribed.
         #
-        # proxy=None 不是保险起见 —— 这条连接的对端是 127.0.0.1 上的 app-server，
-        # 而 websockets 默认 proxy=True（读 HTTPS_PROXY 等环境变量）。本机 HTTPS_PROXY 是
-        # **用户级**变量，于是每个进程都继承，包括桥经 wmux 起的 worker：一条本该走 loopback 的
-        # 连接，实际被第三方代理进程转发（2026-08-31 实测 tuf19：速记员唯一的 established 连接
-        # 打在 127.0.0.1:7897 上，5588 那一端的客户端 socket 属于代理进程）。
-        # 后果就是 08-29 那次事故的形状：loopback 不会无缘无故断，**闲置三天的代理隧道会**。
-        # 所以对端是本机时一律直连，不给代理经手的机会。
+        # proxy=None 不是保险起见 —— 对端是 127.0.0.1 上的 app-server，而 websockets 默认
+        # proxy=True，会去读环境里的代理变量。于是一条本该走 loopback 的连接被第三方代理进程
+        # 转发；后果就是 2026-08-29 那次事故的形状：**loopback 不会无缘无故断，闲置三天的
+        # 代理隧道会**（08-26 最后一个事件之后连续三天零通知，08-29 才浮出 transport_error）。
+        #
+        # ⚠️ 别去查环境变量判断「这台机中没中招」—— 两台机实测是两种来源，写法数不过来：
+        #   · tuf19：Windows **用户级** HTTPS_PROXY，每个进程都继承（~/.bashrc 里反而没有）
+        #   · tb24 ：用户级三层全空，但 ~/.bashrc 里 export 了**小写** http_proxy/https_proxy，
+        #            面板的 bash 读它 → Python 继承 → websockets 照样认
+        # 唯一可靠的判据是机械信号：**看这个进程的 established 连接打在哪个端口** ——
+        # 等于 app-server 端口就是直连，是别的端口就是被代理经手了。变量有无数种写法，连接只有一个真相。
         self.ws = connect(url, open_timeout=5, close_timeout=2, max_size=None, proxy=None)
         self.next_id = 1
         self.pending: dict[int, queue.Queue] = {}
