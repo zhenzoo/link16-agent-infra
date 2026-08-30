@@ -217,6 +217,20 @@ def pending_status(state_dir, bot, *, now=None, timeout=120):
     return ("waiting", p)
 
 
+def silent_minutes(state_dir, bot, *, now=None):
+    """回程静默了几分钟 = 这只 bot 的 outbox 最后一次被写至今。文件还没有 → None（无从判断·别喊）。
+
+    为什么不用 pending 的注入时间当判据：定时任务每 N 分钟注一条就把 pending 计时刷新一次，
+    用它判「静默多久」永远够不到阈值 —— 2026-08-29 事故正是这个形状（cron 每 5 分钟唤醒一次，
+    回程其实已经断了 8 小时）。**回程静没静，只有 outbox 说了算。**
+    """
+    try:
+        last = os.path.getmtime(outbox_path(state_dir, bot))
+    except OSError:
+        return None
+    return max(0.0, ((now if now is not None else time.time()) - last) / 60.0)
+
+
 # ---------- 交互 picker 结构化状态（答题侧不读屏的唯一真相 · ARCH-101 §2.10）----------
 # drainer 渲 ask 卡时写 bridge-picker-<bot>.json；回合恢复（下条 progress/answer）时清。
 # on_message 读它判「在不在 picker」+ 每问的选项布局（编号按 len(options) 算·零硬编码）。

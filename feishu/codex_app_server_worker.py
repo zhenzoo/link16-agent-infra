@@ -23,6 +23,8 @@ from bridge_events import CONTRACT, MilestoneAccumulator, normalize_codex_notifi
 
 
 WARMUP_MARKER = "LINK16_APP_SERVER_READY"
+RECONNECT_MAX_BACKOFF = 30      # 秒·重连退避上限
+RECONNECT_ALERT_AFTER = 120     # 秒·重连这么久还挂不回去 → 告诉主人一声（走 outbox·飞书看得见）
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -115,9 +117,32 @@ class RpcConnection:
             pass
 
 
+def _attach_rpc(url: str, *, thread_id: str, cwd) -> "RpcConnection":
+    """把一条观察者连接挂到【已经在跑】的 app-server 上：initialize → thread/resume。
+
+    必须 resume：只 initialize 的客户端一条线程通知都收不到（2026-08-29 实测 70 秒零通知，
+    resume 之后 item/completed 立刻就来）。参数与首次挂载保持一致，不改动线程的任何设置。
+    """
+    rpc = RpcConnection(url)
+    rpc.request("initialize", {
+        "clientInfo": {"name": "link16", "title": "Link16 milestone observer", "version": "1"},
+        "capabilities": {"experimentalApi": True},
+    })
+    rpc.notify("initialized")
+    rpc.request("thread/resume", {
+        "threadId": thread_id,
+        "cwd": str(cwd),
+        "approvalPolicy": "never",
+        "sandbox": "danger-full-access",
+    })
+    return rpc
+
+
 class MilestoneObserver:
-    def __init__(self, rpc: RpcConnection, *, bot: str, root_thread: str, state_dir: Path, workspace_root: Path):
+    def __init__(self, rpc: RpcConnection, *, bot: str, root_thread: str, state_dir: Path, workspace_root: Path,
+                 reconnect=None):
         self.rpc = rpc
+        self.reconnect = reconnect   # 可调用对象 → 新 RpcConnection（断线自愈）；None = 断了就结束（老行为）
         self.bot = bot
         self.root_thread = root_thread
         self.state_dir = state_dir
@@ -140,43 +165,93 @@ class MilestoneObserver:
                 continue
             if message.get("method") == "_transport_error":
                 _append_jsonl(ledger, {"kind": "transport_error", "ts": int(time.time()), **(message.get("params") or {})})
+                if not self._reattach(outbox, ledger):
+                    return
+                continue
+            try:
+                self._consume(message, outbox, ledger)
+            except Exception as exc:          # noqa: BLE001 —— 一条事件坏掉不许连累整条回程
+                _append_jsonl(ledger, {"kind": "observer_error", "ts": int(time.time()), "message": repr(exc)})
+
+    def _say(self, outbox: Path, text: str):
+        """借 outbox 这条现成的路把回程自身的状态说给主人听。
+
+        drainer 在桥进程里，与本连接互相独立 —— 正因为如此，观察者断线时这条路照样送得出去。
+        """
+        record = {"kind": "answer", "ts": int(time.time()), "session": self.root_thread,
+                  "anchor": None, "text": text}
+        route = _load_route(self.state_dir, self.bot)
+        if isinstance(route, dict):
+            record["route"] = route
+        _append_jsonl(outbox, record)
+
+    def _reattach(self, outbox: Path, ledger: Path) -> bool:
+        """断线不是终点：退避重连 + 重新 resume 回同一条 thread。挂不回去就喊人。
+
+        2026-08-29 事故：旧码收到 transport_error 只写一行日志就 return —— 观察者线程永久结束，
+        而 app-server 和 TUI 都好好活着，于是「消息进得去、回复出不来」，静默 8 小时无人知晓。
+        飞书 SDK 早就在做的事（断了自己爬起来），这条回程一直没有；这里补上。
+        """
+        if not self.reconnect:
+            return False
+        delay, since, alerted = 1, time.time(), False
+        while not self.stop.is_set():
+            try:
+                self.rpc = self.reconnect()
+            except Exception as exc:          # noqa: BLE001 —— app-server 没起来/端口没了都算这类
+                _append_jsonl(ledger, {"kind": "reattach_failed", "ts": int(time.time()), "message": repr(exc)})
+            else:
+                _append_jsonl(ledger, {"kind": "reattached", "ts": int(time.time()), "thread": self.root_thread})
+                if alerted:
+                    self._say(outbox, "✅ 回程已自愈：观察连接重新挂回会话，之后的回复恢复正常。")
+                return True
+            if not alerted and time.time() - since > RECONNECT_ALERT_AFTER:
+                self._say(outbox, (
+                    "⚠️ **回程断了**：我到会话的观察连接掉线，已重试 "
+                    f"{int(time.time() - since)} 秒仍挂不回去。" + chr(10) +
+                    "在接回来之前我的回复送不到飞书（你发给我的消息仍然进得来）。正在持续重试。"))
+                alerted = True
+            self.stop.wait(delay)
+            delay = min(delay * 2, RECONNECT_MAX_BACKOFF)
+        return False
+
+    def _consume(self, message: dict, outbox: Path, ledger: Path):
+        event = normalize_codex_notification(
+            message, self.root_thread, workspace_root=self.workspace_root
+        )
+        if not event:
+            return
+        ledger_record = {
+            "kind": "event",
+            "contract": CONTRACT,
+            "runtime": "codex",
+            "session": self.root_thread,
+            "root_turn": event.get("turn"),
+            "ts": int(time.time()),
+            **event,
+        }
+        _append_jsonl(ledger, ledger_record)
+        if event.get("event_type") == "final":
+            event_id = str(event.get("event_id") or "")
+            if event_id and event_id in self.final_event_ids:
                 return
-            event = normalize_codex_notification(
-                message, self.root_thread, workspace_root=self.workspace_root
+            record = _answer_record(
+                event,
+                session=self.root_thread,
+                route=_load_route(self.state_dir, self.bot),
             )
-            if not event:
-                continue
-            ledger_record = {
-                "kind": "event",
-                "contract": CONTRACT,
-                "runtime": "codex",
-                "session": self.root_thread,
-                "root_turn": event.get("turn"),
-                "ts": int(time.time()),
-                **event,
-            }
-            _append_jsonl(ledger, ledger_record)
-            if event.get("event_type") == "final":
-                event_id = str(event.get("event_id") or "")
-                if event_id and event_id in self.final_event_ids:
-                    continue
-                record = _answer_record(
-                    event,
-                    session=self.root_thread,
-                    route=_load_route(self.state_dir, self.bot),
-                )
-                if record:
-                    _append_jsonl(outbox, record)
-                    if event_id:
-                        self.final_event_ids.add(event_id)
-                continue
-            if self.accumulator.apply(event):
-                record = self.accumulator.progress_record(
-                    session=self.root_thread,
-                    route=_load_route(self.state_dir, self.bot),
-                )
-                record["ts"] = int(time.time())
+            if record:
                 _append_jsonl(outbox, record)
+                if event_id:
+                    self.final_event_ids.add(event_id)
+            return
+        if self.accumulator.apply(event):
+            record = self.accumulator.progress_record(
+                session=self.root_thread,
+                route=_load_route(self.state_dir, self.bot),
+            )
+            record["ts"] = int(time.time())
+            _append_jsonl(outbox, record)
 
 
 def _codex_native_default() -> Path:
@@ -319,6 +394,7 @@ def run(args) -> int:
             observer = MilestoneObserver(
                 rpc, bot=args.bot, root_thread=root_thread, state_dir=state_dir,
                 workspace_root=cwd,
+                reconnect=lambda: _attach_rpc(url, thread_id=root_thread, cwd=cwd),
             )
             observer.start()
             command = [
