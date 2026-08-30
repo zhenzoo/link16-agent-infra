@@ -173,3 +173,93 @@ class ProvisionalOwnerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Peer私聊兜底(unittest.TestCase):
+    """锁死 2026-08-30 新增的兜底第一顺位：借另一个 bot 的凭据私聊主人。
+
+    背景：原来唯一兜底是群喇叭 webhook，2026-07 有人在飞书后台给它加了关键词校验，
+    此后 748 次兜底全被拒(19024)。8-30 洪水那天医生喊「需人工」喊的就是这条死通道，
+    主人 42 分钟一无所知。peer DM 不依赖任何后台可变设置。
+    """
+
+    ROSTER = [
+        {"name": "坏了的bot", "app_id_env": "A_ID", "app_secret_env": "A_SEC"},
+        {"name": "没认过主的", "app_id_env": "B_ID", "app_secret_env": "B_SEC"},
+        {"name": "只是推测的", "app_id_env": "C_ID", "app_secret_env": "C_SEC"},
+        {"name": "好用的peer", "app_id_env": "D_ID", "app_secret_env": "D_SEC"},
+    ]
+    OWNERS = {
+        "坏了的bot": {"open_id": "ou_自己"},
+        "没认过主的": {},
+        "只是推测的": {"open_id": "ou_猜的", "provisional": True},
+        "好用的peer": {"open_id": "ou_peer专属"},
+    }
+
+    def _run(self, api_impl, roster=None):
+        calls = []
+        def api(method, url, token=None, body=None, **kw):
+            calls.append({"url": url, "body": body, "token": token})
+            return api_impl(url, body)
+        fake_rest = mock.Mock(api=api)
+        env = {k: "v" for b in self.ROSTER for k in (b["app_id_env"], b["app_secret_env"])}
+        with mock.patch.dict(sys.modules, {"feishu_rest": fake_rest}), \
+             mock.patch.dict(feishu_bridge.os.environ, env, clear=False), \
+             mock.patch.object(feishu_bridge, "load_bots", lambda: roster or self.ROSTER), \
+             mock.patch.object(feishu_bridge, "load_owner_record", lambda n: self.OWNERS.get(n, {})):
+            got = feishu_bridge._peer_dm_fallback("正文", "坏了的bot", "230013")
+        return got, calls
+
+    @staticmethod
+    def _ok(url, body):
+        if "tenant_access_token" in url:
+            return {"code": 0, "tenant_access_token": "tok"}
+        return {"code": 0}
+
+    def test_跳过自己_跳过没认主_跳过provisional_用好的peer(self):
+        got, calls = self._run(self._ok)
+        self.assertEqual(got, "好用的peer")
+        sends = [c for c in calls if "im/v1/messages" in c["url"]]
+        self.assertEqual(len(sends), 1, "只该发一次")
+        self.assertEqual(sends[0]["body"]["receive_id"], "ou_peer专属",
+                         "必须用【peer 自己记的】主人 open_id —— open_id 按飞书应用隔离，"
+                         "拿失败 bot 的 id 配 peer 的 token 会 230013 找不到人")
+
+    def test_正文里带上是谁代发的(self):
+        _, calls = self._run(self._ok)
+        sent = json.loads([c for c in calls if "im/v1/messages" in c["url"]][0]["body"]["content"])
+        self.assertIn("好用的peer", sent["text"], "主人要一眼看出是谁代发的")
+        self.assertIn("230013", sent["text"], "降级原因必须带上")
+        self.assertNotIn("{peer}", sent["text"], "占位符必须被替换")
+
+    def test_全部失败返回None而不是抛异常(self):
+        got, _ = self._run(lambda u, b: {"code": 99, "msg": "boom"})
+        self.assertIsNone(got)
+
+    def test_底层抛异常也不许逃逸(self):
+        def boom(u, b): raise RuntimeError("网络炸了")
+        got, _ = self._run(boom)
+        self.assertIsNone(got, "兜底路径自己绝不能抛 —— 它是最后一道防线")
+
+    def test_名册读不了也不许抛(self):
+        with mock.patch.object(feishu_bridge, "load_bots",
+                               side_effect=RuntimeError("名册坏了")):
+            self.assertIsNone(feishu_bridge._peer_dm_fallback("x", "b", "why"))
+
+    def test_绝不调用会sys_exit的feishu_rest高层函数(self):
+        """feishu_rest.tenant_token / send_msg 失败时 sys.exit(2)/(1)。
+        在兜底路径里调它们 = 一次 token 失败就杀掉整个桥进程，比没有兜底更糟。"""
+        import inspect
+        src = inspect.getsource(feishu_bridge._peer_dm_fallback)
+        self.assertNotIn("tenant_token(", src)
+        self.assertNotIn("send_msg(", src)
+
+    def test_peer成功时不再走群喇叭(self):
+        notify = FakeNotify()
+        with mock.patch.object(feishu_bridge, "_peer_dm_fallback", lambda *a: "某peer"), \
+             mock.patch.object(feishu_bridge, "_notify", notify), \
+             mock.patch.object(feishu_bridge, "receipt", lambda *a, **k: None), \
+             mock.patch.object(feishu_bridge, "blog", lambda *a, **k: None):
+            ok = feishu_bridge._webhook_fallback("正文", "某bot", "原因", "ou_x")
+        self.assertTrue(ok)
+        self.assertEqual(notify.bodies, [], "peer 私聊成功后不该再刷群")

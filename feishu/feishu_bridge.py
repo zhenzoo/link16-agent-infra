@@ -1164,6 +1164,66 @@ async def _send_checked(channel, chat_id, payload, name, kind):
     return False, last, transient
 
 
+def _peer_dm_fallback(text, name, why):
+    """兜底第一顺位：借【另一个 bot】的凭据私聊主人。失败返回 None，成功返回代发的 bot 名。
+
+    为什么加这层（2026-08-30）：原来唯一的兜底是群喇叭 webhook，而 2026-07 有人在飞书后台
+    给那个群机器人加了【关键词校验】—— 从此每条兜底都被拒（19024 Key Words Not Found），
+    实测成功 11 次 / 失败 748 次。8-30 洪水那天医生一直在喊「需人工」，喊的正是这条死通道，
+    主人 42 分钟一无所知。关键词只存在于飞书后台、代码看不见也改不了，**修好了也能再被悄悄改坏**。
+
+    peer DM 结构上更硬：① 每个 bot 是独立飞书应用、独立 token，A 发不出去不影响 B；
+    ② 直接进【私聊】（主人真会看），不是群；③ 不依赖任何后台可变设置。
+
+    ⚠️ open_id 按飞书应用隔离 —— 同一个人在每个 app 里 id 不同（实测 16 个 bot 16 个值）。
+    所以必须用【peer 自己记的】主人 open_id，绝不能拿失败 bot 的 id 配 peer 的 token。
+    provisional（工具推的·未经真 DM 证实）的 owner 一律跳过：推错了就发给陌生人。
+    """
+    try:
+        import feishu_rest
+    except ImportError:
+        return None
+    body = (f"[{name} · 私聊发不出，由 {{peer}} 代发]\n⚠️ 降级原因：{why}\n" + (text or "")[:3000])
+    try:                                                 # 名册读不了也不能让兜底自己抛
+        roster = load_bots()
+    except Exception:                                    # noqa: BLE001
+        return None
+    tried = 0
+    for peer in roster:
+        pname = peer.get("name")
+        if pname == name or tried >= 3:                  # 别用出问题的那个·最多试 3 个
+            continue
+        rec = load_owner_record(pname)
+        oid = rec.get("open_id")
+        if not oid or rec.get("provisional"):            # 没认过主 / 只是推测 → 不冒险
+            continue
+        aid = os.environ.get(peer.get("app_id_env") or "")
+        sec = os.environ.get(peer.get("app_secret_env") or "")
+        if not (aid and sec):
+            continue
+        tried += 1
+        try:
+            # ⚠️ 只用底层 api()：feishu_rest 的 tenant_token / send_msg 失败时会 sys.exit(2)/(1)，
+            # 在兜底路径里调它们 = 一次 token 失败就把整个桥进程杀掉，比没有兜底还糟。
+            t = feishu_rest.api("POST",
+                                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                                body={"app_id": aid, "app_secret": sec})
+            tok = (t or {}).get("tenant_access_token")
+            if not tok:
+                continue
+            d = feishu_rest.api(
+                "POST", "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+                token=tok,
+                body={"receive_id": oid, "msg_type": "text",
+                      "content": json.dumps({"text": body.replace("{peer}", pname)},
+                                            ensure_ascii=False)})
+            if (d or {}).get("code") == 0:
+                return pname
+        except Exception:                                # noqa: BLE001 — 兜底自己绝不能抛
+            continue
+    return None
+
+
 def _webhook_fallback(text, name, reason=None, intended=None):
     """最后一道兜底：scripts/notify.py webhook（纯标库绕代理 3 重试 · 但发到群不是 DM）。
     返回 ok。webhook 喇叭机器人只能发文字（发不了图）。
@@ -1175,6 +1235,13 @@ def _webhook_fallback(text, name, reason=None, intended=None):
       ① `reason`(真实报错·如 230013) + `intended`(本该投的 DM 目标) 一律写进 receipts，
       ② 并【印在发到群的正文头上】——谁看到刷屏，谁当场就知道为什么，不用再翻日志反推。"""
     why = str(reason or "未知原因")[:160]
+    peer = _peer_dm_fallback(text, name, why)   # 先试 peer 私聊：进 DM 且不依赖飞书后台设置
+    if peer:
+        blog(name, f"兜底 ✅ 由 {peer} 代发主人私聊 · 原因={why}")
+        receipt(name, {"tid": "fallback", "kind": "peer_dm_fallback", "delivered": True,
+                       "via": f"peer-dm:{peer}", "err": None, "reason": why,
+                       "intended": intended, "len": len(text or "")})
+        return True
     if _notify is None:
         blog(name, f"webhook 兜底不可用（notify 未 import）· 原因={why}")
         receipt(name, {"tid": "fallback", "kind": "webhook_fallback", "delivered": False,
