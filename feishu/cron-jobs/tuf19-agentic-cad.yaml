@@ -1,0 +1,11 @@
+# tuf19-agentic-cad 的定时任务 · cron-jobs/<bot>.yaml（bot 名=文件名·别在此重复写 bot）
+# 加/改/停一项 = 编辑本文件 或用 `bridge_cron.py add/rm/enable/disable`；守护进程热读、免重启。
+jobs:
+- name: p030-blind-loop-5m
+  cron: '*/5 * * * *'
+  tz: Asia/Shanghai
+  enabled: false
+  desc: P030 drawing_cold 隔离试验五分钟兜底；完成或明确人工门后停
+  prompt: 继续推进 P030 drawing_cold 机械隔离试验。这个 5 分钟唤醒只作卡住时兜底，不是节拍器：醒来直接接着 PLAN 当前未完成步骤，不重新盘点。守盲：producer 不得读取主仓、assets
+    真值、corpus100.json、INDEX/OCR/Baseline/Truth Census；先证明主仓不可读、网络不可用、COM 可用，再建模。完成 SEALED/JUDGED 或到明确的人类单击门后，禁用
+    tuf19-agentic-cad/p030-blind-loop-5m。
