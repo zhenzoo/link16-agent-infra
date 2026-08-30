@@ -134,6 +134,19 @@ MUTATIONS = [
      "                    _n, _last = hwm_corrupt_unseen(_bn, _al.get(_key, {}).get(\"seen\", 0))",
      "                    _n, _last = 0, \"\"",
      "test_R6_已接进巡检主循环"),
+
+    # ---- 陈旧检测·全部常驻进程（2026-08-30 tuf19 报的两层盲区）----
+    ("陈旧闸：把函数内的懒加载也算成依赖（每改一次看门狗就把 16 只桥全标旧）",
+     FEISHU / "bridge_watchdog.py",
+     '_IMPORT_RE = re.compile(r"^(?:from|import)\s+([A-Za-z_][\w.]*)", re.M)',
+     '_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_][\w.]*)", re.M)',
+     "test_陈旧_只认模块级import_懒加载不算"),
+
+    ("陈旧闸：算出来了却没接进 status（还是没人看）",
+     FEISHU / "bridge_watchdog.py",
+     "    rows = stale_processes()",
+     "    rows = []",
+     "test_陈旧_已接进status"),
 ]
 
 
