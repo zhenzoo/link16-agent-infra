@@ -30,7 +30,6 @@ def 隔离(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "ALERTS_PATH", tmp_path / "alerts.json")
     sent, nudged = [], []
     monkeypatch.setattr(w, "notify", lambda b, k, t: sent.append((b, k)) or True)
-    monkeypatch.setattr(w, "notify_webhook", lambda t: sent.append(("webhook", t[:20])) or True)
     monkeypatch.setattr(w, "nudge_pane", lambda p: nudged.append(p) or True)
     return {"sent": sent, "nudged": nudged, "tmp": tmp_path}
 
