@@ -43,7 +43,7 @@ python feishu/tenant_probe.py --bot <新bot>
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
 # 6. 重启桥生效（只加了新 bot 就【单起它】·别全局 stop/start 把在跑的会话全杀了）
 python feishu/feishu_bridge.py start --bot <新bot>
-# 7. ⚠️ 必做：主人【私聊】新 bot 一句话，完成「认主」（见下方红字 · 漏了会刷群）
+# 7. ⚠️ 必做：主人【私聊】新 bot 一句话，完成「认主」（见下方红字 · 漏了它以后的回复【无处可投】）
 # 8. 仅多台受信机器确实要共享该 bot 凭据时：用用户自己的安全同步方案更新其它机器
 ```
 
@@ -379,7 +379,7 @@ python feishu/register_feishu_app.py --name "<bot>" --bot <bot> --profile <profi
 
 # 5. 注册器/Monitor 按所选 capability 给出真实增量权限链；企业租户A 历史齐平排障才用 scope_level.py
 
-# 6. 主人【私聊】新 bot 一句话完成认主（§0 第 7 步·漏了会刷群）
+# 6. 主人【私聊】新 bot 一句话完成认主（§0 第 7 步·漏了则 DM 无目标·重试到 GIVE_UP_SEC 后放弃）
 
 # 7. 把 agent-registry.json 的 open_id 换成新应用的（register 不会自动做）
 python feishu/reset_bot_identity.py --bot <bot> --refresh-openid            # 先看
