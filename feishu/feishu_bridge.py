@@ -1686,7 +1686,9 @@ def _send_interactive_message(app_id, app_secret, target, payload, message_uuid=
 def _fragment_receipt(fragment):
     return {
         key: fragment.get(key)
-        for key in ("answer_id", "fragment_id", "part", "total", "content_sha256")
+        for key in ("answer_id", "fragment_id", "part", "total", "content_sha256",
+                    "split_policy", "render_target", "hard_budget", "guard_used",
+                    "guard_chars")
         if isinstance(fragment, dict) and fragment.get(key) is not None
     }
 
@@ -1706,7 +1708,8 @@ def _record_automatic_outbound(bot_name, route, target, text, mid, fragment):
     extra = {
         key: fragment.get(key)
         for key in ("answer_id", "fragment_id", "part", "total", "content_sha256",
-                    "session", "anchor", "source_ts")
+                    "split_policy", "render_target", "hard_budget", "guard_used",
+                    "guard_chars", "session", "anchor", "source_ts")
         if isinstance(fragment, dict) and fragment.get(key) is not None
     }
     return bridge_outbound.append_delivery(
@@ -2683,16 +2686,25 @@ def run(bot_name=None):
         holder = {}
 
         # AskUserQuestion 检测已移到 PreToolUse hook(写 kind:"ask")→ drainer 不再需要读屏闭包(_read_screen 退役)。
+        def _drainer_error(event):
+            blog(
+                bname,
+                "❌ drainer logic error "
+                f"offset={event.get('offset')} kind={event.get('kind') or '-'} "
+                f"{event.get('error_type')}: {event.get('error')}",
+            )
+
         def _start_drainer():
             holder["d"] = asyncio.create_task(bridge_outbox.outbox_drainer(
                 bname, state_dir=ad, new_card=_new_card, edit_card=_edit_card,
-                send_plain=_send_plain, asleep=asyncio.sleep, coalesce_sec=10.0))
+                send_plain=_send_plain, asleep=asyncio.sleep, on_error=_drainer_error,
+                coalesce_sec=10.0))
 
         _start_drainer()
 
-        # 重启 drainer 只治「它卡住/死了」。水位连续不动说明重启无效，再重启还有害：
-        # 每次重启都会把 drainer 自己的 GIVE_UP_SEC(600s·发不出就放弃解堵) 计时器清零，
-        # 反而让它永远等不到自愈。所以连续 3 次水位没动就停手，把场子交回给 GIVE_UP_SEC。
+        # 重启 drainer 只治「task 卡住/死了」。水位连续不动说明同一队头记录仍在确定性失败，
+        # 继续重启只会制造抖动与重复诊断，不会修复内容或代码。所以连续 3 次水位没动就停手，
+        # 保留 HWM/backlog 和一次去重后的 logic-error 事件，交给人工按 offset 精确修复。
         # 不在这里告警 —— bridge_doctor 自己会「卡 N 轮自愈无效·需人工」升级，别发两遍。
         fuse = {"off": None, "n": 0}
 

@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 import os
 import json
 import sys
@@ -48,6 +50,26 @@ def fresh_state():
         "sent": set(),
         "picker_active": False,
     }
+
+
+def inclusive_right_split(text, capacity):
+    """Pre-PLAN-991 splitter mutation: it can consume index=end."""
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(len(text), start + capacity)
+        if end < len(text):
+            newline = text.rfind("\n", start, end + 1)
+            if newline >= start:
+                end = newline + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks or [text]
+
+
+def guard_boundary_source():
+    prefix = "**回复 3/3**\n\n"
+    capacity = bridge_outbox.ANSWER_TARGET_BUDGET - len(prefix)
+    return ("a" * capacity) + "\n" + ("中" * 2755) + "\n" + ("🙂" * 522)
 
 
 class FakeCards:
@@ -298,6 +320,261 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
                         for row in first
                     ))
 
+    def test_split_exact_newline_at_capacity_boundary_is_bounded_and_lossless(self):
+        source = "abcd\nx"
+        chunks = bridge_outbox._split_exact(source, 4)
+        self.assertEqual("".join(chunks), source)
+        self.assertTrue(all(len(chunk) <= 4 for chunk in chunks), chunks)
+
+    def test_answer_fragment_newline_at_card_capacity_boundary_is_bounded(self):
+        route = {"kind": "p2a"}
+        record = {"session": "boundary", "anchor": "plan220"}
+        prefix = "**回复 3/3**\n\n"
+        capacity = bridge_outbox.CARD_BUDGET - len(prefix)
+        source = ("a" * capacity) + "\n" + ("中" * 2765) + "\n" + ("🙂" * 522)
+
+        first = bridge_outbox._answer_fragments(record, source, route)
+        second = bridge_outbox._answer_fragments(record, source, route)
+
+        self.assertEqual(len(first), 3)
+        self.assertEqual(first, second)
+        self.assertEqual("".join(row["content"] for row in first), source)
+        self.assertTrue(all(
+            len(row["rendered"]) <= bridge_outbox.CARD_BUDGET for row in first
+        ))
+
+    def test_split_exact_boundary_matrix_handles_unicode_and_no_newline(self):
+        samples = [
+            ("abc\n中🙂", 4),       # newline is the last included character
+            ("abcd\n中🙂", 4),      # newline is exactly at the right boundary
+            ("abcde\n中🙂", 4),     # newline is just after the boundary
+            ("中文🙂abcdef", 4),     # no newline fallback
+            ("\nabcde", 4),         # preserve historical newline-at-start split
+        ]
+        for source, capacity in samples:
+            with self.subTest(source=source, capacity=capacity):
+                chunks = bridge_outbox._split_exact(source, capacity)
+                self.assertEqual("".join(chunks), source)
+                self.assertTrue(all(len(chunk) <= capacity for chunk in chunks), chunks)
+
+    def test_answer_guard_band_is_unused_on_the_normal_path(self):
+        record = {"session": "guard", "anchor": "normal"}
+        source = "x" * 2795
+        fragments = bridge_outbox._answer_fragments(
+            record, source, {"kind": "p2a"},
+            budget=bridge_outbox.ANSWER_TARGET_BUDGET,
+            hard_budget=bridge_outbox.CARD_BUDGET,
+            split_policy=bridge_outbox.ANSWER_SPLIT_POLICY_GUARD10,
+        )
+        self.assertEqual("".join(row["content"] for row in fragments), source)
+        self.assertGreater(len(fragments), 1)
+        self.assertTrue(all(
+            len(row["rendered"]) <= bridge_outbox.ANSWER_TARGET_BUDGET
+            and row["guard_chars"] == 0 and not row["guard_used"]
+            for row in fragments
+        ))
+
+    def test_old_off_by_one_uses_one_guard_character_without_losing_text(self):
+        record = {"session": "guard", "anchor": "one-char"}
+        source = guard_boundary_source()
+        with mock.patch.object(bridge_outbox, "_split_exact", side_effect=inclusive_right_split):
+            fragments = bridge_outbox._answer_fragments(
+                record, source, {"kind": "p2a"},
+                budget=bridge_outbox.ANSWER_TARGET_BUDGET,
+                hard_budget=bridge_outbox.CARD_BUDGET,
+                split_policy=bridge_outbox.ANSWER_SPLIT_POLICY_GUARD10,
+            )
+        self.assertEqual("".join(row["content"] for row in fragments), source)
+        self.assertEqual(max(row["guard_chars"] for row in fragments), 1)
+        self.assertTrue(any(row["guard_used"] for row in fragments))
+        self.assertTrue(all(
+            len(row["rendered"]) <= bridge_outbox.CARD_BUDGET for row in fragments
+        ))
+
+    def test_guard_overrun_above_ten_characters_hits_hard_limit(self):
+        def overrun(text, capacity):
+            return [text[:capacity + 11], text[capacity + 11:]]
+
+        with mock.patch.object(bridge_outbox, "_split_exact", side_effect=overrun):
+            with self.assertRaisesRegex(ValueError, "CARD_BUDGET"):
+                bridge_outbox._answer_fragments(
+                    {"session": "guard", "anchor": "too-large"}, "x" * 6000,
+                    {"kind": "p2a"}, budget=bridge_outbox.ANSWER_TARGET_BUDGET,
+                    hard_budget=bridge_outbox.CARD_BUDGET,
+                    split_policy=bridge_outbox.ANSWER_SPLIT_POLICY_GUARD10,
+                )
+
+    async def test_outbox_drainer_replays_boundary_answer_to_eof_without_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = "boundary-bot"
+            prefix = "**回复 3/3**\n\n"
+            capacity = bridge_outbox.CARD_BUDGET - len(prefix)
+            source = ("a" * capacity) + "\n" + ("中" * 2765) + "\n" + ("🙂" * 522)
+            record = {
+                "kind": "answer", "session": "boundary", "anchor": "plan220",
+                "text": source, "route": {"kind": "p2a"},
+            }
+            self.assertTrue(bridge_outbox.append_record(tmp, bot, record))
+            eof = Path(bridge_outbox.outbox_path(tmp, bot)).stat().st_size
+            reached_eof = asyncio.Event()
+            offsets = []
+            cards = []
+            fallbacks = []
+            errors = []
+
+            async def new_card(text, route=None, purpose="answer", fragment=None):
+                cards.append((text, route, purpose, fragment))
+                return {"ok": True, "message_id": f"om_{fragment['part']}"}
+
+            async def edit_card(_mid, _text):
+                return True
+
+            async def send_plain(text, route=None, purpose="answer", fragment=None):
+                fallbacks.append((text, route, purpose, fragment))
+                return True
+
+            async def asleep(_delay):
+                await asyncio.sleep(0)
+
+            def save_offset(offset):
+                offsets.append(offset)
+                if offset == eof:
+                    reached_eof.set()
+
+            task = asyncio.create_task(bridge_outbox.outbox_drainer(
+                bot, state_dir=tmp, new_card=new_card, edit_card=edit_card,
+                send_plain=send_plain, asleep=asleep, hwm_load=lambda: 0,
+                hwm_save=save_offset, on_error=errors.append, poll=0,
+                coalesce_sec=0,
+            ))
+            try:
+                await asyncio.wait_for(reached_eof.wait(), timeout=1)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+            self.assertEqual(offsets[-1], eof)
+            self.assertEqual(len(cards), 3)
+            self.assertEqual([row[3]["part"] for row in cards], [1, 2, 3])
+            self.assertEqual(fallbacks, [])
+            self.assertEqual(errors, [])
+
+    async def test_outbox_drainer_guard_survives_old_off_by_one_and_reaches_eof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = "guard-bot"
+            source = guard_boundary_source()
+            record = {
+                "kind": "answer", "session": "guard", "anchor": "old-splitter",
+                "text": source, "route": {"kind": "p2a"},
+            }
+            self.assertTrue(bridge_outbox.append_record(tmp, bot, record))
+            eof = Path(bridge_outbox.outbox_path(tmp, bot)).stat().st_size
+            reached_eof = asyncio.Event()
+            offsets, cards, errors = [], [], []
+
+            async def new_card(text, route=None, purpose="answer", fragment=None):
+                cards.append((text, fragment))
+                return {"ok": True, "message_id": f"om_{fragment['part']}"}
+
+            async def edit_card(_mid, _text):
+                return True
+
+            async def send_plain(*_args, **_kwargs):
+                self.fail("guarded interactive delivery must not fall back")
+
+            async def asleep(_delay):
+                await asyncio.sleep(0)
+
+            def save_offset(offset):
+                offsets.append(offset)
+                if offset == eof:
+                    reached_eof.set()
+
+            with mock.patch.object(
+                bridge_outbox, "_split_exact", side_effect=inclusive_right_split,
+            ):
+                task = asyncio.create_task(bridge_outbox.outbox_drainer(
+                    bot, state_dir=tmp, new_card=new_card, edit_card=edit_card,
+                    send_plain=send_plain, asleep=asleep, hwm_load=lambda: 0,
+                    hwm_save=save_offset, on_error=errors.append, poll=0,
+                    coalesce_sec=0,
+                ))
+                try:
+                    await asyncio.wait_for(reached_eof.wait(), timeout=1)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+            self.assertEqual(offsets[-1], eof)
+            self.assertEqual(len(cards), 3)
+            self.assertEqual(max(row[1]["guard_chars"] for row in cards), 1)
+            self.assertEqual(errors, [])
+
+    async def test_outbox_drainer_reports_logic_error_without_advancing_hwm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = "error-bot"
+            record = {
+                "kind": "answer", "session": "s", "anchor": "a",
+                "text": "answer", "route": {"kind": "p2a"},
+            }
+            self.assertTrue(bridge_outbox.append_record(tmp, bot, {"kind": "noop"}))
+            self.assertTrue(bridge_outbox.append_record(tmp, bot, record))
+            error_seen = asyncio.Event()
+            failed_twice = asyncio.Event()
+            block_after_error = asyncio.Event()
+            offsets = []
+            errors = []
+            failures = []
+
+            async def no_send(*_args, **_kwargs):
+                self.fail("delivery callback must not run after injected splitter failure")
+
+            async def asleep(delay):
+                if delay >= 1 and len(failures) >= 2:
+                    await block_after_error.wait()
+                else:
+                    await asyncio.sleep(0)
+
+            def on_error(event):
+                errors.append(event)
+                error_seen.set()
+
+            def injected_failure(*_args, **_kwargs):
+                failures.append(1)
+                if len(failures) >= 2:
+                    failed_twice.set()
+                raise RuntimeError("SECRET_MARKER token=supersecret injected failure")
+
+            with mock.patch.object(
+                bridge_outbox, "_answer_fragments",
+                side_effect=injected_failure,
+            ):
+                task = asyncio.create_task(bridge_outbox.outbox_drainer(
+                    bot, state_dir=tmp, new_card=no_send, edit_card=no_send,
+                    send_plain=no_send, asleep=asleep, hwm_load=lambda: 0,
+                    hwm_save=offsets.append, on_error=on_error, poll=0,
+                    coalesce_sec=0,
+                ))
+                try:
+                    await asyncio.wait_for(error_seen.wait(), timeout=1)
+                    await asyncio.wait_for(failed_twice.wait(), timeout=1)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["bot"], bot)
+            self.assertEqual(errors[0]["offset"], 0)
+            self.assertEqual(errors[0]["kind"], "answer")
+            self.assertEqual(errors[0]["error_type"], "RuntimeError")
+            self.assertIn("internal error digest=", errors[0]["error"])
+            self.assertNotIn("SECRET_MARKER", errors[0]["error"])
+            self.assertNotIn("supersecret", errors[0]["error"])
+            self.assertEqual(offsets, [])
+
     async def test_fragment_ack_survives_restart_and_only_missing_parts_retry(self):
         class FragmentCards:
             def __init__(self, fail_parts=()):
@@ -341,11 +618,146 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
                 persist_answer=lambda value: bridge_outbox.save_answer_state(tmp, "bot", value),
             )
             self.assertNotIn(1, [part for _kind, part, _fid, _text in second.calls])
+            restored = bridge_outbox.load_answer_state(tmp, "bot")
+            saved = next(iter(restored["answers"].values()))
+            self.assertEqual(saved["split_policy"], bridge_outbox.ANSWER_SPLIT_POLICY_GUARD10)
+            self.assertEqual(saved["render_target"], bridge_outbox.ANSWER_TARGET_BUDGET)
             self.assertEqual(
                 [row["fragment_id"] for row in bridge_outbox._answer_fragments(
-                    record, text.strip(), record["route"]
+                    record, text.strip(), record["route"],
+                    budget=bridge_outbox.ANSWER_TARGET_BUDGET,
+                    hard_budget=bridge_outbox.CARD_BUDGET,
+                    split_policy=bridge_outbox.ANSWER_SPLIT_POLICY_GUARD10,
                 )][1],
                 second.calls[0][2],
+            )
+
+    async def test_guard_used_manifest_freezes_boundaries_across_restart(self):
+        class Cards:
+            def __init__(self, fail_parts=()):
+                self.fail_parts = set(fail_parts)
+                self.calls = []
+
+            async def new_card(self, text, route=None, purpose="answer", fragment=None):
+                self.calls.append((text, dict(fragment)))
+                return None if fragment["part"] in self.fail_parts else f"m{fragment['part']}"
+
+            async def edit_card(self, _mid, _text):
+                return True
+
+            async def send_plain(self, text, route=None, purpose="answer", fragment=None):
+                return False if fragment["part"] in self.fail_parts else f"t{fragment['part']}"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = guard_boundary_source()
+            record = {"kind": "answer", "session": "guard", "anchor": "manifest",
+                      "text": source, "route": {"kind": "p2a"}}
+            first_state = fresh_state()
+            first_state["answer_delivery"] = bridge_outbox.load_answer_state(tmp, "bot")
+            first = Cards({2})
+            with mock.patch.object(
+                bridge_outbox, "_split_exact", side_effect=inclusive_right_split,
+            ):
+                with self.assertRaises(bridge_outbox.RetrySend):
+                    await bridge_outbox.drain_batch(
+                        [record], new_card=first.new_card, edit_card=first.edit_card,
+                        send_plain=first.send_plain, state=first_state, coalesce_sec=0,
+                        clock=lambda: 100, force_flush=True,
+                        persist_answer=lambda value: bridge_outbox.save_answer_state(tmp, "bot", value),
+                    )
+
+            persisted = bridge_outbox.load_answer_state(tmp, "bot")
+            saved = next(iter(persisted["answers"].values()))
+            self.assertEqual(saved["manifest"][0]["guard_chars"], 1)
+            manifest_ids = [row["fragment_id"] for row in saved["manifest"]]
+
+            second_state = fresh_state()
+            second_state["answer_delivery"] = persisted
+            second = Cards()
+            await bridge_outbox.drain_batch(
+                [record], new_card=second.new_card, edit_card=second.edit_card,
+                send_plain=second.send_plain, state=second_state, coalesce_sec=0,
+                clock=lambda: 101, force_flush=True,
+                persist_answer=lambda value: bridge_outbox.save_answer_state(tmp, "bot", value),
+            )
+            self.assertEqual([row[1]["part"] for row in second.calls], [2, 3])
+            self.assertEqual([row[1]["fragment_id"] for row in second.calls], manifest_ids[1:])
+            self.assertEqual(second.calls[0][1]["guard_chars"], 0)
+
+    async def test_manifest_persist_failure_blocks_network_and_rolls_back_memory(self):
+        state = fresh_state()
+        state["answer_delivery"] = {"version": 1, "answers": {}}
+        sends = []
+
+        async def new_card(*args, **kwargs):
+            sends.append((args, kwargs))
+            return "m1"
+
+        async def edit_card(_mid, _text):
+            return True
+
+        async def send_plain(*args, **kwargs):
+            sends.append((args, kwargs))
+            return "t1"
+
+        record = {"kind": "answer", "session": "guard", "anchor": "durable",
+                  "text": "x" * 3000, "route": {"kind": "p2a"}}
+        with self.assertRaisesRegex(OSError, "durable"):
+            await bridge_outbox.drain_batch(
+                [record], new_card=new_card, edit_card=edit_card,
+                send_plain=send_plain, state=state, coalesce_sec=0,
+                clock=lambda: 100, force_flush=True,
+                persist_answer=lambda _value: False,
+            )
+        self.assertEqual(sends, [])
+        self.assertEqual(state["answer_delivery"]["answers"], {})
+
+    async def test_legacy_answer_state_backfills_manifest_without_resending_ack(self):
+        class Cards:
+            def __init__(self):
+                self.calls = []
+
+            async def new_card(self, text, route=None, purpose="answer", fragment=None):
+                self.calls.append(dict(fragment))
+                return f"m{fragment['part']}"
+
+            async def edit_card(self, _mid, _text):
+                return True
+
+            async def send_plain(self, *_args, **_kwargs):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = ("旧分片\n" * 1200).strip()
+            record = {"kind": "answer", "session": "legacy", "anchor": "a",
+                      "text": source, "route": {"kind": "p2a"}}
+            legacy = bridge_outbox._answer_fragments(record, source, record["route"])
+            first = legacy[0]
+            delivery = {"version": 1, "answers": {first["answer_id"]: {
+                "text_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "route": record["route"], "total": len(legacy),
+                "fragments": {first["fragment_id"]: {
+                    "acked": True, "message_id": "old-m1", "part": 1,
+                    "content_sha256": first["content_sha256"], "acked_at": 1,
+                }}, "completed_at": None,
+            }}}
+            self.assertTrue(bridge_outbox.save_answer_state(tmp, "bot", delivery))
+            state = fresh_state()
+            state["answer_delivery"] = bridge_outbox.load_answer_state(tmp, "bot")
+            cards = Cards()
+            await bridge_outbox.drain_batch(
+                [record], new_card=cards.new_card, edit_card=cards.edit_card,
+                send_plain=cards.send_plain, state=state, coalesce_sec=0,
+                clock=lambda: 100, force_flush=True,
+                persist_answer=lambda value: bridge_outbox.save_answer_state(tmp, "bot", value),
+            )
+            self.assertNotIn(1, [row["part"] for row in cards.calls])
+            restored = bridge_outbox.load_answer_state(tmp, "bot")["answers"][first["answer_id"]]
+            self.assertEqual(restored["split_policy"], bridge_outbox.ANSWER_SPLIT_POLICY_LEGACY)
+            self.assertEqual(restored["render_target"], bridge_outbox.CARD_BUDGET)
+            self.assertEqual(
+                [row["fragment_id"] for row in restored["manifest"]],
+                [row["fragment_id"] for row in legacy],
             )
 
     def test_same_text_on_different_routes_has_different_answer_identity(self):

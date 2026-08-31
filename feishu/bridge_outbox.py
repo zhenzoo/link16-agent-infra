@@ -605,7 +605,11 @@ def _answer_with_docs(text, docs):
 
 
 # ---------- 处理一批记录（纯逻辑·可单测）----------
-CARD_BUDGET = 2800   # 单卡正文字数上限（飞书卡 ~3000·留余量）
+CARD_BUDGET = 2800   # final 硬上限（飞书卡约 3000；这里本就留了 provider 余量）
+ANSWER_GUARD_CHARS = 10
+ANSWER_TARGET_BUDGET = CARD_BUDGET - ANSWER_GUARD_CHARS
+ANSWER_SPLIT_POLICY_LEGACY = "answer-v1-hard2800"
+ANSWER_SPLIT_POLICY_GUARD10 = "answer-v2-target2790-guard10"
 
 
 def _has_pending(state):
@@ -651,7 +655,12 @@ def _split_exact(text, capacity):
     while start < len(text):
         end = min(len(text), start + capacity)
         if end < len(text):
-            newline = text.rfind("\n", start, end + 1)
+            # ``end`` is the exclusive slice boundary.  Searching through
+            # ``end + 1`` can select a newline at index ``end`` and create a
+            # capacity+1 chunk.  Keep the existing newline-at-start behavior:
+            # changing valid historical splits would change fragment IDs and
+            # could conflict with already persisted per-fragment ACKs.
+            newline = text.rfind("\n", start, end)
             if newline >= start:
                 end = newline + 1
         if end <= start:  # defensive; a newline at start still advances by one
@@ -661,8 +670,34 @@ def _split_exact(text, capacity):
     return chunks or [text]
 
 
-def _answer_fragments(record, text, route, budget=CARD_BUDGET):
-    """Build stable, lossless final-answer fragments with visible part/total."""
+def _answer_fragment(answer_id, content, index, total, content_start, *,
+                     render_target, hard_budget, split_policy):
+    """Render one fragment and expose enough metadata for a body-free manifest."""
+    content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    fragment_id = hashlib.sha256(
+        f"{answer_id}:{index}:{total}:{content_sha}".encode("utf-8")
+    ).hexdigest()
+    rendered = content if total == 1 else f"**回复 {index}/{total}**\n\n{content}"
+    if len(rendered) > hard_budget:
+        raise ValueError("fragment 超出 CARD_BUDGET")
+    guard_chars = max(0, len(rendered) - render_target)
+    return {
+        "answer_id": answer_id, "fragment_id": fragment_id,
+        "part": index, "total": total, "content_sha256": content_sha,
+        "content_start": content_start, "content_end": content_start + len(content),
+        "content": content, "rendered": rendered,
+        "split_policy": split_policy, "render_target": render_target,
+        "hard_budget": hard_budget, "guard_used": bool(guard_chars),
+        "guard_chars": guard_chars,
+    }
+
+
+def _answer_fragments(record, text, route, budget=CARD_BUDGET, *,
+                      hard_budget=None, split_policy=ANSWER_SPLIT_POLICY_LEGACY):
+    """Build stable, lossless fragments against a target and a separate hard limit."""
+    hard_budget = budget if hard_budget is None else hard_budget
+    if budget <= 0 or hard_budget < budget:
+        raise ValueError("answer fragment budget 非法")
     answer_id = _answer_id(record, text, route)
     if len(text) <= budget:
         contents = [text]
@@ -676,19 +711,60 @@ def _answer_fragments(record, text, route, budget=CARD_BUDGET):
             total = len(contents)
     total = len(contents)
     fragments = []
+    content_start = 0
     for index, content in enumerate(contents, 1):
-        content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        fragment_id = hashlib.sha256(
-            f"{answer_id}:{index}:{total}:{content_sha}".encode("utf-8")
-        ).hexdigest()
-        rendered = content if total == 1 else f"**回复 {index}/{total}**\n\n{content}"
-        if len(rendered) > budget:
-            raise ValueError("fragment 超出 CARD_BUDGET")
-        fragments.append({
-            "answer_id": answer_id, "fragment_id": fragment_id,
-            "part": index, "total": total, "content_sha256": content_sha,
-            "content": content, "rendered": rendered,
-        })
+        fragment = _answer_fragment(
+            answer_id, content, index, total, content_start,
+            render_target=budget, hard_budget=hard_budget, split_policy=split_policy,
+        )
+        fragments.append(fragment)
+        content_start = fragment["content_end"]
+    return fragments
+
+
+def _fragment_manifest(fragments):
+    """Persist deterministic boundaries/identity without copying answer content."""
+    keys = (
+        "part", "total", "content_start", "content_end", "content_sha256",
+        "fragment_id", "guard_chars",
+    )
+    return [{key: row[key] for key in keys} for row in fragments]
+
+
+def _answer_fragments_from_manifest(record, text, route, manifest, *,
+                                    render_target, hard_budget, split_policy):
+    """Rebuild exact persisted fragments; never call the current splitter on retry."""
+    if not isinstance(manifest, list) or not manifest:
+        raise RuntimeError("answer fragment manifest conflict")
+    answer_id = _answer_id(record, text, route)
+    total, cursor, fragments = len(manifest), 0, []
+    for index, saved in enumerate(manifest, 1):
+        if not isinstance(saved, dict):
+            raise RuntimeError("answer fragment manifest conflict")
+        try:
+            part = int(saved.get("part"))
+            saved_total = int(saved.get("total"))
+            start = int(saved.get("content_start"))
+            end = int(saved.get("content_end"))
+            saved_guard = int(saved.get("guard_chars") or 0)
+        except (TypeError, ValueError):
+            raise RuntimeError("answer fragment manifest conflict") from None
+        if (part != index or saved_total != total or start != cursor
+                or end < start or end > len(text)):
+            raise RuntimeError("answer fragment manifest conflict")
+        fragment = _answer_fragment(
+            answer_id, text[start:end], index, total, start,
+            render_target=render_target, hard_budget=hard_budget,
+            split_policy=split_policy,
+        )
+        if (saved.get("content_sha256") != fragment["content_sha256"]
+                or saved.get("fragment_id") != fragment["fragment_id"]
+                or saved_guard != fragment["guard_chars"]):
+            raise RuntimeError("answer fragment manifest conflict")
+        fragments.append(fragment)
+        cursor = end
+    if cursor != len(text):
+        raise RuntimeError("answer fragment manifest conflict")
     return fragments
 
 
@@ -890,19 +966,72 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
     async def _deliver_answer(record, text, route):
         """Persist each acknowledged fragment so restart retries only missing parts."""
         nonlocal n
-        fragments = _answer_fragments(record, text, route)
-        answer_id = fragments[0]["answer_id"]
+        answer_id = _answer_id(record, text, route)
         ledger = state.setdefault("answer_delivery", {"version": 1, "answers": {}})
         answers = ledger.setdefault("answers", {})
+        saved = answers.get(answer_id)
+        if saved is not None and not isinstance(saved, dict):
+            raise RuntimeError("answer_id ledger conflict")
+        if saved is None or not saved.get("split_policy"):
+            split_policy = (ANSWER_SPLIT_POLICY_GUARD10 if saved is None
+                            else ANSWER_SPLIT_POLICY_LEGACY)
+        else:
+            split_policy = saved.get("split_policy")
+        policy_targets = {
+            ANSWER_SPLIT_POLICY_LEGACY: CARD_BUDGET,
+            ANSWER_SPLIT_POLICY_GUARD10: ANSWER_TARGET_BUDGET,
+        }
+        if split_policy not in policy_targets:
+            raise RuntimeError("answer split policy conflict")
+        render_target = policy_targets[split_policy]
+        if saved is not None and saved.get("render_target") is not None:
+            try:
+                stored_target = int(saved.get("render_target"))
+            except (TypeError, ValueError):
+                raise RuntimeError("answer split policy conflict") from None
+            if stored_target != render_target:
+                raise RuntimeError("answer split policy conflict")
+        if saved is not None and saved.get("manifest") is not None:
+            fragments = _answer_fragments_from_manifest(
+                record, text, route, saved.get("manifest"),
+                render_target=render_target, hard_budget=CARD_BUDGET,
+                split_policy=split_policy,
+            )
+        else:
+            fragments = _answer_fragments(
+                record, text, route, budget=render_target, hard_budget=CARD_BUDGET,
+                split_policy=split_policy,
+            )
         text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
         expected = {
             "text_sha256": text_sha,
             "route": route if isinstance(route, dict) else {"kind": "p2a"},
             "total": len(fragments),
         }
+        created_saved = saved is None
         saved = answers.setdefault(answer_id, {**expected, "fragments": {}, "completed_at": None})
         if any(saved.get(name) != value for name, value in expected.items()):
             raise RuntimeError("answer_id ledger conflict")
+        if saved.get("manifest") is None:
+            missing = object()
+            previous = {
+                key: saved.get(key, missing)
+                for key in ("split_policy", "render_target", "manifest")
+            }
+            saved["split_policy"] = split_policy
+            saved["render_target"] = render_target
+            saved["manifest"] = _fragment_manifest(fragments)
+            try:
+                _persist_answers()                     # freeze boundaries before any network request
+            except Exception:
+                for key, value in previous.items():
+                    if value is missing:
+                        saved.pop(key, None)
+                    else:
+                        saved[key] = value
+                if created_saved and not saved.get("fragments"):
+                    answers.pop(answer_id, None)
+                raise
         receipts = saved.setdefault("fragments", {})
         for fragment in fragments:
             fid = fragment["fragment_id"]
@@ -910,6 +1039,8 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 continue
             meta = {key: fragment[key] for key in (
                 "answer_id", "fragment_id", "part", "total", "content_sha256",
+                "split_policy", "render_target", "hard_budget", "guard_used",
+                "guard_chars",
             )}
             meta.update({
                 "session": record.get("session"), "anchor": record.get("anchor"),
@@ -929,7 +1060,10 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 raise RetrySend()
             receipts[fid] = {
                 "acked": True, "message_id": mid, "part": fragment["part"],
-                "content_sha256": fragment["content_sha256"], "acked_at": int(clock()),
+                "content_sha256": fragment["content_sha256"],
+                "split_policy": fragment["split_policy"],
+                "guard_used": fragment["guard_used"],
+                "guard_chars": fragment["guard_chars"], "acked_at": int(clock()),
             }
             _persist_answers()
         saved["completed_at"] = int(clock())
@@ -945,6 +1079,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
 
     for r in recs:
         kind = r.get("kind")
+        state["_active_record_kind"] = kind
         if kind == "doc_delivery":
             _remember_doc_delivery(state, r)
             continue
@@ -1024,18 +1159,21 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["usage"] = r.get("usage") or state.get("usage") or {}
             state["progress_route"] = r.get("route") or state.get("progress_route")
     if _has_pending(state) and (force_flush or clock() - state["last_flush"] >= coalesce_sec):
+        state["_active_record_kind"] = "progress"
         await _flush_v2()
         await _flush_progress()
+    state.pop("_active_record_kind", None)
     return n
 
 
 # ---------- 常驻 drainer ----------
 async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asleep,
-                         hwm_load=None, hwm_save=None,
+                         hwm_load=None, hwm_save=None, on_error=None,
                          clock=time.time, poll=0.5, coalesce_sec=3.0):
     """常驻：增量 drain → 统一卡片流(进度卡原地长大/满轮换/回复多卡/ask 结构化卡)。HWM 防重放·绝不崩。
     deps（均 coroutine）：new_card(text)->mid|None · edit_card(mid,text)->bool · send_plain(text)。
-    hwm_load()->offset / hwm_save(offset)：默认走 state_dir 下的 hwm 文件。
+    hwm_load()->offset / hwm_save(offset)：默认走 state_dir 下的 hwm 文件；
+    on_error(event)：可选同步回调，只接收 bot/offset/kind/error_type/error，不含正文。
     （AskUserQuestion 检测已改 PreToolUse hook 写 kind:"ask"·不再读屏轮询——旧 _maybe_forward_ask 退役。）"""
     if hwm_load is None:
         hwm_load = lambda: load_hwm(state_dir, bot)          # noqa: E731
@@ -1055,8 +1193,11 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
     on_ask = lambda qs, key, sess: picker_write(state_dir, bot, qs, session=sess, key=key)   # noqa: E731
     on_resume = lambda: picker_clear(state_dir, bot)                                          # noqa: E731
+    last_error_signature = None
     while True:
         await asleep(poll)
+        recs = []
+        state["_active_record_kind"] = None
         try:
             recs, new_off = read_new_records(path, offset)
             if recs:
@@ -1080,10 +1221,37 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                     save_progress_state(state_dir, bot, state)
                     offset = new_off
                     hwm_save(offset)
+                    last_error_signature = None
             elif _has_pending(state) and clock() - state["last_flush"] >= coalesce_sec:
                 await drain_batch([], state=state, coalesce_sec=coalesce_sec, clock=clock,
                                   on_ask=on_ask, on_resume=on_resume, **deps)
                 save_delivery_state(state_dir, bot, state.get("pending_docs") or [])
                 save_progress_state(state_dir, bot, state)
-        except Exception:                            # noqa: BLE001 — drainer 绝不崩
+        except Exception as exc:                     # noqa: BLE001 — drainer 绝不崩
+            raw_error = re.sub(r"[\r\n\t]+", " ", str(exc)).strip()
+            error_digest = hashlib.sha256(raw_error.encode("utf-8")).hexdigest()[:12]
+            safe_internal_errors = {
+                "fragment 超出 CARD_BUDGET",
+                "answer_id ledger conflict",
+                "answer split policy conflict",
+                "answer fragment manifest conflict",
+                "pending doc delivery state is not durable yet",
+            }
+            error = (raw_error if raw_error in safe_internal_errors
+                     else f"internal error digest={error_digest}")
+            kind = state.get("_active_record_kind")
+            signature = (offset, kind, type(exc).__name__, error_digest)
+            if on_error is not None:
+                if signature != last_error_signature:
+                    try:
+                        on_error({
+                            "bot": bot,
+                            "offset": offset,
+                            "kind": kind,
+                            "error_type": type(exc).__name__,
+                            "error": error,
+                        })
+                    except Exception:                # noqa: BLE001 — observability 不能拖垮 drainer
+                        pass
+                    last_error_signature = signature
             await asleep(1.0)

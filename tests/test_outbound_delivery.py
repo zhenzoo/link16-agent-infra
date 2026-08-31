@@ -271,6 +271,25 @@ class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(texts, [("oc_group", "机器人", "ou_peer", provider_id)])
         self.assertEqual(fragment["fragment_id"], local_id)
 
+    def test_guard_metadata_is_preserved_in_receipt_and_outbound_ledger(self):
+        fragment = {
+            "answer_id": "a", "fragment_id": "f" * 64, "part": 1, "total": 2,
+            "content_sha256": "h", "split_policy": "answer-v2-target2790-guard10",
+            "render_target": 2790, "hard_budget": 2800,
+            "guard_used": True, "guard_chars": 1,
+        }
+        self.assertEqual(feishu_bridge._fragment_receipt(fragment)["guard_chars"], 1)
+        with mock.patch.object(
+            feishu_bridge.bridge_outbound, "append_delivery", return_value=True,
+        ) as append:
+            self.assertTrue(feishu_bridge._record_automatic_outbound(
+                "bot", {"kind": "p2a"}, "ou_owner", "answer", "om_1", fragment,
+            ))
+        kwargs = append.call_args.kwargs
+        self.assertTrue(kwargs["guard_used"])
+        self.assertEqual(kwargs["guard_chars"], 1)
+        self.assertEqual(kwargs["render_target"], 2790)
+
     async def test_group_progress_is_skipped_but_robot_prefixed_final_is_not(self):
         calls = []
         with mock.patch.object(
