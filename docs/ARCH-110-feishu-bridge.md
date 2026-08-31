@@ -211,7 +211,7 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
      - **🔒 turn cursor（2026-08-16 加 · 结构性防「整段历史重发」）**：Stop 每次只看 `行号 > cursor` 的记录，`cursor` = 上一次 Stop **真正取走正文的最后一行**（写在 `_state/bridge-stop-cursor-<bot>.json`·和 outbox 同目录·原子落盘·换 session 自动作废）。**anchor 只是「turn 从哪开始」的启发式，会随 Claude Code 记录形状变化失灵；cursor 是硬保证——上一次 Stop 扫过的正文，下一次结构上再也够不着。** 竞态超时（没等到终结态）那条路**不推进** cursor → 晚落盘的 wrap-up 下轮照样补发（自愈不破）。
      - **turn 边界判据（`_is_real_user_message`）只把「带 `sourceToolUseID` 的注入」排除在外**：`/loop` 定时开火与 a2a 注入（`isMeta:true` + `promptSource:"system"` + `queuePriority`，**无** `sourceToolUseID`）**是**真 turn 起点，必须推进 anchor；技能/工具注入（`Base directory for this skill:` 等·带 `sourceToolUseID`）不是。⚠️ 2026-06-21 那版写成「isMeta 一律不算边界」，把定时/a2a 两类真 turn 一起挡了 → anchor 冻在几十轮以前 → Stop 把这期间**所有** `end_turn` 收尾拼成一张越滚越大的卡、**每轮把全部历史重发一遍**（实证 tb24-voiceover 08-16 22:00 前后：anchor 冻在 L1210，收尾卡 1099 → 21176 字、连发 21 轮；主人只发了一句话，收到的是整条链的全量回放）。
   3. **PostToolUse / typed milestone producer**：Claude 保留 `bridge_posttool.py` transcript race-guard；普通 Codex 保留 compact PostToolUse。PLAN-915/916 canary 改由 app-server typed observer 写 `milestone-v1`，commentary 原文 + plan/collab 状态 + 相邻工具安全摘要；raw reasoning/command/output 只在内存中短暂出现并在写 ledger/outbox 前完成 allowlist 投影。
-  4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox → answer 按 route 立即发 interactive/text、progress 限流合并。answer 使用稳定 fragment ID + durable ACK，全部片段确认后才推进 HWM；`milestone-v1` 另持久化 message id、当前卡 event ids、acked revision 与 route。edit 失败/卡满时只从 dirty event 续，不复制旧 snapshot。**不再等 turn、不被任何长 turn 阻塞**。
+  4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox → answer 按 route 立即发 interactive/text、progress 限流合并。answer 使用稳定 fragment ID + durable ACK，全部片段确认后才推进 HWM；长答案按半开区间切分。新 answer 正常只用 2790 字符，2800 是硬上限，中间 10 字符只作异常 guard。首次发网前把无正文分片 manifest 落 answer-state，重启按 manifest 原样补片，不重新猜边界。`milestone-v1` 另持久化 message id、当前卡 event ids、acked revision 与 route。edit 失败/卡满时只从 dirty event 续，不复制旧 snapshot。**不再等 turn、不被任何长 turn 阻塞**。
 - **SSOT / 隔离**：hook 只写 outbox 文件（**不碰飞书凭据**）；唯一持飞书 WS + 凭据的是桥进程；outbox **单写（hook）单读（drainer）**。
 - **⚠️ 过渡铁律**：hook 只在会话 **spawn 那一刻**（`--settings`）挂上 → **重启桥不会给已在跑的旧会话补 hook**。新会话自动带 v8；已在跑的会话（旧桥裸 ccp 起的）要 **respawn**（`/close`+re-@ 或自然重启）才获 v8 auto-mirror（总控下次巡航自动获得）。
 - _(jsonl 钉死 / 唤醒判别那套是 v7 防串台机制·v8 outbound 已不依赖 jsonl·现仅 `/screen`、`cmd_doctor` 显示用·`on_message` 里 re-pin 循环标 vestigial·下轮清理删)_
@@ -248,8 +248,9 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 - **病（实证 2026-06-29 夜）**：DNS 抽了约 2 分钟，drainer 发卡撞 `getaddrinfo failed`；但旧逻辑「读一条 → 发一条 → **不管成没成都推 HWM（书签）+ 标 sent**」→ 那几条（含注册链接）被**跳过、再不回头**，网络恢复也不补。WS（入站）本就自动重连、**你发的我始终收得到**；丢的只在**出站**。
 - **当前修法（2026-08-26 取代 `sent + partial`）**：answer 先生成稳定 `answer_id/fragment_id`，每片取得 message_id 后立刻写 durable ACK；任一片失败即 `RetrySend` 且不推 HWM，重启只补未 ACK 片。ask 仍用兼容 partial 状态。
 - **不再超时放弃**：旧 `GIVE_UP_SEC=600` 会把未送达 answer 当成功推进 HWM，已删除。永久错误保持可见 backlog，交给 doctor/人工修复，绝不静默丢答案。
+- **永久逻辑异常不再静默**：仍保持 drainer 不崩、HWM 不推进，但按实际出错 record 写一次 `bot/offset/kind/error_type/error`；未知异常只留 digest，不落正文或 secret。同一错误签名在 HWM 未变化时去重，防毒记录每轮刷日志。
 - **`_send_plain` 返回送达布尔**（True=发出 / False=失败），drainer 据此判要不要重试。**progress** 仍 best-effort（临时进度·可丢，不 hold 队列）。
-- **验**：隔离测试（注入断网通断 + 假时钟驱动真 `outbox_drainer`）4 场景全过——断网 2 轮→恢复补发恰 1 次 / 一直在线正常发 / 恢复后多轮不重复 / 永久错到点放弃解堵。
+- **验**：网络场景继续覆盖断网恢复补发、在线恰一次与恢复后不重复；逻辑异常另用临时 outbox 注入连续两轮同一 poison，证明 HWM 前进 `0B`、实际 kind 正确、未知错误不泄正文且日志回调只触发一次。
 
 ---
 
@@ -287,11 +288,11 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 - **进度卡（原地长大 + 满则轮换）**：PostToolUse hook 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**——你看到的是**同一张卡在长大**（实时显示 💭思考 / 📝文字 / ✏️📖🔧 全工具 + 头部 🔧/💭/🪙 计数）。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随【信息量】有界增长，**不随时间线性刷屏**。
 - **Codex milestone 工具摘要（PLAN-916）**：commentary 保持原样；每个相邻工具段集总为“实际调用次数 + 工具/运行时类别 + 访问/修改/新增路径”。路径仓库相对化、每组最多 5 个，超出显示“另有 N 个”；只读段明确写“修改：无”。header 显示“计划完成度 + 实际工具次数”，不暴露内部里程碑/工具段计数。完整命令、参数、输出、绝对路径和 reasoning 不进入任何持久层或卡片。
-- **答案卡（同款·超长拆连续多卡）**：Stop/typed final 把该轮最终回复写 outbox；drainer **>2800 字无损拆成带 part/total 的连续多卡**，不附隐藏推理或工具流水账。
+- **答案卡（同款·超长拆连续多卡）**：Stop/typed final 把该轮最终回复写 outbox；新 answer 超过正常 target `2790` 即无损拆成带 part/total 的连续多卡。`回复 i/N` 标题计入 target；`2800` hard limit 前的 10 字符不分给正文，只容纳 splitter 的小幅异常并强制留 `guard_chars` 回执。首次发送前持久化 fragment manifest，重启只补 manifest 中未 ACK 的片；旧 state 无 manifest 时按 legacy 2800 规则回填。不附隐藏推理或工具流水账。
 - **逐级降级（始终同一个目标）**：interactive 创建失败或返回空 message_id 时降级为同目标 text；text 仍失败则保留 outbox/HWM 等待重试，**不退群 webhook**。
   > **2026-08-30 主人拍板：兜底通道整条拆除**（`_webhook_fallback` / `notify.py` / 看门狗 `notify_webhook` 全部删除）。理由：兜底给失败开了条特殊通道，让「没送到」长得像「送到了」——taoci-7 刷群 767 条、洪水时医生朝着被关键词校验拒收 748 次的群喇叭喊「需人工」，主人 42 分钟一无所知。发不到主人自己会察觉，届时直接找 link16 或上机器看。
 - **发出前链接检查（PLAN-921）**：卡片、markdown/text 兜底与群纯文字共用 `outbound_links.sanitize_outbound_links`。本地绝对路径、`/D:/...`、`file:///`、UNC、仓库相对路径从 Markdown 链接解除，改成“标签 + 明文代码路径”；普通行内网页链接不动；独占一行的外链及飞书 docx / Cloudflare Pages 会另露原始 URL。代码区、锚点和图片 Markdown 保持既有语义。处理幂等，多级 fallback 重跑不会重复加 URL。
-- **drainer deps**（注入·见 `feishu_bridge.run()`）：`new_card(text,route,purpose,fragment)`（按 route 发 interactive/text）· `edit_card(mid,text)->bool`（DM progress 原位更新）· `send_plain(...)`（同目标 text fallback）。`coalesce_sec` 只作相邻 progress update 的批量间隔，answer 轮换只靠容量与逐片 ACK。
+- **drainer deps**（注入·见 `feishu_bridge.run()`）：`new_card(text,route,purpose,fragment)`（按 route 发 interactive/text）· `edit_card(mid,text)->bool`（DM progress 原位更新）· `send_plain(...)`（同目标 text fallback）· `on_error(event)`（per-bot 脱敏逻辑异常）。`coalesce_sec` 只作相邻 progress update 的批量间隔，answer 轮换只靠容量与逐片 ACK。
 - **裸 URL 自动 `_linkify`** 成 `[url](url)` 可点（飞书卡片不自动 linkify 裸网址）。
 - **🔒 机械闸 `_seal_bare_urls`（2026-06-24）**：卡片路径走 `_linkify` 已包链接·**但 `guaranteed_send`(markdown/text 必达兜底/镜像直发) 不经 `_linkify`** → 裸 URL 紧贴 CJK/全角时飞书**原生 autolink 贪婪**把后续中文整段吞进 href（实证：`https://x.com/…872（中文…)` 渲成一整条超链接·href 里 `%EF%BC%88…`）。修：在**最低发送收口 `_send_checked`**（覆盖 guaranteed_send 的 markdown+text）+ `_send_group_text`（a2a 群）对 payload 跑 `_seal_bare_urls`——裸 URL 紧跟非 ASCII 时插一个空格强制 autolink 在 URL 真末尾终止（只在该精确危险态触发·8 例单测过·URL 本身不改·已 `[](){}` 包的靠负 lookbehind 跳过）。软规则（链接单独成行）只是兜底·这道闸才是确定性保证。**改桥代码需重启桥才生效**（别在活会话中途重启）。
 
@@ -310,6 +311,7 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
   | `[id] 已注入 pty=… pinned=有/无` | 已把话发进 bot 会话；`pinned` = 这会话的 jsonl 是否已钉死 |
   | `[id] 📌 钉定 transcript …xxx.jsonl` | （首轮/换会话）探测并钉死了它自己的 jsonl |
   | `[id] 回复 <谁> via=card/markdown/text/failed stream_ok=… len=… 耗时` | 最终怎么发出去、走第几级、多少字、花多久 |
+  | `drainer logic error offset=… kind=… <type>: <digest>` | outbox 队头逻辑异常；HWM 未推进，同一签名只记一次 |
 
 - **怎么一眼判断健不健康**：
   - 正常 = 看到「收到 → 已注入 →（必要时📌钉定）→ 回复 via=…」闭环。

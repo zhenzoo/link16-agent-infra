@@ -3,6 +3,13 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.20.1 — 跨机诊断与 Outbox 长答案分片边界恢复（2026-08-31）
+
+- **CROSS-MACHINE**：看门狗 `_holds` 的 cron 统计改用本机 roster 过滤，避免 tuf19 把 tb24 的定时任务误判成自己手上的活；Codex loopback 代理排查改以进程真实 established 连接为机械判据，兼容 Windows 用户变量与 Git Bash 小写环境变量两种来源。
+- **WHY**：`tb26-baseball-2` 的 PLAN-220 最终答案完整写入 outbox 后没有发起任何飞书请求。根因是换行恰落正文 capacity 右边界时，`_split_exact` 把半开区间写成 `end + 1`，生成 2801 字符渲染卡并在发送前抛错；drainer 又静默吞掉逻辑异常，HWM 永久停在毒记录前。
+- **WHAT**：分片换行搜索恢复为 `[start,end)`；新 answer 使用 `2790` 正常目标和不可越过的 `2800` 硬上限，中间 `10` 字符只允许 splitter 异常使用并显式留痕。第一次发网前持久化无正文 fragment manifest，重启按原边界补缺片；无 policy 的旧 ACK 继续按 legacy 2800 重建。drainer 同时对实际出错 record 产生一次脱敏 `bot/offset/kind/error_type/error-digest` 事件，坚持不跳记录、不推进 HWM。
+- **VERIFY**：PLAN-991 evaluator baseline `29/29`，旧右边界、取消 guard、放宽 hard limit 三种 mutation 全被判红；focused `62 passed + 16 subtests`，历史 `290/290`，全仓 `484 passed + 35 subtests`，编译与 diff check 均通过。按用户授权只重启 `tb26-baseball-2` bridge 后，HWM 从 `15059781` 追到 EOF、backlog=`0B`；PLAN-220 `3/3` 片均获真实 message_id，ledger 重复 fragment=`0`，飞书 API 回读到三张连续卡。terminal worker、observer、workspace/PTY 与其它 bot 均未重启。
+
 ## v0.20.0 — 速记员与主讲人分家（2026-08-31）
 
 - Codex 回程的观察者从 worker 的一个线程搬进独立进程。此前观察者与 TUI 同属一个进程，导致「回程坏了要重启回程」在拓扑上等于「掐掉主人正在用的会话」；拆开后回程可以随时单独重启，主讲人一动不动。`observer_command()` 是速记员启动方式的唯一真源，worker 起它、人工重挂、测试拼它都只经过这一处。
