@@ -3,6 +3,14 @@
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.21.0 — 可见长任务、跨 Runtime 恢复与同 profile Worker（2026-09-02）
+
+- **WHY**：长任务恢复后，飞书侧一度只看到连续思考摘要，缺少带绝对 ETA 的 Stage/Step 计划、绿黄红交付状态和逐步产物；旧 `find-session` 只覆盖 Claude 路径，独立 wmux 面板也没有同账号继承、写入边界和精确关闭合同，容易恢复错会话或让并行写者互撞。
+- **LIVE PROGRESS**：将 Stage/Step、绝对 ETA、完成时间、状态圆点和产物就绪事件固化为真实结构化进度；进度正文不再混入原始工具参数或虚假本地链接。新增机器级产物交付策略：本地绝对路径始终可见，在线飞书链接由显式全局开关控制，附件只在用户明确要求原文件时发送。
+- **SESSION RECOVERY**：Link16 profile registry 成为 Claude/Codex 会话发现的唯一账号目录，核心 profile `cc/ccp/ccp2/cxp/cx` 优先，机器上不存在的可选 profile 优雅跳过；`session-xray` 可合并 Codex typed timeline 与 Link16 投递账本，并区分原始正文、转发引用和工具回显。
+- **WMUX WORKER**：新增 profile-locked 独立 Worker 入口。新面板只能继承主 Session 的精确 `LINK16_AGENT_PROFILE`，创建前过 registry doctor，pane metadata 记录账号，跨 profile 复用直接失败；任务合同同时声明写入所有权，避免主会话与 Worker 同写同一产物。
+- **VERIFY**：Link16 全仓 `391 passed`；个人配置侧 resolver `14/14`、session-xray `6/6`、profile governance `10/10`，六个相关 Skill 均通过结构校验。真实 Baseball 原句跨核心 profile 回放正确返回原始 Codex session `01a0558f-30e1-7c90-bca1-c2668ab03228`，不再被新会话工具回显抢占。
+
 ## v0.20.1 — 跨机诊断与 Outbox 长答案分片边界恢复（2026-08-31）
 
 - **CROSS-MACHINE**：看门狗 `_holds` 的 cron 统计改用本机 roster 过滤，避免 tuf19 把 tb24 的定时任务误判成自己手上的活；Codex loopback 代理排查改以进程真实 established 连接为机械判据，兼容 Windows 用户变量与 Git Bash 小写环境变量两种来源。

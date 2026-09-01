@@ -1,0 +1,824 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#eef2f7">
+  <title>Link16 · 飞书实时进度卡 Mockup</title>
+  <style>
+    :root {
+      --canvas: #eef2f7;
+      --surface: #ffffff;
+      --surface-soft: #f7f9fc;
+      --text: #18233a;
+      --muted: #5f6f89;
+      --subtle: #8996aa;
+      --border: #dce3ed;
+      --border-soft: #e9edf3;
+      --brand: #1456f0;
+      --brand-soft: #edf3ff;
+      --success: #16855b;
+      --success-soft: #eaf8f2;
+      --warning: #9a6500;
+      --warning-soft: #fff6dc;
+      --danger: #c43f3f;
+      --shadow: 0 24px 70px rgba(31, 50, 82, .14), 0 2px 8px rgba(31, 50, 82, .06);
+      --fast: 140ms;
+      --normal: 220ms;
+      --ease: cubic-bezier(.2, 0, 0, 1);
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--canvas); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        linear-gradient(90deg, rgba(20, 86, 240, .035) 1px, transparent 1px),
+        linear-gradient(rgba(20, 86, 240, .035) 1px, transparent 1px),
+        var(--canvas);
+      background-size: 32px 32px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, a { touch-action: manipulation; }
+    button:focus-visible, a:focus-visible, summary:focus-visible {
+      outline: 3px solid rgba(20, 86, 240, .28);
+      outline-offset: 3px;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 42px 0 56px;
+    }
+
+    .page-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 28px;
+      margin-bottom: 22px;
+    }
+
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 790px;
+      margin: 0;
+      font-size: clamp(27px, 3.2vw, 42px);
+      line-height: 1.08;
+      letter-spacing: -.025em;
+      overflow-wrap: anywhere;
+      text-wrap: balance;
+    }
+
+    .head-note {
+      margin: 0 0 3px;
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: .015em;
+      white-space: nowrap;
+    }
+
+    .stage {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 285px;
+      align-items: start;
+      gap: 20px;
+    }
+
+    .chat-window {
+      min-width: 0;
+      overflow: hidden;
+      background: #f5f6f8;
+      border: 1px solid #d7dde7;
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .chat-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 52px;
+      padding: 0 18px;
+      background: rgba(255, 255, 255, .94);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .chat-name { font-size: 14px; font-weight: 650; }
+    .local-badge {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+
+    .chat-body { padding: 24px; }
+
+    .message-row {
+      display: grid;
+      grid-template-columns: 36px minmax(0, 1fr);
+      align-items: start;
+      gap: 11px;
+    }
+
+    .avatar {
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      color: #fff;
+      background: var(--brand);
+      border-radius: 9px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .04em;
+    }
+
+    .card {
+      min-width: 0;
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 5px 16px rgba(31, 50, 82, .07);
+    }
+
+    .card-status {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      padding: 16px 18px 14px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .card-status::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: var(--brand);
+    }
+
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+    }
+
+    .live-dot {
+      position: relative;
+      flex: 0 0 auto;
+      width: 9px;
+      height: 9px;
+      background: var(--success);
+      border-radius: 50%;
+    }
+
+    .live-dot::after {
+      content: "";
+      position: absolute;
+      inset: -4px;
+      border: 1px solid rgba(22, 133, 91, .28);
+      border-radius: 50%;
+      animation: pulse 1.8s var(--ease) infinite;
+    }
+
+    .status-title {
+      overflow: hidden;
+      font-size: 16px;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .update-time {
+      color: var(--subtle);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: .015em;
+      white-space: nowrap;
+    }
+
+    .eta-band {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      background: var(--surface-soft);
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .eta-cell { padding: 15px 18px 14px; }
+    .eta-cell + .eta-cell { border-left: 1px solid var(--border-soft); }
+    .eta-label {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+
+    .eta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 7px;
+    }
+
+    .eta-item {
+      min-width: 0;
+      padding: 7px 8px;
+      background: var(--surface);
+      border: 1px solid var(--border-soft);
+      border-radius: 7px;
+    }
+
+    .eta-level { display: block; color: var(--subtle); font-size: 10px; }
+    .eta-value {
+      display: block;
+      margin-top: 2px;
+      color: var(--text);
+      font-size: 17px;
+      font-weight: 760;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -.015em;
+      transition: color var(--normal) var(--ease), transform var(--normal) var(--ease);
+    }
+
+    .eta-value.changed { color: var(--brand); transform: translateY(-1px); }
+    .eta-reason {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .content { padding: 18px; }
+
+    .focus {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      gap: 10px 14px;
+      margin-bottom: 16px;
+    }
+
+    .focus-key {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .focus-value {
+      min-width: 0;
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+      text-wrap: pretty;
+    }
+
+    .next-value { color: #104bc9; font-weight: 650; }
+
+    .progress-track {
+      height: 6px;
+      overflow: hidden;
+      margin: 0 0 18px;
+      background: #e7ebf1;
+      border-radius: 999px;
+    }
+
+    .progress-fill {
+      width: 24%;
+      height: 100%;
+      background: var(--brand);
+      border-radius: inherit;
+      transition: width 420ms var(--ease);
+    }
+
+    .events {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .event {
+      position: relative;
+      display: grid;
+      grid-template-columns: 48px 13px minmax(0, 1fr);
+      gap: 8px;
+      min-height: 38px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .event + .event { margin-top: 3px; }
+    .event-time { padding-top: 1px; font-variant-numeric: tabular-nums; }
+    .event-mark {
+      position: relative;
+      width: 9px;
+      height: 9px;
+      margin-top: 5px;
+      background: #aab5c5;
+      border: 2px solid var(--surface);
+      border-radius: 50%;
+      box-shadow: 0 0 0 1px #aab5c5;
+    }
+
+    .event:not(:last-child) .event-mark::after {
+      content: "";
+      position: absolute;
+      top: 10px;
+      left: 2px;
+      width: 1px;
+      height: 30px;
+      background: #dce2eb;
+    }
+
+    .event.latest { color: var(--text); }
+    .event.latest .event-mark { background: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+    .event-body strong { color: var(--text); font-weight: 680; }
+    .event-body { min-width: 0; overflow-wrap: anywhere; }
+    .event-new { animation: event-in 240ms var(--ease) both; }
+
+    .artifact {
+      display: none;
+      margin-top: 16px;
+      padding: 14px 0 0;
+      border-top: 1px solid var(--border-soft);
+    }
+
+    .artifact.visible { display: block; animation: event-in 240ms var(--ease) both; }
+    .artifact-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      color: var(--success);
+      font-size: 13px;
+      font-weight: 720;
+    }
+
+    .artifact-icon {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .artifact-title { margin-bottom: 9px; font-size: 14px; font-weight: 680; }
+    .artifact-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+    .artifact-action {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 0 10px;
+      color: var(--brand);
+      background: var(--surface);
+      border: 1px solid #c7d3e7;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 680;
+      text-decoration: none;
+    }
+
+    .artifact-action.primary { color: #fff; background: var(--brand); border-color: var(--brand); }
+    .artifact-action:hover { border-color: var(--brand); }
+    .artifact-path-note {
+      margin-top: 8px;
+      color: var(--subtle);
+      overflow-wrap: anywhere;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    details {
+      margin-top: 15px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border-soft);
+    }
+
+    summary {
+      width: fit-content;
+      color: var(--subtle);
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1.4;
+      list-style: none;
+    }
+
+    summary::-webkit-details-marker { display: none; }
+    summary::before { content: "+"; display: inline-block; width: 16px; font-weight: 800; }
+    details[open] summary::before { content: "−"; }
+    .tool-detail {
+      margin: 8px 0 0 16px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-height: 42px;
+      padding: 0 18px;
+      color: var(--muted);
+      background: var(--surface-soft);
+      border-top: 1px solid var(--border-soft);
+      font-size: 12px;
+    }
+
+    .continuing { display: flex; align-items: center; gap: 7px; }
+    .continuing::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      background: var(--success);
+      border-radius: 50%;
+    }
+
+    .side {
+      padding: 5px 0 0;
+    }
+
+    .side h2 {
+      margin: 0 0 14px;
+      font-size: 16px;
+      letter-spacing: -.01em;
+    }
+
+    .principles {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid #cfd7e3;
+    }
+
+    .principles li {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr);
+      gap: 10px;
+      padding: 15px 0;
+      border-bottom: 1px solid #cfd7e3;
+    }
+
+    .principle-num {
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 760;
+      letter-spacing: .06em;
+    }
+
+    .principle-title { margin-bottom: 3px; font-size: 13px; font-weight: 700; }
+    .principle-copy { color: var(--muted); font-size: 12px; line-height: 1.55; }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .control {
+      min-height: 38px;
+      padding: 0 13px;
+      color: var(--text);
+      background: var(--surface);
+      border: 1px solid #cfd7e3;
+      border-radius: 7px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 680;
+      transition: background-color var(--fast) var(--ease), border-color var(--fast) var(--ease), transform 90ms var(--ease);
+    }
+
+    .control:hover { background: #f7f9fc; border-color: #b6c1d1; }
+    .control:active { transform: scale(.98); }
+    .control.primary { color: #fff; background: var(--brand); border-color: var(--brand); }
+    .control.primary:hover { background: #0f49d4; border-color: #0f49d4; }
+
+    .note {
+      margin-top: 15px;
+      color: var(--subtle);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    @keyframes event-in {
+      from { opacity: 0; transform: translateY(-5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: .25; transform: scale(.78); }
+      50% { opacity: .85; transform: scale(1.08); }
+    }
+
+    @media (max-width: 860px) {
+      .shell { width: min(100% - 24px, 680px); padding-top: 24px; }
+      .page-head { align-items: start; flex-direction: column; gap: 10px; }
+      .stage { grid-template-columns: 1fr; }
+      .side { padding-top: 8px; }
+    }
+
+    @media (max-width: 520px) {
+      body { overflow-x: hidden; }
+      .chat-body { padding: 14px 10px 18px; }
+      .local-badge { display: none; }
+      .message-row { grid-template-columns: 30px minmax(0, 1fr); gap: 8px; }
+      .avatar { width: 30px; height: 30px; border-radius: 8px; font-size: 10px; }
+      .card-status { grid-template-columns: 1fr; gap: 4px; padding: 14px 15px 12px; }
+      .update-time { padding-left: 18px; }
+      .eta-band { grid-template-columns: 1fr; }
+      .eta-cell + .eta-cell { border-top: 1px solid var(--border-soft); border-left: 0; }
+      .content { padding: 15px; }
+      .focus { grid-template-columns: 1fr; gap: 3px; }
+      .focus-value + .focus-key { margin-top: 8px; }
+      .card-foot { align-items: start; flex-direction: column; gap: 4px; padding: 10px 15px; }
+      .head-note { white-space: normal; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="page-head">
+      <div>
+        <p class="eyebrow">Link16 progress experience · local mockup</p>
+        <h1>不再汇报“用了什么工具”，而是持续回答：做到哪、何时交、交了什么。</h1>
+      </div>
+      <p class="head-note">本地演示 · 不修改生产桥</p>
+    </header>
+
+    <section class="stage" aria-label="实时进度卡效果">
+      <div class="chat-window">
+        <div class="chat-bar">
+          <span class="chat-name">tb26-link16</span>
+          <span class="local-badge">Feishu DM preview</span>
+        </div>
+        <div class="chat-body">
+          <div class="message-row">
+            <div class="avatar" aria-hidden="true">L16</div>
+            <article class="card" aria-label="智能体实时进度">
+              <header class="card-status">
+                <div class="status-line">
+                  <span class="live-dot" aria-hidden="true"></span>
+                  <span class="status-title" id="statusTitle">执行中 · S1/3 · 对照真实记录</span>
+                </div>
+                <time class="update-time" id="updateTime">21:48 更新</time>
+              </header>
+
+              <section class="eta-band" aria-label="绝对预计完成时间">
+                <div class="eta-cell">
+                  <span class="eta-label">总体 ETA</span>
+                  <div class="eta-grid">
+                    <span class="eta-item"><span class="eta-level">总计划</span><strong class="eta-value" id="planEta">22:05</strong></span>
+                    <span class="eta-item"><span class="eta-level">当前 P0</span><strong class="eta-value" id="p0Eta">22:05</strong></span>
+                  </div>
+                  <div class="eta-reason" id="etaReason">首次估计 · 17 分钟</div>
+                </div>
+                <div class="eta-cell">
+                  <span class="eta-label">当前执行 ETA</span>
+                  <div class="eta-grid">
+                    <span class="eta-item"><span class="eta-level">Stage</span><strong class="eta-value" id="stageEta">21:58</strong></span>
+                    <span class="eta-item"><span class="eta-level">Step</span><strong class="eta-value" id="stepEta">21:55</strong></span>
+                  </div>
+                  <div class="eta-reason" id="nextReason">下一交付：21:55 · 对照结论</div>
+                </div>
+              </section>
+
+              <div class="content">
+                <div class="focus">
+                  <div class="focus-key">正在做</div>
+                  <div class="focus-value" id="doingText">回看 baseball 最新 session，找出“看得到活动、看不到推进”的具体时间段。</div>
+                  <div class="focus-key">刚完成</div>
+                  <div class="focus-value" id="doneText">已找回被关闭会话与 PLAN-220 接手点。</div>
+                  <div class="focus-key">接下来</div>
+                  <div class="focus-value next-value" id="nextText">给出真实对照结论；不中断，随后继续做卡片。</div>
+                </div>
+
+                <div class="progress-track" aria-label="阶段进度">
+                  <div class="progress-fill" id="progressFill"></div>
+                </div>
+
+                <ol class="events" id="events" aria-live="polite" aria-label="最新进展">
+                  <li class="event latest">
+                    <time class="event-time">21:48</time>
+                    <span class="event-mark" aria-hidden="true"></span>
+                    <span class="event-body"><strong>开始：</strong>先追回关闭会话，再做本地 mockup。</span>
+                  </li>
+                </ol>
+
+                <section class="artifact" id="artifact" aria-label="中间产物">
+                  <div class="artifact-head">
+                    <svg class="artifact-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="m9 15 2 2 4-4"/></svg>
+                    中间产物已可检查 · 任务继续执行
+                  </div>
+                  <div class="artifact-title">飞书实时进度卡 · 本地交互 mockup</div>
+                  <div class="artifact-actions">
+                    <span class="artifact-action primary">在线副本：全局开关 off</span>
+                    <span class="artifact-action">系统默认应用：已打开</span>
+                  </div>
+                  <div class="artifact-path-note">本地路径：C:\410_VibeCoding\Post\link16-agent-infra\docs\mockups\feishu-live-progress-card.html</div>
+                </section>
+
+                <p class="tool-detail" id="toolSummary">工具 7 次（只保留计数，明细不进入卡片正文）</p>
+              </div>
+
+              <footer class="card-foot">
+                <span class="continuing">仍在继续，不需要回复“继续”</span>
+                <span id="scheduleLine">下次更新：21:55 或产物提前完成时</span>
+              </footer>
+            </article>
+          </div>
+        </div>
+      </div>
+
+      <aside class="side" aria-label="设计说明">
+        <h2>这张卡只保留 5 件事</h2>
+        <ol class="principles">
+          <li>
+            <span class="principle-num">01</span>
+            <div><div class="principle-title">当前动作</div><div class="principle-copy">一句话说清正在解决什么，不贴命令流水账。</div></div>
+          </li>
+          <li>
+            <span class="principle-num">02</span>
+            <div><div class="principle-title">四级绝对 ETA</div><div class="principle-copy">总计划、P0、Stage、Step 先显示具体完成点；分钟范围只作补充，并随新证据前移或后移。</div></div>
+          </li>
+          <li>
+            <span class="principle-num">03</span>
+            <div><div class="principle-title">增量事实</div><div class="principle-copy">有真实变化才增加一行；用户看到卡片生长，就知道任务在推进。</div></div>
+          </li>
+          <li>
+            <span class="principle-num">04</span>
+            <div><div class="principle-title">中间产物即刻交付</div><div class="principle-copy">本地路径始终出现；只有全局开关开启或本轮明确要求时才增加在线链接。</div></div>
+          </li>
+          <li>
+            <span class="principle-num">05</span>
+            <div><div class="principle-title">工具退出正文</div><div class="principle-copy">只保留调用总数；命令、文件活动和路径留在本地审计记录。</div></div>
+          </li>
+        </ol>
+        <div class="controls">
+          <button class="control primary" id="replayButton" type="button">重播动态更新</button>
+          <button class="control" id="advanceButton" type="button">下一条</button>
+        </div>
+        <p class="note">自动演示只播放一轮。真实产品中不按固定分钟刷屏：发生判断变化、完成可看产物，或预计完成点需要调整时才更新。</p>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const snapshots = [
+      {
+        time: '21:48', title: '执行中 · S1/3 · 对照真实记录',
+        planEta: '22:05', p0Eta: '22:05', stageEta: '21:58', stepEta: '21:55',
+        eta: '首次估计 · 17 分钟', nextTime: '21:55', nextReason: 'baseball 进度卡对照结论',
+        doing: '回看 baseball 最新 session，找出“看得到活动、看不到推进”的具体时间段。',
+        done: '已找回被关闭会话与 PLAN-220 接手点。',
+        next: '给出真实对照结论；不中断，随后继续做卡片。', progress: 24,
+        schedule: '下次更新：21:55 或产物提前完成时', tools: '工具 7 次（只保留计数，明细不进入卡片正文）',
+        event: ['21:48', '<strong>开始：</strong>先追回关闭会话，再做本地 mockup。'], artifact: false
+      },
+      {
+        time: '21:54', title: '执行中 · S1/3 · 参考已锁定',
+        planEta: '22:08', p0Eta: '22:08', stageEta: '22:02', stepEta: '21:58',
+        eta: '发现 4 轮只有工具流水账 · +3 分钟', nextTime: '21:58', nextReason: '卡片内容骨架',
+        doing: '把 baseball 的真实缺口改写成卡片信息顺序：进度、绝对完成点、下一产物优先。',
+        done: '确认 18:58—19:16 连续更新没有可审阅产物与时间预估。',
+        next: '完成卡片骨架并开始动态状态演示。', progress: 45,
+        schedule: '下次更新：21:58 · 内容骨架完成', tools: '工具 18 次（只保留计数，明细不进入卡片正文）',
+        event: ['21:54', '<strong>判断更新：</strong>问题不是“没有活动”，而是活动没有变成主人能审阅的节点。'], artifact: false
+      },
+      {
+        time: '21:59', title: '执行中 · S2/3 · 本地页面成形',
+        planEta: '22:04', p0Eta: '22:04', stageEta: '22:01', stepEta: '21:59',
+        eta: '复用现有卡片结构 · 提前 4 分钟', nextTime: '21:59', nextReason: 'HTML 已可本地查看',
+        doing: '检查动态更新、移动端折行与低动态偏好。',
+        done: '卡片主层级与自动演示已经完成。',
+        next: '立即交付绝对路径；继续做浏览器审计。', progress: 78,
+        schedule: '下次更新：审计完成或预计完成点再变化时', tools: '工具 24 次（只保留计数，明细不进入卡片正文）',
+        event: ['21:59', '<strong>产物完成：</strong>本地 HTML 已生成，先交给主人看；任务继续做审计。'], artifact: true
+      },
+      {
+        time: '22:03', title: '执行中 · S3/3 · 最终审计',
+        planEta: '22:04', p0Eta: '22:04', stageEta: '22:04', stepEta: '22:04',
+        eta: '仍按 22:04 完成 · 约 1 分钟', nextTime: '22:04', nextReason: '验收结论与是否进入正式实施',
+        doing: '回读页面与绝对路径，准备对齐结论。',
+        done: '绝对完成点、增量行、中间产物和折叠工具活动均已验证。',
+        next: '请主人只判断：这个卡片节奏是不是你要的。', progress: 96,
+        schedule: '下次更新：22:04 · mockup 收尾', tools: '工具 29 次（只保留计数，明细不进入卡片正文）',
+        event: ['22:03', '<strong>审计通过：</strong>信息增长可见，预计完成点有理由地变化，中间产物不等最终。'], artifact: true
+      }
+    ];
+
+    const $ = (id) => document.getElementById(id);
+    const els = {
+      statusTitle: $('statusTitle'), updateTime: $('updateTime'),
+      planEta: $('planEta'), p0Eta: $('p0Eta'), stageEta: $('stageEta'), stepEta: $('stepEta'),
+      etaReason: $('etaReason'), nextReason: $('nextReason'),
+      doingText: $('doingText'), doneText: $('doneText'), nextText: $('nextText'),
+      progressFill: $('progressFill'), events: $('events'), artifact: $('artifact'),
+      toolSummary: $('toolSummary'), scheduleLine: $('scheduleLine')
+    };
+
+    let index = 0;
+    let timer = null;
+
+    function setChanged(el) {
+      el.classList.remove('changed');
+      void el.offsetWidth;
+      el.classList.add('changed');
+      window.setTimeout(() => el.classList.remove('changed'), 650);
+    }
+
+    function render(snapshot, appendEvent = true) {
+      const previousPlanEta = els.planEta.textContent;
+      const previousStepEta = els.stepEta.textContent;
+      els.statusTitle.textContent = snapshot.title;
+      els.updateTime.textContent = `${snapshot.time} 更新`;
+      els.planEta.textContent = snapshot.planEta;
+      els.p0Eta.textContent = snapshot.p0Eta;
+      els.stageEta.textContent = snapshot.stageEta;
+      els.stepEta.textContent = snapshot.stepEta;
+      els.etaReason.textContent = snapshot.eta;
+      els.nextReason.textContent = `下一交付：${snapshot.nextTime} · ${snapshot.nextReason}`;
+      els.doingText.textContent = snapshot.doing;
+      els.doneText.textContent = snapshot.done;
+      els.nextText.textContent = snapshot.next;
+      els.progressFill.style.width = `${snapshot.progress}%`;
+      els.toolSummary.textContent = snapshot.tools;
+      els.scheduleLine.textContent = snapshot.schedule;
+      els.artifact.classList.toggle('visible', snapshot.artifact);
+
+      if (previousPlanEta !== snapshot.planEta) setChanged(els.planEta);
+      if (previousStepEta !== snapshot.stepEta) setChanged(els.stepEta);
+
+      if (appendEvent && index > 0) {
+        els.events.querySelectorAll('.event').forEach((item) => item.classList.remove('latest'));
+        const item = document.createElement('li');
+        item.className = 'event latest event-new';
+        item.innerHTML = `<time class="event-time">${snapshot.event[0]}</time><span class="event-mark" aria-hidden="true"></span><span class="event-body">${snapshot.event[1]}</span>`;
+        els.events.appendChild(item);
+      }
+    }
+
+    function reset() {
+      window.clearInterval(timer);
+      index = 0;
+      els.events.innerHTML = '<li class="event latest"><time class="event-time">21:48</time><span class="event-mark" aria-hidden="true"></span><span class="event-body"><strong>开始：</strong>先追回关闭会话，再做本地 mockup。</span></li>';
+      render(snapshots[0], false);
+    }
+
+    function advance() {
+      if (index >= snapshots.length - 1) return false;
+      index += 1;
+      render(snapshots[index], true);
+      return true;
+    }
+
+    function play() {
+      reset();
+      timer = window.setInterval(() => {
+        if (!advance()) window.clearInterval(timer);
+      }, 3200);
+    }
+
+    $('replayButton').addEventListener('click', play);
+    $('advanceButton').addEventListener('click', () => {
+      window.clearInterval(timer);
+      advance();
+    });
+
+    play();
+  </script>
+</body>
+</html>

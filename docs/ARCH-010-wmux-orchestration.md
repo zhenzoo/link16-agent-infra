@@ -17,7 +17,7 @@ read_when:
   - 改动 wmux_session.py 或任何面板驱动逻辑
   - 面板起不来 / 判活不准需要定位
   - 评估某个 wmux 新 API 能不能用
-last_reviewed: 2026-08-26
+last_reviewed: 2026-09-01
 ---
 # WMUX 多窗口编排 · 交接文档（成功方案 + 失败记录）
 
@@ -26,13 +26,13 @@ last_reviewed: 2026-08-26
 >
 > **🔄 UPDATE 2026-06-08 晚(wmux 升 2.17.1）**：本文下面的失败记录是 **wmux 2.9.1** 上的。**升到 2.17.1 后核心 bug 已修**：git bash 面板里现在**有** `WMUX_WORKSPACE_ID`（实测非空 `ws-fc5b37fd-…`）→ § 2 那道 "Workspace identity unknown" 闸，**原生 in-pane MCP `terminal_*` 现可过**。两个新注意点：① **MCP 路径含版本号**——下文出现的 `app-2.9.1` 现一律应读作 `app-2.17.1`；wmux 升级会让旧路径失效、wmux 只自动重指 `~/.claude.json`，`~/.claude-personal/.claude.json` 要手动重指。② **`wmux-rpc.js` 在 2.17.1 daemon 上仍照常工作**，且免身份免 MCP，仍是最稳的外部驱动路。
 >
-> **🔒 ACTIVE OVERRIDE 2026-07-31**：本文的裸 `ccp` 示例只代表 2026-06 历史实验，不能再用于生产。当前账号 SSOT = [`ARCH-120`](ARCH-120-agent-profile-runtime.md)：独立 pane 必须继承父 session 的 `LINK16_AGENT_PROFILE`，只经 `agent_profile_cli.py` 或内容仓 `spawn_worker.py` 启动；缺变量在 split 前失败。
+> **🔒 ACTIVE OVERRIDE 2026-09-01**：本文的裸 `ccp` 示例只代表 2026-06 历史实验，不能再用于生产。当前账号 SSOT = [`ARCH-120`](ARCH-120-agent-profile-runtime.md)：通用独立 pane 只经 `feishu/wmux_worker.py` 启动；内容仓可以封装自己的业务 lease，但仍须复用 Link16 profile CLI 与同等 metadata/profile 闸。独立 pane 必须继承父 session 的 `LINK16_AGENT_PROFILE`，缺失或 doctor 不健康时在任何 wmux 读取/改动前失败。
 
 ---
 
 ## 0. TL;DR（给下一个 Claude 的 30 秒须知）
 
-- 🚨 **最重要 · 必读 §8（确切信号）**：`read` 读屏对【刚 spawn 的空闲面板】**不可靠**——只返回 banner、读不到 `❯`，**但面板其实活着**（`LEN=46` 只 banner ≠ 死）。**判面板死活用 `spawn_worker.py probe`、派活用 `kickoff`（验 spinner）·别拿空闲 read 当心跳**（2026-06-25 巡航 P169 假「卡死」血泪：误判一整夜、还白清了 Chrome）。
+- 🚨 **最重要 · 必读 §8（确切信号）**：`read` 读屏对【刚 spawn 的空闲面板】**不可靠**——只返回 banner、读不到 `❯`，**但面板其实活着**（`LEN=46` 只 banner ≠ 死）。通用任务用 `feishu/wmux_worker.py probe/kickoff/status`：判活看 marker、派活看 spinner、完成看 receipt；内容仓 wrapper 只能在这套信号上增加业务合同，不能退回空闲 read 猜状态。
 - **目标**：在 wmux 多 pane 中运行 Claude/Codex，由 orchestrator 程序化读屏、派活和收结果；每个独立 worker 与主 session 使用同一个 Link16 profile。
 - **已跑通**：wmux RPC 负责 pane I/O，Link16 public launcher 负责 profile/runtime/home；两层不互相猜账号。
 - **没跑通**：wmux 自带的 **MCP `terminal_*` 工具**，全报 `Workspace identity unknown`（缺 env `WMUX_WORKSPACE_ID`）。
@@ -123,8 +123,10 @@ node wmux-rpc.js split-here [vertical|horizontal] [--ws <wsId>]   # 默认 verti
 1. `workspace.focus <我自己>` → 把我变成全局活动；
 2. `workspace.current` 确认真成了我 → 关掉「focus 和 split 之间被抢焦点」的窗口；
 3. `pane.split` → 此刻劈的就是我自己；
-4. diff `workspace.list` 验证新 pty 确实落在我 workspace；
-5. 万一被抢、落到别人那 → 只给「我刚建的那个」新 pty `send "exit"` 清掉，重试（≤ 4 次）。
+4. 用各 workspace 的 `surface.list({workspaceId})` 做前后 diff，验证新 pty 确实落在我 workspace；
+5. 万一被抢、且只观察到一个明确 stray → 只给「我刚建的那个」新 pty `send "exit"` 清掉，最多重试一次；看不到新 surface 或同时出现多个新 pane 时立即失败，不再 split。
+
+> **wmux 3.46 实测订正（2026-09-01）**：`workspace.list.ptyIds` 在 `pane.split` 后可能短暂返回旧值。旧算法会误判“没有新 pane”并连续重试，实测一次制造 4 个空白 pane。当前算法改用 `surface.list({workspaceId})` 交叉观察；若 split 返回后约 3 秒仍看不到新 surface，立即失败且**不再 split**；若同时出现多个新 pane，因所有权不明确也立即失败且不清理/重试。真实 `cxp` smoke test 已证明单次创建、metadata claim、kickoff、receipt 与精确 close 全链路通过。
 
 > 为什么不用 `workspace.new` 开新 workspace：那会多出一个独立窗口；我们要的是 worker **就在当前 workspace 里、视觉上嵌一起**。`split-here` 满足这点且 race-safe。永久干净解 = 等 openwong2kim/wmux#236（让 `pane.split` 认 `workspaceId`），届时连 focus 都不用。
 
@@ -144,28 +146,38 @@ env 可覆盖：`WMUX_AUTH_TOKEN` / `WMUX_SOCKET_PATH` / `WMUX_WS`(workspaceId)�
 
 ## 4. Worker 启动 + 派活 playbook
 
-**0. 先建面板**（没有空闲面板时 · 总控在自己 workspace 自拆）：
+生产入口是 `feishu/wmux_worker.py`；它把 profile、workspace、pane metadata、写入所有权和完成 receipt 绑成一个合同。先只读预演，再启动：
+
 ```powershell
-node wmux-rpc.js split-here vertical          # ✅ 同 workspace · race-safe → 打印 {workspaceId, pty}
-# ❌ 别用裸 `rpc pane.split`：只劈全局活动面板、多 bot 会串台，已被硬闸拦（见 § 3 / § 3.1）
+python feishu/wmux_worker.py plan --id stage-3-research --cwd <repo> `
+  --allow-write research/stage-3 --deny-write docs/PRD-010.md `
+  --receipt research/stage-3/worker-receipt.json
+python feishu/wmux_worker.py start --id stage-3-research --cwd <repo> `
+  --allow-write research/stage-3 --deny-write docs/PRD-010.md `
+  --receipt research/stage-3/worker-receipt.json
 ```
-**起一个 worker**：首选目标内容仓自己的 `spawn_worker.py`，它会在 split 前 fail closed 并记录 profile metadata。只有诊断时才手工启动：
+
+`start` 内部执行 `profile doctor → command → split-here → metadata claim → TUI ready`；profile 缺失/未知/不健康、路径重叠或 worker ID 已占用时在 split 前失败。不要手工启动生产 Worker；下面的裸 RPC 只用于诊断底层：
+
 ```powershell
 node wmux-rpc.js send <pty> 'python "$LINK16_AGENT_INFRA_ROOT/feishu/agent_profile_cli.py" run --profile "$LINK16_AGENT_PROFILE" --cwd "$PWD"'
 node wmux-rpc.js key  <pty> enter
 # ready/needs-trust 必须继续调用同一 profile CLI；不得用固定 Claude banner 判断 Codex
 ```
-**派活**：
+
+**派活与收结果**：
+
 ```powershell
-node wmux-rpc.js send  <pty> "写 P134"
-node wmux-rpc.js key   <pty> enter
+python feishu/wmux_worker.py kickoff --id stage-3-research --task-file <task.md>
+python feishu/wmux_worker.py status --id stage-3-research
+python feishu/wmux_worker.py close --id stage-3-research
 ```
-**收结果**：`node wmux-rpc.js read <pty> 30`（轮询；判活看屏幕内容变化，别用固定 sleep 瞎等）。
 
 **注意事项**：
-- 起 worker 前先 `read <pty>` 确认是干净提示符，别往运行中的进程里乱打字。
-- 派纯文字问题不会触发权限弹窗；让 worker 跑工具（Bash/Edit）首次可能弹权限——届时按需 `send` 选项 + `enter`，或预先在该 worker 里配好权限。
-- worker #1 起来后我测过一句问答，正式用前可让它 `/clear`。
+- `kickoff` 前按 state + metadata 精确定位 Worker，不复用未知 pane；长任务用 `--task-file`。
+- Worker 只写 `--allow-write`，不写 `--deny-write` 与未声明路径；主 Session 是共享 PLAN/PRD/架构 SSOT 的默认单写者。
+- 完成只认结构化 receipt；主 Session 回读、验收、整合并更新 Living Plan，Worker 不自行宣称共享 Stage 完成。
+- 内容仓可在通用入口上增加自己的 role/lease/业务 marker，但不得复制或绕开 profile registry、`split-here` 和跨 workspace 守卫。
 
 ---
 
@@ -211,18 +223,18 @@ node wmux-rpc.js key   <pty> enter
 ### 8.3 确切信号分级（从今往后照这个判）
 | 要判断 | ❌ 坏信号（别用） | ✅ 确切信号（用这个） |
 |---|---|---|
-| 面板**活没活** | 看空闲屏有没有 `❯` | **side-effect 探针**：`python _autopilot/spawn_worker.py probe <pty>` —— 发一句让它 `echo x > 文件` + enter，poll 文件出现没。**文件系统不说谎。** |
-| 派活**送达没** | 看屏里有没有我的任务文本 | **kickoff 验 spinner**：`python _autopilot/spawn_worker.py kickoff <pty> "写 PNN"` —— send+enter 后 poll 到 spinner = 送达开跑。 |
-| 某阶段**完成没** | 猜 / 读屏 | **确定性 marker 文件**：`PNN-ready.md` / `revised.md` / `needs-human.md`（poll 文件 · 流水线本来就这么判） |
+| 面板**活没活** | 看空闲屏有没有 `❯` | **side-effect 探针**：`python feishu/wmux_worker.py probe --id X` —— 让目标 Worker 写唯一 marker，poll 文件出现没。**文件系统不说谎。** |
+| 派活**送达没** | 看屏里有没有我的任务文本 | **kickoff 验 spinner**：`python feishu/wmux_worker.py kickoff --id X --task-file task.md` —— paste+enter 后 poll 到 spinner = 送达开跑。 |
+| 某阶段**完成没** | 猜 / 读屏 | **结构化 receipt**：`python feishu/wmux_worker.py status --id X` 回读 receipt；内容仓可在此基础上增加业务 marker。 |
 | 忙面板**还在跑没** | — | 直接 `read`——**生成中的 read 可靠**（读得到 `✶ …(Ns · ↑tokens)` spinner；`Cogitated for 3h` 是【已完成】的过去式总结、不是 spinner） |
 
 ### 8.4 正确协议
-- **起写帖 worker + 派活**：`spawn-writer PNN` → **`kickoff <pty> "写 PNN"`**（别先拿空闲 read 判 `❯`、别因 `tui_ready:false` 就 close+respawn）。`spawn-writer` 现在见 `tui_ready:false` 会在返回 JSON 里直接提示「不代表死·用 probe/kickoff」。
-- **怀疑某面板死了**：先 `probe <pty>`。`alive:true` → 它活着、继续用；`alive:false`（超时 marker 没出）→ 才考虑 close+respawn。
+- **起通用 Worker + 派活**：`plan → start → kickoff`（别先拿空闲 read 判 `❯`、别因 `tui_ready:false` 就 close+respawn）。内容仓 wrapper 仍可把这三步封装成 `spawn-writer PNN` 等业务命令。
+- **怀疑某面板死了**：先 `probe --id X`。`alive:true` → 它活着、继续用；`alive:false`（超时 marker 没出）→ 才考虑精确 `close --id X` 后重建。
 - **绝不**：把空闲 banner read（`LEN` 小、无 `❯`）当死亡证明；send 任务后因为 read 没显示文本就不敢 enter。
 
-### 8.5 工具（`_autopilot/spawn_worker.py` · 已实测 2026-06-25）
-- `probe <pty>` → `{"alive": true/false, "evidence": …}`（写 marker 验·绕开不可靠的 read）。
-- `kickoff <pty> "<任务>"` → `{"delivered": true/false, "evidence": …}`（send+enter+验 spinner）。
-- 这两条把「判死活 / 派活」从**靠记忆 + 手搓 read 判断**变成**确定性命令**——别再手搓 read 去猜面板状态。
-- 底层：probe 用 `_send`+`_key`+poll marker；kickoff 用 `_send`+`_key`+poll `_is_generating()`（spinner 检测）。
+### 8.5 工具（`feishu/wmux_worker.py` · 2026-09-01 提拔为通用入口）
+- `probe --id X` → `{"alive": true/false, "marker": …}`（写唯一 marker 验，绕开不可靠的 idle read）。
+- `kickoff --id X --task-file task.md` → `{"delivered": true/false, "evidence": …}`（paste+enter+验 spinner）。
+- `status --id X` → pane metadata + receipt 状态；完成语义不再绑某个内容仓的 `PNN-ready.md`。
+- 底层仍复用 2026-06-25 已实证的 `_send`/`_key`/marker/spinner 原理；Tennis/XHS 的 `spawn_worker.py` 保留业务 role、lease 和内容 marker，不再是通用入口。

@@ -11,10 +11,12 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
+| `feishu/artifact_delivery.py` | **本机全局产物交付策略 SSOT**：只决定是否允许创建飞书在线副本；默认 off，所有 Link16 profile/bot 共读。绝对路径始终显示、附件仍需明确授权、GUI 打开仍由 `$open-local` 决定；`send --doc` / 在线媒体在网络前执行失败闸 | `status [--json]`；`set-online on|off`；`decide --explicit auto|online|local [--json]` |
 | `feishu/feishu_bridge.py` | **双向桥主进程**：N 个 bot 长连接，@bot→注入对应 wmux 会话 / 回传 v8（hook→outbox→drainer）· `send`/`status`/`stop`/`doctor` | `python feishu/feishu_bridge.py`（=start 全部）/ `stop`（停全部）· **单个 bot 加 `--bot X`**：裸命令 `--bot X`=只起/刷新它、`stop --bot X`=只停它（不碰别的 bot·2026-07-03） |
 | `feishu/cron.py` ⭐⭐ | **主人自己开关定时任务的入口（复选菜单）**：一条命令列出全舰队定时任务，↑↓ 选、空格勾开 / 勾关、`f` 立刻跑一次、回车保存 —— **不用喊 agent 代跑 enable/disable**。写回 `cron-jobs/<bot>.yaml`，守护进程热读、免重启；关时自动记下「主人手动关·非故障」，开时清掉过期的停用说明。真控制台走单键，MinTTY / git-bash 自动退回「敲序号」行输入模式 | `python feishu/cron.py`（菜单）· 带参数则透传给 `bridge_cron.py`（如 `python feishu/cron.py board`） |
 | `feishu/bridge_cron.py` ⭐ | **给智能体排定时任务（CRON·闹钟 vs 大脑）**：到点把一句触发词注入某 bot 会话（大脑=该 bot 自己仓的 SOP·`route=p2a` 回主人）· **载体=每 bot 一个 `feishu/cron-jobs/<bot>.yaml`（专属划分·别混·bot 名=文件名）** + 旧 `cron-jobs.json` 向后兼容 · 守护进程**只真触发本机名册里的 bot**（多机同读一份不撞·零硬编码 host）· 热读免重启 · 随整体 `start`/`stop` 起停（不重启任何 bot 桥）· 详见 `docs/ARCH-150` | `python feishu/bridge_cron.py board`（总览）· `menu`（复选菜单·门面见上面 `cron.py`）· `add --bot X --name N --cron "0 9 * * *" --sop <仓内SOP>` · `rm`/`enable`/`disable`/`list [--bot X]`/`fire <name> --dry-run`/`start`/`stop` |
 | `feishu/wmux_session.py` | 桥的 wmux 会话原语：spawn 新 workspace、执行 registry 派生的 profile command、pty_alive 探活 / close | （库 · 桥内部用） |
+| `feishu/wmux_worker.py` | **通用独立 Worker 面板入口**：严格继承主 Session 的 `LINK16_AGENT_PROFILE`，在同一 workspace race-safe `split-here`；以 metadata 锁定 profile/worker/cwd/workspace，以 allow/deny 路径阻止多写者冲突，并提供 `plan/start/kickoff/probe/status/close` 与结构化 receipt | 先 `plan --id X --cwd <repo> --allow-write <path> --deny-write <ssot>`；通过后同参 `start`；再 `kickoff --id X --task-file <prompt>`；完成看 `status`，最后 `close --id X` |
 | `feishu/bridge_outbox.py` | **v8 回传唯一发送引擎 drainer**：增量读 outbox → 按 route 发卡片/文字；长答案稳定分片并逐片 ACK，重启只补缺片；进度限流合并；持久化本轮在线文档并在 final 列出原始 docx URL | （桥 runner 起的后台 task） |
 | **`/handoff`（飞书里发）** ⭐ | **`/close` 的进阶版：换一个全新 context，但让它先读懂历史再跟你对齐**。关掉当前会话 → **账号和目录都不变** → 起一个全新会话 → 自动注入 prompt 让它：读上一轮 transcript（先读尾部·禁止通读）+ **重点看最后几轮那份还没定的方案** + **调研 code base**（不只读聊天记录）→ 汇报「原任务/已完成/停在哪/哪些还没定」→ **停下等你提新需求**。启动按 runtime 使用独立窗口；失败 pane 关闭前保存有界现场，`/screen` 仍能查看；旧会话已关但新会话失败时，6 小时内再次发 `/handoff` 会复用原交接包重试。 | 在飞书里 @ 该 bot 发 `/handoff`（或 `/交接`） |
 | `feishu/bridge_watchdog.py` ⭐ | **看门狗（全机 agent 会话保活 + 撞额度上限自动换号接手）**：每 120s 扫【全部 workspace 全部面板】，按**规则表**处理各类中断——R1 API错→注「继续」· R2 撞限流→查额度选号→换号→把原任务交接给新会话 · R3 停在 picker→什么都不做 · R4 桥死→告警。**随桥整体 start/stop 起停**（没有自己的计划任务→跨机零路径问题）。详见 `docs/ARCH-160` | `python feishu/bridge_watchdog.py status [--verbose]`（在看护几个面板/上次巡检/注入记录+跨机自检）· `failover --bot X [--to <profile>] [--dry-run]`（手动换号·破坏性·先预演） |
@@ -42,13 +44,14 @@
 | `feishu/capability_probe.py` | **按能力实测每只 bot 能不能做，并从飞书报错里挖出【可替代权限清单】**（解析 99991672 的 `One of the following scopes is required:`）。区分 `denied(scope)` 与 `denied(resource:*)`；默认跳过会生成云端资源的上传探针，必须显式允许 | `python feishu/capability_probe.py --doc <token> --media <token>`；`--alternatives`；`--allow-upload-probes`；`--json` |
 | `feishu/bridge_feishu_probe.py` ⭐ | **飞书 API 调试探针**：读各 bot 真实消息历史 / 验真送达 / **一步读 a2a 群**（`--group`/`--chat`·不绕 DM·ARCH-140 §4 兜底读） | `python feishu/bridge_feishu_probe.py --all --recent 3` / `--bot X --verify "片段"` / `--bot X --group --recent 5` |
 | `feishu/bridge_history.py` ⭐ | **查某只 bot 的完整本地收发时间线**：入站读 durable ledger；自动/主动出站合并 outbox + `bridge-outbound` ledger + receipts。只按非空 message_id 去重，同文不同 message_id 不误吞；分片按 part/total 可追查 | `python feishu/bridge_history.py --bot X --recent 40 --full [--feishu]` |
-| `feishu/feishu_docs.py` | `send --doc` 底层：Markdown/TXT 原生 docx 优先，HTML/Office import；在线失败自动由同一 bot 发原文件附件。`file-as-text` 永不自动使用 | `python feishu/feishu_bridge.py send --bot X --doc <file>`；正文进聊天框必须显式 `--file-as-text <file>` |
+| `feishu/feishu_docs.py` | `send --doc` 底层：先过 `artifact_delivery.py` 全局策略闸，再按 Markdown/TXT 原生 docx、HTML/Office import；在线失败如实失败，绝不自动发本地原文件附件 | 全局 on：`python feishu/feishu_bridge.py send --bot X --doc <file>`；当前轮明确要求在线稿：追加 `--explicit-online` |
 | `feishu/send_feishu_msg.py` ⭐ | 主动发**纯文字 + @人/@bot**；发送前检查 active turn，目标等于本轮自动回址时在网络前拒绝，防“手动一次 + 自动一次”。成功写 unified outbound ledger；真正额外通知才加 `--proactive`。发 peer 仍是 ARCH-140 的唯一主动路 | `python feishu/send_feishu_msg.py --bot X --to-agent Y --text "..." [--proactive]` |
 | `feishu/send_feishu_file.py` ⭐ | 发**文件本体**附件 | `python feishu/send_feishu_file.py --bot X --to oc_群 --file <f>` |
 | `feishu/send_feishu_voice.py` ⭐ | 发**可拖进度条语音**（带 duration） | `python feishu/send_feishu_voice.py --bot X --audio <a> --text "说明"` |
-| `feishu/send_feishu_media.py` ⭐ | 发**图/视频/媒体在线看**链接（嵌 docx·同走 `feishu_docs`·链接同样默认任何人可看） | `python feishu/send_feishu_media.py --bot X --media <m> --title "..."` |
+| `feishu/send_feishu_media.py` ⭐ | 发**图/视频/媒体在线看**链接（嵌 docx·同走 `feishu_docs`）；网络前服从全局在线产物开关 | 全局 on：`python feishu/send_feishu_media.py --bot X --media <m> --title "..."`；当前轮明确要求在线稿：追加 `--explicit-online` |
 | `feishu/feishu_rest.py` | 飞书 REST 原语（api/tenant_token/send_msg · 纯标库绕代理） | （feishu_docs/media/voice 内部用） |
-| `feishu/agent-profiles.local.json` · `feishu/agent_profile_cli.py` · `feishu/agent_runtime.py` | 本机 effective profile registry（gitignored）+ 公共 launcher：主 session/独立 wmux worker 都只传 `LINK16_AGENT_PROFILE`，由 registry 派生 runtime/home/driver；`agent-profiles.example.json` 是新机 schema，committed `agent-profiles.json` 仅作旧机迁移期 fallback | `python feishu/agent_profile_cli.py list`；`doctor --profile <profile>`；`run --profile <profile> --cwd <repo>` |
+| `feishu/agent-profiles.local.json` · `feishu/agent_profile_cli.py` · `feishu/agent_runtime.py` | 本机 effective profile registry（gitignored）+ 公共 launcher：主 session/独立 wmux worker 都只传 `LINK16_AGENT_PROFILE`，由 registry 派生 runtime/home/driver；`session_search.preferred_profiles` 是历史 Session 首轮搜索集合的唯一真源；`agent-profiles.example.json` 是新机 schema，committed `agent-profiles.json` 仅作旧机迁移期 fallback | `python feishu/agent_profile_cli.py list`；`doctor --profile <profile>`；`run --profile <profile> --cwd <repo>` |
+| `$find-session` · `$session-xray` | 用户级跨 Runtime 恢复链：前者用原话定位 Claude/Codex Session，后者对白盒时间线、工具、协作与 Link16 投递证据分源复盘。默认先查 registry 指定的 `cc / ccp / ccp2 / cxp / cx`；没有原始正文命中才回退其他已注册且本机存在的 profile | `python "$HOME/.claude-personal/skills/find-session/scripts/find_session.py" "<原话>" --show 1`；`python "$HOME/.claude-personal/skills/session-xray/xray.py" <session-id> --out <report.md>` |
 | `feishu/bridge_env.py` | 跨机路径解析（.env/名册/wmux-rpc） | （库） |
 
 > 🧭 **喊别的 bot 被拒「没有它的飞书凭据…拒绝猜」时怎么办**（2026-08-20 实证 · tb25↔tuf19）
@@ -68,7 +71,7 @@
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
 | `wmux/wmux-rpc.js` | **wmux daemon JSON-RPC 客户端**（带 token+workspaceId·免 MCP 身份闸）：`panes`/`surfaces`/`read`/`send`/`key`/`enter`/`split-here`/`close`/`rpc` · 裸 `pane.split` 已禁 | `node wmux/wmux-rpc.js read <pty>` / `send <pty> "..."` / `close <pty> --allow-ws <id>` |
-| probe / kickoff / spinner 原语 | **确切信号**：判面板死活靠 side-effect 探针、派活靠验 spinner、不信空闲 banner read | 待从 xhs `spawn_worker.py` 提拔进本包 · 现暂在 xhs · 见 `docs/ARCH-010 §8` |
+| `feishu/wmux_worker.py probe/kickoff/status` | **通用确切信号**：判面板死活靠 side-effect marker，派活靠 spinner，完成靠结构化 receipt；不信空闲 banner read | `python feishu/wmux_worker.py probe --id X` / `kickoff --id X --task-file task.md` / `status --id X` · 见 `docs/ARCH-010 §8` |
 
 > ⚠️ **xhs 巡航专属、不在本仓**：`spawn_worker.py`（写帖角色/lease/N+3）、`check_pane_layout.py`——那些是 xhs 自己的工作负载、只是用 wmux，留在 xhs。
 > （`watchdog.py` 是**半个例外**：代码在 xhs，但它的**限流自愈**职责是全机的 → 见下面「机器级常驻服务」。）

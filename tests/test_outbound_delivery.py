@@ -91,12 +91,12 @@ class OutboundLinkTests(unittest.TestCase):
 
     def test_local_markdown_targets_become_visible_non_links(self):
         cases = {
-            "[PLAN](D:/repo/PLAN.md)": "PLAN — `D:/repo/PLAN.md`",
-            "[PLAN](/D:/repo/PLAN.md)": "PLAN — `D:/repo/PLAN.md`",
-            "[PLAN](file:///D:/repo/PLAN.md)": "PLAN — `D:/repo/PLAN.md`",
-            "[PLAN](docs/PLAN.md)": "PLAN — `docs/PLAN.md`",
-            "[share](\\\\server\\share\\x.md)": "share — `\\\\server\\share\\x.md`",
-            "[share](//server/share/x.md)": "share — `//server/share/x.md`",
+            "[PLAN](D:/repo/PLAN.md)": "PLAN — D:/repo/PLAN.md",
+            "[PLAN](/D:/repo/PLAN.md)": "PLAN — D:/repo/PLAN.md",
+            "[PLAN](file:///D:/repo/PLAN.md)": "PLAN — D:/repo/PLAN.md",
+            "[PLAN](docs/PLAN.md)": "PLAN — docs/PLAN.md",
+            "[share](\\\\server\\share\\x.md)": "share — \\\\server\\share\\x.md",
+            "[share](//server/share/x.md)": "share — //server/share/x.md",
         }
         for source, expected in cases.items():
             with self.subTest(source=source):
@@ -131,13 +131,14 @@ class OutboundLinkTests(unittest.TestCase):
         self.assertIn("![alt](D:/image.png)", result)
         self.assertIn("[section](#part)", result)
         self.assertIn("https://example.com/a", result)
-        self.assertIn("`D:/repo/PLAN.md`", result)
+        self.assertIn("D:/repo/PLAN.md", result)
+        self.assertNotIn("`D:/repo/PLAN.md`", result)
 
     def test_card_linkify_applies_sanitizer_and_keeps_url_visible(self):
         result = feishu_bridge._linkify(
             "[PLAN](/D:/repo/PLAN.md)\nhttps://example.com/a"
         )
-        self.assertIn("PLAN — `D:/repo/PLAN.md`", result)
+        self.assertIn("PLAN — D:/repo/PLAN.md", result)
         self.assertIn("[https://example.com/a](https://example.com/a)", result)
 
 
@@ -161,7 +162,7 @@ class FallbackLinkTests(unittest.IsolatedAsyncioTestCase):
             channel, "ou_owner", payload, "bot", "markdown"
         )
         self.assertTrue(ok)
-        self.assertEqual(channel.payloads[0]["markdown"], "PLAN — `D:/repo/PLAN.md`")
+        self.assertEqual(channel.payloads[0]["markdown"], "PLAN — D:/repo/PLAN.md")
 
     async def test_text_fallback_exposes_delivery_url(self):
         channel = SuccessfulChannel()
@@ -428,42 +429,21 @@ class DocumentCommandHelpersTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--file-as-text"):
             feishu_bridge._read_send_text(legacy_file="answer.md")
 
-    def test_attachment_fallback_sends_one_real_file_payload(self):
-        sent = []
+    def test_send_doc_policy_gate_stops_before_bot_or_network_lookup(self):
+        blocked = feishu_bridge.artifact_delivery.OnlineArtifactDeliveryDisabled("off")
+        with mock.patch.object(feishu_bridge, "assert_sender_identity"), \
+                mock.patch.object(
+                    feishu_bridge.artifact_delivery,
+                    "require_online_publication",
+                    side_effect=blocked,
+                ), \
+                mock.patch.object(feishu_bridge, "load_bots") as load_bots:
+            with self.assertRaises(SystemExit) as stopped:
+                feishu_bridge.cmd_send("bot", "", doc="never-read.md")
+        self.assertEqual(stopped.exception.code, 3)
+        load_bots.assert_not_called()
 
-        class FakeMediaSource:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-
-        class FakeOutboundFile:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-
-        class FakeChannel:
-            async def send(self, target, payload):
-                sent.append((target, payload))
-                return types.SimpleNamespace(success=True)
-
-        fake_lark = types.SimpleNamespace(
-            MediaSource=FakeMediaSource,
-            OutboundFile=FakeOutboundFile,
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "deliverable.md"
-            source.write_text("# 原始文件", encoding="utf-8")
-            with mock.patch.dict(sys.modules, {"lark_channel": fake_lark}):
-                ok, error = asyncio.run(feishu_bridge._send_file_attachment(
-                    FakeChannel(), "ou_owner", source,
-                ))
-
-        self.assertTrue(ok)
-        self.assertIsNone(error)
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0][0], "ou_owner")
-        self.assertIsInstance(sent[0][1], FakeOutboundFile)
-        self.assertEqual(sent[0][1].kwargs["file_name"], "deliverable.md")
-
-    def test_send_doc_automatically_falls_back_to_attachment(self):
+    def test_send_doc_failure_never_falls_back_to_local_attachment(self):
         class FakeChannel:
             def __init__(self, **_kwargs):
                 pass
@@ -484,19 +464,20 @@ class DocumentCommandHelpersTests(unittest.TestCase):
                     mock.patch.object(feishu_bridge, "load_owner", return_value="ou_owner"), \
                     mock.patch.object(feishu_bridge, "_publish_online_doc",
                                       side_effect=RuntimeError("online denied")), \
-                    mock.patch.object(feishu_bridge, "_send_file_attachment",
-                                      new=mock.AsyncMock(return_value=(True, None))) as attach, \
                     mock.patch.object(feishu_bridge, "receipt"), \
                     mock.patch.object(feishu_bridge, "blog"), \
                     mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 with self.assertRaises(SystemExit) as stopped:
-                    feishu_bridge.cmd_send("bot", "", doc=str(source), as_json=True)
-        self.assertEqual(stopped.exception.code, 0)
+                    feishu_bridge.cmd_send(
+                        "bot", "", doc=str(source), as_json=True, online_override=True
+                    )
+        self.assertEqual(stopped.exception.code, 1)
         payload = json.loads(stdout.getvalue())
-        self.assertTrue(payload["delivered"])
-        self.assertEqual(payload["doc_delivery_mode"], "attachment")
-        self.assertTrue(payload["attachment_ok"])
-        attach.assert_awaited_once()
+        self.assertFalse(payload["delivered"])
+        self.assertFalse(payload["doc_ok"])
+        self.assertEqual(payload["doc_delivery_mode"], "online_doc_failed")
+        self.assertIsNone(payload["attachment_ok"])
+        self.assertIsNone(payload["attachment_error"])
 
     def test_text_document_reports_real_source_size(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -92,10 +92,6 @@ def _local_display(target: str) -> str:
     return shown
 
 
-def _inline_code(value: str) -> str:
-    return f"`` {value} ``" if "`" in value else f"`{value}`"
-
-
 def _is_delivery_url(url: str) -> bool:
     m = re.match(r"^https?://([^/?#]+)([^?#]*)", url, re.IGNORECASE)
     if not m:
@@ -149,7 +145,7 @@ def sanitize_outbound_links(text: str) -> str:
             label, raw_target = match.group(1), match.group(2)
             target = _target_core(raw_target)
             if _is_local(target):
-                return f"{label} — {_inline_code(_local_display(target))}"
+                return f"{label} — {_local_display(target)}"
             if _is_external(target) and label.strip() != target:
                 if _is_delivery_url(target) or _stands_alone(segment, match):
                     if target not in exposed:
@@ -158,7 +154,7 @@ def sanitize_outbound_links(text: str) -> str:
 
         segment = _MD_LINK_RE.sub(replace_link, segment)
         segment = _BARE_FILE_URI_RE.sub(
-            lambda m: _inline_code(_local_display(m.group(0))), segment
+            lambda m: _local_display(m.group(0)), segment
         )
         parts[index] = segment
 

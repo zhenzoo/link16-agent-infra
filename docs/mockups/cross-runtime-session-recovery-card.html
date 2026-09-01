@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Link16 · 跨 Runtime Session 恢复目标态</title>
+  <style>
+    :root {
+      --canvas:#edf1f7; --surface:#fff; --soft:#f7f9fc; --line:#dce3ed;
+      --text:#17233b; --muted:#62718a; --brand:#1456f0; --brand-soft:#edf3ff;
+      --green:#16855b; --green-soft:#eaf8f2; --yellow:#9a6500; --yellow-soft:#fff6dc;
+      --shadow:0 24px 70px rgba(31,50,82,.14),0 2px 8px rgba(31,50,82,.06);
+    }
+    *{box-sizing:border-box} body{margin:0;min-height:100vh;color:var(--text);background:var(--canvas);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    button{font:inherit} .shell{width:min(1060px,calc(100% - 32px));margin:auto;padding:34px 0 48px}
+    .head{display:flex;justify-content:space-between;align-items:end;gap:24px;margin-bottom:18px}
+    .eyebrow{margin:0 0 6px;color:var(--brand);font-size:12px;font-weight:800;letter-spacing:.08em}
+    h1{margin:0;font-size:clamp(25px,3vw,38px);line-height:1.1;letter-spacing:-.02em}
+    .note{margin:0;color:var(--muted);font-size:13px}.stage{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:18px}
+    .chat{overflow:hidden;background:#f4f6f9;border:1px solid #d5dce7;border-radius:17px;box-shadow:var(--shadow)}
+    .bar{height:52px;padding:0 17px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid var(--line)}
+    .bot{font-size:14px;font-weight:750}.local{font-size:11px;color:var(--muted);letter-spacing:.06em}.body{padding:22px}
+    .row{display:grid;grid-template-columns:36px minmax(0,1fr);gap:11px}.avatar{width:36px;height:36px;display:grid;place-items:center;background:var(--brand);color:#fff;border-radius:9px;font-weight:800;font-size:12px}
+    .card{overflow:hidden;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 5px 16px rgba(31,50,82,.07)}
+    .card-head{position:relative;padding:16px 18px 14px;border-bottom:1px solid #e9edf3}.card-head:before{content:"";position:absolute;inset:0 auto 0 0;width:4px;background:var(--green)}
+    .title-line{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:800}.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(22,133,91,.12)}
+    .subtitle{margin:7px 0 0 18px;color:var(--muted);font-size:12px}.content{padding:17px 18px 18px}
+    .query{padding:12px 13px;background:var(--soft);border:1px solid #e5eaf1;border-radius:9px;color:#33415a;font-size:13px;line-height:1.55}
+    .query b{color:var(--muted);font-size:11px;letter-spacing:.05em}.chips{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 14px}
+    .chip{padding:5px 8px;border-radius:999px;background:var(--brand-soft);color:#174bab;font-size:11px;font-weight:700}.chip.ok{background:var(--green-soft);color:var(--green)}
+    .best{border:1px solid #bfe7d5;border-radius:11px;background:linear-gradient(180deg,#fbfffd,#f3fbf7)}
+    .best-top{padding:12px 13px;display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #d9eee5}
+    .rank{font-size:13px;font-weight:800}.why{color:var(--green);font-size:11px;font-weight:750}.grid{display:grid;grid-template-columns:112px minmax(0,1fr);gap:8px 12px;padding:13px;font-size:12px}
+    .label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere;font-weight:650}.mono{font-family:"Cascadia Mono",Consolas,monospace;font-size:11px}
+    .actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:13px}.action{min-height:39px;border-radius:8px;border:1px solid #cfd9e8;background:#fff;color:#23416f;font-weight:750;cursor:pointer}
+    .action.primary{border-color:var(--brand);background:var(--brand);color:#fff}.receipt{margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--green-soft);color:#146d4c;font-size:12px;line-height:1.5}
+    details{margin-top:12px;border-top:1px solid #edf0f5;padding-top:11px}summary{cursor:pointer;color:#42516b;font-size:12px;font-weight:700}.other{margin-top:9px;padding:9px 10px;background:var(--soft);border-radius:8px;color:var(--muted);font-size:11px;line-height:1.55}
+    .rail{padding:16px;background:rgba(255,255,255,.8);border:1px solid var(--line);border-radius:14px}.rail h2{margin:0 0 11px;font-size:14px}.tabs{display:grid;gap:7px}.tab{padding:11px;border:1px solid var(--line);border-radius:9px;background:#fff;color:#44526b;text-align:left;cursor:pointer;font-weight:700}.tab.active{border-color:#9ebcff;background:var(--brand-soft);color:#174bab}.rule{margin:15px 0 0;padding-top:14px;border-top:1px solid var(--line);font-size:12px;line-height:1.6;color:var(--muted)}
+    .hidden{display:none}.metric-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}.metric{padding:10px 8px;text-align:center;background:var(--soft);border:1px solid #e6eaf1;border-radius:9px}.num{display:block;font-weight:850;font-size:16px}.cap{color:var(--muted);font-size:10px}.timeline{margin:11px 0 0;padding:0;list-style:none}.timeline li{position:relative;margin-left:5px;padding:0 0 11px 18px;border-left:1px solid #cad5e4;font-size:12px;line-height:1.45}.timeline li:before{content:"";position:absolute;left:-4px;top:4px;width:7px;height:7px;border-radius:50%;background:var(--brand)}
+    .toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,12px);padding:9px 13px;border-radius:8px;background:#17233b;color:#fff;font-size:12px;opacity:0;pointer-events:none;transition:.18s}.toast.show{opacity:1;transform:translate(-50%,0)}
+    @media(max-width:760px){.shell{width:min(100% - 20px,620px);padding-top:18px}.head{display:block}.note{margin-top:7px}.stage{grid-template-columns:1fr}.rail{order:-1}.tabs{grid-template-columns:1fr 1fr}.body{padding:14px}.row{grid-template-columns:30px minmax(0,1fr);gap:8px}.avatar{width:30px;height:30px}.grid{grid-template-columns:88px minmax(0,1fr)}.metric-row{grid-template-columns:1fr 1fr}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="head"><div><p class="eyebrow">PLAN-1010 · TARGET-STATE ACCEPTANCE PREVIEW</p><h1>改完以后，你在飞书里会直接收到这个</h1></div><p class="note">真实字段 · 真实排序理由 · 可续接 · 可深剖</p></header>
+    <section class="stage">
+      <div class="chat">
+        <div class="bar"><span class="bot">tb26-link16</span><span class="local">飞书 DM · 最终目标态</span></div>
+        <div class="body">
+          <div class="row"><div class="avatar">L16</div><div>
+            <article class="card" id="find-card">
+              <header class="card-head"><div class="title-line"><span class="dot"></span>Session 已定位</div><p class="subtitle">14:26 · 核心 profile 已命中原始正文，可选 profile 无需继续扫描</p></header>
+              <div class="content">
+                <div class="query"><b>检索原句</b><br>“我这次误用了历史的 tests/gen_compare_page.py，生成了两栏页……”</div>
+                <div class="chips"><span class="chip ok">5 个核心 profile</span><span class="chip">4 个 fallback 未扫描</span><span class="chip">Claude + Codex</span><span class="chip">同 session 已去重</span></div>
+                <section class="best">
+                  <div class="best-top"><span class="rank">最佳命中 · cxp / Codex</span><span class="why">原始 assistant 正文精确命中</span></div>
+                  <div class="grid">
+                    <span class="label">Session</span><span class="value mono">01a0558f-30e1-7c90-bca1-c2668ab03228</span>
+                    <span class="label">项目</span><span class="value">企业租户A-baseball</span>
+                    <span class="label">工作目录</span><span class="value mono">C:\410_VibeCoding\企业租户A\企业租户A-baseball</span>
+                    <span class="label">时间</span><span class="value">2026-08-31 10:04 → 2026-09-01 09:08</span>
+                    <span class="label">证据来源</span><span class="value">Codex rollout · 7 次正文命中 · Link16 ledger 可补计划事件</span>
+                  </div>
+                </section>
+                <div class="actions"><button class="action primary" data-copy="resume">复制正确账号续接命令</button><button class="action" data-tab="xray">查看 Session 白盒复盘</button></div>
+                <div class="receipt">🟢 已确认：原始 cxp 会话排第 1；本轮转发引用被降权；不会再只搜 Claude JSONL。</div>
+                <details><summary>其他 4 个候选（已折叠）</summary><div class="other">2. cxp / Codex · 当前转发引用 · 已降权<br>3. ccp / Claude · 工具输出引用<br>4. ccw2 / Claude · 历史摘要引用<br>5. cx / Codex · developer context 引用</div></details>
+              </div>
+            </article>
+            <article class="card hidden" id="xray-card">
+              <header class="card-head"><div class="title-line"><span class="dot"></span>Session 白盒复盘已完成</div><p class="subtitle">14:31 · Runtime transcript 与 Link16 delivery ledger 分开标注</p></header>
+              <div class="content">
+                <div class="query"><b>复盘对象</b><br><span class="mono">cxp · 01a0558f-30e1-7c90-bca1-c2668ab03228</span></div>
+                <div class="metric-row"><div class="metric"><span class="num">23m</span><span class="cap">实际执行</span></div><div class="metric"><span class="num">34</span><span class="cap">工具事件</span></div><div class="metric"><span class="num">6</span><span class="cap">计划变更</span></div><div class="metric"><span class="num">2</span><span class="cap">证据源</span></div></div>
+                <ul class="timeline"><li><b>07:54</b> 浅色 3D 方向锁定，专项检查通过。</li><li><b>08:03</b> 旧两栏生成器确认零调用并删除。</li><li><b>08:17</b> 三张棒球距离图完成复核，统一总览进入生成。</li><li><b>09:08</b> 会话关闭；剩余事项由 runtime plan 与 delivery ledger 共同恢复。</li></ul>
+                <div class="receipt">🟢 续接指针已生成：使用 cxp profile、原工作目录和原 Session ID；Claude-only 字段显示“不适用”，不伪造 token / hook 数据。</div>
+                <div class="actions"><button class="action primary" data-copy="report">复制复盘报告路径</button><button class="action" data-tab="find">返回定位结果</button></div>
+              </div>
+            </article>
+          </div></div>
+        </div>
+      </div>
+      <aside class="rail"><h2>目标态的两步体验</h2><div class="tabs"><button class="tab active" data-tab="find">① 找到原 Session</button><button class="tab" data-tab="xray">② 看完整进度与续接点</button></div><p class="rule"><b>验收不是“脚本支持 Codex”。</b><br>验收是你贴一句旧内容后，第一屏就看到正确原会话、为什么它排第一、在哪个 profile、怎样续接；再点一次看到完整时间线和剩余工作。</p></aside>
+    </section>
+  </main>
+  <div class="toast" id="toast">已复制</div>
+  <script>
+    const cards={find:document.querySelector('#find-card'),xray:document.querySelector('#xray-card')};
+    function show(which){Object.entries(cards).forEach(([k,v])=>v.classList.toggle('hidden',k!==which));document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===which));}
+    document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.tab)));
+    document.querySelectorAll('[data-copy]').forEach(b=>b.addEventListener('click',async()=>{const text=b.dataset.copy==='resume'?'python agent_profile_cli.py run --profile cxp --cwd "C:\\410_VibeCoding\\企业租户A\\企业租户A-baseball" -- resume 01a0558f-30e1-7c90-bca1-c2668ab03228':'C:\\410_VibeCoding\\Post\\link16-agent-infra\\_xray_01a0558f-30e1-7c90-bca1-c2668ab03228.md';try{await navigator.clipboard.writeText(text)}catch{}const t=document.querySelector('#toast');t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1200)}));
+  </script>
+</body>
+</html>

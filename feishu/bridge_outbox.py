@@ -801,7 +801,10 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             return 0
 
     def _v2_text(steps, snapshot=None):
-        labels = [str(step.get("label") or "").strip() for step in steps]
+        labels = [
+            str(step.get("label") or "").strip()
+            for step in steps if step.get("kind") != "tool"
+        ]
         labels = [label for label in labels if label]
         snapshot = snapshot or steps
         plan = next((step for step in reversed(snapshot) if step.get("kind") == "plan"), None)

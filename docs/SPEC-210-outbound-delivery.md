@@ -15,7 +15,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-08-31
+last_reviewed: 2026-09-01
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -30,7 +30,19 @@ last_reviewed: 2026-08-31
 
 目标字符串是否以 `oc_` 开头只决定 `receive_id_type`，不得决定格式。卡片失败可降级为文字，但 receipt 必须留下 `requested=interactive`、`via=text`、`degraded=true` 和原因；未取得 message_id 不得记成功。
 
-`purpose=progress` 与 `purpose=answer` 是显式字段。群 progress 的产品策略只依据 purpose，不得根据正文前缀猜测；以 `🤖` 等符号开头的 final 仍必须投递。隐藏推理、命令全文、tool input/output、secret 和绝对用户目录不得进入 final 或 progress 持久层。
+`purpose=progress` 与 `purpose=answer` 是显式字段。群 progress 的产品策略只依据 purpose，不得根据正文前缀猜测；以 `🤖` 等符号开头的 final 仍必须投递。隐藏推理、命令全文、tool input/output 和 secret 不得进入 final 或 progress 持久层。工具事件派生的路径仍只允许安全的仓库相对路径；唯一的绝对路径例外是 agent 在 owner `p2a` 正文中明确交付的、已核对存在的本地中间产物。该例外不得扩到 `p2a-ext`、`a2a` 或工具摘要。
+
+进行中卡的正文以 commentary/plan 的用户可见进展为主；`kind=tool` 的 label 不铺在卡片正文，只把实际工具总数保留在 header，本地 ledger 继续保存既有安全摘要供排障。`📋 当前计划` 只能来自真实 `kind=plan` / runtime plan event；renderer 禁止从 prose 猜计划。Codex 长任务使用 `update_plan`，Claude 长任务使用其 task/todo surface。
+
+普通 intent/investigation/rationale commentary 原样显示且不着色。Agent 显式给出的 `🟡` 只表示方向锁定或有证据的阶段结论，`🟢` 只表示通过所需验证的 Step/产物完成，`🔴` 表示真实 blocker、验收失败或紧急风险；renderer 原样保留，不自动补色或猜状态。Step 状态变化时 agent 先更新 runtime plan，再发结果回执；可审阅产物回执必须写明产物、验收状态和访问入口。只有思考与纯时长预估的消息不算 Step 更新或产物交付。
+
+“本地已打开”是 agent 执行结果，不是 outbound renderer 能推断的状态。有人直接参与的本机会话，或 owner `p2a` 明确要求当前任务自动打开时，agent 必须在发出每份产物的回执后立即用系统默认应用打开已核对的目标文件，再进入下一 Step；不得在最终阶段批量补。后台、cron、a2a 或无人值守任务未获得这条明确授权时只交付 URL/路径，不启动 GUI。
+
+总计划或当前全部 P0、当前 P0、当前 Stage、当前 Step 四级绝对 ETA 由 agent 以自然语言 commentary 提供，renderer 不反向解析、不新增 schema。用户可见格式先写 `ETA HH:mm（预计 HH:mm 完成）`；“约 8–12 分钟”只能括号补充，禁止只写纯时长。runtime plan 使用渐进展开：全部 Stage 按 `1 / 2 / 3`（或 PLAN 既有 `S1 / S2 / S3`）编号，各一条顶层项，写状态、明确对象、短目标/主要产物和 `实际完成 HH:mm` 或 `预计 HH:mm 完成`；只有当前 Stage 在其文本内按 `1.1 / 1.2` 缩进列出短 Step 及逐项时间，未来/已完成 Stage 不复制长 Step 正文。每一项必须脱离相邻文本也能说明“在改什么、交付什么”，不得只给 `resolver`、`清洁清单`、`白盒复盘` 等孤立内部名词。跨天写 `MM-DD HH:mm`。Agent 切换 Step、产出可审阅成果或重算 ETA 时发新 commentary，桥只负责原位增量更新。
+
+本地路径、在线副本、原文件附件和本地 GUI 打开是四个独立动作。可审阅产物回执始终显示一行普通可复制的本机绝对路径。是否创建在线副本只认 `feishu/artifact-delivery.local.json` 的本机全局值：文件缺失与 `online_artifacts=false` 都是 off；on 才允许 `send --doc` / 在线媒体链，用户本轮明确要求在线稿时可用 `--explicit-online` 单次覆盖但不得修改全局值。两个在线入口必须在网络请求前执行该闸。在线失败时如实返回，禁止自动把本地 HTML、Markdown、图片、视频、音频或其他原文件发进聊天。只有用户明确要求“附件”或“原文件”时，agent 才调用专用附件工具；在线 URL 成功、本地默认应用已打开，都不能外推出附件授权。
+
+本地 Markdown 链接、`file:///` 和 UNC 不得伪装为飞书可点击链接：sanitizer 解除链接并显示普通可复制路径，不使用代码块。只有 `http://`/`https://` 外链进入飞书链接语义；本地客户端未来若有可机械验证的能力，再另立合同启用。
 
 ## 2. Answer 与 fragment
 

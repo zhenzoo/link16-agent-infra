@@ -86,6 +86,35 @@ class CodexEventContractTests(unittest.TestCase):
         self.assertIn("✅ A", steps[0]["label"])
         self.assertEqual(steps[0]["revision"], 2)
 
+    def test_plan_preserves_actual_and_expected_clock_times_per_step(self):
+        message = {"method": "turn/plan/updated", "params": {
+            "threadId": "root", "turnId": "t", "plan": [
+                {"step": "恢复现场（实际完成 09:51）", "status": "completed"},
+                {"step": "修复兜底（预计 10:22 完成）", "status": "inProgress"},
+                {"step": "全量回归（预计 10:45 完成）", "status": "pending"},
+            ],
+        }}
+        event = normalize_codex_notification(message, "root")
+        self.assertIn("✅ 恢复现场（实际完成 09:51）", event["label"])
+        self.assertIn("🔄 修复兜底（预计 10:22 完成）", event["label"])
+        self.assertIn("○ 全量回归（预计 10:45 完成）", event["label"])
+
+    def test_plan_preserves_progressively_expanded_stage_projection(self):
+        message = {"method": "turn/plan/updated", "params": {
+            "threadId": "root", "turnId": "t", "plan": [
+                {"step": "Stage 1｜护栏与追溯（预计 16:15 完成）\n"
+                         "  ↳ TRACE-01 清洁清单（预计 15:40 完成）\n"
+                         "  ↳ TRACE-02 零丢失映射（预计 16:00 完成）",
+                 "status": "inProgress"},
+                {"step": "Stage 2｜用户原声与竞品矩阵（预计 19:30 完成）",
+                 "status": "pending"},
+            ],
+        }}
+        event = normalize_codex_notification(message, "root")
+        self.assertIn("🔄 Stage 1｜护栏与追溯（预计 16:15 完成）", event["label"])
+        self.assertIn("↳ TRACE-01 清洁清单（预计 15:40 完成）", event["label"])
+        self.assertIn("○ Stage 2｜用户原声与竞品矩阵（预计 19:30 完成）", event["label"])
+
     def test_command_actions_publish_only_safe_program_and_workspace_paths(self):
         message = {
             "method": "item/completed",

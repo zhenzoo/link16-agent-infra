@@ -251,6 +251,7 @@ class ProfileSpec:
     launcher: str
     label: str = ""
     recommended: bool = False
+    session_search_preferred: bool = False
 
     @property
     def home_path(self) -> Path:
@@ -300,6 +301,15 @@ def _profile_document(path=None) -> dict:
 def profile_specs(path=None) -> list[ProfileSpec]:
     data = _profile_document(path)
     defaults = data["default_profiles"]
+    search_policy = data.get("session_search") or {}
+    if not isinstance(search_policy, dict):
+        raise ValueError("profile registry session_search 必须是 object")
+    preferred = search_policy.get("preferred_profiles") or []
+    if not isinstance(preferred, list) or any(not isinstance(name, str) for name in preferred):
+        raise ValueError("profile registry session_search.preferred_profiles 必须是 string array")
+    if len(preferred) != len(set(preferred)):
+        raise ValueError("profile registry session_search.preferred_profiles 不得重复")
+    preferred_set = set(preferred)
     result = []
     for name, raw in data["profiles"].items():
         if not _PROFILE_NAME_RE.fullmatch(str(name)):
@@ -322,10 +332,16 @@ def profile_specs(path=None) -> list[ProfileSpec]:
             launcher=launcher,
             label=str(raw.get("label") or ""),
             recommended=bool(raw.get("recommended")),
+            session_search_preferred=name in preferred_set,
         ))
     if not result:
         raise ValueError("profile registry 至少需要一个 profile")
     known = {p.name: p.runtime for p in result}
+    unknown_preferred = preferred_set - set(known)
+    if unknown_preferred:
+        raise ValueError(
+            f"session_search.preferred_profiles 含未知 profile：{sorted(unknown_preferred)!r}"
+        )
     present_runtimes = {p.runtime for p in result}
     unknown_defaults = set(defaults) - _PROFILE_RUNTIMES
     if unknown_defaults:
@@ -421,6 +437,7 @@ def profile_public_dict(profile: ProfileSpec) -> dict:
         "launcher": profile.launcher,
         "label": profile.label,
         "recommended": profile.recommended,
+        "session_search_preferred": profile.session_search_preferred,
     }
 
 

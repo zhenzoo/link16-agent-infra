@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-08-27
+last_reviewed: 2026-09-01
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -165,7 +165,7 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 - observer 只接 root thread 的 typed item；collab child thread 不进入主人卡，root collab item 只渲完成度。
 - `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 同时写脱敏 ledger 和 answer outbox，typed observer 是 app-server 模式的唯一最终回复 producer。
 - `reasoning`、命令全文、tool input/output、等待 UI、token transport 事件全部丢弃。命令字段只允许在 producer 内存中做一次保守分类，raw 值不得进入 ledger、outbox、progress-state 或卡片。
-- 相邻工具输出实际调用数、类别计数和安全路径摘要；plan 以同一 event id 增 revision，原位更新。
+- 相邻工具输出仍聚合实际调用数、类别计数和安全路径摘要供本地排障；进行中卡正文不再铺工具 label，只在 header 保留实际工具总数。plan 以同一 event id 增 revision，原位更新。
 - app-server canary 中 PostToolUse 与 Stop hook 都 no-op，避免工具/最终回复双写；observer 只接 root thread，因此子 agent final 不会进入主人卡。这样切换 `CODEX_HOME` 时即使新账号没有安装 hooks，最终回复也不会丢。
 - `codex_transport` 只允许放机器本地 `bridge-bots.local.json`；Codex 省略字段即走默认 app-server，只有显式 `cli-legacy` 才回退旧路。Claude 不消费该字段。
 
@@ -175,9 +175,9 @@ Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026
 
 - 单个 tool event 只允许 `tool_family`（固定枚举）、`program`（固定显示名）、`status`（固定状态）及 `access_paths/write_paths/create_paths`。
 - 路径只允许当前 workspace 内、无 `..` 的仓库相对路径；工作区外路径、变量路径、`.env`、私钥/凭据类文件名直接丢弃。路径在 producer 内去重并设硬上限，未知字段默认不透传。
-- 聚合 tool step 只允许 `tool_count`、`tool_types[{family,program,count}]`、三组安全路径及其数值 total、`source_event_ids`；持久化路径每组最多 50 个，卡片显示前 5 个并用 total 计算“另有 N 个”。继续复用 `tools:<first_event_id>` 稳定键与 revision 原位更新。
+- 聚合 tool step 只允许 `tool_count`、`tool_types[{family,program,count}]`、三组安全路径及其数值 total、`source_event_ids`；持久化路径每组最多 50 个，供本地历史与排障使用。卡片正文过滤全部 tool label，header 只累计 `tool_count`。继续复用 `tools:<first_event_id>` 稳定键与 revision 原位更新。
 - plan step 可携带 `plan_completed/plan_total`，供 header 显示“计划 2/3”；renderer 不从中文 label 反向解析结构数据。
-- event ledger、progress outbox、`bridge-progress-state-<bot>.json` 和最终卡片是同一防泄漏边界，四层都必须通过 raw command/output/absolute-home/secret-marker=0 的回归。
+- event ledger、progress outbox、`bridge-progress-state-<bot>.json` 和最终卡片是同一防泄漏边界，四层都必须通过 raw command/output/secret-marker=0 的回归；tool-derived 路径与群 route 继续要求 absolute-home=0。Owner `p2a` commentary/final 可携带 agent 明确交付且已核对存在的本地产物绝对路径，这不是 tool metadata 白名单的放宽。
 
 当时 rollout 记录 `PLAN-2026-06-18-bridge-multi-agent-runtime.md` 已归档并移出活跃文档树；
 当前运行契约以本 ARCH 和 `ARCH-120-agent-profile-runtime.md` 为准。
@@ -286,12 +286,17 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 > **当前铁律**：呈现由 route 决定，而不是由目标 ID 的 `oc_` 前缀决定。真人的 `p2a`/`p2a-ext` final 用互动卡片；peer 的 a2a 用纯文字。单卡满约 2800 字时无损拆成 1～N 张有序卡；卡片发送失败降级文字并在 receipt 标明原因。下方较早版本记录只用于解释演进，不得覆盖本段与 `SPEC-210`。
 
-- **进度卡（原地长大 + 满则轮换）**：PostToolUse hook 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**——你看到的是**同一张卡在长大**（实时显示 💭思考 / 📝文字 / ✏️📖🔧 全工具 + 头部 🔧/💭/🪙 计数）。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随【信息量】有界增长，**不随时间线性刷屏**。
-- **Codex milestone 工具摘要（PLAN-916）**：commentary 保持原样；每个相邻工具段集总为“实际调用次数 + 工具/运行时类别 + 访问/修改/新增路径”。路径仓库相对化、每组最多 5 个，超出显示“另有 N 个”；只读段明确写“修改：无”。header 显示“计划完成度 + 实际工具次数”，不暴露内部里程碑/工具段计数。完整命令、参数、输出、绝对路径和 reasoning 不进入任何持久层或卡片。
+- **进度卡（原地长大 + 满则轮换）**：PostToolUse/typed event 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**。正文只展示 commentary/plan 的进展、下一份交付和 agent 写出的绝对完成点，header 保留计划完成度与实际工具总数；工具 label 不铺正文。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随信息量有界增长，不随时间线性刷屏。
+- **计划不是 prose 推断（PLAN-1000）**：`📋 当前计划` 只在收到真实 `kind=plan` / `turn/plan/updated` 后出现；renderer 不从“计划已更新”之类 commentary 反向合成。Codex 长任务必须调用 `update_plan`，Claude 长任务必须更新其 task/todo surface；否则本地 ledger、progress state 和飞书卡都不会凭空得到计划。
+- **思考、里程碑、交付三层分开（PLAN-1000）**：普通 commentary 原样显示且保持无色；agent 显式发出的 `🟡`（方向锁定/阶段结论）、`🟢`（已验证 Step 或产物完成）、`🔴`（blocker/验收失败/紧急风险）原样保留。renderer 不自动补色，也不猜绿/红。产生可审阅产物的 Step 由 agent 在同轮更新 plan 并发带入口的结果回执；桥只传递、原位增量和交付，不把思考伪造成产物。
+- **本地打开属于 Step 交付，不属于桥（PLAN-1000）**：agent 在当前渠道完成本地路径与按策略存在的在线 URL 回执后，若是有人直接参与的本机会话，或 owner `p2a` 已明确要求当前任务自动打开，则立即用系统默认应用打开已核对的那一份产物，再进入下一 Step；禁止把多份打开动作攒到 final。bridge/drainer 不启动 GUI，也不把“已发链接”伪装成“本地已打开”。
+- **在线产物开关只认 Link16 本机策略（PLAN-1000 S7）**：`feishu/artifact-delivery.local.json` 是这台机器所有 profile/bot 共用的唯一可变值，缺失即 off；committed 样例只定义 schema。`artifact_delivery.py status/set-online/decide` 是查询与切换入口。`send --doc` 和 `send_feishu_media.py` 在任何飞书网络请求前过闸；全局 off 时退出，用户本轮明确要求在线稿才允许 `--explicit-online` 单次覆盖。`set-online` 是持久偏好，不用于“临时 on → shell finally 恢复”的单次事务：外层执行器超时会跳过恢复；单次交付始终走不改配置的 override。profile registry、Skill、CLAUDE/AGENTS 只负责路由到该策略，不复制开关值。
+- **四级绝对 ETA 不加协议字段（PLAN-1000）**：总计划/当前全部 P0、当前 P0、当前 Stage、当前 Step 的绝对完成点，以及下一 Step 的绝对时间段，都由 Claude/Codex 按用户级 `align`/`living-plan` 规则写进 commentary。用户可见文字使用 `ETA HH:mm（预计 HH:mm 完成）`，时长范围只能括号补充。每个 runtime plan Step 自身也携带 `实际完成 HH:mm` 或 `预计 HH:mm 完成`；桥只原样保存，不从中文 label 反向解析时间，也不替 agent 读钟、计算或猜测。
+- **Codex milestone 工具摘要（PLAN-916/1000）**：commentary 保持原样；每个相邻工具段仍聚合实际调用次数、类别和安全仓库相对路径，供本地 ledger 与排障使用。卡片正文过滤 tool label，只在 header 累计 `tool_count`。完整命令、参数、输出、tool-derived 绝对路径和 reasoning 不进入卡片。
 - **答案卡（同款·超长拆连续多卡）**：Stop/typed final 把该轮最终回复写 outbox；新 answer 超过正常 target `2790` 即无损拆成带 part/total 的连续多卡。`回复 i/N` 标题计入 target；`2800` hard limit 前的 10 字符不分给正文，只容纳 splitter 的小幅异常并强制留 `guard_chars` 回执。首次发送前持久化 fragment manifest，重启只补 manifest 中未 ACK 的片；旧 state 无 manifest 时按 legacy 2800 规则回填。不附隐藏推理或工具流水账。
 - **逐级降级（始终同一个目标）**：interactive 创建失败或返回空 message_id 时降级为同目标 text；text 仍失败则保留 outbox/HWM 等待重试，**不退群 webhook**。
   > **2026-08-30 主人拍板：兜底通道整条拆除**（`_webhook_fallback` / `notify.py` / 看门狗 `notify_webhook` 全部删除）。理由：兜底给失败开了条特殊通道，让「没送到」长得像「送到了」——taoci-7 刷群 767 条、洪水时医生朝着被关键词校验拒收 748 次的群喇叭喊「需人工」，主人 42 分钟一无所知。发不到主人自己会察觉，届时直接找 link16 或上机器看。
-- **发出前链接检查（PLAN-921）**：卡片、markdown/text 兜底与群纯文字共用 `outbound_links.sanitize_outbound_links`。本地绝对路径、`/D:/...`、`file:///`、UNC、仓库相对路径从 Markdown 链接解除，改成“标签 + 明文代码路径”；普通行内网页链接不动；独占一行的外链及飞书 docx / Cloudflare Pages 会另露原始 URL。代码区、锚点和图片 Markdown 保持既有语义。处理幂等，多级 fallback 重跑不会重复加 URL。
+- **发出前链接检查（PLAN-921/1000）**：卡片、markdown/text 兜底与群纯文字共用 `outbound_links.sanitize_outbound_links`。本地绝对路径、`/D:/...`、`file:///`、UNC、仓库相对路径从 Markdown 链接解除，改成“标签 + 普通可复制路径”，不用代码块，也不假装飞书客户端能打开；普通行内网页链接不动；独占一行的外链及飞书 docx / Cloudflare Pages 会另露原始 URL。代码区、锚点和图片 Markdown 保持既有语义。处理幂等，多级 fallback 重跑不会重复加 URL。
 - **drainer deps**（注入·见 `feishu_bridge.run()`）：`new_card(text,route,purpose,fragment)`（按 route 发 interactive/text）· `edit_card(mid,text)->bool`（DM progress 原位更新）· `send_plain(...)`（同目标 text fallback）· `on_error(event)`（per-bot 脱敏逻辑异常）。`coalesce_sec` 只作相邻 progress update 的批量间隔，answer 轮换只靠容量与逐片 ACK。
 - **裸 URL 自动 `_linkify`** 成 `[url](url)` 可点（飞书卡片不自动 linkify 裸网址）。
 - **🔒 机械闸 `_seal_bare_urls`（2026-06-24）**：卡片路径走 `_linkify` 已包链接·**但 `guaranteed_send`(markdown/text 必达兜底/镜像直发) 不经 `_linkify`** → 裸 URL 紧贴 CJK/全角时飞书**原生 autolink 贪婪**把后续中文整段吞进 href（实证：`https://x.com/…872（中文…)` 渲成一整条超链接·href 里 `%EF%BC%88…`）。修：在**最低发送收口 `_send_checked`**（覆盖 guaranteed_send 的 markdown+text）+ `_send_group_text`（a2a 群）对 payload 跑 `_seal_bare_urls`——裸 URL 紧跟非 ASCII 时插一个空格强制 autolink 在 URL 真末尾终止（只在该精确危险态触发·8 例单测过·URL 本身不改·已 `[](){}` 包的靠负 lookbehind 跳过）。软规则（链接单独成行）只是兜底·这道闸才是确定性保证。**改桥代码需重启桥才生效**（别在活会话中途重启）。
@@ -438,12 +443,12 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 > 一句话：会话把本地 `.md`/`.html` 文件转成飞书在线文档并发链接——访问者需要登录飞书；能否编辑取决于是否成功加为协作者，组织内凭链接默认是只读。
 
-**入口**：`python feishu/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`。
+**入口**：先用 `python feishu/artifact_delivery.py status` 看本机全局值。开关 on 时调用 `python feishu/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`；用户本轮明确要求在线稿但不改变全局值时追加 `--explicit-online`。
 
 **生产链路（全 `tenant_access_token` · 始终使用当前 bot 身份）**：
 1. Markdown/TXT 先走原生 docx：建文档 → Markdown 转块 → 分批写入 → 设组织内凭链接可读；不依赖 `drive:drive`。失败才试 upload/import 兼容链。
 2. HTML/Office 只走 upload/import；它需要 `drive:drive` 或等价窄口权限。
-3. 在线链全部失败，自动由**同一 bot**发送原文件附件；`file-as-text` 永不参与自动降级，也不存在跨 bot 代发。
+3. 在线链全部失败就如实失败并留下 `online_doc_failed` receipt；**绝不自动发送本地原文件附件**，`file-as-text` 也永不参与自动降级。只有用户明确要“附件/原文件”时，agent 才另行使用 `send_feishu_file.py`。
 4. 在线文档成功必须同时拿到 URL，并证实“组织内凭链接可读”或 owner 协作者授权成功；否则不报送达。
 5. 飞书 `anyone_readable` 的“任何人”仍要求登录飞书（PLAN-980 E25），不是匿名公网访问；真匿名交付走静态站。
 6. **final 对账（PLAN-921）**：同 bot 的 p2a 回合取得 URL 后写 `kind=doc_delivery`；drainer 去重、持久化并在下一条匹配 answer 追加标题和原始 URL。显式 `--to`、手工 terminal、别的 bot 与 a2a 不登记，避免串收件人。
@@ -454,13 +459,13 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **边界（诚实）**：① 飞书侧修改不会自动回灌本地源文件。② 每次发布都会在飞书云产生一篇新文档；没有“先清空旧文档再重写”的危险原地更新。③ 企业策略可能禁止外部分享；组织内可见与协作者授权都失败时，桥不会把不可读 URL 当成功。
 
-**SSOT / 不硬编码**：发布原语在 `feishu_docs.py`，生产选择与附件终局兜底在 `feishu_bridge.py`；owner open_id 取桥持久状态。`send` 是独立短进程、代码即改即用；CLI/receipt 记录链路类型、源字符/字节、错误与 URL。
+**SSOT / 不硬编码**：发布原语在 `feishu_docs.py`，在线链选择与失败收口在 `feishu_bridge.py`；显式原文件附件只由 `send_feishu_file.py` 承担。owner open_id 取桥持久状态。`send` 是独立短进程、代码即改即用；CLI/receipt 记录链路类型、源字符/字节、错误与 URL。
 
 ## § 2.11b · 在线查看媒体（本地【图片 / 视频 / 任意文件】→ 嵌进 docx → 发链接 · 2026-06-19）
 
 > 一句话：会话把本地**图片 / 视频 / pdf / 任意媒体**塞进一篇飞书在线文档，发**一条文档链接**到你 DM——你点链接在飞书里**看图、放视频、预览文件**，**不点就不下载、不占手机内存**。「图片在线 / 视频在线」都走它。
 
-**入口**：`python feishu/send_feishu_media.py --bot <name> --media <图/视频/文件> [--media <更多> …] [--caption "说明"] [--title "标题"] [--text "前言"] [--to oc_/ou_]`（`--media` 可重复 → 一篇里混排多个）。引擎 = `feishu_docs.publish_media_as_doc`。
+**入口**：全局在线产物开关 on 后调用 `python feishu/send_feishu_media.py --bot <name> --media <图/视频/文件> [--media <更多> …] [--caption "说明"] [--title "标题"] [--text "前言"] [--to oc_/ou_]`；本轮明确要求在线稿时可追加 `--explicit-online`。`--media` 可重复，一篇里混排多个；引擎为 `feishu_docs.publish_media_as_doc`。
 
 **为什么不能照搬 §2.11 的 import**：import 只吃 md/html/txt/docx、**吃不下图/视频**；也不能「图当独立网盘文件传上去拿链接」——**bot 是应用身份、没有个人「我的空间」根目录**（`drive/v1/files/root_folder_meta` 对 tenant token 返 **404**·2026-06-18 实证）。唯一通路 = **docx 块 API**。
 

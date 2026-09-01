@@ -272,17 +272,33 @@ async function main() {
         const l = await rpc("workspace.list", {});
         return Array.isArray(l) ? l : (l && l.workspaces) || [];
       };
-      const ptyMap = (arr) => { const m = {}; for (const w of arr) for (const p of (w.ptyIds || [])) m[p] = w.id; return m; };
+      // wmux 3.46 can briefly return stale workspace.list.ptyIds immediately after pane.split.
+      // surface.list({workspaceId}) is fresher, so build the before/after topology from surfaces
+      // instead of trusting the cached ptyIds array.  This also prevents a false "no pane" retry
+      // from creating several blank panes in the target workspace.
+      const surfaceTopology = async (arr) => {
+        const ptys = {}, panes = {};
+        for (const w of arr) {
+          const raw = await rpc("surface.list", { workspaceId: w.id });
+          const surfaces = Array.isArray(raw) ? raw : (raw && raw.surfaces) || [];
+          for (const s of surfaces) {
+            if (!s || !s.ptyId) continue;
+            ptys[s.ptyId] = w.id;
+            panes[s.ptyId] = s.paneId || null;
+          }
+        }
+        return { ptys, panes };
+      };
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-      const MAX = 4;
+      const MAX = 2; // second attempt is only for a verified focus failure or one cleaned stray
       let lastErr = "unknown";
       for (let attempt = 1; attempt <= MAX && !out; attempt++) {
         const beforeArr = await freshList();
         if (!beforeArr.some((w) => w.id === target)) {
           throw new Error(`split-here: target workspace ${target} not found in workspace.list`);
         }
-        const before = ptyMap(beforeArr);
+        const before = await surfaceTopology(beforeArr);
         // focus my ws, then confirm it actually became active (shrinks the focus-steal window)
         await rpc("workspace.focus", { id: target });
         const cur = await rpc("workspace.current", {});
@@ -291,24 +307,39 @@ async function main() {
         // my ws is active -> the split lands here
         const sp = await rpc("pane.split", { direction });
         if (sp && sp.error) { lastErr = `pane.split: ${sp.error}`; break; }
-        await sleep(250);
-        const after = ptyMap(await freshList());
-        const fresh = Object.keys(after).filter((p) => !(p in before));
-        const landed = fresh.find((p) => after[p] === target);
-        if (landed) { out = { workspaceId: target, pty: landed, direction, attempt }; break; }
+        let after = null, fresh = [];
+        for (let poll = 0; poll < 20; poll++) {
+          await sleep(poll === 0 ? 250 : 150);
+          after = await surfaceTopology(await freshList());
+          fresh = Object.keys(after.ptys).filter((p) => !(p in before.ptys));
+          if (fresh.length) break;
+        }
+        if (!fresh.length) {
+          // Do not retry after an unobserved split: the pane may exist while the daemon's lists
+          // are stale. Retrying is worse because it can multiply unowned blank panes.
+          throw new Error("split-here: pane.split returned but no new surface was observable after 3s; refusing a duplicate split");
+        }
+        const landed = fresh.filter((p) => after.ptys[p] === target);
+        if (fresh.length === 1 && landed.length === 1) {
+          out = { workspaceId: target, pty: landed[0], paneId: after.panes[landed[0]], direction, attempt, observedBy: "surface.list" };
+          break;
+        }
+        if (fresh.length > 1) {
+          // Multiple fresh panes means another split raced us. We cannot prove ownership, so do
+          // not close any of them and, crucially, do not perform another split.
+          throw new Error(`split-here: ${fresh.length} new panes appeared concurrently (${fresh.join(",")}); ownership is ambiguous, refusing cleanup/retry`);
+        }
         // raced. Clean up ONLY a pane we are confident we created (exactly one fresh pane), so we
         // never exit another session's concurrently-created pane.
         if (fresh.length === 1) {
-          const p = fresh[0], strayWs = after[p];
+          const p = fresh[0], strayWs = after.ptys[p];
           console.error(`[split-here] raced: new pane ${p} landed in ${strayWs}, not ${target} — exiting our stray`);
           try {
             await rpc("input.send", { text: "exit", ptyId: p, workspaceId: strayWs });
             await rpc("input.sendKey", { key: "enter", ptyId: p, workspaceId: strayWs });
           } catch (e) { console.error(`[split-here] stray cleanup failed for ${p}: ${e.message}`); }
-        } else if (fresh.length > 1) {
-          console.error(`[split-here] ${fresh.length} new panes appeared (concurrent split?) — NOT auto-exiting any (could be another session's); retrying`);
         }
-        lastErr = fresh.length ? `split raced into ${fresh.map((p) => after[p]).join(",")}` : "split produced no new pane";
+        lastErr = `split raced into ${fresh.map((p) => after.ptys[p]).join(",")}`;
         await sleep(200);
       }
       if (!out) throw new Error(`split-here failed after ${MAX} attempts: ${lastErr}`);

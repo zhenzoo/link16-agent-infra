@@ -32,11 +32,12 @@ description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文
 
 | 用户要做什么 | 确定性入口 |
 |---|---|
+| 查看/切换本机全局在线产物开关 | `python feishu/artifact_delivery.py status`；`set-online on|off` |
 | 给另一只 bot 派活、回结果或续轮 | `python feishu/send_feishu_msg.py --bot <我> --to-agent <对方> --text "…"` |
 | 查看可发送的 agent | `python feishu/send_feishu_msg.py --list-agents` |
 | 发图片、视频或媒体 | `python feishu/send_feishu_media.py --bot <我> --media <路径> --title "…"` |
 | 发可播放语音 | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"` |
-| 发布飞书在线文档 | `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`（在线失败自动发原文件附件） |
+| 发布飞书在线文档 | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
 | 明确发送原文件附件 | `python feishu/send_feishu_file.py --bot <我> --to <oc_群/ou_人> --file <路径>` |
 | 明确把文件正文塞进聊天 | `python feishu/feishu_bridge.py send --bot <我> --file-as-text <路径>`（最后选择；长文可能拆条） |
 | 查某 bot 完整收发历史 | `python feishu/bridge_history.py --bot <bot> --recent 40 --full`（自动与主动出站均含 Feishu message_id） |
@@ -61,11 +62,14 @@ description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文
 
 ## 4. 交付规则
 
-- 选择顺序只有一条：用户要在线文档就用 `send --doc`；在线链失败时工具自动由**同一 bot**发原文件附件；只有用户明确要“把文件内容发成聊天文字”时才用 `--file-as-text`。不得跨 bot 代发。
-- Markdown/TXT 优先走不依赖 `drive:drive` 的原生 docx；HTML/Office 才优先走 import。权限审计只用于排障或用户明确要求补能力，不挡住附件交付。
-- 用户明确要“文件/附件”时直接用 `send_feishu_file.py --file`。旧的 `send --file` 已机械拒绝，不能再用。
+- 每份可审阅产物都在回执中显示一行完整本机绝对路径，使用普通可复制文字，不放代码块，也不写成 Markdown / `file:///` 假链接。飞书当前只对 `http://` / `https://` 提供可靠链接语义。
+- 创建在线副本前先运行 `python feishu/artifact_delivery.py decide --json`。默认全局开关为 off：不调用在线文档/媒体工具，回复里也没有 HTTPS 行；开关为 on 时才按文件类型调用在线工具。用户本轮明确要求在线稿可在发送命令加 `--explicit-online` 单次覆盖，不修改全局值。
+- `set-online on|off` 是持久用户偏好，不是一次发送的临时事务。单次在线交付必须用 `--explicit-online`，不得先开全局值再依赖 shell `finally` 恢复；外层执行器超时或被终止会让恢复语句来不及运行。
+- 用户要在线文档就用 `send --doc`；两条在线链都失败时如实报失败与权限/频控原因，**绝不自动发送本地原文件附件**。只有用户明确要“把文件内容发成聊天文字”时才用 `--file-as-text`，不得跨 bot 代发。
+- Markdown/TXT 优先走不依赖 `drive:drive` 的原生 docx；HTML/Office 才优先走 import。在线失败时按需运行权限审计并给修复入口，不擅自降低交付形态。
+- 只有用户明确说“文件”“附件”或“原文件”时，才使用 `send_feishu_file.py --file`。在线开关、在线 URL 或 `$open-local` 成功都不能外推出附件授权。旧的 `send --file` 已机械拒绝，不能再用。
 - 飞书在线文档和关键网页 URL 必须裸写或写成 `[标签](https://...)`，不得套反引号或代码围栏。
-- 本地路径可以作为电脑定位信息，但手机不能打开；需要手机访问时发布为飞书在线文档。
+- 本地路径是默认电脑定位信息；需要手机访问时，用户可以开启全局在线开关或在当前轮明确要求在线稿。
 - 通过本 skill 产出的在线文档，最终回复必须逐条列出真实外部 URL。
 - 任何注册、权限和开机启动动作先 dry-run；需要人点击链接、登录、认领或确认系统任务时，说清动作并依赖 registration monitor/doctor 的机械信号继续。
 - 不打印 app secret、token 或 `.env` 内容。

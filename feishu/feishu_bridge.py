@@ -110,6 +110,7 @@ import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·�
 import bridge_injection  # noqa: E402  (桥/cron/watchdog/注册监督器跨进程共享注入锁)
 import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持久化)
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
+import artifact_delivery  # noqa: E402  (本机全局在线产物交付策略)
 from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
 
 
@@ -2948,26 +2949,6 @@ def _read_send_text(*, text=None, file_as_text=None, legacy_file=None):
     return Path(file_as_text).read_text(encoding="utf-8") if file_as_text else text
 
 
-async def _send_file_attachment(channel, target, path):
-    """Send one real Feishu file message and return ``(ok, error)``."""
-    from lark_channel import MediaSource, OutboundFile
-
-    source = Path(path)
-    try:
-        result = await channel.send(target, OutboundFile(
-            source=MediaSource(kind="file", path=str(source.resolve())),
-            file_name=source.name,
-        ))
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)[:250]
-    if bool(getattr(result, "success", False)):
-        return True, None
-    error = getattr(result, "error", None)
-    if error:
-        return False, f"code={getattr(error, 'code', None)} {getattr(error, 'hint', None)}"
-    return False, "unknown"
-
-
 def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
     """Publish text natively; use import for HTML/Office and as text fallback.
 
@@ -3064,14 +3045,23 @@ def _send_size_label(text, doc_stats):
     return " · ".join(parts) or "0 字"
 
 
-def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_name=None):
+def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_name=None,
+             online_override=False):
     """独立短进程主动推送一条到飞书 DM（REST·不依赖常驻桥进程）。
     目标优先级：--to > 会话 chat_id > owner open_id（私聊）。文字复用 guaranteed_send 四级兜底。
     --image <path>：把本地图发到 DM（封面/截图/图表/架构图直达手机·SDK upload_media→OutboundImage）。
     --doc <md/html>：Markdown/TXT 先走原生 docx，HTML/Office 走 import；在线链失败时
-    由同一 bot 自动发送原文件附件。file-as-text 不参与自动降级。
+    如实失败并保留 receipt，绝不自动发送本地原文件附件。file-as-text 也不参与自动降级。
     给「Claude 在终端会话里主动发飞书」用——不是群喇叭 notify.py，是 bot 自己的 DM 通道。"""
     assert_sender_identity(bot_name)
+    if doc:
+        try:
+            artifact_delivery.require_online_publication(
+                explicit_online=online_override
+            )
+        except artifact_delivery.OnlineArtifactDeliveryDisabled as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            raise SystemExit(3) from exc
     bot = next((b for b in load_bots() if b["name"] == bot_name), None)
     if not bot:
         print(f"❌ 没有名为 '{bot_name}' 的 bot", file=sys.stderr); sys.exit(2)
@@ -3131,11 +3121,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                 doc_ok = False
                 doc_error = str(e)[:500]
                 blog(bot_name, f"send --doc 两条在线链均失败: {doc_error}")
-                attachment_ok, attachment_error = await _send_file_attachment(ch, target, doc)
-                doc_delivery_mode = "attachment"
-                doc_ok = None
-                if not attachment_ok:
-                    blog(bot_name, f"send --doc 附件降级失败: {attachment_error}")
+                doc_delivery_mode = "online_doc_failed"
         body = text
         if doc_url:
             title = (doc_name or Path(doc).name).strip()
@@ -3180,9 +3166,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                           "text_chars": len(text), **doc_stats}, ensure_ascii=False))
     else:
         artifact = ""
-        if doc_delivery_mode == "attachment":
-            artifact = f" 文件附件{'✅' if attachment_ok else '❌'}"
-        elif (doc_delivery_mode or "").startswith("online_doc"):
+        if (doc_delivery_mode or "").startswith("online_doc"):
             artifact = f" 在线文档{'✅' if doc_ok else '❌'}{('·'+doc_url) if doc_url else ''}"
         extra = (f" 图片{'✅' if img_ok else '❌'}" if image else "") + artifact + \
                 (" 对账⚠️未登记" if reconcile_queued is False else "")
@@ -3243,6 +3227,8 @@ def main():
     ap.add_argument("--image", default=None, help="send：把本地图片发到 DM（可与 --text 同用·封面/截图/图表直达手机）")
     ap.add_argument("--doc", default=None, help="send：本地 md/HTML 转飞书云文档发链接（在线查看·可复制可改存·ARCH-101 §2.11）")
     ap.add_argument("--name", default=None, help="send：--doc 的飞书文档标题（不给=取文件名）")
+    ap.add_argument("--explicit-online", action="store_true",
+                    help="send --doc：用户本轮明确要求在线副本时，单次覆盖关闭的全局开关；不修改全局值")
     ap.add_argument("--to", default=None, help="send：目标 chat_id/open_id（不给=会话 chat_id → owner open_id）")
     ap.add_argument("--json", action="store_true", help="send：机器可读 JSON 输出")
     args = ap.parse_args()
@@ -3265,7 +3251,8 @@ def main():
             ap.error(str(exc))
         _bots = load_bots()
         bot_name = args.bot or (_bots[0]["name"] if _bots else "default")
-        cmd_send(bot_name, body, args.to, args.json, args.image, args.doc, args.name)
+        cmd_send(bot_name, body, args.to, args.json, args.image, args.doc, args.name,
+                 args.explicit_online)
     elif args.cmd == "doctor":
         cmd_doctor(args.bot)
 

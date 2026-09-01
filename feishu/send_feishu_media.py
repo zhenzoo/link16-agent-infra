@@ -32,6 +32,7 @@ PROJECT = ORCH.parent
 sys.path.insert(0, str(ORCH))
 sys.path.insert(0, str(PROJECT / "scripts"))
 from bridge_env import resolve_env_path, bots_config_path, assert_sender_identity  # noqa: E402
+import artifact_delivery  # noqa: E402
 import feishu_docs  # noqa: E402
 from feishu_rest import api, tenant_token  # noqa: E402
 
@@ -95,9 +96,18 @@ def main():
     ap.add_argument("--text", default=None, help="链接前附带的说明文字")
     ap.add_argument("--perm", default="view", choices=["view", "edit", "full_access"], help="授权级别（默认 view 只读）")
     ap.add_argument("--dry", action="store_true", help="只回显将走的链路不真发")
+    ap.add_argument("--explicit-online", action="store_true",
+                    help="用户本轮明确要求在线副本时，单次覆盖关闭的全局开关；不修改全局值")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     a = ap.parse_args()
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
+    if not a.dry:
+        try:
+            artifact_delivery.require_online_publication(
+                explicit_online=a.explicit_online
+            )
+        except artifact_delivery.OnlineArtifactDeliveryDisabled as exc:
+            raise SystemExit(f"❌ {exc}") from exc
 
     paths = [Path(p) for p in a.media]
     for p in paths:

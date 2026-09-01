@@ -4,6 +4,9 @@
     "claude": "claude-work",
     "codex": "codex-work"
   },
+  "session_search": {
+    "preferred_profiles": ["claude-work", "codex-work"]
+  },
   "entry_documents": {
     "managed_profiles": [
       "claude-work",

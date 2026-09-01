@@ -82,6 +82,28 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(agent_runtime.default_profile("codex"), "cxp")
         self.assertEqual(agent_runtime.profile_spec("cxp").home, "~/.codex-personal")
         self.assertEqual(agent_runtime.profile_spec("cck").launcher, "launch-sh")
+        preferred = {profile.name for profile in profiles if profile.session_search_preferred}
+        self.assertEqual(preferred, {"cc", "ccp", "ccp2", "cx", "cxp"})
+        self.assertTrue(agent_runtime.profile_public_dict(agent_runtime.profile_spec("cxp"))["session_search_preferred"])
+        self.assertFalse(agent_runtime.profile_public_dict(agent_runtime.profile_spec("ccw"))["session_search_preferred"])
+
+    def test_session_search_policy_rejects_unknown_or_duplicate_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "agent-profiles.local.json"
+            base = {
+                "version": 1,
+                "default_profiles": {"claude": "cc", "codex": "cx"},
+                "profiles": {
+                    "cc": {"runtime": "claude", "home": "~/.claude", "launcher": "direct"},
+                    "cx": {"runtime": "codex", "home": "~/.codex", "launcher": "direct"},
+                },
+            }
+            for preferred, error in ((["cc", "missing"], "未知 profile"), (["cc", "cc"], "不得重复")):
+                document = dict(base)
+                document["session_search"] = {"preferred_profiles": preferred}
+                registry.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, error):
+                    agent_runtime.profile_specs(registry)
 
     def test_local_registry_wins_and_invalid_local_never_falls_back(self):
         with tempfile.TemporaryDirectory() as tmp:

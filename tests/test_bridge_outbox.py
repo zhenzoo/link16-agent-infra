@@ -136,6 +136,34 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(cards.edits), 1)
         self.assertIn("✅ A", cards.edits[0][1])
 
+    async def test_step_completion_plan_and_result_receipt_are_visible_without_tool_body(self):
+        state, cards = fresh_state(), FakeCards()
+        running = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "plan:t", "revision": 1, "kind": "plan",
+             "label": "🔄 S7.2 全局交付开关（预计 17:50 完成)",
+             "plan_completed": 1, "plan_total": 2},
+            {"event_id": "tools:t", "revision": 1, "kind": "tool", "tool_count": 3,
+             "label": "修改 C:/private/path.py"},
+        ]}
+        completed = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "plan:t", "revision": 2, "kind": "plan",
+             "label": "✅ S7.2 全局交付开关（实际 17:37 完成)",
+             "plan_completed": 2, "plan_total": 2},
+            {"event_id": "tools:t", "revision": 2, "kind": "tool", "tool_count": 5,
+             "label": "修改 C:/private/path.py"},
+            {"event_id": "receipt:t:2", "revision": 1, "kind": "commentary",
+             "label": "💬 🟢 S7.2 已完成；策略测试通过；下一 Step ETA 18:00"},
+        ]}
+        await self.drain([running], state, cards)
+        await self.drain([completed], state, cards)
+        self.assertEqual(len(cards.new), 1)
+        self.assertEqual(len(cards.edits), 1)
+        rendered = cards.edits[0][1]
+        self.assertIn("✅ S7.2 全局交付开关", rendered)
+        self.assertIn("🟢 S7.2 已完成", rendered)
+        self.assertIn("下一 Step ETA 18:00", rendered)
+        self.assertNotIn("private/path.py", rendered)
+
     async def test_structured_delivery_result_keeps_real_message_id_for_patch(self):
         state, cards = fresh_state(), RoutedResultCards()
         first = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
@@ -192,8 +220,11 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         await self.drain([record], state, cards)
         text = cards.new[0][0]
         self.assertIn("🤖 **进行中** · 计划 2/3 · 工具 8 次", text)
-        self.assertIn("类型：搜索 rg ×2", text)
-        self.assertIn("修改：无", text)
+        self.assertIn("📋 current plan", text)
+        self.assertIn("checkpoint", text)
+        self.assertNotIn("🟡 checkpoint", text)
+        self.assertNotIn("类型：搜索 rg ×2", text)
+        self.assertNotIn("修改：无", text)
         self.assertNotIn("里程碑", text)
         self.assertNotIn("工具段", text)
 
@@ -207,7 +238,27 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         await self.drain([record], state, cards)
         text = cards.new[0][0]
         self.assertIn("🤖 **进行中** · 工具 6 次", text)
+        self.assertIn("checkpoint", text)
+        self.assertNotIn("🟡 checkpoint", text)
+        self.assertNotIn("\nA", text)
+        self.assertNotIn("\nB", text)
         self.assertNotIn("计划", text)
+
+    async def test_milestone_commentary_preserves_explicit_status_markers(self):
+        state, cards = fresh_state(), FakeCards()
+        record = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "c1", "revision": 1, "kind": "commentary", "label": "💬 🟢 done"},
+            {"event_id": "c2", "revision": 1, "kind": "commentary", "label": "💬 🟡 running"},
+            {"event_id": "c3", "revision": 1, "kind": "commentary", "label": "💬 🔴 blocked"},
+        ]}
+        await self.drain([record], state, cards)
+        text = cards.new[0][0]
+        self.assertIn("💬 🟢 done", text)
+        self.assertIn("💬 🟡 running", text)
+        self.assertIn("💬 🔴 blocked", text)
+        self.assertNotIn("🟡 🟢", text)
+        self.assertNotIn("🟡 🟡", text)
+        self.assertNotIn("🟡 🔴", text)
 
     async def test_edit_failure_keeps_full_snapshot_header_but_dirty_body_only(self):
         state, cards = fresh_state(), FakeCards()
@@ -225,7 +276,8 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         await self.drain([second], state, cards)
         replacement = cards.new[-1][0]
         self.assertIn("计划 1/2 · 工具 4 次", replacement)
-        self.assertIn("NEW TOOL", replacement)
+        self.assertIn("_思考中…_", replacement)
+        self.assertNotIn("NEW TOOL", replacement)
         self.assertNotIn("OLD PLAN", replacement)
         self.assertNotIn("OLD TOOL", replacement)
 
@@ -260,9 +312,11 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(str(ROOT), surface)
             self.assertNotIn(str(ROOT.parent / "plan916-outside"), surface)
         self.assertIn("工具 4 次", surfaces["card"])
-        self.assertIn("feishu/bridge_events.py", surfaces["card"])
-        self.assertIn("修改：", surfaces["card"])
-        self.assertIn("新增：", surfaces["card"])
+        self.assertNotIn("feishu/bridge_events.py", surfaces["card"])
+        self.assertNotIn("修改：", surfaces["card"])
+        self.assertNotIn("新增：", surfaces["card"])
+        for name in ("outbox", "progress_state", "restored"):
+            self.assertIn("feishu/bridge_events.py", surfaces[name])
 
     def test_milestone_delivery_cursor_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
