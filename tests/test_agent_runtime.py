@@ -76,6 +76,13 @@ class CodexSkillInvocationTests(unittest.TestCase):
 
 
 class AgentProfileTests(unittest.TestCase):
+    def setUp(self):
+        # Legacy-account fixtures must not depend on the operator's local roster.
+        fixture = patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH",
+                               ROOT / "tests" / "absent-profile-registry.json")
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_registry_has_nine_profiles_and_cxp_is_codex_default(self):
         profiles = agent_runtime.profile_specs()
         self.assertEqual(len(profiles), 9)
@@ -206,7 +213,9 @@ class AgentProfileTests(unittest.TestCase):
         cli = ROOT / "feishu" / "agent_profile_cli.py"
         # 屏幕样本带 `❯` / `›`：子进程按本机 locale 解 stdin（tuf19 是 GBK）会直接崩，
         # 探针看起来「判未就绪」其实是根本没读到屏。钉死编码，这条测试才跨机器成立。
-        utf8_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        utf8_env = {**os.environ, "PYTHONIOENCODING": "utf-8",
+                    agent_runtime.PROFILE_REGISTRY_ENV:
+                    str(ROOT / "feishu" / "agent-profiles.json")}
         samples = {
             "cck": "Claude Code\n❯",
             "cxp": "OpenAI Codex\npermissions: YOLO mode\n›",
@@ -407,6 +416,12 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
     text-mode 的 \\r\\n 翻译），别的机器复现不了 —— 所以这里测的是**可移植的
     那一层逻辑**：解析顺序、fail closed、输出契约。
     """
+
+    def setUp(self):
+        fixture = patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH",
+                               ROOT / "tests" / "absent-profile-registry.json")
+        fixture.start()
+        self.addCleanup(fixture.stop)
 
     def test_shell_prefers_env_then_path_and_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -153,7 +153,7 @@ def main(argv=None) -> int:
     p_run.add_argument(
         "provider_args",
         nargs=argparse.REMAINDER,
-        help="`--` 后原样传给 claude/codex",
+        help="`--` 后原样传给 claude/codex/kimi",
     )
 
     for name, help_text in (

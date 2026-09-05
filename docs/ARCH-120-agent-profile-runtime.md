@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-08-17
+last_reviewed: 2026-09-05
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -42,7 +42,7 @@ last_reviewed: 2026-08-17
 
 | 事实 | 唯一真相源 | 其他位置的角色 |
 |---|---|---|
-| profile 如何映射到 runtime/home/launcher | `feishu/agent-profiles.json` | 代码只读取、校验，不再内置 alias 表 |
+| profile 如何映射到 runtime/home/launcher | effective registry：显式路径 → `feishu/agent-profiles.local.json` → 无本地文件才用 legacy `agent-profiles.json` | 只选一份，不合并；代码不再内置 alias 表 |
 | 某个飞书 bot 当前选择哪个 profile | `feishu/bridge-bots.local.json` 的 `profile` | `/account` 只修改这一项 |
 | 当前主 session 正在使用哪个 profile | `LINK16_AGENT_PROFILE` | 从 roster 或手工 wrapper 派生；只作进程级载体，不是第二份持久配置 |
 | Claude 第三方模型后端环境 | 对应账号目录的 `launch.sh` | profile registry 只登记脚本路径，不保存 API key |
@@ -52,7 +52,8 @@ last_reviewed: 2026-08-17
 
 ## 3. Profile registry
 
-`feishu/agent-profiles.json` 是可提交、无密钥、跨机器的目录。顶层包含 runtime 默认、
+`feishu/agent-profiles.local.json` 是本机无密钥的运行目录，历史机器未迁移时才回退 committed
+`feishu/agent-profiles.json`。以下 cck 是旧 Claude 后端配置示例，不代表各机必须保留。顶层包含 runtime 默认、
 受管入口文档声明和 `profiles`；每个 profile 至少包含：
 
 ```json
@@ -74,7 +75,7 @@ last_reviewed: 2026-08-17
 约束：
 
 1. profile 名只允许小写字母、数字和连字符。
-2. `runtime` 只允许 `claude` / `codex`；自定义 runtime 必须先扩 schema。
+2. `runtime` 允许 `claude` / `codex` / `kimi`；原生 Kimi 当前仅支持独立终端，飞书适配见 §11。
 3. `home` 必须是 home-relative，不写盘符和用户名。
 4. `launch-sh` 只表示运行时 source `<home>/launch.sh`；registry 不复制脚本内容或密钥。
 5. 当前生产推荐 Codex profile 是 `cxp`。`cx` 保留为可显式选择的备用档案，不再是新 Codex bot 默认值。
@@ -118,7 +119,7 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 
 - `list`：列 profile，默认不检查本机安装；
 - `show` / `doctor`：解析 profile 并检查本机 home、launcher、CLI、**可用 shell**；
-- `run`：设置 provider 环境并执行 Claude/Codex；
+- `run`：设置 provider 环境并执行 Claude/Codex/原生 Kimi Code；
 - `command`：给 wmux spawner 返回不含密钥的安全启动命令/JSON spec；
 - `selftest`：逐个 profile 走 registry → doctor → 命令生成 → **真启动**（provider 参数换成
   `--version`，秒退不开 TUI，但走的是和真启动完全同一条 shell+env+launcher 路径），
@@ -264,3 +265,33 @@ Codex runtime 适配、最小目标特例和不可复制的派生/私密状态�
 - XHS/tennis 不再含账号 alias 回退或 `worker-account.env`；
 - native Claude/Codex 子智能体路径不受影响；
 - 活跃文档不再把 `claude_config_dir` / `codex_home` 描述为选号 SSOT。
+
+## 11. 原生 Kimi Code：独立终端已接，飞书适配待验收
+
+原生 Kimi Code 与旧 `cck` 是两条不同路径：`cck` 的 runtime 是 Claude，经 `launch.sh`
+使用第三方模型；新 `kp` 的 runtime 是 `kimi`，直接运行官方 Kimi Code。
+新安装按用户指定 home 注册，例如 `~/.kimi-personal`。新版使用 `KIMI_CODE_HOME`，
+不是旧 Python kimi-cli 的 `KIMI_SHARE_DIR`；默认官方数据目录为 `~/.kimi-code`。
+
+- `standalone_worker_cmd()` 为 Kimi 设置 registry home 和 profile，交互启动默认 `--yolo`；
+  `login` / `acp` / `doctor` / `-p` 等入口不追加冲突的交互权限参数。
+- 子 shell 清除继承的临时 `KIMI_MODEL_*`，避免旧模型覆盖改变实际 provider；不迁移任何其他 home 的凭据。
+- `kp login` 登录隔离账户；`kp --version` 与 Link16 `selftest --profile kp` 检查真实启动。
+  `doctor` 通过只说明可启动，登录和模型消息仍要分别验证。
+- 私人入口治理的 Kimi 模板注入同一 Claude 母版沟通段；生成目标为 registry home 下的 `AGENTS.md`。
+  治理脚本与 launcher 必须解析同一个 effective registry，不能各自管理 committed 与 local 两份名单。
+- 当前飞书 `/account` 不列出 Kimi；内存切换、持久化、注册 runtime bot 和 worker 启动均在写入前拒绝。
+  这是能力边界，不把独立终端启动成功宣称为飞书接入完成。
+
+后续最小接入选官方 `kimi acp`：JSON-RPC 的 `session/update` 传公开消息、工具状态和 plan，
+`session/prompt` 响应结束当前回合，`session/load` / `resume` 恢复会话。只新增 Kimi 输入适配，
+继续复用 Link16 的 route、outbox、去重和飞书卡片；不套用 Claude transcript 或 Codex typed final。
+不转发 `agent_thought_chunk`、工具原始输入输出；恢复历史必须与本轮增量分离。
+
+完成判定需专门验证：当前上游实现的非认证失败也可能返回 `end_turn`，不能把该字段独自当成功；
+需结合原生失败信号或相关 Wire/StopFailure 记录。官方 ACP server 是仓内 private package，
+应使用已安装 CLI 的 ACP 入口或公共 ACP SDK，不把它当现成可安装的 Moonshot bridge SDK。
+
+参考：[官方 ACP 合同](https://moonshotai.github.io/kimi-code/en/reference/kimi-acp.html)、
+[目录隔离](https://moonshotai.github.io/kimi-code/en/configuration/data-locations.html)、
+[事件映射源码](https://github.com/MoonshotAI/kimi-code/blob/main/packages/acp-server/src/events-map.ts)。

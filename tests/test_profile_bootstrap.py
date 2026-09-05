@@ -18,7 +18,7 @@ class ProfileBootstrapTests(unittest.TestCase):
     def test_apply_creates_three_homes_launcher_and_shell_functions(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            pb.bootstrap(home, apply=True)
+            pb.bootstrap(home, apply=True, registry_path=ROOT / "feishu" / "agent-profiles.json")
             self.assertTrue((home / ".claude-personal").is_dir())
             self.assertTrue((home / ".claude-personal2" / "launch.sh").is_file())
             self.assertTrue((home / ".codex-personal").is_dir())

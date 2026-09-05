@@ -111,6 +111,8 @@ def runtime_spec(bot) -> RuntimeSpec:
         )
     if name in ("codex", "code-x", "code x"):
         return RuntimeSpec(name="codex", display_name="Codex")
+    if name == "kimi":
+        return RuntimeSpec(name="kimi", display_name="Kimi Code")
     if name == "custom":
         label = bot.get("display_name") if isinstance(bot, dict) else None
         return RuntimeSpec(name="custom", display_name=label or "Custom Agent")
@@ -239,7 +241,7 @@ PROFILE_REGISTRY_ENV = "LINK16_AGENT_PROFILE_REGISTRY"
 ROSTER_LOCAL_PATH = Path(__file__).resolve().with_name("bridge-bots.local.json")
 ROSTER_COMMITTED_PATH = Path(__file__).resolve().with_name("bridge-bots.json")
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_PROFILE_RUNTIMES = {"claude", "codex"}
+_PROFILE_RUNTIMES = {"claude", "codex", "kimi"}
 _PROFILE_LAUNCHERS = {"direct", "launch-sh"}
 
 
@@ -498,7 +500,12 @@ def _require_profile_available(
 
 def account_aliases() -> list:
     """Backward-compatible name used by Feishu `/account` UI."""
-    return [profile.name for profile in profile_specs()]
+    return [profile.name for profile in profile_specs() if profile.runtime != "kimi"]
+
+
+def _require_bridge_profile(profile: ProfileSpec) -> None:
+    if profile.runtime == "kimi":
+        raise ValueError("Kimi Code 当前仅支持独立终端；ACP 飞书适配尚未验收，不能切换 bot")
 
 
 def machine_default_profile(runtime: str) -> str:
@@ -589,6 +596,7 @@ def persist_account(bot_name: str, alias: str, why: str = "") -> dict:
     """
     alias = (alias or "").strip().lower()
     profile = profile_spec(alias)
+    _require_bridge_profile(profile)
     def mutate(_data, bots):
         hit = next(
             (b for b in bots if isinstance(b, dict) and b.get("name") == bot_name),
@@ -628,6 +636,8 @@ def upsert_runtime_bot(
     """Create/update one machine-local runtime row after app registration."""
     profile = profile_spec(profile_name_)
 
+    _require_bridge_profile(profile)
+
     def mutate(_data, bots):
         hit = next(
             (b for b in bots if isinstance(b, dict) and b.get("name") == bot_name),
@@ -658,6 +668,7 @@ def apply_account(bot: dict, alias: str) -> str:
     """Change an in-memory bot to one profile; do not duplicate provider homes."""
     alias = (alias or "").strip().lower()
     profile = profile_spec(alias)
+    _require_bridge_profile(profile)
     for key in ("account", "claude_config_dir", "codex_home", "runtime"):
         bot.pop(key, None)
     bot["profile"] = profile.name
@@ -722,6 +733,27 @@ def standalone_worker_cmd(
             + f"CLAUDE_CONFIG_DIR={_q(profile.home_path.as_posix())} "
             + "claude --dangerously-skip-permissions"
         )
+    elif profile.runtime == "kimi":
+        # Native kimi-code (not the legacy Python kimi-cli). Keep credentials,
+        # sessions and instructions in the selected registry home. Inherited
+        # temporary model overrides must not select another account/provider.
+        model_env = [key for key in os.environ if key.startswith("KIMI_MODEL_")]
+        command = (
+            _unset_shell_env(model_env)
+            + prefix + env_text
+            + f"KIMI_CODE_HOME={_q(profile.home_path.as_posix())} kimi"
+        )
+        args = list(provider_args or [])
+        # Subcommands and non-interactive prompts have their own permission
+        # semantics. In particular -p rejects --yolo in native kimi-code.
+        subcommands = {"login", "doctor", "acp", "web", "server", "provider",
+                       "export", "vis", "migrate", "upgrade", "update"}
+        is_subcommand = bool(args) and args[0] in subcommands
+        has_mode = any(arg in {"--yolo", "-y", "--auto", "--plan"} for arg in args)
+        is_prompt = any(arg in {"-p", "--prompt"} or str(arg).startswith("--prompt=")
+                        for arg in args)
+        if not is_subcommand and not has_mode and not is_prompt:
+            command += " --yolo"
     else:
         # Interactive workers historically own their sandbox policy, but a
         # non-interactive ``codex exec`` caller may be deliberately supplying
@@ -752,6 +784,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
     spec = runtime_spec(bot)
     profile = resolve_profile(bot, required=spec.name != "custom")
     if profile:
+        _require_bridge_profile(profile)
         # The bridge only generates text here. wmux's terminal executes it, so
         # a Scheduled Task's reduced SHELL/PATH must not veto an otherwise valid
         # profile before wmux gets a chance to run and probe the real command.
