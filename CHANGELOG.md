@@ -11,7 +11,7 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 ---
 
 # CHANGELOG · link16-agent-infra
