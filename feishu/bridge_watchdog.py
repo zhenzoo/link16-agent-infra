@@ -38,6 +38,7 @@ HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
 sys.path.insert(0, str(HERE))
 
+import bridge_process
 import bridge_env          # noqa: E402
 import agent_runtime       # noqa: E402
 import agent_quota         # noqa: E402
@@ -254,16 +255,9 @@ def hwm_corrupt_unseen(bot_name, seen):
 # ---------- R4 · 飞书桥看护 ----------
 
 def bridge_alive():
-    """桥进程在不在。查不了（PS 超时等）返 None ≠ 死了，**不喊**（宁可漏报也别误报）。"""
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "@(Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" "
-             "| Where-Object { $_.CommandLine -match 'feishu_bridge' }).Count"],
-            capture_output=True, text=True, timeout=25, creationflags=NO_WINDOW)
-        return int((r.stdout or "0").strip() or 0) > 0
-    except Exception:                                    # noqa: BLE001
-        return None
+    """None=unknown; never confuse query failure with bridge death."""
+    pids = bridge_process.service_pids(HERE / 'feishu_bridge.py', exclude_self=False)
+    return None if pids is None else bool(pids)
 
 
 def _allow(pty):
@@ -486,8 +480,6 @@ def notify(bot_name, kind, text):
         if time.time() - last < ALERT_COOLDOWN:
             log(f"[{bot_name}] {kind} 在冷却内，不重复发")
             return False
-        alerts.setdefault(key, {})["last"] = time.time()
-        _alerts_save(alerts)
     # ⚠️ 必须洗掉 FEISHU_BRIDGE_SESSION 再起子进程 —— 不是绕闸，是【让闸看到正确的身份】：
     #   PLAN-920 的发送者闸拦的是「agent 会话冒用别的 bot 发消息」，它的可信锚点是
     #   FEISHU_BRIDGE_SESSION（桥 spawn 会话时焊死）。`bridge_env.assert_sender_identity` 的注释
@@ -507,6 +499,10 @@ def notify(bot_name, kind, text):
                            errors="replace", timeout=90, cwd=str(PROJECT),
                            env=env, creationflags=NO_WINDOW)
         ok = r.returncode == 0
+        if ok and kind in _STATEFUL_KINDS:
+            alerts = _alerts_load()
+            alerts.setdefault(f'{bot_name}:{kind}', {})['last'] = time.time()
+            _alerts_save(alerts)
         if not ok:
             # 2026-08-30 起不再改投任何通道：喊清楚、如实返回 False，让调用方把「没通知到」
             # 记进心跳账（见下面 failover 的 undelivered 记录），主人上机器时一眼看得见。
@@ -532,7 +528,7 @@ def _notify_bridge_down():
     """
     text = ("⚠️ 看门狗：飞书桥进程挂了（之前在线）· "
             "恢复：在 link16-agent-infra 仓跑 python feishu/feishu_bridge.py start")
-    for spec in fb.load_bots():
+    for spec in _iter_bots():
         name = spec.get("name")
         if name and _alert_target(name):
             return notify(name, "bridge_down", text)
@@ -540,7 +536,7 @@ def _notify_bridge_down():
     return False
 
 
-def _heartbeat_write(panes, acted):
+def _heartbeat_write(panes, acted, checks=None):
     """把「上次巡检时间 / 在看护几个面板 / 本轮动作数」落盘 —— status 要报的三样之一。"""
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -555,6 +551,7 @@ def _heartbeat_write(panes, acted):
             "at": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "epoch": int(time.time()),
             "panes": panes,
+            "checks": checks or {},
             "acted_this_round": acted,
             "acted_total": int(prev.get("acted_total") or 0) + acted,
         }, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1208,10 +1205,11 @@ def cmd_run(auto=True):
                            f"· 能救的两招：给这个 bot 发 /handoff 换全新 context；或者过一阵再试\n"
                            f"· 面板 {ws} / {pty}")
 
+            checks = {"r6": "ok", "r4": "ok"}
             # ---- R6 · 水位书签损坏（每轮扫一遍名册·新增才喊）----
             try:
                 _al = _alerts_load()
-                for _spec in fb.load_bots():
+                for _spec in _iter_bots():
                     _bn = _spec.get("name")
                     if not _bn:
                         continue
@@ -1219,14 +1217,20 @@ def cmd_run(auto=True):
                     _n, _last = hwm_corrupt_unseen(_bn, _al.get(_key, {}).get("seen", 0))
                     if _n <= 0:
                         continue
-                    notify(_bn, "hwm_corrupt",
+                    delivered = notify(_bn, "hwm_corrupt",
                            f"⚠️ 检测到 {_n} 次水位书签损坏（多为断电/非正常关机）。已 fail-closed "
                            f"自动修复、未重放历史，但崩溃前最后一批未送达的消息被跳过了"
                            f"（仍在 outbox 里可人工捞回）。最近一条：{_last[:120]}")
-                    _al.setdefault(_key, {})["seen"] = int(_al.get(_key, {}).get("seen", 0)) + _n
-                    acted += 1
-                _alerts_save(_al)
+                    if delivered:
+                        # notify updated cooldown state: re-read before advancing seen.
+                        _al = _alerts_load()
+                        _al.setdefault(_key, {})["seen"] = int(_al.get(_key, {}).get("seen", 0)) + _n
+                        _alerts_save(_al)
+                        acted += 1
+                    else:
+                        checks["r6"] = "pending_notification"
             except Exception as _e:                       # noqa: BLE001 —— 巡检绝不因它崩
+                checks["r6"] = f"error: {_e}"
                 log(f"R6 水位损坏扫描失败（不致命）：{_e}")
 
             # ---- R4 · 桥进程活→死（每轮一次·不针对面板）----
@@ -1240,10 +1244,13 @@ def cmd_run(auto=True):
                     bridge_alerted = False
             elif ba is False and bridge_seen_alive and not bridge_alerted:
                 log("⚠️ 飞书桥进程挂了（之前在线）")
-                bridge_alerted = True
-                _notify_bridge_down()
+                bridge_alerted = bool(_notify_bridge_down())
+                if not bridge_alerted:
+                    checks["r4"] = "pending_notification"
+            elif ba is None:
+                checks["r4"] = "process_query_unknown"
 
-            _heartbeat_write(len(ptys), acted)
+            _heartbeat_write(len(ptys), acted, checks)
             if tick % HEARTBEAT_EVERY == 0:
                 blind = f" · 其中 {r5_blind} 个认不出 thread（R5 对它们是瞎的）" if r5_blind else ""
                 log(f"心跳 · 看护 {len(ptys)} 个面板 / {len(bot_by_pty)} 个有会话的 bot · "
@@ -1256,40 +1263,15 @@ def cmd_run(auto=True):
 # ---------- 进程管理（镜像 bridge_cron 的打法）----------
 
 def _pids():
-    ps = ("@(Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | "
-          f"Where-Object {{ $_.CommandLine -match '{PID_NAME}' -and $_.CommandLine -match ' run' }}"
-          ").ProcessId -join ','")
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
-        return [int(x) for x in (r.stdout or "").strip().split(",") if x.strip().isdigit()]
-    except Exception:                                  # noqa: BLE001
-        return []
+    return bridge_process.service_pids(HERE / 'bridge_watchdog.py')
 
 
 def cmd_start():
-    for p in _pids():
-        subprocess.run(["taskkill", "/F", "/PID", str(p)], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=15, creationflags=NO_WINDOW)
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    logf = open(LOGS_DIR / "watchdog.log", "a", encoding="utf-8")
-    detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([sys.executable, str(HERE / "bridge_watchdog.py"), "run"],
-                     stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                     cwd=str(PROJECT), creationflags=detached | NO_WINDOW)
-    time.sleep(2)
-    pids = _pids()
-    print(f"看门狗已起 · pid={pids or '?'} · 日志 feishu/_logs/watchdog.log")
-    return 0
+    return bridge_process.start_daemon(HERE / 'bridge_watchdog.py', LOGS_DIR / 'watchdog.log', 'watchdog', PROJECT)
 
 
 def cmd_stop():
-    pids = _pids()
-    for p in pids:
-        subprocess.run(["taskkill", "/F", "/PID", str(p)], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=15, creationflags=NO_WINDOW)
-    print(f"看门狗已停 · 杀掉 {len(pids)} 个进程")
-    return 0
+    return bridge_process.stop_daemon(HERE / 'bridge_watchdog.py', 'watchdog')
 
 
 def failover_readiness(rows=None):
@@ -1494,6 +1476,9 @@ def cmd_status(verbose=False):
     """必须报出三样（PLAN-931 Q8）：**在看护几个面板 · 上次巡检什么时候 · 最近注入过谁**。
     再加一段跨机自检（本机找不找得到 wmux / 名册 / 桥）—— 换台机器一跑就知道能不能用。"""
     pids = _pids()
+    if pids is None:
+        print('❌ 看门狗进程状态未知，查询失败；不能判断为已停止。')
+        return 1
     print(f"进程：{'✅ 在 pid=' + str(pids) if pids else '❌ 没在跑'}")
 
     # ⚠️ 陈旧检测放最前面 —— 后面所有绿灯的可信度都取决于它
@@ -1534,6 +1519,11 @@ def cmd_status(verbose=False):
             hb = json.loads(hp.read_text(encoding="utf-8"))
             age = (time.time() - int(hb.get("epoch") or 0)) / 60
             print(f"上次巡检：{hb.get('at')}（{age:.0f} 分钟前）· 那轮看护 {hb.get('panes')} 个面板")
+            checks = hb.get('checks')
+            if checks:
+                print('巡检功能：' + ' · '.join(f'{key}={value}' for key, value in checks.items()))
+            else:
+                print('巡检功能：旧心跳没有逐项结果，不能据此判定 R4/R6 健康')
         except Exception:                                # noqa: BLE001
             print("上次巡检：心跳文件读不动")
     else:
@@ -1603,7 +1593,8 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "run":
-        return cmd_run()
+        with bridge_process.service('watchdog', HERE / 'bridge_watchdog.py'):
+            return cmd_run()
     if args.cmd == "start":
         return cmd_start()
     if args.cmd == "stop":
@@ -1614,4 +1605,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (bridge_process.ProcessControlError, TimeoutError) as exc:
+        print(f'❌ {exc}', file=sys.stderr)
+        sys.exit(1)

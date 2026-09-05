@@ -11,6 +11,7 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
+| `feishu/bridge_process.py` | 桥、cron、watchdog 共用的 Windows 进程观测与服务互斥；查询失败为未知，受控停止等待退出，同一服务持有系统文件锁到退出 | 库；通过三种服务的 `start` / `stop` / `status` 使用 |
 | `feishu/artifact_delivery.py` | **本机全局产物交付策略 SSOT**：只决定是否允许创建飞书在线副本；默认 off，所有 Link16 profile/bot 共读。绝对路径始终显示、附件仍需明确授权、GUI 打开仍由 `$open-local` 决定；`send --doc` / 在线媒体在网络前执行失败闸 | `status [--json]`；`set-online on|off`；`decide --explicit auto|online|local [--json]` |
 | `feishu/feishu_bridge.py` | **双向桥主进程**：N 个 bot 长连接，@bot→注入对应 wmux 会话 / 回传 v8（hook→outbox→drainer）· `send`/`status`/`stop`/`doctor` | `python feishu/feishu_bridge.py`（=start 全部）/ `stop`（停全部）· **单个 bot 加 `--bot X`**：裸命令 `--bot X`=只起/刷新它、`stop --bot X`=只停它（不碰别的 bot·2026-07-03） |
 | `feishu/cron.py` ⭐⭐ | **主人自己开关定时任务的入口（复选菜单）**：一条命令列出全舰队定时任务，↑↓ 选、空格勾开 / 勾关、`f` 立刻跑一次、回车保存 —— **不用喊 agent 代跑 enable/disable**。写回 `cron-jobs/<bot>.yaml`，守护进程热读、免重启；关时自动记下「主人手动关·非故障」，开时清掉过期的停用说明。真控制台走单键，MinTTY / git-bash 自动退回「敲序号」行输入模式 | `python feishu/cron.py`（菜单）· 带参数则透传给 `bridge_cron.py`（如 `python feishu/cron.py board`） |
