@@ -53,6 +53,41 @@ class DeviceGrantRecoveryTests(unittest.TestCase):
         )
         self.assertIn("drive:drive", scopes)
 
+    def test_docs_consume_requests_only_verified_read_scopes(self):
+        scopes = register.bridge_scope_audit.requested_scopes(
+            ["docs-consume"], for_fix=True
+        )
+        self.assertEqual(scopes, (
+            "sheets:spreadsheet:read",
+            "docs:document.media:download",
+            "board:whiteboard:node:read",
+        ))
+        self.assertNotIn("drive:drive", scopes)
+
+    def test_enterprise_registration_defaults_to_docs_consume(self):
+        capabilities = register._registration_capabilities(None, "enterprise")
+        self.assertEqual(capabilities, ("core", "group-a2a", "docs-consume"))
+
+    def test_personal_registration_keeps_safe_default(self):
+        capabilities = register._registration_capabilities(None, "personal")
+        self.assertEqual(capabilities, ("core", "group-a2a"))
+
+    def test_enterprise_group_resolves_from_registry_not_bot_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.json"
+            registry.write_text(
+                '{"tenants":[{"kind":"enterprise","group_name":"obsagent 大乱斗",'
+                '"group_chat_id":"oc_company"}]}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                register._tenant_kind_from_group("obsagent 大乱斗", registry),
+                "enterprise",
+            )
+            self.assertIsNone(
+                register._tenant_kind_from_group("tb26-looking-name-only", registry)
+            )
+
     def test_group_a2a_registration_requires_explicit_group(self):
         with self.assertRaisesRegex(ValueError, "必须显式给 --group"):
             register._validate_group_choice(["core", "group-a2a"], None)

@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-08-30
+last_reviewed: 2026-09-04
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -36,8 +36,8 @@ last_reviewed: 2026-08-30
 # 1. 一键建应用（官方扫码 · 自动写 .env）
 python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <profile> --group "<目标共享群>" --background
 # 2. 脚本按 profile doctor 后自动 upsert 本机运行名册；只核对非身份字段（见 §1）
-# 3. 选择能力档（见 §2）：默认 core/group-a2a 不追加权限；
-#    docs-text/docs-media/docs-import/group-listen 才申请增量 scope，可能需要管理员审批
+# 3. 选择能力档（见 §2）：个人租户默认 core/group-a2a；公司租户默认再加 docs-consume；
+#    docs-text/docs-media/docs-import/group-listen 按用途追加，可能需要管理员审批
 # 4. 把 bot 拉进群 —— 先查它该进哪个（企业租户 ≠ 交流水吧 · 见 §4.2）；再互报 open_id（跨机靠 bot/v3/info）
 python feishu/tenant_probe.py --bot <新bot>
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
@@ -130,18 +130,21 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 ## § 2 · 权限三层（★ 本文最关键的一节）
 
-注册不再把“所有历史 bot 开过的权限”当成每只新 bot 的完成条件。`register_feishu_app.py --capability ...` 按实际用途选择；未指定时使用 `core + group-a2a`。
+注册不再把“所有历史 bot 开过的权限”当成每只新 bot 的完成条件。`register_feishu_app.py --capability ...` 按实际用途选择；个人租户未指定时使用 `core + group-a2a`，公司租户使用 `core + group-a2a + docs-consume`。
 
 | 能力档 | 能做什么 | 额外权限 | 审批边界 |
 |---|---|---|---|
 | `core` | DM 收发、发文字/图/文件 | 无；官方 preset 已带 | Device Grant 创建流内完成 |
 | `group-a2a` | 入共享群后与 peer bot 互相 @ | 无额外 umbrella scope；依赖 preset 的 granular `im:chat:read/update`、`im:chat.members:bot_access`、群 @ scope | 权限通常已随 preset；**人工拉群**仍不可省 |
 | `docs-text` | 创建公开可读文字 docx；Markdown/HTML 经 convert-block 写入 | docx 创建/编辑 + block convert；preset 通常已带 | `tb26-baseball` 无 `drive:drive` 真测成功 |
+| `docs-consume` | 递归读取在线文档里的 Sheet、图片与白板 | `sheets:spreadsheet:read` + `docs:document.media:download` + `board:whiteboard:node:read` | **公司租户默认**；个人租户仅承担完整文档解析时选 |
 | `docs-media` | 图片/视频/文件嵌入 docx | 优先 `docs:document.media:upload` | 组织内应用通常免审；**一旦这只应用开了「外部可用范围」就会翻成需审核**（[§ 4.4](#-44--权限突然全变需审核先看应用可用范围有没有开外部2026-08-27-主人实测)）。直接 IM 发附件不需要它 |
 | `docs-import` | 把本地源文件上传后走 import task，并显式授权协作者 | Drive/导入/permission 类权限 | 会触发管理员审核的重能力；不用就不开 |
 | `group-listen` | 不被 @ 也主动读取全群 | `im:message.group_msg` | 可选高范围能力；不用就不开 |
 
-注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant / 创建应用（`create_only=True`，不携带权限 `addons`）；登记成功后，Monitor 按选定 capability 生成链接 2，明确列出这次要开的 tenant scopes，让人审阅后再按飞书页面要求创建版本/发布。默认 `core + group-a2a`；需要文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
+注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant / 创建应用（`create_only=True`，不携带权限 `addons`）；登记成功后，Monitor 按选定 capability 生成链接 2，明确列出这次要开的 tenant scopes，让人审阅后再按飞书页面要求创建版本/发布。个人租户默认 `core + group-a2a`；公司租户由 `--tenant-kind enterprise` 或 `--group` 对 registry 的租户映射自动加 `docs-consume`。需要创建文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
+
+**2026-09-04 `tb26-baseball-4` 端到端验真**：scope API 返回 43 项，三项新增 scope 均为已生效；随后以 bot 身份从真实产品文档读取内嵌 Sheet `A1:F8`、一张 2,030,702 字节 PNG，并导出一块 350 节点白板。图片预览链已满足 AI 解析；“原件直下”分支仍单独返回 HTTP 403，不能把“预览可读”写成“所有下载分支均可用”。
 
 **2026-08-26 `tb26-baseball` 真测**：当前 47 scopes 里没有 `drive:drive`，旧 `send --doc` 的源文件上传在 `ccm_import_open` 返回 `99991672`；但直接创建 docx、写入文字、设置任何人凭链接可读均成功，且外部读取器读回正文。显式增加 owner 协作者仍缺 `docs:permission.member:create` 等权限。因此：无 Drive ≠ 无在线文档；准确区别是“公开文字文档可做，旧源文件导入和协作者授权不可做”。
 
@@ -288,15 +291,15 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 >
 > **🔒 登记协议（Publisher 2026-06-20 定规 · 硬规则 · 2026-07-04 大部分已自动化）**：每次用 `register_feishu_app.py` 建新 bot、**或**给任何 bot 开/关权限之后都要回写登记。**register 现在【自动】把新 bot 补进 [`agent-registry.json`](../feishu/agent-registry.json)（目录名单·open_id 现查填好）** → 运行的 agent 只需**核对/补 `repo`**；开/关权限后再跑 auditor 刷新 §2.2 能力矩阵。§2.1 名单已收口为 `agent-registry.json` 的指针·**不再手抄**。`register_feishu_app.py` 跑完会打印这份清单提醒。
 
-- [ ] **注册** `register_feishu_app.py --name X --bot key --profile <profile> --group "<Device Grant 所选组织对应的共享群>"`（OAuth 前 profile doctor）
-- [ ] **能力档** — 默认 `core + group-a2a`；只有确实需要才选 `docs-text` / `docs-media` / `docs-import` / `group-listen`
-- [ ] **按能力开权限** — 默认 `core + group-a2a` 已齐就不追加；只有确实需要才选 `docs-text` / `docs-media` / `docs-import` / `group-listen`
+- [ ] **注册** `register_feishu_app.py --name X --bot key --profile <profile> --group "<Device Grant 所选组织对应的共享群>" --tenant-kind <enterprise|personal>`（OAuth 前 profile doctor；`--group` 精确命中 registry 时可自动推导租户类型）
+- [ ] **能力档** — 个人租户默认 `core + group-a2a`；公司租户默认 `core + group-a2a + docs-consume`；只有确实需要才再选 `docs-text` / `docs-media` / `docs-import` / `group-listen`
+- [ ] **按能力开权限** — 公司 `docs-consume` 固定申请 Sheet/图片/白板三条只读 scope；个人租户只有承担在线文档完整解析时才显式选择该 capability
 - [ ] **别开【外部可用范围】** — 除非这只 bot 确实要给外部用户/外部群用。开了会把云文档/表格那批权限从免审翻成**需审核**、卡在审批里（[§ 4.4](#-44--权限突然全变需审核先看应用可用范围有没有开外部2026-08-27-主人实测) 前后对照实证）
 - [ ] **Monitor** — 注册器已自动 arm；`python feishu/registration_monitor.py status --bot key` 能看到 OAuth/权限/认主/入群机械状态
 - [ ] **运行时名册** — ✅ 注册脚本自动 upsert `bridge-bots.local.json`；核对 name/app_id_env/at_name/cwd/profile，禁止 legacy identity 字段
 - [ ] **跨机目录名册** `agent-registry.json` —— ✅ **`register_feishu_app.py` 已【自动】补 stub**（name/machine/send_key/open_id/at_name/verified 现查填好）→ 你只需**核对/补 `repo`**（分管哪个仓·脚本不知道）+ 必要时 machine，共享仓则 `shared:true`。查名册 tool / repo-sync 路由 / 方案B 按名喊全靠它
 - [x] **默认 profile** — 本机 `defaults.profiles` 只写一次；例外 bot 只写 `profile`。机制见 [`ARCH-120`](ARCH-120-agent-profile-runtime.md) 与 [`ARCH-110 §4.2`](ARCH-110-feishu-bridge.md)。
-- [ ] **可选文档能力** — 文字公开链接选 `docs-text`；嵌媒体选 `docs-media`；只有保留旧源文件导入/协作者编辑才选 `docs-import`
+- [ ] **文档能力** — 完整读取选 `docs-consume`（公司默认）；文字公开链接选 `docs-text`；嵌媒体写入选 `docs-media`；只有保留旧源文件导入/协作者编辑才选 `docs-import`
 - [ ] **可选 group-listen** — 只有要听全群时才申请 `group_msg`
 - [ ] **拉进共享群** —— ⚠️ **先跑 `python feishu/tenant_probe.py --bot <新bot>` 看它该进哪个群**（[§ 4.2](#-42--该进哪个群--按租户判定绝不按名字前缀猜)），别默认交流水吧；然后互换 open_id（`bot/v3/info`）
 - [ ] **两台机** 各配 `.env`（§5）
@@ -307,11 +310,13 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 
 ---
 
-## § 4.1 · 权限按能力开，不按租户开满
+## § 4.1 · 公司默认完整读取；个人仍按能力最小授权
 
-注册默认只有 `core + group-a2a`；真实缺口由 Monitor 和 `bridge_scope_audit.py` 判断。需要在线文字文档时加 `docs-text`，不需要 `drive:drive`；只有 HTML/Office 导入才加 `docs-import`，嵌媒体才加 `docs-media`。个人租户与企业租户使用同一套 capability 规则，不因账号类型自动开满权限。
+注册器只认 `agent-registry.json` 的租户映射或显式 `--tenant-kind`，绝不按 `tb26-` 之类名字猜。公司租户默认 `core + group-a2a + docs-consume`，其中 `docs-consume` 只增加 Sheet、图片读取和白板节点三条窄 scope；它不是“开满权限”。个人租户继续默认 `core + group-a2a`，只有该 bot 确实承担在线文档完整解析时才加 `--capability docs-consume`。
 
-`scope_level.py --new-app` 只保留给 企业租户A 企业租户的历史 54-scope 齐平/排障，不是正常注册步骤，也不用于判断文档能否发送。文档发送统一走 `send --doc`：Markdown/TXT 优先原生 docx，在线失败自动发原文件附件。
+需要在线文字文档创建时加 `docs-text`，不需要 `drive:drive`；只有 HTML/Office 导入才加 `docs-import`，嵌媒体写入才加 `docs-media`。真实缺口由 Monitor 和 `bridge_scope_audit.py --capability docs-consume` 判断。
+
+`scope_level.py --new-app` 只保留给 企业租户A 企业租户的历史 55-scope 齐平/排障，不是正常注册步骤，也不用于判断文档能否发送。文档发送统一走 `send --doc`：Markdown/TXT 优先原生 docx。
 
 ### ⚠️ 开通链有【长度上限】：超了整页报「参数不合法」（2026-08-27 实证 · 已加机械闸）
 
@@ -481,9 +486,9 @@ python feishu/bridge_history.py --bot <bot> --recent 10      # 老记录还在�
 要真正「不用登录、任何网络都能打开」的公开链接，走部署者自己选择并维护的静态站发布工具；
 Link16 不依赖用户私人 skill。PLAN-980 的实测静态页匿名访问为 `HTTP 200`。
 
-### 最小可用权限集（推荐给新 bot · 别无脑开 54 条）
+### 最小可用权限集（推荐给新 bot · 别无脑开历史 55 条）
 
-54 条里绝大多数是**官方注册预设自带的**（消息、评论、pin、表情、斜杠命令、机器人菜单…），
+历史 55 条里绝大多数是**官方注册预设自带的**（消息、评论、pin、表情、斜杠命令、机器人菜单…），
 不是我们挑的。真正需要的是下表这些按能力组合的权限；可选能力不启用就不申请，不再写一个容易误导的固定总数：
 
 | 用途 | 权限 |
@@ -494,9 +499,10 @@ Link16 不依赖用户私人 skill。PLAN-980 的实测静态页匿名访问为 
 | **发在线文档** | `docx:document:create`、`docx:document:write_only`、`docx:document.block:convert`、`drive:drive.metadata:readonly`、`docs:permission.setting:write_only`（或 `docs:permission.member:create`） |
 | 读文档 | `docx:document:readonly`、`wiki:node:read` |
 | 扒文档内嵌图片 | `docs:document.media:download` |
-| 读表格（可选） | `bitable:app:readonly`、`sheets:spreadsheet:readonly` |
+| 读表格（可选） | `bitable:app:readonly`、`sheets:spreadsheet:read`（或历史 `:readonly`） |
+| 读画板节点（可选） | `board:whiteboard:node:read` |
 
-`--new-app` 给的 54 条是「和现有 bot 完全拉齐」的做法，省心但偏多；
+`--new-app` 给的 55 条是「和现有公司 bot 历史水位完全拉齐」的做法，省心但偏多；
 **只想要能用**就照上表挑。多出来的那些不构成额外风险（都是消息类和只读类），但也没必要。
 
 ### 发在线文档链接给人时：必须带中文说明，不许只甩链接

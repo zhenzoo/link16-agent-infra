@@ -14,7 +14,7 @@ does_not_own:
   - Codex Personal 的迁移（见 SOP-160）
 read_when:
   - 要新建一个 Codex（而非 Claude）飞书 bot
-last_reviewed: 2026-08-26
+last_reviewed: 2026-09-04
 ---
 # SOP-121 · 建一个 Feishu Codex bot（SOP-120 之上的 Codex 增量）
 
@@ -46,7 +46,8 @@ Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史�
 
 1. **注册应用 → 显式选择已通过 doctor 的 Codex profile**：
    ```powershell
-   python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <codex-profile> --background
+   python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <codex-profile> `
+     --group "<目标共享群>" --tenant-kind <enterprise|personal> --background
    ```
    OAuth 扫码 / 自动写 `.env` / 自动补 `agent-registry.json` stub 全同 SOP-120；脚本先从 Link16 effective
    local registry 解析所选 profile 为 Codex 并 doctor，注册成功后自动 upsert 本机运行名册。
@@ -67,7 +68,7 @@ Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史�
 3. **运行 Link16 doctor/selftest**；registry 中没有目标 profile 时，用
    `profile_bootstrap.py --register-profile <name> --runtime codex --profile-home <home>` 先预览再 `--apply`。
 
-4. **其余全照 [`SOP-120 §4`](SOP-120-feishu-register.md) 清单**：按用途选能力档；普通 Codex agent 使用 `core + group-a2a`，不默认申请 Drive、plain `im:chat` 或听全群。仍需人工拉进共享群、私聊认主、双机同步 `.env`，并核对 `agent-registry.json` 的 `repo`/`machine`。
+4. **其余全照 [`SOP-120 §4`](SOP-120-feishu-register.md) 清单**：按用途选能力档；个人租户 Codex agent 默认 `core + group-a2a`，公司租户默认再加 `docs-consume` 三项只读 scope；两者都不默认申请 broad Drive、plain `im:chat` 或听全群。仍需人工拉进共享群、私聊认主、按需同步受信同主设备的 `.env`，并核对 `agent-registry.json` 的 `repo`/`machine`。
 
    注册器会 arm 独立 Monitor。Codex turn 已结束后，OAuth/权限/认主/入群信号由 Link16 经 wmux 注回发起 bot，不能依赖 Claude Code 的后台任务完成通知，也不读取 Codex transcript 猜完成。
 

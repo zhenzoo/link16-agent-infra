@@ -50,6 +50,8 @@ description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文
 
 表中没有的操作先读 `TOOLS.md`，不要另造脚本。
 
+注册公司租户 bot 时，默认传 `--tenant-kind enterprise`（或给出能由 registry 唯一识别的公司群），让注册器自动附加 `docs-consume`：`sheets:spreadsheet:read`、`docs:document.media:download`、`board:whiteboard:node:read`。注册个人租户 bot 时传 `--tenant-kind personal`，默认不扩这三项；只有该 bot 确实承担在线文档完整解析时才显式加 `--capability docs-consume`。不要按 bot 名、机器名或 Codex/Claude profile 猜飞书租户。
+
 ## 3. 自动回址与主动发送
 
 - `p2a`：真人私聊 bot。普通回复由桥自动回原 DM，渲染为互动卡片。
@@ -70,6 +72,7 @@ description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文
 - 只有用户明确说“文件”“附件”或“原文件”时，才使用 `send_feishu_file.py --file`。在线开关、在线 URL 或 `$open-local` 成功都不能外推出附件授权。旧的 `send --file` 已机械拒绝，不能再用。
 - 飞书在线文档和关键网页 URL 必须裸写或写成 `[标签](https://...)`，不得套反引号或代码围栏。
 - 本地路径是默认电脑定位信息；需要手机访问时，用户可以开启全局在线开关或在当前轮明确要求在线稿。
+- owner `p2a` 的成型可审阅产物在路径核对和回执后，默认立即调用用户级 `$open-local` 在这台配对电脑逐份打开；不要求 owner 每轮重复说“请打开”，也不以“是否在桌前”推断授权。本轮明确说“后台/无人值守/不要打开”时跳过；`p2a-ext`、cron 与 a2a 默认不启动 GUI，除非 owner 当前任务明确授权。Link16 bridge/drainer 不替 agent 启动本地应用。
 - 通过本 skill 产出的在线文档，最终回复必须逐条列出真实外部 URL。
 - 任何注册、权限和开机启动动作先 dry-run；需要人点击链接、登录、认领或确认系统任务时，说清动作并依赖 registration monitor/doctor 的机械信号继续。
 - 不打印 app secret、token 或 `.env` 内容。

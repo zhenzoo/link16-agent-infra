@@ -67,6 +67,19 @@ CAPABILITY_SPECS = {
             "docs:permission.setting:write_only",
         ],
     },
+    "docs-consume": {
+        "label": "在线文档完整读取（Sheet/图片/白板）",
+        "groups": [
+            ["sheets:spreadsheet:read", "sheets:spreadsheet:readonly"],
+            ["docs:document.media:download"],
+            ["board:whiteboard:node:read"],
+        ],
+        "requested": [
+            "sheets:spreadsheet:read",
+            "docs:document.media:download",
+            "board:whiteboard:node:read",
+        ],
+    },
     "docs-media": {
         "label": "云文档内嵌图片/文件",
         "groups": [["docs:document.media:upload", "drive:drive"]],

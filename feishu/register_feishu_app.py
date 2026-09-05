@@ -14,10 +14,12 @@
 
 官方 preset 提供消息、事件与 WebSocket 基础能力；注册默认分成两条人工链接：
 第一条只创建应用，第二条按 `--capability` 精确列出 tenant 权限供人审阅/发布。
-默认 core + group-a2a 不申请 broad Drive 或听全群。`--background` 把
-Device Grant 和人工步骤监督从当前 Claude/Codex turn 生命周期中解耦。
+默认 core + group-a2a 不申请 broad Drive 或听全群；公司租户默认再加
+docs-consume（Sheet/图片/白板只读）。`--background` 把 Device Grant 和人工步骤监督
+从当前 Claude/Codex turn 生命周期中解耦。
 """
 import argparse
+import json
 import os
 import re
 import socket
@@ -246,6 +248,39 @@ def _validate_group_choice(capabilities, group):
         )
 
 
+def _tenant_kind_from_group(group, registry_file=None):
+    """Resolve enterprise/personal from the registry SSOT, never from bot names."""
+    if not (group or "").strip():
+        return None
+    if registry_file is None:
+        from bridge_env import registry_path
+        registry_file = registry_path()
+    try:
+        data = json.loads(Path(registry_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    needle = group.strip().casefold()
+    matches = {
+        tenant.get("kind")
+        for tenant in data.get("tenants", [])
+        if tenant.get("kind")
+        and (
+            needle == str(tenant.get("group_chat_id") or "").casefold()
+            or needle == str(tenant.get("group_name") or "").casefold()
+            or needle in str(tenant.get("group_name") or "").casefold()
+        )
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _registration_capabilities(requested=None, tenant_kind=None):
+    """Apply the enterprise document-consumption baseline without widening personal bots."""
+    capabilities = list(bridge_scope_audit.normalize_capabilities(requested))
+    if tenant_kind == "enterprise" and "docs-consume" not in capabilities:
+        capabilities.append("docs-consume")
+    return tuple(capabilities)
+
+
 def main():
     ap = argparse.ArgumentParser(description="一键创建飞书智能体应用并写凭据进 .env")
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
@@ -265,6 +300,8 @@ def main():
                     help="人工步骤完成后唤醒哪只 Link16 bot；不给取 FEISHU_BRIDGE_SESSION")
     ap.add_argument("--group", default=None,
                     help="group-a2a 的人工入群验收名片段；新 bot 必须按 Device Grant 选中的组织显式给出")
+    ap.add_argument("--tenant-kind", choices=("enterprise", "personal"), default=None,
+                    help="飞书租户类型；不给时按 --group 与 agent-registry.json 的 tenants 映射推导")
     ap.add_argument("--no-monitor", action="store_true",
                     help="只用于测试/故障隔离：不启动独立注册监督器")
     ap.add_argument("--background", action="store_true",
@@ -317,7 +354,14 @@ def main():
     else:
         id_key, sec_key = "FEISHU_BRIDGE_APP_ID", "FEISHU_BRIDGE_APP_SECRET"
 
-    capabilities = bridge_scope_audit.normalize_capabilities(args.capability)
+    inferred_tenant_kind = _tenant_kind_from_group(args.group)
+    if args.tenant_kind and inferred_tenant_kind and args.tenant_kind != inferred_tenant_kind:
+        ap.error(
+            f"--tenant-kind {args.tenant_kind} 与 --group 对应的 "
+            f"{inferred_tenant_kind} 租户冲突"
+        )
+    tenant_kind = args.tenant_kind or inferred_tenant_kind
+    capabilities = _registration_capabilities(args.capability, tenant_kind)
     try:
         _validate_group_choice(capabilities, args.group)
     except ValueError as exc:
@@ -328,6 +372,7 @@ def main():
         print(f"bot={args.bot or args.name}")
         print(f"profile={selected_profile.name} runtime={runtime}")
         print(f"cwd={selected_cwd or '(repo default)'}")
+        print(f"tenant_kind={tenant_kind or 'unknown'}")
         print(f"capabilities={','.join(capabilities)}")
         print("registration_links=2")
         print("first_link=create-only;addons=(none)")

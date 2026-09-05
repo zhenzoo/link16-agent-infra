@@ -26,7 +26,7 @@ import scope_level  # noqa: E402
 class AuthUrlLengthGateTests(unittest.TestCase):
     def test_long_scope_list_is_split_and_每条都在闸内(self):
         urls = feishu_docs.auth_urls("cli_demo", scope_level.ENTERPRISE_PRESET)
-        self.assertGreater(len(urls), 1, "54 条 preset 必须拆条，不能吐一条 1446 字符的死链")
+        self.assertGreater(len(urls), 1, "企业 preset 必须拆条，不能吐一条超长死链")
         for url in urls:
             self.assertLessEqual(len(url), feishu_docs.AUTH_URL_MAX_CHARS)
 

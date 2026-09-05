@@ -61,10 +61,12 @@ EXTRA_CANDIDATES = [
     ("space:document:retrieve", "列云空间文件/文件夹（替代 drive:drive:readonly）"),
     ("bitable:app:readonly", "读多维表格（群里的用户地区表、信息收集表都是这类）"),
     ("sheets:spreadsheet:readonly", "读电子表格"),
+    ("board:whiteboard:node:read", "读取飞书画板原始节点"),
 ]
 
 # ── 企业租户A 企业租户A（企业租户 YOUR_TENANT）注册新 bot 的权限清单 ───────────────────
-# 2026-08-26 实测确定：这 54 条是该租户里【拿得到】的最高水位。
+# 2026-08-26 实测确定 54 条；2026-09-04 在真实画板验通后加入
+# board:whiteboard:node:read，当前企业历史齐平水位为 55 条。
 # `drive:drive` 不在其中 —— 该租户对它的审批压着不给，而且**不需要它**：
 # 建文档 / 写正文 / 设「组织内凭链接可读」全部走 docx:* 即可（实测 baseball 零高权限跑通）。
 ENTERPRISE_PRESET = (
@@ -84,7 +86,7 @@ ENTERPRISE_PRESET = (
     "im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,"
     "im:message.reactions:write_only,im:message:readonly,im:message:send_as_bot,"
     "im:message:send_multi_users,im:message:send_sys_msg,im:message:update,im:resource,"
-    "offline_access,sheets:spreadsheet:readonly,wiki:node:read"
+    "offline_access,sheets:spreadsheet:readonly,wiki:node:read,board:whiteboard:node:read"
 ).split(",")
 
 
@@ -151,7 +153,7 @@ def main():
         urls = feishu_docs.auth_urls(args.new_app, missing)
         print(f"=== 新 bot 开通链接（缺 {len(missing)}/{len(ENTERPRISE_PRESET)} 条 · "
               f"企业租户A 企业预设 · 不含 drive:drive · {source}）")
-        print("点开 → 勾选【应用身份】→ 创建版本并发布。发布后跑 scope_level.py 复核是否 54 条全到。")
+        print(f"点开 → 勾选【应用身份】→ 创建版本并发布。发布后跑 scope_level.py 复核是否 {len(ENTERPRISE_PRESET)} 条全到。")
         if len(urls) > 1:
             print(f"⚠️ 拆成 {len(urls)} 条链（单条超 {feishu_docs.AUTH_URL_MAX_CHARS} 字符飞书会报"
                   f"「参数不合法」）—— 每条都要点开并发布。")
