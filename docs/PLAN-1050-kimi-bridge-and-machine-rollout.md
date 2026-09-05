@@ -34,9 +34,9 @@ observed：本机八只桥在 14:56:39～42 重启，之后该 runtime 错误为
 
 evidence：`feishu/_logs/bridge-tb26-*.log`、`feishu/_state/bridge-progress-state-tb26-link16.json` 与 receipts；`agent_profile_cli.py selftest --profile kp`；`profile_governance.py docs`；66 项定向测试通过。
 
-## 当前执行图（2026-09-05 16:00）
+## 当前执行图（2026-09-05 20:02）
 
-Stage 顺序就是优先级。Stage 4 在等待明确跨 bot 派发许可期间，执行无依赖的 Stage 5 调研。所有远程写入先核对目标当前分支、dirty worktree、源和派生漂移。不同步凭据，不重启生产桥，不创建新 bot。
+本轮用户优先指定 Stage 8：将 tb26-ccp 切到 kp 并实际测试，已授权仅该 bot 的生产维护窗口。Stage 4 保留待办，不把本轮指定 CCP 验收扩大成其他机器的生产变更。所有远程写入先核对目标当前分支、dirty worktree、源和派生漂移。
 
 ### ✅ Stage 1｜统一 Claude／Codex／Kimi 的沟通真源
 
@@ -81,6 +81,14 @@ Stage 顺序就是优先级。Stage 4 在等待明确跨 bot 派发许可期间�
 - [x] 7.2 已给出清单：本机 cck 已退役、历史保留；ccw 保留；tb25 的 ccq/ccg 使用与引用待 Stage 4.4 对端核验。
 - [x] 7.3 已说明 AnySearch 当前搜索成功，历史故障原因仍未知，不误报根治。
 
+### 🔄 Stage 8｜CCP 已切换 KP，等待真人 DM 入站验收
+
+- [x] 8.1 已记录 before 与恢复信息（实际 19:47）：tb26-ccp profile=cxp，cwd 为原配置目录，无活动 PTY，旧桥 PID=28288；kp doctor 通过。备份位于 feishu/_state/kp-rollout-20260905-1945。
+- [x] 8.2 profile=kp 已持久化，新桥 PID=29248 已连接；实际 19:49。原生 session_014194b7-c51b-4518-9e69-be43b54ffacf、PTY daemon-674e71e1 启动，其他七只桥 PID 不变，共享沟通段加载已确认。
+- [x] 8.3 本地标记注入→原生 Kimi→真实飞书 DM 出站通过，实际 20:02。身份 kp/.kimi-personal，plan 0/2→2/2、ETA 19:49/19:50 与实际 19:48/19:49 保留；取消只报取消，同 session 恢复正常；所有本轮 receipts delivered=true。
+- [x] 8.4 生产发现最终正文同时进入进度卡，已修复：公开 text 等该 step 的工具事件再判为进度，否则只等 turn.ended 发最终答案。真实 Wire 重放与重载后的恢复回复均确认最终标记不在 progress 中；551 tests、53 subtests 全过，实际 20:02。只重启 observer，保留 Kimi TUI。
+- [ ] 8.5 真人 DM 入站尚未收到。已请用户私聊 CCP 一句；恢复信号为 bridge-inbound-tb26-ccp.jsonl 出现本次新 p2p/user 消息，并与同轮 answer ACK 对上。CCP 当前未加入任何群，peer 测试因无共享群在发送前被拒；没有绕过群成员检查。
+
 ## 变更记录与恢复指针
 
 - 15:07 用户说继续；查证任务扩为跨机部署和 Kimi 适配。原总 ETA 15:06 仅针对查证；新本机工程 ETA 19:10，远端时间依赖派发许可与在线状态。
@@ -91,10 +99,12 @@ Stage 顺序就是优先级。Stage 4 在等待明确跨 bot 派发许可期间�
 - 15:35 本机工程总 ETA 从 19:10 调整为 16:50（提前 140 分钟）：原生 TUI 可直接复用，不必实现完整 ACP 执行客户端。Stage 4 仍等待明确派发许可，不为远端编造 ETA。磁盘代码已接入 KP 显式切换入口，但生产桥未重启、未切换任何现有 bot，不宣称 KP 飞书已上线。
 - 15:55 Stage 5 实际完成，比原 ETA 16:10 提前 15 分钟：原生执行、Wire 回放与共享卡片验证均已收敛；Stage 6 ETA 调整为 16:20，Stage 7 为 16:25。所有生产 bot 当前仍使用原 profile。
 - 16:00 本机代码与建议交付完毕：Stage 6 比 ETA 16:20 提前 22 分钟，Stage 7 比 ETA 16:25 提前 25 分钟，原因是全仓回归无失败、远端无分叉、工具整理只需对话方案。Stage 4 与生产验收仍未完成，不以本机提交推送代替部署完成。
+- 19:45 用户明确同意将 CCP 的 account 改为 KP 并测试；不再重复询问目标或维护窗口。恢复执行新增 Stage 8。
+- 20:02 可自主完成的生产验证结束；待真人 DM 样本，不为该输入编造 ETA。新桥 PID=29248、原生 PTY=daemon-674e71e1；其他七只桥 PID 未变。最终答复 A 的 ACK 为 om_x100b66f4520bd4a4c38c50ae7fceddb；取消 ACK 为 om_x100b66f4764e00a0c0054def6eba227；恢复 C 的 ACK 为 om_x100b66f47452dca0c12aabf65001825。
 
 ## 生产验收闸与精确恢复信号
 
 - 跨机：用户同意后才向 tb24-link16、tb25-link16、tuf19-link16 派发规则同步，范围为 claude-config/main（含 e8dd4ec）与 Link16/main（90f71ec）。要求回报 before/after SHA、dirty/drift 处理、受管规则哈希、writes=0 和运行中会话进度；不混入尚未合并的 Kimi 功能分支。
-- KP 飞书：需用户选定现有 bot 或明确创建新 bot，并批准该 bot 的生产维护窗口。before 为原 profile/桥进程/会话记录；after 为所选 bot 使用 kp、加载本次功能提交，真实 DM 的 Stage/ETA/最终答案取得 ACK。生产群能力另验，不自动扩群。
-- 回滚：只恢复所选 bot 原 profile 与启动版本，保留 Kimi home、session、outbox 和 ACK。当前尚无生产切换，不需要执行回滚。
+- KP 飞书：用户已选择 tb26-ccp 并授权窗口；account 已由 cxp 切为 kp，原 cwd 保留，Stage/ETA/最终答案真实 DM 出站已获 ACK。真人 DM 入站与群能力仍未验；不自动扩群。
+- 回滚：只恢复 tb26-ccp 原 profile=cxp 和相应会话选择，再仅重启该桥；保留 Kimi home、session、outbox 和 ACK。切换前名册/会话备份在 feishu/_state/kp-rollout-20260905-1945；恢复时只取该 bot 的行，不整份覆盖其他 bot 的后续变更。当前 KP 工作正常，未回滚。
 - 原生 Kimi 交互选择器到飞书按钮、可靠额度 API 与自动换入 KP 尚未实现；普通文字问答、计划、工具安全摘要、取消和恢复不据此泛称全部交互已完备。
