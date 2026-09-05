@@ -418,6 +418,7 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
     """
 
     def setUp(self):
+        self.machine_registry = agent_runtime.profile_registry_path()
         fixture = patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH",
                                ROOT / "tests" / "absent-profile-registry.json")
         fixture.start()
@@ -557,8 +558,12 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
         if not roster.is_file():
             self.skipTest("本机没有 bridge-bots.local.json")
         bots = json.loads(roster.read_text(encoding="utf-8"))["bots"]
-        unresolvable = [b.get("name") for b in bots
-                        if not agent_runtime.profile_name(b)]
+        # Pair the real local roster with its real effective registry. The
+        # class fixture intentionally hides that registry for portable tests;
+        # using it here incorrectly rejects machine-only profiles such as kp.
+        with patch.dict(os.environ, {agent_runtime.PROFILE_REGISTRY_ENV: str(self.machine_registry)}):
+            unresolvable = [b.get("name") for b in bots
+                            if not agent_runtime.profile_name(b)]
         self.assertEqual(unresolvable, [], f"这些 bot 解析不出账号：{unresolvable}")
 
     def test_cli_stdout_is_lf_only(self):

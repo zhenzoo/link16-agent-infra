@@ -30,6 +30,7 @@ class KimiEvents:
         self.route = None
         self.accumulator = MilestoneAccumulator()
         self.texts = []
+        self.pending_text = {}
         self.tool_steps = set()
         self.seen = set()
         self.closed = True
@@ -70,6 +71,7 @@ class KimiEvents:
             self.accumulator = MilestoneAccumulator()
             self.accumulator.turn = self.turn
             self.texts, self.tool_steps, self.seen = [], set(), set()
+            self.pending_text = {}
             self.closed = False
             return [self._progress()]
         if self.closed or not self.turn:
@@ -125,12 +127,21 @@ class KimiEvents:
             if not text:
                 return []
             self.texts.append((step, text))
-            return self._apply({"event_id": identity, "event_type": "commentary",
-                                "turn": self.turn, "label": "💬 " + text,
-                                "payload": {"text": text}})
+            public = {"event_id": identity, "event_type": "commentary",
+                      "turn": self.turn, "label": "💬 " + text, "payload": {"text": text}}
+            # Wire text has no commentary/final channel. Wait for a tool call
+            # in this step before publishing it as progress; otherwise keep it
+            # for turn.ended only, so the final is not displayed twice.
+            if step in self.tool_steps:
+                return self._apply(public)
+            self.pending_text.setdefault(step, []).append(public)
+            return []
         if event_type != "tool.call":
             return []
         self.tool_steps.add(step)
+        output = []
+        for public in self.pending_text.pop(step, []):
+            output.extend(self._apply(public))
         name = event.get("name")
         family, program = _TOOLS.get(name, ("external", "工具"))
         args = event.get("args") if isinstance(event.get("args"), dict) else {}
@@ -139,5 +150,5 @@ class KimiEvents:
             path = _safe_relative_path(args.get("path", args.get("file_path")), self.workspace)
             if path:
                 payload["write_paths" if name in {"Write", "Edit"} else "access_paths"] = [path]
-        return self._apply({"event_id": identity, "event_type": "tool", "turn": self.turn,
-                            "label": program, "payload": payload})
+        return output + self._apply({"event_id": identity, "event_type": "tool", "turn": self.turn,
+                                     "label": program, "payload": payload})

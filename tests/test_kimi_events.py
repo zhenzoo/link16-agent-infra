@@ -63,6 +63,19 @@ class KimiEventsTests(unittest.TestCase):
         self.assertEqual((plan["plan_completed"], plan["plan_total"]), (1, 2))
         self.assertIn("ETA 14:30", plan["label"])
         self.assertTrue(all(r["runtime"] == "kimi" for r in outputs))
+        self.assertNotIn("✅ 检查完成。", json.dumps([r for r in outputs if r["kind"] == "progress"], ensure_ascii=False))
+
+    def test_text_is_progress_only_after_its_step_calls_a_tool(self):
+        reducer = KimiEvents("session_test", Path.cwd())
+        reducer.consume(fixture()[0], 0)
+        reducer.consume(fixture()[1], 1)
+        self.assertEqual(reducer.consume(text("c", "阶段说明"), 2), [])
+        progress = reducer.consume(loop("tool.call", "t", name="Read", args={}), 3)
+        self.assertIn("阶段说明", json.dumps(progress, ensure_ascii=False))
+        self.assertEqual(reducer.consume(text("f", "FINAL_ONLY", "last"), 4), [])
+        final = reducer.consume(row("turn.ended", reason="completed"), 5)
+        self.assertIn("FINAL_ONLY", final[0]["text"])
+        self.assertNotIn("阶段说明", final[0]["text"])
 
     def test_failed_cancelled_and_unknown_cannot_claim_success(self):
         for reason in ("failed", "cancelled", "blocked", "unrecognized"):
@@ -173,7 +186,9 @@ class WireRecoveryTests(unittest.TestCase):
         self.assertEqual(first.poll(), 0)
         with self.wire.open("ab") as handle:
             handle.write(part[15:] + b"\n")
-        self.assertEqual(first.poll(), 1)
+        self.assertEqual(first.poll(), 0)  # Text is pending until a tool identifies commentary.
+        self.write([loop("tool.call", "t", name="Read", args={})])
+        self.assertEqual(first.poll(), 2)
         self.wire.write_bytes(b"{}\n")
         with self.assertRaises(ValueError):
             first.poll()
