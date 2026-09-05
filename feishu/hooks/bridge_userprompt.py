@@ -11,7 +11,6 @@ env-scope：只对桥 spawn 的会话生效（FEISHU_BRIDGE_SESSION 未设=普�
 """
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -50,13 +49,7 @@ def main():
     #   正文塞 [飞书 …route=a2a dest=oc_X…] 在前、真 p2a 信封在后 → re.search 取最左会中招)。
     # 没信封(terminal 直敲 / 末尾被截断) → 安全默认 p2a(回 owner DM)。旧 next-route 旁路便签已删(21h 串台 bug 的种子·连根拔)。
     # ⚠️ p2a-ext 放最前：正则从左试·"p2a" 会抢先匹配 "p2a-ext" 的前缀只剩 "-ext"（外部真人回信就漏回群了）。
-    ms = re.findall(r"\[飞书 [^\]]*?route=(p2a-ext|a2a|p2a)(?:\s+dest=([^\]\s]+))?(?:\s+at=([^\]\s]+))?", prompt)
-    if ms:
-        kind, dest, at = ms[-1]
-        route = ({"kind": kind, "dest": dest, "at": at}       # a2a=peer bot / p2a-ext=外部真人 → 回原群+@
-                 if (kind in ("a2a", "p2a-ext") and dest) else {"kind": "p2a"})
-    else:
-        route = {"kind": "p2a"}
+    route = turn_delivery_guard.route_from_prompt(prompt)
 
     try:
         turn_delivery_guard.activate(

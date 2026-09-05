@@ -500,12 +500,12 @@ def _require_profile_available(
 
 def account_aliases() -> list:
     """Backward-compatible name used by Feishu `/account` UI."""
-    return [profile.name for profile in profile_specs() if profile.runtime != "kimi"]
+    return [profile.name for profile in profile_specs()]
 
 
 def _require_bridge_profile(profile: ProfileSpec) -> None:
-    if profile.runtime == "kimi":
-        raise ValueError("Kimi Code 当前仅支持独立终端；ACP 飞书适配尚未验收，不能切换 bot")
+    if profile.runtime not in {"claude", "codex", "kimi"}:
+        raise ValueError("unsupported bridge runtime")
 
 
 def machine_default_profile(runtime: str) -> str:
@@ -827,6 +827,12 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
             + "--dangerously-bypass-hook-trust --no-alt-screen "
             + f"-C {_q(cwd)}"
         )
+    if spec.name == "kimi":
+        worker = (project / "feishu" / "kimi_native_worker.py").as_posix()
+        return (
+            env + f"python {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} "
+            + f"--state-dir {_q(autopilot.as_posix())}"
+        )
     if spec.name == "custom" and isinstance(bot, dict) and bot.get("agent_cmd"):
         return env + str(bot["agent_cmd"]).format(
             cwd=cwd,
@@ -915,6 +921,14 @@ def is_ready(bot, screen: str) -> bool:
                 "permissions: YOLO mode" in screen
                 or composer_ready
             )
+        )
+    if spec.name == "kimi":
+        # Native composer and status bar, not a warmup string in history.
+        return (
+            "Trust this folder?" not in screen
+            and "context:" in screen
+            and re.search(r"(?m)^\s*(?:yolo|auto|manual)\s+", screen) is not None
+            and re.search(r"(?m)^\s*│\s*>\s*│\s*$", screen) is not None
         )
     if spec.name == "custom":
         markers = []

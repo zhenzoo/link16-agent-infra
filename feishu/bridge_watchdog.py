@@ -682,6 +682,10 @@ def snapshot_handoff(bot_name, reason=""):
         "screen_tail": tail or "",
         "background": scan_background(rec.get("cwd")),
     }
+    if rec.get("profile") and agent_runtime.profile_spec(rec["profile"]).runtime == "kimi":
+        from kimi_native_worker import handoff_source
+        # Fail before closing a pane if its exact history cannot be identified.
+        pack.update(handoff_source(bot_name, rec["profile"], rec.get("cwd"), STATE_DIR))
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         (STATE_DIR / f"watchdog-handoff-{bot_name}.json").write_text(
@@ -689,6 +693,14 @@ def snapshot_handoff(bot_name, reason=""):
     except Exception as e:                             # noqa: BLE001
         log(f"交接包落盘失败（不致命）：{e}")
     return pack
+
+
+def _transcript_format_hint(pack):
+    if pack.get("transcript_runtime") == "kimi":
+        return ("这是 Kimi Wire 1.5 主 agent 日志，不是 Claude/Codex transcript。"
+                "只按 turn.prompt、context.append_loop_event 和 turn.ended 定位用户输入、公开文字与结果；"
+                "思考、系统提示、工具参数/输出只留本地，不转发。\n")
+    return ""
 
 
 def build_handoff_prompt(pack, new_profile):
@@ -722,6 +734,7 @@ def build_handoff_prompt(pack, new_profile):
     return (
         f"[接管] 上一个会话（账号 {pack.get('old_profile')}）撞了额度上限中断了，现在换成 {new_profile} 由你接手。\n"
         f"它的完整聊天记录在：{pack.get('transcript')}\n"
+        f"{_transcript_format_hint(pack)}"
         f"（session {pack.get('session_id')} · 工作目录 {pack.get('cwd')} · 中断于 {pack.get('at')}）\n"
         f"{bg_text}\n\n"
         "请你按这个顺序做，**全程不需要跟我确认、不需要跟我对齐**：\n"
@@ -768,6 +781,7 @@ def build_align_prompt(pack):
         f"[接手·对齐模式] 你是这条线的新会话（**全新上下文**）。上一个会话的 context 快满了，"
         f"主人要在这里开一条**新的重要线**，但**不能丢掉前面已经聊出来的结论**。\n\n"
         f"上一个会话的完整聊天记录：{pack.get('transcript')}\n"
+        f"{_transcript_format_hint(pack)}"
         f"（session {pack.get('session_id')} · 工作目录 {pack.get('cwd')} · 交接于 {pack.get('at')}）"
         f"{bg_text}\n\n"
         f"请按这个顺序做：\n"

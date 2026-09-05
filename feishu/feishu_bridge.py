@@ -557,6 +557,11 @@ def clear_codex_thread(bot_name):
     f = STATE_DIR / f"bridge-codex-app-thread-{bot_name}.json"
     if f.exists():
         f.unlink()
+    # Tombstone only Kimi's pointer on explicit close/new/handoff. Provider
+    # history and delivery cursors remain available for recovery and auditing.
+    kimi = STATE_DIR / f"bridge-kimi-thread-{bot_name}.json"
+    if kimi.exists():
+        bridge_injection.atomic_write_json(kimi, {"closed": True})
 
 
 def _startup_failure_file(bot_name):
@@ -909,6 +914,8 @@ def _ready_timeout(bot, explicit=None):
         return float(configured)
     if agent_runtime.uses_app_server(bot):
         return float(CODEX_APP_SERVER_READY_TIMEOUT_SEC)
+    if agent_runtime.runtime_spec(bot).name == "kimi":
+        return 150.0  # Native warmup has a 120-second bounded model call.
     if agent_runtime.runtime_spec(bot).name == "claude":
         return float(CLAUDE_READY_TIMEOUT_SEC)
     return float(READY_TIMEOUT_SEC)

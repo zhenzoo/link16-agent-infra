@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
 
 import bridge_injection
+
+
+def route_from_prompt(prompt):
+    """Read the last bridge envelope, shared by all runtime producers."""
+    matches = re.findall(
+        r"\[飞书 [^\]]*?route=(p2a-ext|a2a|p2a)(?:\s+dest=([^\]\s]+))?(?:\s+at=([^\]\s]+))?",
+        str(prompt or ""),
+    )
+    if matches:
+        kind, dest, at = matches[-1]
+        if kind in ("a2a", "p2a-ext") and dest:
+            return {"kind": kind, "dest": dest, "at": at}
+    return {"kind": "p2a"}
 
 
 def route_path(state_dir, bot):

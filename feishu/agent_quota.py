@@ -292,6 +292,8 @@ def collect(names=None):
             base.update(_claude_quota(home))
         elif spec.runtime == "codex":
             base.update(_codex_quota(home))
+        elif spec.runtime == "kimi":
+            base.update({"status": "unknown", "note": "Kimi 原生启动已支持；额度接口尚未验收，不参与自动选号"})
         else:
             base.update({"status": "unknown", "note": f"不认识的 runtime {spec.runtime}"})
         base.setdefault("session_percent", None)

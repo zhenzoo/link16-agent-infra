@@ -26,6 +26,8 @@ last_reviewed: 2026-09-05
 
 ## 1. 要解决的问题
 
+Kimi 原生 TUI 与独立 Wire observer 合同见 §11；逐机部署证据与生产验收状态见 [PLAN-1050](PLAN-1050-kimi-bridge-and-machine-rollout.md)。
+
 账号、runtime、配置目录和模型后端过去散落在四处：
 
 - `feishu/agent_runtime.py` 的 Python alias 常量；
@@ -75,7 +77,7 @@ last_reviewed: 2026-09-05
 约束：
 
 1. profile 名只允许小写字母、数字和连字符。
-2. `runtime` 允许 `claude` / `codex` / `kimi`；原生 Kimi 当前仅支持独立终端，飞书适配见 §11。
+2. `runtime` 允许 `claude` / `codex` / `kimi`；原生 Kimi 的终端与飞书适配见 §11。
 3. `home` 必须是 home-relative，不写盘符和用户名。
 4. `launch-sh` 只表示运行时 source `<home>/launch.sh`；registry 不复制脚本内容或密钥。
 5. 当前生产推荐 Codex profile 是 `cxp`。`cx` 保留为可显式选择的备用档案，不再是新 Codex bot 默认值。
@@ -266,7 +268,7 @@ Codex runtime 适配、最小目标特例和不可复制的派生/私密状态�
 - native Claude/Codex 子智能体路径不受影响；
 - 活跃文档不再把 `claude_config_dir` / `codex_home` 描述为选号 SSOT。
 
-## 11. 原生 Kimi Code：独立终端已接，飞书适配待验收
+## 11. 原生 Kimi Code：原生终端与独立 Wire 观察程序
 
 原生 Kimi Code 与旧 `cck` 是两条不同路径：`cck` 的 runtime 是 Claude，经 `launch.sh`
 使用第三方模型；新 `kp` 的 runtime 是 `kimi`，直接运行官方 Kimi Code。
@@ -280,18 +282,25 @@ Codex runtime 适配、最小目标特例和不可复制的派生/私密状态�
   `doctor` 通过只说明可启动，登录和模型消息仍要分别验证。
 - 私人入口治理的 Kimi 模板注入同一 Claude 母版沟通段；生成目标为 registry home 下的 `AGENTS.md`。
   治理脚本与 launcher 必须解析同一个 effective registry，不能各自管理 committed 与 local 两份名单。
-- 当前飞书 `/account` 不列出 Kimi；内存切换、持久化、注册 runtime bot 和 worker 启动均在写入前拒绝。
-  这是能力边界，不把独立终端启动成功宣称为飞书接入完成。
+- 飞书 `/account` 可显式选择已注册的 Kimi profile。额度状态保持 unknown；未验收可靠额度接口前，自动选号不选择 Kimi。
+- `worker_cmd()` 启动 `kimi_native_worker.py`，后者启动官方原生 TUI 和独立观察子进程；沿用现有桥注入、路由、outbox、卡片与 durable ACK，不复制发送引擎。
 
-后续最小接入选官方 `kimi acp`：JSON-RPC 的 `session/update` 传公开消息、工具状态和 plan，
-`session/prompt` 响应结束当前回合，`session/load` / `resume` 恢复会话。只新增 Kimi 输入适配，
-继续复用 Link16 的 route、outbox、去重和飞书卡片；不套用 Claude transcript 或 Codex typed final。
-不转发 `agent_thought_chunk`、工具原始输入输出；恢复历史必须与本轮增量分离。
+### 11.1 会话与观察者身份
 
-完成判定需专门验证：当前上游实现的非认证失败也可能返回 `end_turn`，不能把该字段独自当成功；
-需结合原生失败信号或相关 Wire/StopFailure 记录。官方 ACP server 是仓内 private package，
-应使用已安装 CLI 的 ACP 入口或公共 ACP SDK，不把它当现成可安装的 Moonshot bridge SDK。
+首次用原生 `-p --output-format stream-json` 做有界热身；退出成功、精确响应标记和唯一 typed `session.resume_hint` 同时通过才固定 session。不得猜最新目录。热身字节边界以前的内容只作本地历史，不投递。随后原生 TUI 用 `--session` 接续；目录信任仅写所选 profile、精确 bot cwd 的本地记录，保留已有记录，原生 workspace key 从该 session 的实际目录取得。
 
-参考：[官方 ACP 合同](https://moonshotai.github.io/kimi-code/en/reference/kimi-acp.html)、
-[目录隔离](https://moonshotai.github.io/kimi-code/en/configuration/data-locations.html)、
-[事件映射源码](https://github.com/MoonshotAI/kimi-code/blob/main/packages/acp-server/src/events-map.ts)。
+`bridge-kimi-thread-<bot>.json` 保存 profile/cwd/session/initial_offset；恢复要求 profile 与目录一致。`/close`、`/new`、`/handoff` 只封存会话指针，保留 provider 历史与投递游标。交接包使用精确 session 的主 agent Wire 路径并说明格式；找不到绑定就先失败，不关闭旧会话。原生交互选择器尚未适配飞书按钮，不据此宣称全部交互能力可用。
+
+观察子进程持有共享 per-bot observer 锁，父 worker 另持 Kimi worker 锁。观察者异常退出后由父进程退避拉起，可单独恢复而不停止 TUI。解析异常按当前已锁定的 route 报告回传中断；没有新 turn 时不误发历史告警。原生进程退出后再读完 journal 尾部，缺少终结事件则报告结果未确认。
+
+### 11.2 Wire 1.5 → 共享 milestone 合同
+
+只接受已验证的 Wire `protocol_version=1.5` 和精确 `agents/main/wire.jsonl`。`turn.prompt` 字节偏移形成稳定 turn_key，入口信封当场锁定回址。`content.part` 只接收公开 text；工具调用只派生固定类别/安全仓库相对路径；`tools.update_store` 的 todo 状态生成真实 plan 修订。思考、系统提示、工具参数、工具结果与错误详情不得进入 outbox。
+
+`turn.ended.reason` 决定终结：completed 且存在无工具步骤的公开文字才生成正常答案；failed/cancelled/blocked 分别明确呈现。工具步骤中的文字作为进度，不拼进最终答案。ETA 与实际时间由 agent 提供，适配器保留，不编造。终结记录持久写入 outbox 后才按 turn_key compare-and-clear，旧轮不得清掉新轮。
+
+按完整 UTF-8 行推进字节游标；部分尾行等待、截断或未知协议失败。重启从头重建 reducer 状态，但只发布 cursor 以后的事件。每条公开事件用 session/字节偏移/序号形成 source_event_id，先追加并 fsync，再原子推进 cursor；追加后、游标前崩溃时按已发布 ID 去重。最终网络送达仍由 SPEC-210 的 fragment ACK 保证。
+
+选路实证：0.38.0 的 ACP session 接续原生 TUI 时会出现工具 runtime 不存在；ACP 的部分 failed 也映射成 end_turn，因此没有采用 ACP 创建或执行路径。版本升级需重跑原生会话/真实工具/计划/失败/取消/恢复验收；本机隔离通过不等于生产 bot 或其他电脑已部署。
+
+参考：[Wire 合同](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/docs/wire-manifest.d.ts)、[循环事件](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core/src/loop/events.ts)、[目录隔离](https://moonshotai.github.io/kimi-code/en/configuration/data-locations.html)、[ACP 事件映射](https://github.com/MoonshotAI/kimi-code/blob/main/packages/acp-server/src/events-map.ts)。

@@ -46,6 +46,8 @@ Claude PostToolUse 从 transcript 重放已成功返回的 `TodoWrite`、`TaskCr
 
 本地 Markdown 链接、`file:///` 和 UNC 不得伪装为飞书可点击链接：sanitizer 解除链接并显示普通可复制路径，不使用代码块。只有 `http://`/`https://` 外链进入飞书链接语义；本地客户端未来若有可机械验证的能力，再另立合同启用。
 
+Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store 形成真实 plan，公开 text 与安全工具摘要形成 `runtime=kimi` 的 milestone。只用 `turn.ended.reason` 判断成功、取消或失败，不能拿 ACP end_turn 代替成功信号。回址在 turn.prompt 冻结，恢复历史只重建状态不重复发送；原生终端仍运行而观察程序中断时，只报告回传故障进度，不把本轮伪装成已结束。三种 runtime 共用上述卡片呈现与以下投递合同。
+
 ## 2. Answer 与 fragment
 
 - `answer_id` 必须由规范化正文和公开 route 确定性计算；同一输入跨进程重启得到相同 ID，不得用 Python 进程随机 `hash()`。
@@ -64,7 +66,7 @@ Claude PostToolUse 从 transcript 重放已成功返回的 `TodoWrite`、`TaskCr
 
 ## 3. Active turn 防双发
 
-`bridge-turn-route-<bot>.json` 的活动字段为 `active`、`turn_key`、`session`、`started_at`。`UserPromptSubmit` 必须同步落盘；Claude Stop、legacy Codex Stop 和 Codex app-server final 在 answer 成功钉住后按 turn_key compare-and-clear。
+`bridge-turn-route-<bot>.json` 的活动字段为 `active`、`turn_key`、`session`、`started_at`。`UserPromptSubmit` 必须同步落盘；Kimi 在原生 turn.prompt 观察点激活同一合同。Claude Stop、legacy Codex Stop、Codex app-server final 与 Kimi turn.ended 在 answer 成功钉住后按 turn_key compare-and-clear。
 
 桥会话调用 `send_feishu_msg.py` 时：
 

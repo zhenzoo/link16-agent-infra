@@ -56,21 +56,21 @@ class KimiProfileTests(unittest.TestCase):
             self.assertTrue(result.stdout.endswith("/.kimi-personal|unset"), result.stdout)
             self.assertEqual(os.environ["KIMI_MODEL_NAME"], "stale-provider")
 
-    def test_unimplemented_bridge_adapter_cannot_change_a_bot(self):
-        bot = {"name": "test", "profile": "cxp"}
-        before = dict(bot)
-        with patch.object(runtime, "_update_local_roster") as write:
-            for operation in (
-                lambda: runtime.apply_account(bot, "kp"),
-                lambda: runtime.persist_account("test", "kp"),
-                lambda: runtime.upsert_runtime_bot("test", "ID", "SECRET", "test", "kp"),
-                lambda: runtime.worker_cmd({"name": "test", "profile": "kp"}, self.root, self.root),
-            ):
-                with self.assertRaisesRegex(ValueError, "ACP"):
-                    operation()
-            write.assert_not_called()
-        self.assertEqual(bot, before)
-        self.assertEqual(runtime.account_aliases(), [])
+    def test_native_bridge_launch_uses_one_profile_and_own_worker(self):
+        bot = {"name": "test", "profile": "kp"}
+        command = runtime.worker_cmd(bot, self.root, self.root)
+        self.assertIn("kimi_native_worker.py", command)
+        self.assertIn('LINK16_AGENT_PROFILE="kp"', command)
+        self.assertNotIn("codex_app_server", command)
+        self.assertEqual(runtime.account_aliases(), ["kp"])
+
+    def test_native_ready_requires_composer_and_status_without_trust_dialog(self):
+        bot = {"name": "test", "profile": "kp"}
+        screen = "│ >                        │\nyolo K2.7 Coding\ncontext: 14% (35k/256k)"
+        self.assertTrue(runtime.is_ready(bot, screen))
+        self.assertFalse(runtime.is_ready(bot, "Trust this folder?\n" + screen))
+        self.assertFalse(runtime.is_ready(bot, "LINK16_KIMI_NATIVE_READY"))
+        self.assertFalse(runtime.is_ready(bot, "│ > unsent prompt │\nyolo K2.7 Coding\ncontext: 14%"))
 
 
 if __name__ == "__main__":
