@@ -140,6 +140,8 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 
 ## 文档地图（按「我想干什么」找）
 
+进行中的 Kimi 飞书适配与跨机规则部署见 [PLAN-1050](docs/PLAN-1050-kimi-bridge-and-machine-rollout.md)。
+
 | 我想… | 看 |
 |---|---|
 | 在一台新电脑上从零装好 | [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) |
