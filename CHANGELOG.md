@@ -1,7 +1,34 @@
+---
+doc_type: CHANGELOG
+doc_id: CHANGELOG
+title: Link16 版本历史
+status: active
+purpose: 记录已交付版本的行为变化、验证与升级注意事项。
+owns:
+  - 已发布版本及回滚节点
+does_not_own:
+  - 当前执行计划
+  - 运行时协议字段
+read_when:
+  - 升级或回滚 Link16
+last_reviewed: 2026-09-05
+---
+
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.22.0 — Claude/Codex 计划卡统一与公司文档读取基线（2026-09-05）
+
+- **计划卡**：Stage 自动有序编号，状态统一为 ✅/🔄/⏳，标题后空行、当前 Stage 的 Step 四空格缩进，保留 agent 提供的实际时间和绝对 ETA。工具-only 换卡保留最近可见上下文，无上下文不发送“思考中”占位。
+- **Claude 补齐**：PostToolUse 将成功的 TodoWrite/TaskCreate/TaskUpdate 转为与 Codex 共用的 milestone 计划修订；公开进度保留多行正文，消除旧 140 字单行截断。失败/未完成调用不更新计划，隐藏推理、命令和工具输出不进入新进度卡，final 不重复播报。
+- **升级**：个人电脑需分别同步 Link16 与本人的 claude-config；后者提供 align/living-plan 及 Claude/Codex 入口规则。受管入口先 dry-run 检查漂移后再渲染，常驻桥在取得维护窗口后重启加载；本次发布不代表 tb24/tb25/tuf19 已完成拉取或真机验收。owner p2a 逐份本地打开沿用用户 standing instruction。
+- **回归**：本机全量 526 项测试、37 个 subtests 通过，含真实 Claude PostToolUse 子进程到 outbox，以及公开多行正文到最终卡片载荷；claude-config 治理测试 10 项通过，受管入口 dry-run 零写入。
+
+- **WHY**：Docx/Wiki 正文可读并不代表内嵌 Sheet、图片和白板也可读；只看后台勾选状态，会把“有 scope”误报成“完整消费链路已通”。同时，Codex/Claude 的个人 profile 不等于个人飞书租户，不能按运行账号名称猜租户并扩权。
+- **WHAT**：新增 `docs-consume` 能力档，精确包含 `sheets:spreadsheet:read`、`docs:document.media:download`、`board:whiteboard:node:read`。公司租户新 bot 默认附加该能力；个人租户仍默认 `core + group-a2a`，只有明确需要完整读取在线文档时才按需开启。租户类型只接受显式参数或 registry 中的群归属，不从 bot 名、机器名或 AI profile 猜测。
+- **VERIFY**：`tb26-baseball-4` 真实读取 Sheet `A1:F8`、2,030,702 字节 PNG 预览和 350 个白板节点；原图直下仍为 HTTP 403，作为独立限制保留。54 个个人租户历史应用三项窄 scope 均未齐备；公司/个人注册 dry-run 分别得到 `core + group-a2a + docs-consume` 与 `core + group-a2a`。聚焦测试、skill 校验与 profile 安装状态均通过。
 
 ## v0.21.0 — 可见长任务、跨 Runtime 恢复与同 profile Worker（2026-09-02）
 
