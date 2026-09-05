@@ -233,3 +233,23 @@ def test_stop_rejects_missing_confirmation(monkeypatch):
     monkeypatch.setattr(p, '_powershell', lambda *args: result({'ok': True}))
     with pytest.raises(p.ProcessControlError):
         p.stop_pids(['123'])
+
+
+def test_cron_board_unknown_is_not_stopped(monkeypatch, capsys):
+    monkeypatch.setattr(cron, 'load_jobs', lambda: [])
+    monkeypatch.setattr(cron, '_roster_bots', lambda: [])
+    monkeypatch.setattr(cron, '_load_lastfire', lambda: {})
+    monkeypatch.setattr(cron, '_cron_pids', lambda: None)
+    with pytest.raises(p.ProcessControlError):
+        cron.cmd_board()
+    assert '没跑' not in capsys.readouterr().out
+
+
+def test_cron_menu_unknown_does_not_offer_start(monkeypatch, capsys):
+    monkeypatch.setattr(cron, '_cron_pids', lambda: None)
+    monkeypatch.setattr(cron, '_load_bot_file', lambda bot: [{'name': 'job'}])
+    monkeypatch.setattr(cron, '_save_bot_file', lambda *args: None)
+    monkeypatch.setattr(cron, 'log', lambda *args: None)
+    monkeypatch.setattr('builtins.input', lambda *args: pytest.fail('unknown must not prompt to start'))
+    cron._menu_commit([{'bot': 'unit', 'name': 'job', 'on': True, 'was': False, 'cron': '* * * * *'}])
+    assert '未知' in capsys.readouterr().out

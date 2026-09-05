@@ -57,11 +57,11 @@ R4 仅在确认通知成功后置位。R6 仅在确认通知成功后推进 seen
 - 测试修正：首次新增冷却测试只替换 STATE_DIR、遗漏 ALERTS_PATH，误写本机一条 unit:hwm_corrupt 测试时间戳；已按确切键移除且保留其他状态，补齐路径隔离后全仓通过；未发送真实测试告警。
 - 用户级沟通：共享源 ~/.claude-personal/CLAUDE.md 已增加具体对象要求，renderer 写五份派生入口，六个账号均 source/ok，再次 apply 零写入。完整 doctor 因既有 cck launch.sh 缺失非零，未声明环境全绿。
 - 飞书可见性：02:30—03:01 出站无新活动；03:03 独立文字补发并通过读取接口回读（om_x100b66f23af834a4c3858da07bbef12）。卡片 edit receipt 为成功，但 GET 仅返回占位，客户端实际显示未知。
-- 本机生产：待更新；保留当前 agent 会话。
-- TB24：待发布后通知。
-- TB25：待发布后通知，明确保留 trust 启动修复等 dirty。
-- TB26：待发布后通知核验，离线则记录最后投递和恢复信号。
-- 发布版本、commit 与远端：待验收后记录。
+- 本机生产：03:10 刷新三个桥（link16=65652、ccp=44956、agentic-cad=29064），均重新连接飞书且保留原会话；watchdog=38720、cron=67576。心跳 03:11:10 → 03:13:57，均 checks.r4/r6=ok；NameError 总数保持 3111。03:12:26 新进度卡投递成功，message_id=om_x100b66f2d77914a4c2364bc20402c4a。
+- TB24：更新请求已投递 om_x100b66f2dc6f80a4c4f379db87f56e9，待机器回执。
+- TB25：更新请求已投递 om_x100b66f2da9ee8a4c37315b091179a6，明确由一个执行者保留 trust 启动等 dirty，待机器回执。
+- TB26：本机缺目标凭据，自动选共享群被拒；已请 TB25 核验通道代转（om_x100b66f2d97344a0c4aeb73fcfcefbd），尚不能声明已通知或已更新。
+- 发布：4bc23022a90be1a20f3fec193a4849d418204b9a / v0.22.1 已推送 origin/main 并通过 ls-remote 确认。追加 v0.22.2 补齐 cron board/menu 的未知状态展示，全仓 564 passed + 37 subtests，17.77 秒。
 
 ## 已否决与回退
 

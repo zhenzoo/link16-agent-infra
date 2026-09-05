@@ -390,7 +390,7 @@ def cmd_status():
 def cmd_board():
     """全舰队总览：每个 bot 排了哪些定时任务（本机 roster 标 ●本机 / 别机 ○）· 下次/上次。"""
     jobs, roster, lastfire = load_jobs(), _roster_bots(), _load_lastfire()
-    pids = _cron_pids()
+    pids = bridge_process.require_known(_cron_pids())
     by_bot = {}
     for j in jobs:
         by_bot.setdefault(j.get("bot", "?"), []).append(j)
@@ -604,7 +604,8 @@ def _menu_render(rows, cur, msg="", raw=True):
     except Exception:                                  # noqa: BLE001
         cols = 110
     pids = _cron_pids()
-    daemon = f"守护进程 在跑 PID={','.join(pids)}" if pids else "⚠️ 守护进程没在跑"
+    daemon = ('⚠️ 守护进程状态未知（查询失败）' if pids is None else
+              f"守护进程 在跑 PID={','.join(pids)}" if pids else "⚠️ 守护进程没在跑")
     out = ["", f"  ⏰ cron 定时任务 · {daemon}", ""]
     last_bot = None
     for i, r in enumerate(rows):
@@ -675,7 +676,10 @@ def _menu_commit(rows):
         print(f"   {'开 ✓' if r['on'] else '关 ✗'}  {r['bot']} / {r['name']}")
     on_now = [r for r in rows if r["on"]]
     print(f"\n现在开着的（{len(on_now)}/{len(rows)}）：" + ("、".join(f"{r['name']}({r['cron']})" for r in on_now) or "无"))
-    if on_now and not _cron_pids():                    # 开了任务但闹钟没跑 = 白开·当场问一句
+    pids = _cron_pids() if on_now else []
+    if on_now and pids is None:
+        print('\n⚠️ 任务已保存，但 cron 进程查询失败，是否运行未知；未发起启动。')
+    elif on_now and not pids:                        # 已确认没有守护进程才提示启动
         print("\n⚠️ 有任务开着，但 cron 守护进程没在跑 → 到点不会触发。")
         try:
             if input("现在起守护进程？(y/N) ").strip().lower() == "y":
