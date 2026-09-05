@@ -633,7 +633,7 @@ def _header(full, usage):
 
 
 def _card_text(header, labels):
-    return header + "\n\n" + ("\n".join(labels) if labels else "_思考中…_")
+    return header + (("\n\n" + "\n".join(labels)) if labels else "")
 
 
 def _fit_count(labels, head_len, budget):
@@ -808,6 +808,26 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         labels = [label for label in labels if label]
         snapshot = snapshot or steps
         plan = next((step for step in reversed(snapshot) if step.get("kind") == "plan"), None)
+        if not labels:
+            # A tool-only refresh is not a heartbeat.  When a card must be
+            # replaced, repeat the latest real plan/commentary context instead
+            # of emitting the old ``思考中`` placeholder.
+            context = []
+            if plan and str(plan.get("label") or "").strip():
+                context.append(str(plan.get("label") or "").strip())
+            commentary = next(
+                (
+                    step for step in reversed(snapshot)
+                    if step.get("kind") == "commentary"
+                    and str(step.get("label") or "").strip()
+                ),
+                None,
+            )
+            if commentary:
+                label = str(commentary.get("label") or "").strip()
+                if label not in context:
+                    context.append(label)
+            labels = context
         tool_total = sum(
             _safe_count(step.get("tool_count"))
             for step in snapshot if step.get("kind") == "tool"
@@ -871,14 +891,24 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         dirty = _v2_dirty()
         if not dirty:
             return
-        by_id = {str(step.get("event_id")): step for step in (state.get("v2_steps") or [])}
+        snapshot = state.get("v2_steps") or []
+        if not any(
+            step.get("kind") != "tool" and str(step.get("label") or "").strip()
+            for step in snapshot
+        ):
+            # Tool activity is kept in the local state but must not create a
+            # user-facing card that pretends ``思考中`` is a useful heartbeat.
+            _v2_ack(dirty)
+            state["last_flush"] = clock()
+            return
+        by_id = {str(step.get("event_id")): step for step in snapshot}
         card_ids = [event_id for event_id in (state.get("v2_card_ids") or []) if event_id in by_id]
         for step in dirty:
             event_id = str(step.get("event_id"))
             if event_id not in card_ids:
                 card_ids.append(event_id)
         card_steps = [by_id[event_id] for event_id in card_ids]
-        text = _v2_text(card_steps, state.get("v2_steps") or [])
+        text = _v2_text(card_steps, snapshot)
         mid = state.get("v2_mid")
         if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
             mid = None

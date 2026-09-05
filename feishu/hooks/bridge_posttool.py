@@ -60,8 +60,15 @@ def main():
         from jsonl_reply_extract import progress, _tool_step
         if tp and os.path.exists(tp):
             p = progress(tp, None)
-            rec["turn"] = p.get("anchor_line")
-            rec["steps"] = p.get("steps") or []
+            milestone = p.get("milestone")
+            if milestone:
+                rec.update(milestone)
+                rec["session"] = sid
+                rec["root_turn"] = f"{sid}:{p.get('anchor_line')}"
+                rec["turn"] = rec["root_turn"]
+            else:
+                rec["turn"] = p.get("anchor_line")
+                rec["steps"] = p.get("steps") or []
             rec["usage"] = p.get("usage") or {}
         else:
             rec["label"] = _tool_step({"name": tool_name, "input": tool_input})

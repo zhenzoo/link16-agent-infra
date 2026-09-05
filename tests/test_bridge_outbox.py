@@ -276,10 +276,19 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         await self.drain([second], state, cards)
         replacement = cards.new[-1][0]
         self.assertIn("计划 1/2 · 工具 4 次", replacement)
-        self.assertIn("_思考中…_", replacement)
+        self.assertIn("OLD PLAN", replacement)
+        self.assertNotIn("思考中", replacement)
         self.assertNotIn("NEW TOOL", replacement)
-        self.assertNotIn("OLD PLAN", replacement)
         self.assertNotIn("OLD TOOL", replacement)
+
+    async def test_milestone_tool_only_snapshot_does_not_create_thinking_card(self):
+        state, cards = fresh_state(), FakeCards()
+        record = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "tools:a", "revision": 1, "kind": "tool", "tool_count": 1, "label": "TOOL"},
+        ]}
+        await self.drain([record], state, cards)
+        self.assertEqual([], cards.new)
+        self.assertEqual([], cards.edits)
 
     async def test_legacy_progress_header_is_unchanged(self):
         state, cards = fresh_state(), FakeCards()
@@ -311,7 +320,7 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(marker, surface)
             self.assertNotIn(str(ROOT), surface)
             self.assertNotIn(str(ROOT.parent / "plan916-outside"), surface)
-        self.assertIn("工具 4 次", surfaces["card"])
+        self.assertEqual("\n", surfaces["card"])
         self.assertNotIn("feishu/bridge_events.py", surfaces["card"])
         self.assertNotIn("修改：", surfaces["card"])
         self.assertNotIn("新增：", surfaces["card"])

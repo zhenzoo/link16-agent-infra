@@ -210,8 +210,10 @@ def progress(jsonl_path, marker=None):
                 texts.append(b["text"])
                 steps.append({"kind": "text", "label": "📝 " + _oneline(b["text"], 140)})
             elif bt == "thinking":
-                th = b.get("thinking") or b.get("text") or ""
-                steps.append({"kind": "thinking", "label": "💭 " + (_oneline(th, 100) if th.strip() else "思考中…")})
+                # Hidden reasoning is neither a user-facing heartbeat nor a
+                # safe progress artifact. Detailed heartbeats must be emitted
+                # explicitly as assistant text/commentary.
+                continue
             elif bt == "tool_use":
                 steps.append({"kind": "tool", "label": _tool_step(b)})
         if atxts and (rec.get("message") or {}).get("stop_reason") in ("end_turn", "stop_sequence"):
@@ -221,7 +223,91 @@ def progress(jsonl_path, marker=None):
     last = steps[-1]["label"] if steps else ""
     sig = f"{len(steps)}|{last}|{len(texts)}|{len(texts[-1]) if texts else 0}|{turn_complete}"
     return {"found": True, "turn_complete": turn_complete, "texts": texts, "steps": steps,
-            "usage": usage, "signature": sig, "anchor_line": records[anchor_idx][0]}
+            "usage": usage, "signature": sig, "anchor_line": records[anchor_idx][0],
+            "milestone": _claude_milestones(records, anchor_idx)}
+
+
+def _claude_milestones(records, anchor_idx):
+    """Replay confirmed task mutations; preserve public prose, never reasoning/IO.
+
+    Older turns may seed task IDs, but only current-turn events are published.
+    A failed or unfinished tool call cannot change the visible plan.
+    """
+    from bridge_events import MilestoneAccumulator, _plan_label
+
+    acc = MilestoneAccumulator()
+    turn = str(records[anchor_idx][0])
+    acc.turn = turn
+    tasks, pending = {}, {}
+
+    def emit(event_id, kind, label, payload=None):
+        acc.apply({"event_id": event_id, "event_type": kind, "turn": turn,
+                   "label": label, "payload": payload or {}})
+
+    for idx, (line_number, rec) in enumerate(records):
+        current = idx > anchor_idx
+        if current and _is_real_user_message(rec):
+            break
+        message = rec.get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block_idx, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if rec.get("type") == "assistant":
+                if kind == "text" and current and message.get("stop_reason") not in ("end_turn", "stop_sequence"):
+                    label = str(block.get("text") or "").strip()
+                    if label:
+                        emit(f"text:{line_number}:{block_idx}", "commentary", label)
+                elif kind == "tool_use":
+                    pending[block.get("id")] = (block, current)
+                    if current:
+                        # Only count the tool; arguments/output stay out of the outbox.
+                        emit(f"tool:{block.get('id') or line_number}", "tool", "工具活动")
+            elif rec.get("type") == "user" and kind == "tool_result":
+                call = pending.pop(block.get("tool_use_id"), None)
+                if not call or block.get("is_error"):
+                    continue
+                tool, in_turn = call
+                name, inp = tool.get("name"), tool.get("input") or {}
+                changed = False
+                if name == "TodoWrite" and isinstance(inp.get("todos"), list):
+                    tasks = {str(i): {"step": str(t.get("content") or ""),
+                                      "status": t.get("status") or "pending"}
+                             for i, t in enumerate(inp["todos"]) if isinstance(t, dict)}
+                    changed = True
+                elif name == "TaskCreate":
+                    result = rec.get("toolUseResult") or {}
+                    task = result.get("task") or {} if isinstance(result, dict) else {}
+                    task_id = task.get("id") if isinstance(task, dict) else None
+                    if task_id is None:
+                        # Claude's textual success receipt supplies the assigned ID.
+                        match = re.search(r"Task #([^\s]+) created successfully", str(block.get("content") or ""))
+                        task_id = match.group(1) if match else None
+                    if task_id is not None and inp.get("subject"):
+                        tasks[str(task_id)] = {"step": inp["subject"], "status": "pending"}
+                        changed = True
+                elif name == "TaskUpdate":
+                    task_id = str(inp.get("taskId") or "")
+                    if inp.get("status") == "deleted":
+                        changed = tasks.pop(task_id, None) is not None
+                    elif task_id in tasks or inp.get("subject"):
+                        task = tasks.setdefault(task_id, {"step": inp.get("subject"), "status": "pending"})
+                        if inp.get("subject"):
+                            task["step"] = inp["subject"]
+                        if inp.get("status"):
+                            task["status"] = inp["status"]
+                        changed = True
+                if changed and current and in_turn:
+                    plan = list(tasks.values())
+                    emit(f"plan:{turn}", "plan", _plan_label(plan), {"plan": plan})
+        if current and rec.get("type") == "assistant" and message.get("stop_reason") in ("end_turn", "stop_sequence"):
+            break
+    record = acc.progress_record(session="")
+    record["runtime"] = "claude"
+    return record
 
 
 def last_turn_reply(jsonl_path):

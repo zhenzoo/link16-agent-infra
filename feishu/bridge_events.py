@@ -236,14 +236,22 @@ def _tool_event(item: dict, workspace_root) -> tuple[str, dict]:
 
 
 def _plan_label(plan: list[dict]) -> str:
-    icons = {"completed": "✅", "inProgress": "🔄", "in_progress": "🔄", "pending": "○"}
+    icons = {"completed": "✅", "inProgress": "🔄", "in_progress": "🔄", "pending": "⏳"}
     rows = []
+    number = 0
     for item in plan or []:
         if not isinstance(item, dict):
             continue
+        number += 1
         status = str(item.get("status") or "pending")
-        rows.append(f"{icons.get(status, '○')} {str(item.get('step') or '').strip()}")
-    return "📋 **当前计划**" + (("\n" + "\n".join(rows)) if rows else "")
+        lines = str(item.get("step") or "").strip().splitlines() or [""]
+        # The renderer owns the ordered-list prefix so every runtime produces
+        # the same card.  Strip an agent-supplied prefix to avoid ``1. 1.``.
+        first = re.sub(r"^\d+\.\s+", "", lines[0].strip())
+        first = re.sub(r"^(?:✅|🔄|⏳|○)\s*", "", first)
+        rows.append(f"{number}. {icons.get(status, '⏳')} {first}".rstrip())
+        rows.extend(f"    {line.strip()}" for line in lines[1:] if line.strip())
+    return "📋 **当前计划**" + (("\n\n" + "\n".join(rows)) if rows else "")
 
 
 def _collab_label(item: dict) -> str:

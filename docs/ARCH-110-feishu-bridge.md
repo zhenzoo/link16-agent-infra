@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-05
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -288,8 +288,10 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 - **进度卡（原地长大 + 满则轮换）**：PostToolUse/typed event 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**。正文只展示 commentary/plan 的进展、下一份交付和 agent 写出的绝对完成点，header 保留计划完成度与实际工具总数；工具 label 不铺正文。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随信息量有界增长，不随时间线性刷屏。
 - **计划不是 prose 推断（PLAN-1000）**：`📋 当前计划` 只在收到真实 `kind=plan` / `turn/plan/updated` 后出现；renderer 不从“计划已更新”之类 commentary 反向合成。Codex 长任务必须调用 `update_plan`，Claude 长任务必须更新其 task/todo surface；否则本地 ledger、progress state 和飞书卡都不会凭空得到计划。
+- **Claude 计划适配（PLAN-1000 S10）**：PostToolUse 重放 transcript 中成功的 TodoWrite/TaskCreate/TaskUpdate，恢复同 session 的历史任务 ID，再把当前轮公开正文与计划输出为 `milestone-v1`。它与 Codex 共用编号、缩进、状态和 outbox 修订逻辑；正文不再经过旧 140 字单行预览。失败或尚未返回的任务调用不会改变计划，隐藏 thinking 和 final 不进入该进度投影。
+- **计划卡格式与有效心跳（PLAN-1000）**：plan adapter 把所有顶层 Stage 机械渲染为 `1. / 2. / 3.` 有序列表，状态固定为 `✅ / 🔄 / ⏳`，并把当前 Stage 文本中的 `1.1 / 1.2` Step 保持缩进；agent 负责提供明确对象、实际时间/绝对 ETA。连续执行 10 分钟无其他事件时，agent 的心跳必须给出当前 Stage/Step、比 Step 更细的具体动作、已用有效执行时间、绝对 ETA 和下一个可验证结果。工具事件不是心跳；milestone 卡在只有工具变化时保留最近的 plan/commentary 上下文，没有任何用户可见上下文时不发“思考中”占位卡。
 - **思考、里程碑、交付三层分开（PLAN-1000）**：普通 commentary 原样显示且保持无色；agent 显式发出的 `🟡`（方向锁定/阶段结论）、`🟢`（已验证 Step 或产物完成）、`🔴`（blocker/验收失败/紧急风险）原样保留。renderer 不自动补色，也不猜绿/红。产生可审阅产物的 Step 由 agent 在同轮更新 plan 并发带入口的结果回执；桥只传递、原位增量和交付，不把思考伪造成产物。
-- **本地打开属于 Step 交付，不属于桥（PLAN-1000）**：agent 在当前渠道完成本地路径与按策略存在的在线 URL 回执后，若是有人直接参与的本机会话，或 owner `p2a` 已明确要求当前任务自动打开，则立即用系统默认应用打开已核对的那一份产物，再进入下一 Step；禁止把多份打开动作攒到 final。bridge/drainer 不启动 GUI，也不把“已发链接”伪装成“本地已打开”。
+- **本地打开属于 Step 交付，不属于桥（PLAN-1000）**：agent 在当前渠道完成本地路径与按策略存在的在线 URL 回执后，若是有人直接参与的本机会话，或 route 是 owner `p2a`，则立即用系统默认应用打开已核对的那一份产物，再进入下一 Step；禁止把多份打开动作攒到 final。owner `p2a` 的默认打开来自用户 standing instruction，不用“是否在桌前”推断，也不要求每轮重复授权；本轮明确说“后台/无人值守/不要打开”时跳过。`p2a-ext`、cron 与 a2a 默认不打开，除非 owner 当前任务明确授权。bridge/drainer 不启动 GUI，也不把“已发链接”伪装成“本地已打开”。
 - **在线产物开关只认 Link16 本机策略（PLAN-1000 S7）**：`feishu/artifact-delivery.local.json` 是这台机器所有 profile/bot 共用的唯一可变值，缺失即 off；committed 样例只定义 schema。`artifact_delivery.py status/set-online/decide` 是查询与切换入口。`send --doc` 和 `send_feishu_media.py` 在任何飞书网络请求前过闸；全局 off 时退出，用户本轮明确要求在线稿才允许 `--explicit-online` 单次覆盖。`set-online` 是持久偏好，不用于“临时 on → shell finally 恢复”的单次事务：外层执行器超时会跳过恢复；单次交付始终走不改配置的 override。profile registry、Skill、CLAUDE/AGENTS 只负责路由到该策略，不复制开关值。
 - **四级绝对 ETA 不加协议字段（PLAN-1000）**：总计划/当前全部 P0、当前 P0、当前 Stage、当前 Step 的绝对完成点，以及下一 Step 的绝对时间段，都由 Claude/Codex 按用户级 `align`/`living-plan` 规则写进 commentary。用户可见文字使用 `ETA HH:mm（预计 HH:mm 完成）`，时长范围只能括号补充。每个 runtime plan Step 自身也携带 `实际完成 HH:mm` 或 `预计 HH:mm 完成`；桥只原样保存，不从中文 label 反向解析时间，也不替 agent 读钟、计算或猜测。
 - **Codex milestone 工具摘要（PLAN-916/1000）**：commentary 保持原样；每个相邻工具段仍聚合实际调用次数、类别和安全仓库相对路径，供本地 ledger 与排障使用。卡片正文过滤 tool label，只在 header 累计 `tool_count`。完整命令、参数、输出、tool-derived 绝对路径和 reasoning 不进入卡片。

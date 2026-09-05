@@ -15,7 +15,7 @@ does_not_own:
 read_when:
   - 修改 align、living-plan 或 Link16 进行中卡
   - 调整飞书中间产物交付方式
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-05
 ---
 
 # PLAN-1000 · 实时进度、绝对 ETA 与中间产物交付
@@ -42,11 +42,12 @@ last_reviewed: 2026-09-01
 
 `📋 当前计划` 使用渐进展开，而不是“只列 Stage”或“复制全部 Step”二选一：
 
-- 所有 Stage 都显示一条顶层项，包含状态、短目标/主要产物和实际完成时间或绝对 ETA，供主人判断优先级与整体排程。
+- 所有 Stage 都显示为真正的 `1. / 2. / 3.` 有序列表项；已有 `S1 / S2 / S3` 只作为 Stage 名称保留在数字后面。每项包含状态、短目标/主要产物和实际完成时间或绝对 ETA，供主人判断优先级与整体排程。
+- 状态图标固定为 `✅` 已完成、`🔄` 正在进行、`⏳` 等待执行；不得显示空心圆、颜色圆点或纯文字状态。
 - 只有当前 Stage 在同一顶层项下缩进显示短 Step；每条只保留状态、短产物和实际时间/绝对 ETA。完整动作、验收和证据仍在 PLAN 真源。
 - Step 切换后收起旧 Stage、展开新 Stage；尚未进入执行时展开当前决策闸。renderer 只保真显示 runtime plan event，不从 prose 猜层级。
 
-每次开工、切换 Step、产出可审阅成果、发现阻塞或预计完工时间明显变化时，更新同一张进行中卡。Step 变化还要同步 runtime plan，并另发一条结果回执；只输出思考和纯时长不算 Step 更新。连续执行 10 分钟仍无上述事件时，补一条短心跳；汇报不中断后续执行。
+每次开工、切换 Step、产出可审阅成果、发现阻塞或预计完工时间明显变化时，更新同一张进行中卡。Step 变化还要同步 runtime plan，并另发一条结果回执；只输出思考和纯时长不算 Step 更新。连续执行 10 分钟仍无上述事件时，补一条有效心跳；心跳必须包含当前 Stage、当前 Step、比 Step 更细的正在处理对象/动作、本 Step 已用有效执行时间、当前 Step 的绝对 ETA 和下一个可验证结果。只显示“思考中”、工具次数、计划计数或重复 Step 标题不算心跳；汇报不中断后续执行。
 
 每次更新同时给出四级绝对完成点：
 
@@ -63,7 +64,7 @@ RESEARCH、PLAN、PRD、ARCH、SOP、SPEC、ROLE、TASTE、LOG、BAN 等受治�
 
 - 飞书 `p2a`：始终显示本机绝对路径；先查询 Link16 本机全局产物交付策略，默认 off 时不创建在线副本、不显示 HTTPS 行，on 或用户本轮明确要求在线稿时才发布飞书在线文档/媒体。默认不发送本地原文件附件；只有用户明确要求“附件/原文件”才可发送。在线链失败也不得自动降级成附件。
 - 本地绝对路径使用普通可选中文字，不放代码块。只有客户端真实支持时才显示可点击本地入口；否则明确使用“复制路径”，不伪装成链接。
-- 本地打开是每份产物交付的一部分，不是最终收尾：验证后按“更新 plan → 发带状态回执与入口 → 立即用系统默认应用打开 → 进入下一 Step”逐份执行，禁止攒到最终批量补。有人直接参与的本机会话默认打开；owner `p2a` 在当前任务明确要求自动打开时，也构成对该任务内已核对目标文件的逐份 GUI 授权。后台、cron、a2a 或无人值守任务没有这条明确授权时不弹 GUI，只登记并发送链接/路径。
+- 本地打开是每份产物交付的一部分，不是最终收尾：验证后按“更新 plan → 发带状态回执与入口 → 立即用系统默认应用打开 → 进入下一 Step”逐份执行，禁止攒到最终批量补。有人直接参与的本机会话默认打开；owner `p2a` 是这台配对电脑上的逐份 GUI 打开 standing instruction，不要求每轮重复说“请打开”。只有本轮明确说“后台/无人值守/不要打开”才跳过。`p2a-ext`、cron 与 a2a 默认不弹 GUI，除非 owner 在当前任务明确授权。
 - 每完成一份产物就交付一条带状态的回执，列出产物、验收状态和访问入口，随后继续执行；不把十份成果压到最终回复一次性发送。
 
 ## 全盘职责图
@@ -126,7 +127,7 @@ RESEARCH、PLAN、PRD、ARCH、SOP、SPEC、ROLE、TASTE、LOG、BAN 等受治�
 
 1. **本地路径**：每份可审阅产物都显示一行完整绝对路径，不放代码块，也不伪装成 Markdown / `file:///` 链接。现有 Link16 sanitizer 和真实客户端探针只证明它可以复制，尚未证明飞书卡片能通过 Ctrl/右键直接打开；因此目标态明确写“本地路径”，不承诺可点击。
 2. **在线入口**：由本机 Link16 的一个全局开关决定。默认关闭时不调用在线发布工具，卡片里完全没有 `https://...` 一行；开启时才调用既有在线文档/媒体工具，并且只多出一行真实 URL。原文件附件仍只有用户明确要求时才允许。
-3. **本地预览**：有人直接参与的本机会话立即调用 `$open-local`；本轮 owner `p2a` 已明确授权当前任务逐份自动打开，因而每份产物验证并回执后立即打开。后台、cron、a2a 或其他无法确认 GUI 授权的任务不据 `p2a` 或时间猜测人在电脑前。
+3. **本地预览**：有人直接参与的本机会话立即调用 `$open-local`；owner `p2a` 依据用户 standing instruction 默认在这台配对电脑逐份打开，不把“人在不在桌前”当成授权判据。本轮明确说“后台/无人值守/不要打开”时跳过；`p2a-ext`、cron 与 a2a 默认不启动 GUI，除非 owner 对当前任务明确授权。
 
 开关只负责“要不要生成在线 URL”，不放入 profile registry，也不改变 bot/profile 身份。实际单一真源为 gitignored 的 `feishu/artifact-delivery.local.json`，配一份 committed 样例和 `status/set-online/decide` CLI；所有 Link16 profile 与 bot 在这台机器读取同一个值。`feishu_bridge.py send --doc` 与 `send_feishu_media.py` 在网络前调用该策略闸，`$open-local` 仍只负责本地打开。
 
@@ -220,13 +221,23 @@ PLAN-240 暴露了第二个投影缺口：完整 PLAN 已有 6 个 Stage、26 �
 - [x] S7.4 把“每个 Step 完成必须有 runtime plan 更新 + 结果回执；10 分钟无事件必须心跳”写入 ARCH/SPEC，并新增一次真实渲染序列回归：完成态 plan 与绿色回执进入同一进度卡，工具路径不进入正文。计划 17:44–18:15；实际 17:44–17:47。69 项聚焦回归通过。
 - [x] S7.5 分别验收开关关闭/开启两条端到端路径并恢复默认关闭。计划 17:47–18:05；实际 17:47–18:00。off 态真实 `send --doc` 在网络前以 exit 3 拒绝，零 URL/附件；on 态通过原生 docx 链真实创建并送达 `PLAN-1000 · 本地优先产物回执验收`（`https://YOUR_TENANT.feishu.cn/docx/TR0wdY19xoivIhx5yWqcgVdjnae`），receipt 为 `delivered=true`、`doc=true`、`attachment=null`。外层执行器 30 秒切断使同 shell 的 `finally` 未运行，实时复核发现策略仍 on 后已单独恢复 off；因此新增硬规则：单次在线交付只用 `--explicit-online`，不得临时切全局值并依赖 shell 恢复。最终全量 391 项回归和两仓 diff 检查通过；受管入口二次运行零漂移。
 
+### S8 · 有序计划状态与有效心跳补闸（19:33–20:29）
+
+2026-09-03 baseball Stage 16 的复核证明 S6/S7 仍有三个未冻结细节：规则说“有序编号”但 renderer 不兜底编号，待执行仍显示空心圆，10 分钟“短心跳”没有必填字段；此外 milestone 换卡遇到 tool-only dirty delta 时会产生“思考中”占位。
+
+- [x] S8.1 逐层核对 `align`、`living-plan`、Claude/Codex 入口、plan adapter、milestone/legacy outbox 与回归，确认缺口属于真实规则和代码，不归咎于单次 payload。实际 19:33–20:19。
+- [x] S8.2 固定 `1. / 2. / 3.` 顶层有序列表、当前 Stage 的四空格缩进 Step 以及 `✅ / 🔄 / ⏳` 三态；既有 `S1 / S2` 只能保留为 Stage 名称，不能代替列表序号。实际 20:19–20:20。
+- [x] S8.3 把心跳升级为六项必填：当前 Stage、当前 Step、比 Step 更细的处理对象/动作、已用有效时间、绝对 ETA、下一可验证结果；只显示思考、工具次数或计划计数不算心跳。实际 20:19–20:20。
+- [x] S8.4 renderer 自动编号、待执行改为 `⏳`；milestone 工具-only 更新保留最近 plan/commentary，无上下文时不发卡；legacy extractor 不再把隐藏 thinking 作为进度。实际 20:19–20:20。
+- [x] S8.5 受管入口第一次同步 5 个 profile、第二次 0 写入；真实 plan event 样例得到 `1. ✅ / 2. 🔄 + 缩进 Step / 3. ⏳`；14 项 adapter、37 项 outbox 聚焦测试及全量 393 项测试通过。实际 20:20–20:29。
+
 ## 验收
 
 基线：进行中卡正文被工具活动占据；Plan/Stage/Step 缺少统一绝对完成点；中间产物常到最终阶段才集中出现；本地链接显示与真实能力不一致；HTML 在线导入失败会自动把本地原文件作为附件发出。
 
-目标：四级绝对完成点在每个进度节点同时可见；runtime plan 每项都有实际/预计时间；连续 10 分钟无事件仍有短心跳；一份可审阅产物完成即显示本机绝对路径并在已授权时本地打开；只有全局开关 on 或本轮明确要求时才创建在线副本；在线交付失败绝不自动发送本地原文件；工具明细不再抢正文；Stage 顺序直接表达优先级；两仓回归测试与治理检查通过。
+目标：四级绝对完成点在每个进度节点同时可见；runtime plan 每项都有实际/预计时间；连续 10 分钟无事件仍有包含 Stage、Step、细化任务、已用时间、绝对 ETA 和下一验证结果的有效心跳；一份可审阅产物完成即显示本机绝对路径并在已授权时本地打开；只有全局开关 on 或本轮明确要求时才创建在线副本；在线交付失败绝不发送本地原文件；工具明细不再抢正文；Stage 顺序直接表达优先级；两仓回归测试与治理检查通过。
 
-新增验收：新长任务 Session 必须出现真实 `📋 当前计划`；计划卡全部 Stage 可见且只有当前 Stage 展开短 Step，每个可见项都带实际时间或绝对 ETA；普通思考不带状态色；方向锁定/阶段结论、已验收完成、真实 blocker 分别使用 🟡/🟢/🔴；每个产生 PLAN、PRD、图片、HTML、视频或音频的 Step 在产物可审阅时当场给出带入口的结果回执并立即用默认应用打开，不得拖到最终阶段。
+新增验收：新长任务 Session 必须出现真实 `📋 当前计划`；计划卡以 `1. / 2. / 3.` 列出全部 Stage，使用 `✅ / 🔄 / ⏳`，且只有当前 Stage 缩进展开短 Step；每个可见项都带实际时间或绝对 ETA。普通思考不带状态色，也不能冒充心跳；方向锁定/阶段结论、已验收完成、真实 blocker 分别使用 🟡/🟢/🔴；每个产生 PLAN、PRD、图片、HTML、视频或音频的 Step 在产物可审阅时当场给出带入口的结果回执并立即用默认应用打开，不得拖到最终阶段。
 
 已观察：
 
@@ -240,3 +251,26 @@ PLAN-240 暴露了第二个投影缺口：完整 PLAN 已有 6 个 Stage、26 �
 - 重启后的进行中消息已由新 bridge 写入出站台账，证明当前 turn 无需重建 session 即可继续增量更新飞书。
 - S5 没有重启生产桥；在线文档与取消附件降级由每次独立启动的 `send --doc` 进程立即生效。用户入口、workflow 和常驻 renderer 的新语义由后续新 Session/下次受控桥启动完整读取。
 - 观察结果与证据随各 Stage 完成后就地回填，不另造重复状态文件。
+- S8 的聚焦与全量回归证明有序列表、缩进 Step、`⏳` 和工具-only 禁“思考中”均已机械锁定；常驻 bridge 需在本轮回复送达后的下一次受控重启加载新 Python，受管入口的新规则已供后续新 Session 读取。
+
+### S9 · owner p2a 默认本地打开纠偏（14:31–15:05）
+
+2026-09-04 baseball 的 TC101S 交付暴露了一条真实分叉：工作流主句写“可审阅产物立即打开”，但 Claude/Codex 用户入口、`living-plan`、`open-local`、Link16 ARCH/SPEC 又把 owner `p2a` 限成“本轮明确说自动打开才授权”。执行层选择了后者，因此已经生成本地路径和飞书在线副本，却没有调用 `$open-local`。文件存在、默认应用关联和打开脚本都正常；漏点发生在 agent 的触发决策，不是 bridge、drainer 或 Windows 启动失败。
+
+- [x] S9.1 把用户纠正与漏开事实写回业务 PLAN，核对两份精确路径，并真实补调 `$open-local`；两份均取得 `LAUNCHED` 回执。实际 14:31–14:32。
+- [x] S9.2 统一用户入口、`living-plan`、`open-local`、repo-owned `feishu` Skill、ARCH-110 与 SPEC-210 的路由矩阵：owner `p2a` 默认打开；本轮明确不要打开才跳过；`p2a-ext`/cron/a2a 默认不打开，除非 owner 当前任务明确授权。实际 14:32–14:40，比原 ETA 14:48 提前 8 分钟；原因是根因集中在同一条授权谓词，未改 bridge 代码。
+- [x] S9.3 运行 skill validator、profile renderer 幂等检查、profile/bootstrap doctor、正反例语义扫描与 diff 检查；回填最终证据。实际 14:40–14:43，比原 ETA 14:52 提前 9 分钟；3 个 Skill validator、20 项测试 + 2 个 subtests、7 文件 21 条 route 子句、4 条旧规则禁用扫描、1 个 mutation 反例、两仓 `git diff --check` 均通过。5 份派生用户入口二次渲染零写入，三个已安装 Feishu Skill 副本与仓库真源 hash 一致。profile doctor 唯一失败仍是本轮前已存在的 `cck` 缺 `~/.claude-kimi/launch.sh`，其余 5 个 profile 和全部入口均通过；未把该无关 launcher 缺口算成本轮失败，也未越权创建它。
+
+这次不把 GUI 启动塞进 bridge/drainer：它们会同时处理 cron、a2a 和无人值守事件，无法可靠判断某个路径是否是已验证的可审阅产物。正确责任仍是 agent 在 Step 交付点调用 `$open-local`；修复点是消除授权判据冲突，并用 route 矩阵让该调用不再依赖临场猜测。
+
+### S10 · 两仓同步前补齐 Claude 计划卡（2026-09-05）
+
+用户要求检查本地更新并提交推送，使 tb24、tb25、tuf19 的个人电脑都能取得规整的当前计划。基线审查发现：S8 只补齐了 Codex adapter，Claude 的 PostToolUse 仍调用单行 140 字预览，任务工具只显示工具名称。因此此前全量测试通过并不能证明两种 runtime 的计划卡都可用。
+
+- [x] S10.1 核对 Link16 与 claude-config 两仓所有待提交内容、远端与规则来源；两仓均为 main，与远端同步。实际 13:04–13:10；原 ETA 13:12，提前 2 分钟。
+- [x] S10.2 Claude 成功任务结果转为 milestone-v1，保留公开正文换行和缩进，与 Codex 共用有序列表和三态图标；失败/未返回的任务不修改计划，历史任务只恢复 ID，不重播旧轮正文。实际 13:10 完成。
+- [x] S10.3 新增跨轮任务恢复、任务删除、失败/未完成结果、真实 PostToolUse 子进程、正文到卡片载荷、隐藏信息过滤等验收；最终全量 526 passed、37 subtests passed。claude-config 治理测试 10 项通过，受管入口 dry-run 为零写入。实际 13:19 完成；原 ETA 13:15，延后 4 分钟，原因是补加真实 hook 子进程验收。
+
+观察边界：以上是本机代码、hook 与出站载荷验收，不冒充三台远端电脑的飞书客户端视觉验收。没有向其他 bot 发通知，没有远程改配置或重启生产桥。本机 cck 缺 launcher 是已有问题；profile_bootstrap 与个人 governance 使用不同 Shell marker 时会报告 shell-function drift，本轮未覆盖现有 wrapper。ccp/cxp 的 repo-owned feishu skill 与 Codex bridge hooks 均为 ok。
+
+跨机应用顺序：各机分别安全拉取 Link16 main 与本人的 claude-config main；按本机 registry 运行个人 governance 的 docs dry-run，审阅 drift 后才 apply，再 doctor。repo-owned feishu skill 通过 Link16 profile_bootstrap 按已选 profile 检查/同步。新会话加载新的用户规则；常驻 bridge 只在批准的维护窗口重启。验收用一条真实长任务检查标题后空行、Stage 编号、Step 缩进、✅/🔄/⏳、实际时间/绝对 ETA，再检查任务状态更新是否原地改卡。若 runtime 没有 plan/task 工具，只能明确报告缺少该 surface，不能由 prose 假造结构化计划。

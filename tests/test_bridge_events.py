@@ -95,9 +95,9 @@ class CodexEventContractTests(unittest.TestCase):
             ],
         }}
         event = normalize_codex_notification(message, "root")
-        self.assertIn("✅ 恢复现场（实际完成 09:51）", event["label"])
-        self.assertIn("🔄 修复兜底（预计 10:22 完成）", event["label"])
-        self.assertIn("○ 全量回归（预计 10:45 完成）", event["label"])
+        self.assertIn("1. ✅ 恢复现场（实际完成 09:51）", event["label"])
+        self.assertIn("2. 🔄 修复兜底（预计 10:22 完成）", event["label"])
+        self.assertIn("3. ⏳ 全量回归（预计 10:45 完成）", event["label"])
 
     def test_plan_preserves_progressively_expanded_stage_projection(self):
         message = {"method": "turn/plan/updated", "params": {
@@ -111,9 +111,21 @@ class CodexEventContractTests(unittest.TestCase):
             ],
         }}
         event = normalize_codex_notification(message, "root")
-        self.assertIn("🔄 Stage 1｜护栏与追溯（预计 16:15 完成）", event["label"])
-        self.assertIn("↳ TRACE-01 清洁清单（预计 15:40 完成）", event["label"])
-        self.assertIn("○ Stage 2｜用户原声与竞品矩阵（预计 19:30 完成）", event["label"])
+        self.assertIn("1. 🔄 Stage 1｜护栏与追溯（预计 16:15 完成）", event["label"])
+        self.assertIn("\n    ↳ TRACE-01 清洁清单（预计 15:40 完成）", event["label"])
+        self.assertIn("2. ⏳ Stage 2｜用户原声与竞品矩阵（预计 19:30 完成）", event["label"])
+
+    def test_plan_renderer_owns_ordered_prefix_without_duplication(self):
+        message = {"method": "turn/plan/updated", "params": {
+            "threadId": "root", "turnId": "t", "plan": [
+                {"step": "1. Stage 1｜基线（实际完成 09:00）", "status": "completed"},
+                {"step": "2. Stage 2｜交付（预计 10:00 完成）", "status": "pending"},
+            ],
+        }}
+        event = normalize_codex_notification(message, "root")
+        self.assertIn("1. ✅ Stage 1｜基线（实际完成 09:00）", event["label"])
+        self.assertIn("2. ⏳ Stage 2｜交付（预计 10:00 完成）", event["label"])
+        self.assertNotIn("1. ✅ 1.", event["label"])
 
     def test_command_actions_publish_only_safe_program_and_workspace_paths(self):
         message = {
