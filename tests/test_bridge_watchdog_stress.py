@@ -94,10 +94,13 @@ def test_压力3_桥挂查不出来时不喊(monkeypatch):
 def test_压力3b_桥活死状态判定(monkeypatch):
     class R:
         def __init__(self, o):
-            self.stdout = o
-    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: R("3\n"))
+            self.stdout = json.dumps({'ok': True, 'processes': o})
+            self.returncode = 0
+            self.stderr = ''
+    rows = [{'ProcessId': 12345, 'CommandLine': f'python "{w.HERE / "feishu_bridge.py"}" run --bot unit'}]
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: R(rows))
     assert w.bridge_alive() is True
-    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: R("0\n"))
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: R([]))
     assert w.bridge_alive() is False
 
 

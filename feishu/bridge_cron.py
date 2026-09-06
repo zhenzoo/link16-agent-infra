@@ -43,6 +43,7 @@ import sys
 import json
 import time
 import subprocess
+import bridge_process
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -346,63 +347,26 @@ def cmd_run():
 
 # ---------- 后台进程 起 / 停 / 看（镜像 feishu_bridge cmd_start 的 DETACHED_PROCESS 打法）----------
 def _cron_pids(exclude_self=True):
-    ps = ("Get-CimInstance Win32_Process | Where-Object { "
-          "$_.CommandLine -match 'bridge_cron\\.py' -and $_.CommandLine -match ' run' } "
-          "| Select-Object -ExpandProperty ProcessId")
-    try:
-        # errors="replace"：PYTHONUTF8=1 下 text=True 按 UTF-8 解码，powershell stderr 若是 GBK 中文会崩读线程
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=15,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.SubprocessError):
-        return []
-    pids = [p.strip() for p in (r.stdout or "").splitlines() if p.strip().isdigit()]
-    if exclude_self:
-        pids = [p for p in pids if p != str(os.getpid())]
-    return pids
+    return bridge_process.service_pids(Path(__file__), exclude_self=exclude_self)
 
 
 def _kill(pids):
-    for p in pids:
-        try:
-            # 不用 taskkill 的输出 → DEVNULL 不解码；否则中文 Windows「成功…」(GBK 0xb3) 在 PYTHONUTF8=1 下崩读线程
-            subprocess.run(["taskkill", "/F", "/PID", p],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except (OSError, subprocess.SubprocessError):
-            pass
+    bridge_process.stop_pids(pids)
 
 
 def cmd_start():
-    pids = _cron_pids()                                # 单实例：顶替残留
-    if pids:
-        _kill(pids)
-        print(f"cron 单实例锁：顶替残留 PID={','.join(pids)}")
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
-    logf = open(LOG_PATH, "a", encoding="utf-8")       # noqa: SIM115 — 句柄交给子进程
-    logf.write(f"\n========== cron start {time.strftime('%Y-%m-%d %H:%M:%S')} ==========\n")
-    logf.flush()
-    subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "run"],
-        stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-        creationflags=detached, cwd=str(PROJECT),
-    )
-    print(f"cron 守护进程已后台启动（脱离终端·关终端不死）\n日志：{LOG_PATH} · 用 `status` 查 · `stop` 停。")
+    return bridge_process.start_daemon(Path(__file__).resolve(), LOG_PATH, 'cron', PROJECT)
 
 
 def cmd_stop():
-    pids = _cron_pids()
-    if not pids:
-        print("cron 守护进程没在跑。")
-        return
-    _kill(pids)
-    print(f"已停 cron 守护进程 PID={','.join(pids)}")
+    return bridge_process.stop_daemon(Path(__file__).resolve(), 'cron')
 
 
 def cmd_status():
     pids = _cron_pids()
+    if pids is None:
+        print('❌ cron 进程状态未知，查询失败。', file=sys.stderr)
+        raise SystemExit(1)
     print(f"cron 守护进程：{'在跑 PID=' + ','.join(pids) if pids else '没跑（用 `start` 起）'}")
     lastfire = _load_lastfire()
     jobs = load_jobs()
@@ -426,7 +390,7 @@ def cmd_status():
 def cmd_board():
     """全舰队总览：每个 bot 排了哪些定时任务（本机 roster 标 ●本机 / 别机 ○）· 下次/上次。"""
     jobs, roster, lastfire = load_jobs(), _roster_bots(), _load_lastfire()
-    pids = _cron_pids()
+    pids = bridge_process.require_known(_cron_pids())
     by_bot = {}
     for j in jobs:
         by_bot.setdefault(j.get("bot", "?"), []).append(j)
@@ -640,7 +604,8 @@ def _menu_render(rows, cur, msg="", raw=True):
     except Exception:                                  # noqa: BLE001
         cols = 110
     pids = _cron_pids()
-    daemon = f"守护进程 在跑 PID={','.join(pids)}" if pids else "⚠️ 守护进程没在跑"
+    daemon = ('⚠️ 守护进程状态未知（查询失败）' if pids is None else
+              f"守护进程 在跑 PID={','.join(pids)}" if pids else "⚠️ 守护进程没在跑")
     out = ["", f"  ⏰ cron 定时任务 · {daemon}", ""]
     last_bot = None
     for i, r in enumerate(rows):
@@ -711,7 +676,10 @@ def _menu_commit(rows):
         print(f"   {'开 ✓' if r['on'] else '关 ✗'}  {r['bot']} / {r['name']}")
     on_now = [r for r in rows if r["on"]]
     print(f"\n现在开着的（{len(on_now)}/{len(rows)}）：" + ("、".join(f"{r['name']}({r['cron']})" for r in on_now) or "无"))
-    if on_now and not _cron_pids():                    # 开了任务但闹钟没跑 = 白开·当场问一句
+    pids = _cron_pids() if on_now else []
+    if on_now and pids is None:
+        print('\n⚠️ 任务已保存，但 cron 进程查询失败，是否运行未知；未发起启动。')
+    elif on_now and not pids:                        # 已确认没有守护进程才提示启动
         print("\n⚠️ 有任务开着，但 cron 守护进程没在跑 → 到点不会触发。")
         try:
             if input("现在起守护进程？(y/N) ").strip().lower() == "y":
@@ -839,7 +807,8 @@ def main():
         return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else default
 
     if cmd == "run":
-        cmd_run()
+        with bridge_process.service('cron', Path(__file__)):
+            cmd_run()
     elif cmd == "start":
         cmd_start()
     elif cmd == "stop":
@@ -896,4 +865,8 @@ if __name__ == "__main__":
         from bridge_env import force_utf8_std as _f8; _f8()
     except Exception:          # noqa: BLE001 — 顶不动也不许挡住本命令
         pass
-    main()
+    try:
+        main()
+    except (bridge_process.ProcessControlError, TimeoutError) as exc:
+        print(f'❌ {exc}', file=sys.stderr)
+        sys.exit(1)

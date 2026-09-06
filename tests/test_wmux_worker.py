@@ -120,6 +120,46 @@ class WmuxWorkerTests(unittest.TestCase):
         self.assertEqual(profile_cli.call_args_list[0].args[:3], ("doctor", "--profile", "cxp"))
         self.assertEqual(profile_cli.call_args_list[1].args[:3], ("command", "--profile", "cxp"))
         self.assertIn(str(self.root), profile_cli.call_args_list[1].args)
+        self.assertNotIn("--", profile_cli.call_args_list[1].args)
+        self.assertEqual(result["model_overrides"], {})
+
+    def test_explicit_codex_overrides_reach_command_and_visible_contract(self):
+        replies = [
+            (0, json.dumps({"ok": True, "errors": []}), ""),
+            (0, json.dumps({"profile": "cxp", "runtime": "codex", "command": "launch-cxp"}), ""),
+        ]
+        with (
+            patch.dict(os.environ, {"LINK16_AGENT_PROFILE": "cxp", "WMUX_WORKSPACE_ID": "ws-main"}, clear=True),
+            patch.object(wmux_worker, "_profile_cli", side_effect=replies) as cli,
+        ):
+            args = wmux_worker._build_parser().parse_args([
+                "plan", "--id", "fast-task", "--cwd", str(self.root), "--allow-write", "research",
+                "--model", "gpt-5.6-sol", "--effort", "low", "--fast",
+            ])
+            result = wmux_worker._contract(args)
+        passed = cli.call_args.args
+        self.assertEqual(passed[passed.index("--") + 1:], (
+            "-c", 'model="gpt-5.6-sol"', "-c", 'model_reasoning_effort="low"',
+            "-c", 'service_tier="fast"',
+        ))
+        self.assertEqual(result["model_overrides"], {
+            "model": "gpt-5.6-sol", "model_reasoning_effort": "low", "service_tier": "fast",
+        })
+        self.assertEqual(result["profile"], "cxp")
+
+    def test_codex_flags_on_claude_fail_before_creating_a_pane(self):
+        replies = [
+            (0, json.dumps({"ok": True, "errors": []}), ""),
+            (0, json.dumps({"profile": "ccp", "runtime": "claude", "command": "launch-ccp"}), ""),
+        ]
+        with (
+            patch.dict(os.environ, {"LINK16_AGENT_PROFILE": "ccp"}, clear=True),
+            patch.object(wmux_worker, "_profile_cli", side_effect=replies),
+            patch.object(wmux_worker, "_split_here") as split,
+        ):
+            with self.assertRaisesRegex(wmux_worker.WorkerError, "require a Codex"):
+                wmux_worker.cmd_start(worker_args(self.root, model="example-model"))
+        split.assert_not_called()
 
     def test_claim_records_profile_worker_cwd_and_workspace(self):
         contract = state(self.root)

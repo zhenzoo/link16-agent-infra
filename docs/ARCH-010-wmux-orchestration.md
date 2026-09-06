@@ -17,7 +17,7 @@ read_when:
   - 改动 wmux_session.py 或任何面板驱动逻辑
   - 面板起不来 / 判活不准需要定位
   - 评估某个 wmux 新 API 能不能用
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-06
 ---
 # WMUX 多窗口编排 · 交接文档（成功方案 + 失败记录）
 
@@ -158,6 +158,14 @@ python feishu/wmux_worker.py start --id stage-3-research --cwd <repo> `
 ```
 
 `start` 内部执行 `profile doctor → command → split-here → metadata claim → TUI ready`；profile 缺失/未知/不健康、路径重叠或 worker ID 已占用时在 split 前失败。不要手工启动生产 Worker；下面的裸 RPC 只用于诊断底层：
+
+Codex pane 的 `plan` / `start` 可选 `--model <model-id>`、`--effort <effort>` 和 `--fast`。
+全部省略就沿用 Codex 原生保存值或推荐默认；只提供某项就只覆盖该项。
+这些参数不会改变 `LINK16_AGENT_PROFILE` 或改写账号配置，预演和状态会显示 `model_overrides`。
+`--fast` 映射官方 `service_tier=fast`，不是另一个模型名，也不等于降低 effort；
+模型是否支持该档位以 Codex `model/list` 为准。显式覆盖下仍可在启动后的官方 TUI 中使用 `/model`。
+例：在上述 plan/start 命令后加 `--model <model-id> --effort low`；支持 Fast 的模型还可加 `--fast`。
+这些 Codex 专属简便参数用于非 Codex profile 时，会在创建 pane 前拒绝。
 
 ```powershell
 node wmux-rpc.js send <pty> 'python "$LINK16_AGENT_INFRA_ROOT/feishu/agent_profile_cli.py" run --profile "$LINK16_AGENT_PROFILE" --cwd "$PWD"'

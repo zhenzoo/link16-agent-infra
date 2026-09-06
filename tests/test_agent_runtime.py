@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -193,15 +194,42 @@ class AgentProfileTests(unittest.TestCase):
         self.assertIn("CODEX_HOME=", codex)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", codex)
         self.assertIn("--dangerously-bypass-hook-trust", codex)
-        self.assertIn('"resume" "abc 123"', codex)
+        self.assertEqual(shlex.split(codex)[-2:], ["resume", "abc 123"])
         self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
         self.assertNotIn("CLAUDE_CODE_CHILD_SESSION", codex)
+
+    def test_public_command_preserves_explicit_provider_arguments(self):
+        import agent_profile_cli
+        import io
+        from contextlib import redirect_stdout
+        supplied = ["--model", "gpt-5.3-codex-spark", "-c", 'model_reasoning_effort="low"',
+                    "-c", 'service_tier="fast"', r'literal $NOT_A_SECRET `text` C:\path']
+        output = io.StringIO()
+        with patch.object(agent_runtime, "_require_profile_available"), redirect_stdout(output):
+            rc = agent_profile_cli.main(["command", "--profile", "cxp", "--json", "--", *supplied])
+        self.assertEqual(rc, 0)
+        command = json.loads(output.getvalue())["command"]
+        self.assertEqual(shlex.split(command)[-len(supplied):], supplied)
 
     def test_bridge_claude_worker_clears_parent_harness_marker(self):
         bot = {"name": "claude-bot", "profile": "ccp"}
         with patch.object(agent_runtime, "_require_profile_available"):
             command = agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
         self.assertTrue(command.startswith("unset CLAUDE_CODE_CHILD_SESSION;"))
+
+    @unittest.skipUnless(os.name == "nt", "requires Git Bash/native Windows boundary")
+    def test_git_bash_does_not_rewrite_native_provider_slash_arguments(self):
+        supplied = ["-p", "/model", "--model", "sonnet", "--effort", "low"]
+        with patch.object(agent_runtime, "_require_profile_available"):
+            command = agent_runtime.standalone_worker_cmd("ccp", cwd=ROOT, provider_args=supplied)
+        # Replace only the native program with an argv recorder: no agent turn.
+        recorder = shlex.quote(sys.executable) + " -c " + shlex.quote(
+            "import json,sys; print(json.dumps(sys.argv[1:]))")
+        command = command.replace("claude --dangerously-skip-permissions", recorder, 1)
+        done = subprocess.run([agent_runtime.resolve_shell(), "-lc", command], cwd=ROOT,
+                              capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), supplied)
 
     def test_standalone_profile_is_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "LINK16_AGENT_PROFILE 未设置"):
@@ -734,6 +762,55 @@ class ClaudeStartupPromptTests(unittest.TestCase):
         self.assertTrue(agent_runtime.is_ready({"agent": "codex"}, "status\n› Use /skills"))
 
 
+class ClaudeHomeSettingsTests(unittest.TestCase):
+    def test_home_collision_is_filtered_in_standalone_and_bridge_only(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            default = home / ".claude"
+            default.mkdir()
+            (default / "settings.json").write_text('{"effortLevel":"xhigh"}', encoding="utf-8")
+            personal = SimpleNamespace(name="ccp", runtime="claude", launcher="direct",
+                                       home_path=home / ".claude-personal")
+            with (
+                patch.object(Path, "home", return_value=home),
+                patch.object(agent_runtime, "profile_spec", return_value=personal),
+                patch.object(agent_runtime, "resolve_profile", return_value=personal),
+                patch.object(agent_runtime, "_require_profile_available"),
+            ):
+                standalone = agent_runtime.standalone_worker_cmd("ccp", cwd=home)
+                bridge = agent_runtime.worker_cmd({"name": "test", "profile": "ccp"}, ROOT,
+                                                  ROOT / "feishu/_state", cwd=home)
+                for command in (standalone, bridge):
+                    self.assertIn("--setting-sources user", command)
+                    self.assertNotIn("--model", command)
+                    self.assertNotIn("--effort", command)
+                self.assertIn("--settings", bridge)
+                self.assertIn("bridge-hooks.json", bridge)
+                self.assertNotIn("--setting-sources", agent_runtime.standalone_worker_cmd("ccp", cwd=home / "repo"))
+                self.assertNotIn("--setting-sources", agent_runtime.worker_cmd(
+                    {"name": "test", "profile": "ccp"}, ROOT, ROOT / "feishu/_state", cwd=home / "repo"))
+                explicit = agent_runtime.standalone_worker_cmd("ccp", cwd=home,
+                    provider_args=["--setting-sources", "user,project", "--model", "sonnet", "--effort", "low"])
+                self.assertEqual(explicit.count("--setting-sources"), 1)
+                self.assertEqual(shlex.split(explicit)[-6:],
+                                 ["--setting-sources", "user,project", "--model", "sonnet", "--effort", "low"])
+                personal.home_path = default
+                self.assertNotIn("--setting-sources", agent_runtime.standalone_worker_cmd("cc", cwd=home))
+            self.assertEqual((default / "settings.json").read_text(encoding="utf-8"), '{"effortLevel":"xhigh"}')
+
+    def test_missing_other_account_settings_does_not_filter(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            profile = SimpleNamespace(home_path=home / ".claude-personal")
+            with patch.object(Path, "home", return_value=home):
+                self.assertEqual(agent_runtime._claude_home_settings_args(profile, home), "")
+                (home / ".claude").mkdir()
+                (home / ".claude/settings.local.json").write_text('{}', encoding="utf-8")
+                self.assertEqual(agent_runtime._claude_home_settings_args(profile, home), " --setting-sources user")
+
+
 class CodexTrustPreseedTests(unittest.TestCase):
     """2026-08-25 · Codex 首启 trust 弹窗会在 app-server warmup 上游挡死会话
     （刷屏自动回车来不及）→ spawn 前把目录信任预写进 profile 的 config.toml。
@@ -770,6 +847,36 @@ class CodexTrustPreseedTests(unittest.TestCase):
             with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "claude")):
                 agent_runtime.ensure_codex_trust(self.CLAUDE, "C:/whatever")
             self.assertFalse((home / "config.toml").exists())
+
+    def test_home_account_collision_is_excluded_without_changing_model_or_other_home(self):
+        for existing_trust in (None, "trusted", "untrusted"):
+            with self.subTest(existing_trust=existing_trust), tempfile.TemporaryDirectory() as td:
+                user_home = Path(td).resolve()
+                other = user_home / ".codex"
+                other.mkdir()
+                other_config = other / "config.toml"
+                other_config.write_text('model = "other-account"\n', encoding="utf-8")
+                personal = user_home / ".codex-personal"
+                personal.mkdir()
+                key = str(user_home).replace("/", "\\").lower()
+                original = 'model = "recent-choice"\nmodel_reasoning_effort = "low"\n'
+                if existing_trust:
+                    original += f"[projects.'{key}']\ntrust_level = \"{existing_trust}\"\n"
+                original += '[projects.other]\ntrust_level = "trusted"\n'
+                config = personal / "config.toml"
+                config.write_text(original, encoding="utf-8")
+                with (
+                    patch.object(Path, "home", return_value=user_home),
+                    patch.object(agent_runtime, "resolve_profile", return_value=self._profile(personal, "codex")),
+                ):
+                    agent_runtime.ensure_codex_trust(self.CODEX, user_home)
+                    first = config.read_text(encoding="utf-8")
+                    agent_runtime.ensure_codex_trust(self.CODEX, user_home)
+                self.assertEqual(first, config.read_text(encoding="utf-8"))
+                self.assertIn(f"[projects.'{key}']\ntrust_level = \"untrusted\"", first)
+                self.assertIn('model = "recent-choice"\nmodel_reasoning_effort = "low"', first)
+                self.assertIn('[projects.other]\ntrust_level = "trusted"', first)
+                self.assertEqual(other_config.read_text(encoding="utf-8"), 'model = "other-account"\n')
 
 
 class BridgeProcessSnapshotTests(unittest.TestCase):

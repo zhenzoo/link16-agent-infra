@@ -46,7 +46,7 @@ class CodexProfileDiscoveryTests(unittest.TestCase):
             profile = base / ".codex"
             profile.mkdir()
             config = profile / "config.toml"
-            config.write_text('model = "profile-model"\ncustom_key = "keep-me"\n', encoding="utf-8")
+            config.write_text('model = "profile-model"\nmodel_reasoning_effort = "low"\ncustom_key = "keep-me"\n', encoding="utf-8")
             auth = profile / "auth.json"
             auth.write_text('{"profile": "do-not-touch"}\n', encoding="utf-8")
             agents = profile / "AGENTS.md"
@@ -60,6 +60,7 @@ class CodexProfileDiscoveryTests(unittest.TestCase):
 
             updated = config.read_text(encoding="utf-8")
             self.assertIn('model = "profile-model"', updated)
+            self.assertIn('model_reasoning_effort = "low"', updated)
             self.assertIn('custom_key = "keep-me"', updated)
             self.assertIn("[mcp_servers.mattermost]", updated)
             self.assertIn("[mcp_servers.wmux]", updated)
@@ -79,6 +80,15 @@ class CodexProfileDiscoveryTests(unittest.TestCase):
             self.assertTrue(any("bridge_userprompt.py" in command for command in commands))
             self.assertTrue(first["changed"])
             self.assertFalse(second["changed"])
+
+    def test_fresh_profile_leaves_model_and_effort_to_codex(self):
+        configurator = load_configurator()
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "isolated"
+            configurator.configure_profile(profile, wmux=Path(tmp) / "wmux/index.js", apply=True)
+            config = (profile / "config.toml").read_text(encoding="utf-8")
+            for key in ("model", "model_reasoning_effort", "service_tier"):
+                self.assertNotRegex(config, rf"(?m)^{key}\s*=")
 
 
 if __name__ == "__main__":

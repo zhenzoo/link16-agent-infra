@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import time
 import uuid
@@ -703,6 +704,22 @@ def current_account(bot) -> str:
     return profile_name(bot, required=False) or "default"
 
 
+def _claude_home_settings_args(profile, cwd=None) -> str:
+    """Do not load another Claude account's home as project settings at ~."""
+    user_home = Path.home().resolve()
+    default_home = user_home / ".claude"
+    if (
+        Path(cwd or Path.cwd()).expanduser().resolve() == user_home
+        and profile.home_path.resolve() != default_home
+        and any((default_home / name).is_file() for name in ("settings.json", "settings.local.json"))
+    ):
+        # Official source filtering still permits managed settings and the
+        # explicit --settings bridge hooks. Real repository settings are kept
+        # everywhere except the user's home-directory account collision.
+        return " --setting-sources user"
+    return ""
+
+
 def standalone_worker_cmd(
     profile_name_: str,
     cwd=None,
@@ -721,6 +738,11 @@ def standalone_worker_cmd(
         if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(key)):
             raise ValueError(f"非法环境变量名：{key!r}")
         env[str(key)] = str(value)
+    if os.name == "nt" and provider_args:
+        # Git Bash otherwise rewrites a native slash command such as /model
+        # into <Git install>/model, even when shell-quoted. Provider argv is
+        # opaque; paths supplied here must already be native Windows paths.
+        env["MSYS2_ARG_CONV_EXCL"] = "*"
     env_text = " ".join(f"{key}={_q(value)}" for key, value in env.items()) + " "
     prefix = ""
     if profile.launcher == "launch-sh":
@@ -733,6 +755,9 @@ def standalone_worker_cmd(
             + f"CLAUDE_CONFIG_DIR={_q(profile.home_path.as_posix())} "
             + "claude --dangerously-skip-permissions"
         )
+        if not any(str(arg) == "--setting-sources" or str(arg).startswith("--setting-sources=")
+                   for arg in (provider_args or [])):
+            command += _claude_home_settings_args(profile, cwd)
     elif profile.runtime == "kimi":
         # Native kimi-code (not the legacy Python kimi-cli). Keep credentials,
         # sessions and instructions in the selected registry home. Inherited
@@ -775,7 +800,9 @@ def standalone_worker_cmd(
         if cwd:
             command += f" -C {_q(str(cwd))}"
     if provider_args:
-        command += " " + " ".join(_q(str(arg)) for arg in provider_args)
+        # Provider arguments are opaque argv, not paths. Preserve backslashes,
+        # TOML quotes, dollar signs and backticks without shell expansion.
+        command += " " + " ".join(shlex.quote(str(arg)) for arg in provider_args)
     return command
 
 
@@ -809,6 +836,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
             + env
             + f"CLAUDE_CONFIG_DIR={_q(config_dir)} "
             + f"claude --dangerously-skip-permissions --settings {_q(hooks_json)}"
+            + _claude_home_settings_args(profile, cwd)
         )
     if spec.name == "codex":
         codex_home = profile.home_path.as_posix()
@@ -857,6 +885,18 @@ def ensure_codex_trust(bot, cwd) -> None:
         return
     profile = resolve_profile(bot, required=True)
     config = profile.home_path / "config.toml"
+    # With an isolated CODEX_HOME, Codex otherwise treats ~/.codex (another
+    # account's home) as project configuration when launched from ~. Project
+    # layers beat the selected profile's saved model/effort and MCP settings.
+    # Record an explicit untrusted decision for this one directory so native
+    # defaults and /model persistence work without injecting a fixed model.
+    user_home = Path.home().resolve()
+    account_collision = (
+        Path(cwd).expanduser().resolve() == user_home
+        and profile.home_path.resolve() != user_home / ".codex"
+        and (user_home / ".codex" / "config.toml").is_file()
+    )
+    trust_level = "untrusted" if account_collision else "trusted"
     key = str(cwd).replace("/", "\\").lower()
     header = f"[projects.'{key}']"
     try:
@@ -864,12 +904,22 @@ def ensure_codex_trust(bot, cwd) -> None:
     except OSError:
         return
     if header.lower() in text.lower():
+        if account_collision:
+            stanza = re.compile(rf"(?ims)^{re.escape(header)}\r?\n.*?(?=^\[|\Z)")
+            updated = stanza.sub(
+                lambda match: re.sub(
+                    r'(?m)^trust_level\s*=\s*"trusted"[ \t]*$',
+                    'trust_level = "untrusted"', match.group(0),
+                ), text, count=1,
+            )
+            if updated != text:
+                config.write_text(updated, encoding="utf-8")
         return
     try:
         with config.open("a", encoding="utf-8") as fh:
             if text and not text.endswith("\n"):
                 fh.write("\n")
-            fh.write(f"\n{header}\ntrust_level = \"trusted\"\n")
+            fh.write(f'\n{header}\ntrust_level = "{trust_level}"\n')
     except OSError:
         pass
 

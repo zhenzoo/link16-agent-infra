@@ -15,7 +15,7 @@ does_not_own:
 read_when:
   - 要让 Codex 复用 Claude 的 skill/workflow
   - 安装或升级 Codex CLI
-last_reviewed: 2026-08-26
+last_reviewed: 2026-09-06
 ---
 # SOP-160 · Claude Personal → Codex Personal compatibility
 
@@ -94,16 +94,17 @@ codex login
 #     The wmux/mattermost MCP tables are appended by configure_personal.py.
 @'
 cli_auth_credentials_store = "file"
-model = "gpt-5.6-sol"
 sandbox_mode = "danger-full-access"
 approval_policy = "on-request"
-model_reasoning_effort = "xhigh"
 '@ | Set-Content -Encoding utf8 "$HOME\.codex-personal\config.toml"
 ```
 
 Notes:
-- **Model / posture are a deliberate choice, not a blind copy.** `gpt-5.6-sol`
-  needs Codex >= 0.144.x. `sandbox_mode = "danger-full-access"` bypasses the
+- **模型与 effort 不在初始化脚本中固定。** 未设置 `model` 时使用 Codex 推荐模型；
+  未设置 `model_reasoning_effort` 时由模型采用默认 effort。`/model` 的选择由 Codex
+  保存到当前 profile；重跑配置 overlay 会保留它。推荐默认不保证是发布日期最新的模型，
+  也不会让运行中的旧会话自动换模型。配置隔离与临时参数见 [ARCH-120 §4.4](ARCH-120-agent-profile-runtime.md#44-codex-模型与-effort)。
+- `sandbox_mode = "danger-full-access"` bypasses the
   sandbox (matches the reference machine's posture) — confirm this is intended
   for the target machine before adopting it.
 - **wmux bundle must be installed** before step 1 below: `configure_personal.py`

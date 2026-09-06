@@ -107,6 +107,7 @@ import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
 import bridge_outbound  # noqa: E402 (统一自动/主动出站历史)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
+import bridge_process
 import bridge_injection  # noqa: E402  (桥/cron/watchdog/注册监督器跨进程共享注入锁)
 import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持久化)
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
@@ -1872,28 +1873,13 @@ def _resolve_person(open_id, chat_id, bot):
 
 
 # ---------- 进程管理 ----------
+# 三态查询共用严格快照：查不到永远不能冒充没有。
+_PIDS_QUERY_TIMEOUTS = bridge_process.QUERY_TIMEOUTS
+
+
 def _bridge_pids(exclude_self=True, bot=None):
-    """【在跑的 bot 进程】PID。bot 给定时只匹配 `--bot <name>` 那个进程。
-    2026-06-18：匹配从裸子串 `feishu_bridge` 收紧到 `feishu_bridge\\.py … \\brun\\b`——只认真正的
-    `feishu_bridge.py run --bot …` 桥进程，**不再误杀** 同时在跑的 `status`/`stop`/import 这个模块的测试/
-    编辑器等（它们命令行含 "feishu_bridge" 但没有 run 子命令）→ stop/单实例锁不会顺手杀掉无辜进程。"""
-    me = os.getpid()
-    ex = (" -and $_.ProcessId -ne " + str(me)) if exclude_self else ""
-    # 收尾用 (?![\w-]) 而非 \b：\b 在连字符处也成立 → `--bot tb24-notes` 会误配 `--bot tb24-notes-2`
-    # （2026-07-03 单 bot start/stop 落地时发现·会让 stop --bot tb24-notes 连 notes-2 一起杀）。
-    bf = (" -and $_.CommandLine -match '--bot " + bot + "(?![\\w-])'") if bot else ""
-    ps = (
-        "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
-        "Where-Object { $_.CommandLine -match 'feishu_bridge\\.py.*\\brun\\b'" + ex + bf + " } | "
-        "ForEach-Object { $_.ProcessId }"
-    )
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-    except (OSError, subprocess.SubprocessError):
-        return []
+    return bridge_process.select_pids(
+        bridge_process.query_processes(_PIDS_QUERY_TIMEOUTS), Path(__file__), bot, exclude_self)
 
 
 def _parse_bridge_processes(items):
@@ -1916,49 +1902,37 @@ def _parse_bridge_processes(items):
 
 
 def _bridge_process_map():
-    """Enumerate every live bridge process with one WMI call.
-
-    Status/doctor used to issue one 15-second WMI query per registered bot,
-    making a healthy multi-bot fleet look hung. Keep `_bridge_pids` for the
-    single-instance/stop paths; dashboards use this snapshot instead.
-    """
-    ps = (
-        "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
-        "Where-Object { $_.CommandLine -match 'feishu_bridge\\.py.*\\brun\\b' } | "
-        "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
-    )
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        raw = (result.stdout or "").strip()
-        if not raw:
-            return {}
-        items = json.loads(raw)
-        return _parse_bridge_processes(items if isinstance(items, list) else [items])
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return {}
+    """One validated snapshot; None means unknown, {} means confirmed empty."""
+    rows = bridge_process.query_processes()
+    if rows is None:
+        return None
+    return _parse_bridge_processes([
+        row for row in rows if bridge_process.service_args(row['CommandLine'], Path(__file__)) is not None])
 
 
 def _kill(pids):
-    if pids:
-        subprocess.run(["powershell", "-NoProfile", "-Command",
-                        "Stop-Process -Id " + ",".join(pids) + " -Force"],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    bridge_process.stop_pids(pids)
 
 
 def _ensure_single_instance(bot_name):
-    """只顶替【同一个 bot】的残留进程（多 bot 各进程互不干扰）。"""
-    pids = _bridge_pids(exclude_self=True, bot=bot_name)
-    if pids:
-        _kill(pids)
-        print(f"[{bot_name}] 单实例锁：顶替残留 PID={','.join(pids)}", flush=True)
+    """服务锁持有到 run 退出，run 不再自行杀掉其他实例。"""
+    return bridge_process.acquire_service('bridge:' + bot_name, Path(__file__), bot_name)
 
 
 # ---------- run：单个 bot（lark_channel 一进程一 WS）----------
 def run(bot_name=None):
+    bots = load_bots()
+    name = bot_name or (bots[0]['name'] if bots else None)
+    if not name or name not in {b['name'] for b in bots}:
+        raise bridge_process.ProcessControlError(f'未知 bot：{name}')
+    lease = _ensure_single_instance(name)
+    try:
+        return _run_bot(name)
+    finally:
+        lease.release()
+
+
+def _run_bot(bot_name=None):
     bots = load_bots()
     if bot_name:
         bots = [b for b in bots if b["name"] == bot_name]
@@ -1971,7 +1945,6 @@ def run(bot_name=None):
               f"——跑 register_feishu_app.py --name <名> --bot {bot['name']}", file=sys.stderr)
         sys.exit(2)
 
-    _ensure_single_instance(bot["name"])
 
     try:
         import asyncio
@@ -2824,20 +2797,29 @@ def run(bot_name=None):
 
 # ---------- 子命令 ----------
 def cmd_start(bot_filter=None):
+    with bridge_process.control_lock('bridge-fleet'):
+        return _start_locked(bot_filter)
+
+
+def _start_locked(bot_filter=None):
     """为每个 bot 各起一个脱离终端的后台进程 run --bot <name>（各自日志 · 各自单实例锁）。
     用 subprocess.Popen + DETACHED_PROCESS 直接起 —— 比 powershell Start-Process 可靠
     （后者实测会 hang 住不返回、卡住后续 bot · 2026-06-15）。
-    bot_filter 给定（裸命令 + `--bot X`）→ 只起这一个 bot；已在跑则 run 的单实例锁自动顶替=刷新它。"""
+    bot_filter 给定（裸命令 + `--bot X`）→ 只起这一个 bot；已在跑则 start 确认退出后替换；run 持有生命周期锁。"""
     bots = load_bots()
     if bot_filter:
         bots = [b for b in bots if b["name"] == bot_filter]
         if not bots:
             print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
             sys.exit(2)
+    # Query before any stop/spawn; failed observation leaves the fleet untouched.
+    pids = bridge_process.require_known(_bridge_pids(bot=bot_filter))
+    _kill(pids)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     script = str(Path(__file__).resolve())
     detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
     started = []
+    children = []
     total = len(bots)
     # 逐个起、**逐行打**（2026-08-19 主人提）：子进程是 DETACHED_PROCESS·无窗口，屏幕上看不到任何动静；
     # 34 个 bot 要起约 17 秒，一次性在末尾打一大串 = 这十几秒主人不知道有没有在动、卡在谁身上。
@@ -2856,9 +2838,23 @@ def cmd_start(bot_filter=None):
             creationflags=detached, cwd=str(PROJECT),
         )
         started.append(nm)
+        children.append((nm, proc))
+        logf.close()
         print(f"  [{i:>2}/{total}] ✅ {nm:<26} pid={proc.pid}", flush=True)
         if i < total:
             time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地（最后一个不用再等）
+    deadline = time.monotonic() + sum(_PIDS_QUERY_TIMEOUTS) + 15
+    while children:
+        for name, child in list(children):
+            if child.poll() is not None:
+                raise bridge_process.ProcessControlError(f'{name} 启动失败 exit={child.returncode}，请看桥日志')
+            if bridge_process.ready_pid('bridge:' + name) == child.pid:
+                children.remove((name, child))
+        if not children:
+            break
+        if time.monotonic() >= deadline:
+            raise bridge_process.ProcessControlError(f'桥启动未验收：{[name for name, _ in children]}')
+        time.sleep(0.1)
     _stop_hint = f"`stop --bot {bot_filter}` 停它" if bot_filter else "`stop` 停全部"
     print(f"\n已后台启动 {len(started)} 个 bot 进程。"
           f"\n日志：{LOG_DIR}\\bridge-<bot>.log · 用 `status` 查 · {_stop_hint}。")
@@ -2872,34 +2868,35 @@ def cmd_start(bot_filter=None):
         for _name, _hint in (("bridge_cron.py", "cron 守护进程"), ("bridge_watchdog.py", "看门狗")):
             try:
                 subprocess.run([sys.executable, str(_here / _name), "start"],
-                               cwd=str(PROJECT), timeout=30,
+                               cwd=str(PROJECT), timeout=150, check=True,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢焦点
             except (OSError, subprocess.SubprocessError) as _e:  # noqa: BLE001
-                print(f"（{_hint}没起来·可手动 `python feishu/{_name} start`：{_e}）")
+                raise bridge_process.ProcessControlError(f"{_hint}启动未完成：{_e}") from _e
 
 
 def cmd_stop(bot_filter=None):
-    """停 bot 进程。bot_filter 给定（`stop --bot X`）→ 只停这一个；不给=停全部。"""
-    if bot_filter and bot_filter not in {b["name"] for b in load_bots()}:
-        print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
-        sys.exit(2)
-    # 整体 stop 也停两个全局守护进程（单 bot `stop --bot X` 不动它们）。
-    if not bot_filter:
-        _here = Path(__file__).resolve().parent
-        for _name in ("bridge_cron.py", "bridge_watchdog.py"):
-            try:
-                subprocess.run([sys.executable, str(_here / _name), "stop"],
-                               cwd=str(PROJECT), timeout=30,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢焦点
-            except (OSError, subprocess.SubprocessError):  # noqa: BLE001
-                pass
-    pids = _bridge_pids(exclude_self=True, bot=bot_filter)
-    if not pids:
-        print(f"bot '{bot_filter}' 没在跑。" if bot_filter else "没有在跑的 bot 进程。")
-        return
-    _kill(pids)
-    print(f"已停 bot '{bot_filter}' 进程 PID={','.join(pids)}" if bot_filter
-          else f"已停全部 bot 进程 PID={','.join(pids)}")
+    from contextlib import ExitStack
+    with ExitStack() as locks:
+        locks.enter_context(bridge_process.control_lock('bridge-fleet'))
+        if not bot_filter:
+            locks.enter_context(bridge_process.control_lock('cron'))
+            locks.enter_context(bridge_process.control_lock('watchdog'))
+        if bot_filter and bot_filter not in {b['name'] for b in load_bots()}:
+            print(f'未知 bot：{bot_filter}', file=sys.stderr)
+            raise SystemExit(2)
+        # Observe before mutation; keep guardians if stopping a bridge fails.
+        rows = bridge_process.query_processes()
+        bridge_process.require_known(rows)
+        pids = bridge_process.select_pids(rows, Path(__file__), bot_filter)
+        guardians = [] if bot_filter else [
+            (name, bridge_process.select_pids(rows, Path(__file__).parent / name))
+            for name in ('bridge_cron.py', 'bridge_watchdog.py')]
+        _kill(pids)
+        print(f'桥已确认停止 PID={pids}')
+        for name, ids in guardians:
+            identity = 'cron' if name == 'bridge_cron.py' else 'watchdog'
+            _kill(ids)
+            print(f'{identity} 已确认停止 PID={ids}')
 
 
 def cmd_status(bot_filter=None):
@@ -2910,6 +2907,9 @@ def cmd_status(bot_filter=None):
     except Exception:  # noqa: BLE001
         print("（wmux 没开 / 连不上，会话活性未知）")
     running = _bridge_process_map()
+    if running is None:
+        print('❌ 无法查询桥进程，状态未知；不能据此判断所有 bot 已停止。', file=sys.stderr)
+        raise SystemExit(1)
     bots = load_bots()
     if bot_filter:
         bots = [b for b in bots if b["name"] == bot_filter]
@@ -3191,6 +3191,9 @@ def cmd_doctor(bot_filter=None):
         pass
     print("飞书桥健康（v8 · hook→outbox→drainer · doctor 自愈 · 详细 outbox 健康跑 bridge_doctor.py）：")
     running = _bridge_process_map()
+    if running is None:
+        print('❌ 无法查询桥进程，状态未知；不能据此判断所有 bot 已停止。', file=sys.stderr)
+        raise SystemExit(1)
     bots = load_bots()
     if bot_filter:
         bots = [b for b in bots if b["name"] == bot_filter]

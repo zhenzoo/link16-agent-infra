@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -114,6 +114,82 @@ launcher。新 pane 不依赖 wmux daemon 或 shell 碰巧继承父进程环境�
 
 内容仓只负责“在哪个 pane、以什么业务角色启动”；Link16 负责“用哪个 agent runtime
 和账号启动”。
+
+### 4.4 Codex 模型与 effort
+
+模型选择由 Codex 原生配置与参数负责；Link16 不维护模型名称、发布日期或 effort 的另一份默认表。
+初始化不写 `model`、`model_reasoning_effort` 或 `service_tier`。已有 profile 保留原值；
+终端 `/model` 保存的选择会供同一 profile 的后续新会话使用。若要恢复官方推荐默认，
+从该 profile 的配置中移除 `model`；effort 也要自动时同时移除 `model_reasoning_effort`。
+不应把 `model` 设置成未经官方定义的 `default`、`auto` 或 `latest` 字符串。
+
+官方模型目录 `model/list` 提供 `isDefault`、`defaultReasoningEffort`、
+`supportedReasoningEfforts` 和 `serviceTiers`。推荐默认受账号、客户端及模型目录更新影响，
+不是“新发布的任意模型立即替换所有现有会话”。旧 thread 的恢复和当前会话切换是独立行为。
+配置优先级仍遵守 Codex：显式 CLI 参数 > 受信任项目配置 > profile 配置 > 内置默认。
+
+**用户主目录的账号冲突（Codex 0.153.4 实测）：** 当 `CODEX_HOME=~/.codex-personal`
+而 cwd 是 `~`，`~/.codex/config.toml` 会被发现为项目配置，覆盖个人 profile 保存的模型和 effort。
+`config/read(includeLayers=true)` 的 `origins.model` 会指向 `type=project, dotCodexFolder=~/.codex`。
+为阻止另一个账号目录参与项目配置，公共 launcher 在发现此冲突时，仅在所选 profile 中把 `~`
+记录为 `untrusted`；其它项目的信任与另一个账号的文件保持原样。实测这样仍能直接进入 TUI，
+不出现信任选择框，`config/read` 和 `thread/start` 均恢复为所选 profile 的模型。
+
+独立启动支持原生参数，指定值只覆盖该次启动，启动器不把临时参数写入用户配置：
+
+```powershell
+cxp
+cxp --model <model-id> -c model_reasoning_effort=low
+cxp --model <model-id> -c service_tier=fast
+python feishu/agent_profile_cli.py command --profile cxp --cwd . --json -- --model <model-id> -c model_reasoning_effort=low
+```
+
+`command` 与 `run` 都原样传递 `--` 后的 provider 参数。PowerShell wrapper 不声明命名参数，
+从 `$args[0]` 读取 Link16 profile，其余原样转发：既避免拒收 `--model`、`-c`，
+也避免 Claude 的 `-p` 被当成 `-Profile` 的缩写而改错账号。shell 拼接保护
+引号、反斜线、美元符号和反引号的原始内容。通用 pane 的简便参数见
+[ARCH-010 §4](ARCH-010-wmux-orchestration.md#4-worker-启动--派活-playbook)。
+Windows 有显式 provider 参数时，在该次启动环境设置 `MSYS2_ARG_CONV_EXCL=*`，
+防止 Git Bash 把 `/model` 改成 Git 安装目录下的文件路径；传入路径应使用原生 Windows 路径。
+
+飞书桥的新 thread 不传模型或 effort；唯一预热消息为 `Reply exactly LINK16_APP_SERVER_READY.`，
+只是生成供官方 TUI 恢复的会话记录。普通消息只加回址标记，`/model` 原样转发。
+因此默认继承通过配置隔离解决，不需要在消息里要求模型换身份，也不需要重启整座桥。
+
+依据：[官方配置优先级](https://developers.openai.com/codex/config-basic/)、
+[官方默认模型规则](https://developers.openai.com/codex/models/)、
+[官方 App Server 接口](https://developers.openai.com/codex/app-server/)。
+
+### 4.5 Claude 模型与 effort
+
+Claude Code 2.1.263 的终端 `/model` 选择按 Enter 会保存到当前 `CLAUDE_CONFIG_DIR`
+的用户 settings；选择器的 `s` 仅切换当前会话。交互式 `/effort` 会把 low/medium/high/xhigh
+按模型保存到 `modelSettings`；`effortLevel` 是没有模型专属保存值时的配置默认。
+`max` 通常仅本会话使用。`--model`、`--effort` 是启动覆盖，非交互 `-p` 中的切换也不保存。
+已经打开的其它会话和恢复的旧会话不会因另一个终端保存新默认而自动换模型。
+
+未固定 `model` 或 `/model default` 表示采用账号的官方默认，不保证是刚发布的最新模型；
+`opus`、`sonnet`、`fable` 等官方别名跟随各自系列，`best` 是官方最强可用系列选择。
+模型与 effort 分开选择，`/effort auto` 清除当前模型的保存值；若仍有 `effortLevel`、
+环境变量或组织策略，它们仍可能决定最终 effort。Link16 不另设默认模型表。
+
+**用户主目录的同类冲突（原生 `-p /model` 无模型请求实测）：** 隔离配置保存 Sonnet/low，
+在仓库启动是 low，在 `~` 启动却是 `~/.claude/settings.json` 的 xhigh。
+只在隔离 Claude profile 从 `~` 启动、且默认账号存在 settings 文件时，公共 launcher
+加官方 `--setting-sources user`，排除另一个账号被误当作 project/local settings 的配置。
+此保护同时覆盖终端与桥；真实仓库、默认 `cc`、管理策略及桥的显式 `--settings` hooks 保留。
+用户明确传 `--setting-sources` 时尊重其选择。不会修改任何 Claude profile 保存的模型/effort。
+
+```powershell
+ccp
+ccp --model sonnet --effort low
+ccp --safe-mode -p /model # 只查询当前解析结果，不发送模型任务、不保存选择
+```
+
+`cc` 与 `ccp` 的终端选项使用同一透传路径。桥不注入模型或 effort；更改默认影响该
+profile 后续新会话，不要求为此销毁正在工作的生产会话。
+依据：[Claude 官方模型及 effort 规则](https://code.claude.com/docs/en/model-config)、
+[官方 CLI 参数](https://code.claude.com/docs/en/cli-reference)。
 
 ## 5. 公共 launcher 契约
 

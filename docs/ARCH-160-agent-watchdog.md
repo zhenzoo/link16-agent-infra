@@ -23,7 +23,7 @@ read_when:
   - 想知道某个面板为什么被注了「继续」或为什么被换了号
   - 要改告警走哪条通道
   - 在新机器上装桥、想确认看门狗有没有跟着起来
-last_reviewed: 2026-08-26
+last_reviewed: 2026-09-06
 ---
 
 # ARCH-160 · 看门狗
@@ -213,7 +213,9 @@ Codex 走 `chatgpt.com/backend-api/codex/usage`（走 `.env` 的 `PROXY_URL`）�
 > 旧的 `AutopilotWatchdog-Autostart` 正是因为写死路径，2026-08-17 在 TB25 装不上
 > （`Test-Path` 返 False、注册不下去）；2026-08-20 已 **Disable**（未 Unregister，可随时回滚）。
 
-单实例：`start` 先顶掉同名残留再起，与 `bridge_cron.py` 一致。日志 `feishu/_logs/watchdog.log`。
+单实例：桥、cron、看门狗统一使用 `bridge_process.py`。`start` 持控制锁，查询成功后停止旧进程并等待退出，再启动；`run` 必须取得操作系统文件锁并持有到退出，不自行杀其他实例。查询未知时拒绝本次启停，日志 `feishu/_logs/watchdog.log`。
+
+R4（桥由活变死的通知）仅在发送成功后标记已告警；失败下一轮重试。R6（水位书签损坏巡检）通过 `_iter_bots()` 读取名册，仅在发送成功后推进已处理计数，并保留通知函数写入的冷却时间。冷却只从发送成功开始。心跳 `checks.r4/r6` 分别记录 `ok`、`pending_notification`、`process_query_unknown` 或错误；旧心跳没有这些字段时，不能以进程活或心跳新代替巡检健康。`ok` 表示本轮检查完成，不表示故障桥已恢复。
 
 ## 6. 告警走哪条路
 

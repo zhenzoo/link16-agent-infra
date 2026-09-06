@@ -158,9 +158,12 @@ function Resolve-Link16Root {{
     return $root
 }}
 function Invoke-Link16Profile {{
-    param([Parameter(Mandatory=$true)][string]$Profile)
+    # No named parameters: even -p is a provider flag, not a Profile abbreviation.
+    if ($args.Count -eq 0 -or -not $args[0]) {{ throw 'Link16 profile is required.' }}
+    $link16Profile = [string]$args[0]
+    $providerArgs = @($args | Select-Object -Skip 1)
     $root = Resolve-Link16Root; $python = Resolve-Link16Python
-    & $python (Join-Path $root 'feishu\agent_profile_cli.py') run --profile $Profile --cwd (Get-Location).Path -- @args
+    & $python (Join-Path $root 'feishu\agent_profile_cli.py') run --profile $link16Profile --cwd (Get-Location).Path -- @providerArgs
 }}
 foreach ($profileName in @({quoted})) {{
     $body = [scriptblock]::Create("Invoke-Link16Profile '$profileName' @args")
