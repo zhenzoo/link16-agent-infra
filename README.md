@@ -147,6 +147,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 我想… | 看 |
 |---|---|
 | 在一台新电脑上从零装好 | [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) |
+| 核对公开版默认配置与发布前缺口 | [PLAN-1080：隔离账号、沟通规则与新手验收](docs/PLAN-1080-public-installation-baseline.md)（实施方案，尚未全部实现） |
 | 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（Codex 版：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
 | 给已有的 bot 改名 | [`docs/SOP-125-bot-rename.md`](docs/SOP-125-bot-rename.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
