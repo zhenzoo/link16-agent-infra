@@ -294,6 +294,28 @@ class ProfileBootstrapTests(unittest.TestCase):
         self.assertIn("sys.version_info >= (3, 12)", block)
         self.assertNotIn("Sort-Object Name -Descending", block)
 
+    @unittest.skipUnless(shutil.which("powershell.exe"), "requires PowerShell")
+    def test_powershell_wrapper_forwards_provider_flags_without_binding_them(self):
+        # Exercise PowerShell's actual argument binder, without launching an agent.
+        block = pb._powershell_block(["cxp"])
+        begin = block.index("function Invoke-Link16Profile")
+        end = block.index("Remove-Variable profileName")
+        harness = (
+            "function Resolve-Link16Root { '.' }; "
+            "function Resolve-Link16Python { 'Capture-Arguments' }; "
+            "function Capture-Arguments { ConvertTo-Json -Compress -InputObject @($args) }; "
+            + block[begin:end]
+            + "\ncxp --model sample-model -c model_reasoning_effort=low --version -p /model"
+        )
+        done = subprocess.run([shutil.which("powershell.exe"), "-NoProfile", "-Command", harness],
+                              capture_output=True, text=True, encoding="utf-8", timeout=15)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        actual = json.loads(done.stdout)
+        self.assertEqual(actual[actual.index("--profile") + 1], "cxp")
+        self.assertEqual(actual[-7:], [
+            "--model", "sample-model", "-c", "model_reasoning_effort=low", "--version", "-p", "/model",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

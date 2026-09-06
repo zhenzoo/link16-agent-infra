@@ -93,7 +93,7 @@ def _worker_id(value: str) -> str:
     return worker_id
 
 
-def _profile_preflight(cwd: Path) -> dict:
+def _profile_preflight(cwd: Path, *, model=None, effort=None, fast=False) -> dict:
     """Resolve the exact inherited profile before any wmux read or mutation."""
     profile = _profile_name()
     rc, out, err = _profile_cli("doctor", "--profile", profile, "--json")
@@ -106,9 +106,22 @@ def _profile_preflight(cwd: Path) -> dict:
     if not health.get("ok"):
         raise WorkerError(f"profile doctor failed for {profile}: {health.get('errors') or health}")
 
-    rc, out, err = _profile_cli(
-        "command", "--profile", profile, "--cwd", str(cwd), "--json"
-    )
+    overrides = {}
+    if model is not None:
+        overrides["model"] = model
+    if effort is not None:
+        overrides["model_reasoning_effort"] = effort
+    if fast:
+        overrides["service_tier"] = "fast"
+    provider_args = []
+    for key, value in overrides.items():
+        if not isinstance(value, str) or not value.strip():
+            raise WorkerError(f"{key} override must not be empty")
+        provider_args += ["-c", f"{key}={json.dumps(value)}"]
+    command_args = ["command", "--profile", profile, "--cwd", str(cwd), "--json"]
+    if provider_args:
+        command_args += ["--", *provider_args]
+    rc, out, err = _profile_cli(*command_args)
     if rc:
         raise WorkerError(f"worker command resolution failed for {profile}: {err or out}")
     try:
@@ -119,6 +132,9 @@ def _profile_preflight(cwd: Path) -> dict:
         raise WorkerError(f"profile command identity mismatch: {command}")
     if not command.get("command"):
         raise WorkerError(f"profile command is empty for {profile}")
+    if overrides and command["runtime"] != "codex":
+        raise WorkerError("--model/--effort/--fast overrides currently require a Codex profile")
+    command["model_overrides"] = overrides
     return command
 
 
@@ -317,7 +333,10 @@ def _find_live_worker(workspace_id: str, worker_id: str) -> dict | None:
 def _contract(args) -> dict:
     worker_id = _worker_id(args.id)
     cwd = _resolve_cwd(args.cwd)
-    profile_info = _profile_preflight(cwd)
+    profile_info = _profile_preflight(
+        cwd, model=getattr(args, "model", None), effort=getattr(args, "effort", None),
+        fast=getattr(args, "fast", False),
+    )
     workspace_id = _workspace_id()
     allow_write = _resolve_paths(cwd, args.allow_write or [])
     deny_write = _resolve_paths(cwd, args.deny_write or [])
@@ -352,6 +371,7 @@ def _contract(args) -> dict:
         "supervisor_pty_id": (os.environ.get(PTY_ENV) or "").strip() or None,
         "profile": profile_info["profile"],
         "runtime": profile_info["runtime"],
+        "model_overrides": profile_info.get("model_overrides", {}),
         "launch_command": profile_info["command"],
         "cwd": str(cwd),
         "allow_write": allow_write,
@@ -587,6 +607,9 @@ def _build_parser() -> argparse.ArgumentParser:
         child.add_argument("--receipt")
         child.add_argument("--direction", choices=("vertical", "horizontal"), default="vertical")
         child.add_argument("--ready-timeout", type=int, default=60)
+        child.add_argument("--model", help="Codex model for this pane; omitted = native saved/default model")
+        child.add_argument("--effort", help="Codex reasoning effort for this pane; omitted = native saved/default effort")
+        child.add_argument("--fast", action="store_true", help="Enable Codex Fast service tier for this pane")
 
     kickoff = sub.add_parser("kickoff")
     kickoff.add_argument("--id", required=True)

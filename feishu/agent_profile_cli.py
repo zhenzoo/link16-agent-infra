@@ -138,6 +138,10 @@ def main(argv=None) -> int:
     p_command.add_argument("--cwd")
     p_command.add_argument("--env", action="append", default=[])
     p_command.add_argument("--json", action="store_true")
+    p_command.add_argument(
+        "provider_args", nargs=argparse.REMAINDER,
+        help="`--` 后原样传给 provider，例如 --model 或 -c model_reasoning_effort=low",
+    )
 
     p_selftest = sub.add_parser(
         "selftest", help="逐个 profile 体检：registry / doctor / 命令生成 / 真启动"

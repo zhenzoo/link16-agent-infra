@@ -29,12 +29,12 @@ from feishu.install_codex_bridge_hooks import bridge_hooks, load_json, merge_hoo
 # stale notify lines, and old MCP tables. The wmux/mattermost MCP tables are
 # appended by the normal flow below. `codex login` (for auth.json) is still a
 # manual prerequisite this script cannot perform.
+# Model/effort are intentionally absent: Codex owns recommended defaults and
+# persists the user's /model selection in this profile's config.toml.
 SEED_CONFIG = (
     'cli_auth_credentials_store = "file"\n'
-    'model = "gpt-5.6-sol"\n'
     'sandbox_mode = "danger-full-access"\n'
     'approval_policy = "on-request"\n'
-    'model_reasoning_effort = "xhigh"\n'
 )
 
 
