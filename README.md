@@ -14,12 +14,12 @@ does_not_own:
   - 架构与精确合同（见 docs/ARCH-*、docs/SPEC-*）
 read_when:
   - 第一次了解或部署 Link16
-last_reviewed: 2026-08-26
+last_reviewed: 2026-09-06
 ---
 
-# Link 16 · 用飞书（Lark）遥控你电脑上的 Claude Code
+# Link 16 · 用飞书（Lark）遥控你电脑上的 Claude Code、Codex 与 Kimi Code
 
-> 手机上 @ 一句「把昨天那版重构完再跑一遍测试」，家里那台电脑上的 Claude Code 就真的开始干活，
+> 手机上 @ 一句「把昨天那版重构完再跑一遍测试」，家里那台电脑上的 AI Agent 就真的开始干活，
 > 干完把结果、截图、在线文档发回你的飞书。人在外面，机器在家里干。
 
 代号 **Link 16**（军用战术数据链：指挥中心 ↔ 前线终端的实时分发与协同操控）。
@@ -29,13 +29,13 @@ last_reviewed: 2026-08-26
 
 ## 它解决什么
 
-Claude Code 很强，但它被钉在**一台电脑的一个终端窗口**里。你一离开桌子，它就停了。
+终端里的 AI Agent 可以持续工作，但离开电脑后，你需要一个能派活、看进度和收结果的入口。
 
 这个仓把两头接上：
 
 ```
 你的手机 ── 飞书 @bot ──▶ 长连接 ──▶ 本仓的桥 ──▶ wmux 开一个终端面板
-                                                      └─▶ 面板里起 Claude Code / Codex
+                                                      └─▶ 面板里起 Claude Code / Codex / Kimi Code
                                                             └─▶ 干活…
 你的手机 ◀── 飞书消息/图/在线文档 ◀── 回传 ◀───────────────────┘
 ```
@@ -62,7 +62,7 @@ Claude Code 很强，但它被钉在**一台电脑的一个终端窗口**里。�
 | **Git for Windows / Git Bash** | Windows Terminal 与 wmux 的默认 shell；安装/升级后由 `preflight.py` 检查，不靠 `.bashrc` alias |
 | **wmux** ⭐ | **必装，且必须开着** —— 见下节 |
 | **飞书账号** | 用来创建 bot 应用；注册流程是扫码 OAuth，仓库里有一键脚本 |
-| **Claude Code 或 Codex CLI** | 面板里真正干活的那个 |
+| **Claude Code、Codex CLI 或原生 Kimi Code** | 按需选择；面板里真正执行任务的 agent |
 
 ### ⭐ wmux —— 为什么它是硬依赖
 
@@ -140,7 +140,9 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 
 ## 文档地图（按「我想干什么」找）
 
-进行中的 Kimi 飞书适配与跨机规则部署见 [PLAN-1050](docs/PLAN-1050-kimi-bridge-and-machine-rollout.md)。
+**v0.23.0 新增原生 Kimi Code 接入**：飞书私聊可启动已注册的 Kimi profile，接收工具进度、计划和最终答案，并支持取消与会话恢复。本机已完成真人 DM 验收；群聊与其他机器的 Kimi 部署需分别验收。原生选择器的飞书按钮、可靠额度查询和自动换入 Kimi 尚未提供。
+
+版本变化、升级和回滚见 [CHANGELOG](CHANGELOG.md)；机制见 [ARCH-120 §11](docs/ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)；合并和分支审计见 [PLAN-1070](docs/PLAN-1070-kimi-main-release.md)，原接入与跨机待办保留在 [PLAN-1050](docs/PLAN-1050-kimi-bridge-and-machine-rollout.md)。
 
 | 我想… | 看 |
 |---|---|

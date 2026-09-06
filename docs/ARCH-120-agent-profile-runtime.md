@@ -363,6 +363,14 @@ Codex runtime 适配、最小目标特例和不可复制的派生/私密状态�
 
 ### 11.1 会话与观察者身份
 
+模型与思考强度由原生 Kimi 管理，Link16 不额外传 `--model` 或固定 effort。新会话读取
+所选 `KIMI_CODE_HOME/config.toml` 的 `default_model` 与 `thinking`；恢复旧 session 的设置
+由 Kimi 自身管理，不保证另一个终端保存默认后会热更新已经运行的会话。显式 provider 参数仍原样透传。
+2026-09-06 本机 0.41.0 的帮助说明默认模型来自 config.toml；真人会话在 23:19:57
+产生 `config.update(modelAlias=kimi-code/k3, thinkingEffort=high)`，随后两条 `llm.request`
+均为 `model=k3, thinkingEffort=high`，与该隔离 profile 保存值一致。只读取模型字段核验，不改配置。
+
+
 首次用原生 `-p --output-format stream-json` 做有界热身；退出成功、精确响应标记和唯一 typed `session.resume_hint` 同时通过才固定 session。不得猜最新目录。热身字节边界以前的内容只作本地历史，不投递。随后原生 TUI 用 `--session` 接续；目录信任仅写所选 profile、精确 bot cwd 的本地记录，保留已有记录，原生 workspace key 从该 session 的实际目录取得。
 
 `bridge-kimi-thread-<bot>.json` 保存 profile/cwd/session/initial_offset；恢复要求 profile 与目录一致。`/close`、`/new`、`/handoff` 只封存会话指针，保留 provider 历史与投递游标。交接包使用精确 session 的主 agent Wire 路径并说明格式；找不到绑定就先失败，不关闭旧会话。原生交互选择器尚未适配飞书按钮，不据此宣称全部交互能力可用。

@@ -13,7 +13,7 @@ does_not_own:
   - 各机认证与本地 profile 映射
 read_when:
   - 接续 2026-09-05 的 Kimi 与沟通规则任务
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-06
 related:
   - ARCH-120
   - SPEC-210
@@ -81,13 +81,15 @@ evidence：`feishu/_logs/bridge-tb26-*.log`、`feishu/_state/bridge-progress-sta
 - [x] 7.2 已给出清单：本机 cck 已退役、历史保留；ccw 保留；tb25 的 ccq/ccg 使用与引用待 Stage 4.4 对端核验。
 - [x] 7.3 已说明 AnySearch 当前搜索成功，历史故障原因仍未知，不误报根治。
 
-### 🔄 Stage 8｜CCP 已切换 KP，等待真人 DM 入站验收
+### ✅ Stage 8｜CCP 已切换 KP，真人 DM 入站验收通过（2026-09-06 23:25）
 
 - [x] 8.1 已记录 before 与恢复信息（实际 19:47）：tb26-ccp profile=cxp，cwd 为原配置目录，无活动 PTY，旧桥 PID=28288；kp doctor 通过。备份位于 feishu/_state/kp-rollout-20260905-1945。
 - [x] 8.2 profile=kp 已持久化，新桥 PID=29248 已连接；实际 19:49。原生 session_014194b7-c51b-4518-9e69-be43b54ffacf、PTY daemon-674e71e1 启动，其他七只桥 PID 不变，共享沟通段加载已确认。
 - [x] 8.3 本地标记注入→原生 Kimi→真实飞书 DM 出站通过，实际 20:02。身份 kp/.kimi-personal，plan 0/2→2/2、ETA 19:49/19:50 与实际 19:48/19:49 保留；取消只报取消，同 session 恢复正常；所有本轮 receipts delivered=true。
 - [x] 8.4 生产发现最终正文同时进入进度卡，已修复：公开 text 等该 step 的工具事件再判为进度，否则只等 turn.ended 发最终答案。真实 Wire 重放与重载后的恢复回复均确认最终标记不在 progress 中；551 tests、53 subtests 全过，实际 20:02。只重启 observer，保留 Kimi TUI。
-- [ ] 8.5 真人 DM 入站尚未收到。已请用户私聊 CCP 一句；恢复信号为 bridge-inbound-tb26-ccp.jsonl 出现本次新 p2p/user 消息，并与同轮 answer ACK 对上。CCP 当前未加入任何群，peer 测试因无共享群在发送前被拒；没有绕过群成员检查。
+- [x] 8.5 真人 DM 入站验收通过，2026-09-06 23:25 回读：23:18:57「hi 你好呀」入站，23:19:37 原生 Kimi 回复；后续 23:20:24 工具进度、23:20:38 最终答案均有送达记录。用户同轮明确确认接通。当前 CLI 0.41.0，所绑定 journal 为 Wire 1.5；不以此补签群聊或其他机器的 Kimi 验收。
+
+2026-09-06 用户授权完成 Kimi 分支合并与版本 tag，后续发布真源为 [PLAN-1070](PLAN-1070-kimi-main-release.md)。此前“未合入 main”及“等待真人 DM”保留为当时历史状态；Stage 4 的跨机 Kimi 部署不由本机验收替代。
 
 ## 变更记录与恢复指针
 
@@ -105,6 +107,6 @@ evidence：`feishu/_logs/bridge-tb26-*.log`、`feishu/_state/bridge-progress-sta
 ## 生产验收闸与精确恢复信号
 
 - 跨机：用户同意后才向 tb24-link16、tb25-link16、tuf19-link16 派发规则同步，范围为 claude-config/main（含 e8dd4ec）与 Link16/main（90f71ec）。要求回报 before/after SHA、dirty/drift 处理、受管规则哈希、writes=0 和运行中会话进度；不混入尚未合并的 Kimi 功能分支。
-- KP 飞书：用户已选择 tb26-ccp 并授权窗口；account 已由 cxp 切为 kp，原 cwd 保留，Stage/ETA/最终答案真实 DM 出站已获 ACK。真人 DM 入站与群能力仍未验；不自动扩群。
+- KP 飞书：用户已选择 tb26-ccp 并授权窗口；account 已由 cxp 切为 kp，原 cwd 保留，Stage/ETA/最终答案真实 DM 出站已获 ACK。2026-09-06 真人 DM 入站已按 Stage 8.5 补验通过；群能力仍未验，不自动扩群。
 - 回滚：只恢复 tb26-ccp 原 profile=cxp 和相应会话选择，再仅重启该桥；保留 Kimi home、session、outbox 和 ACK。切换前名册/会话备份在 feishu/_state/kp-rollout-20260905-1945；恢复时只取该 bot 的行，不整份覆盖其他 bot 的后续变更。当前 KP 工作正常，未回滚。
 - 原生 Kimi 交互选择器到飞书按钮、可靠额度 API 与自动换入 KP 尚未实现；普通文字问答、计划、工具安全摘要、取消和恢复不据此泛称全部交互已完备。
