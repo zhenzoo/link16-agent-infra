@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bridge_env import bots_config_path  # noqa: E402
+from bridge_env import bots_config_path, registry_path  # noqa: E402
 import bridge_scope_audit as audit  # noqa: E402
 
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -44,12 +44,23 @@ os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
-REGISTRY = HERE / "agent-registry.json"
 
 
 def load_tenants():
-    """tenant_key → 目标群 的精确映射表。"""
-    data = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    """tenant_key → 目标群 的精确映射表。
+
+    路径**统一走 `bridge_env.registry_path()`**（env override → profile home 私有本
+    → 仓内 local 本 → 脱敏样例），**别在这里自己拼文件名**：名册从 git 摘出去之后，
+    写死 `agent-registry.json` 会直接找不到文件 → 租户判定失效 → 新 bot 进错 a2a 群。
+
+    名册不存在时返回空列表（不是抛异常）：调用方 `target_group()` 会退成
+    「租户未知 / 无目标群」，符合名册自己定的规则——未知就保持 unknown、
+    必须显式选择，绝不按 bot 名字或同机多数票猜。
+    """
+    path = registry_path()
+    if not path.is_file():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
     return data.get("tenants") or []
 
 

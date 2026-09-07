@@ -399,15 +399,28 @@ def check_local_roster():
 
 
 def check_registry():
+    """舰队通讯录体检 —— 关键是**不许静默降级**。
+
+    解析链是「找不到就往下一档落」，最怕的失败形态不是报错，而是**悄悄读到脱敏样例
+    然后报绿灯**：功能不崩，但舰队数据全是假的，`--to-agent` 喊谁都喊不到、
+    租户判群全落空，而体检说一切正常。所以样例档必须单独识别并 WARN，
+    并且把**实际读到的完整路径**打出来（不是只打文件名），让人一眼看出读错了哪份。
+    """
     try:
         sys.path.insert(0, str(HERE))
-        from bridge_env import registry_path
+        from bridge_env import registry_path, profile_home_registries
         p = registry_path()
+        preferred = profile_home_registries()
+        want = preferred[0] if preferred else HERE / "agent-registry.local.json"
         if not p.exists():
-            return Result("agent 目录名册", WARN, "三个候选都不在（首次使用正常）",
-                          "cp feishu/agent-registry.example.json feishu/agent-registry.local.json")
+            return Result("agent 目录名册", WARN, "还没有本机通讯录（首次使用正常）",
+                          f"从样例起步：cp feishu/agent-registry.example.json {want}")
         n = len(json.loads(p.read_text(encoding="utf-8")).get("agents", []))
-        return Result("agent 目录名册", OK, f"{p.name} · {n} 条")
+        if p.name == "agent-registry.example.json":
+            return Result("agent 目录名册", WARN,
+                          f"落到【脱敏样例】（{n} 条假数据）——这不是你的舰队：{p}",
+                          f"真名册应在 {want}；本该有却落到样例 → 检查该 profile home，或用 LINK16_AGENT_REGISTRY 显式指定")
+        return Result("agent 目录名册", OK, f"{p} · {n} 条")
     except Exception as e:  # noqa: BLE001
         return Result("agent 目录名册", WARN, f"读取失败：{e}", "检查名册 JSON 是否合法")
 

@@ -92,6 +92,42 @@ def bots_config_path(project_root):
     return Path(project_root) / "feishu" / "bridge-bots.json"
 
 
+def _profiles_document():
+    """读 profile 注册表（`agent-profiles.local.json` 优先，回落 committed 本）。
+
+    **直接读 JSON、不 import `agent_runtime`** —— `agent_runtime` 反过来依赖本模块，
+    import 它会成环。这里只需要 home 字符串，读文件足够。
+    """
+    here = Path(__file__).resolve().parent
+    for name in ("agent-profiles.local.json", "agent-profiles.json"):
+        p = here / name
+        if p.is_file():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                return {}
+    return {}
+
+
+def profile_home_registries():
+    """默认 SSOT 候选：各 runtime 默认 profile 的 home 下 `link16/agent-registry.json`。
+
+    先 claude 后 codex —— 没装 Claude、只用 Codex 的人自然落到第二个。
+    只算路径、不判断存在与否；存在性由 `registry_path()` 决定。
+    """
+    doc = _profiles_document()
+    profiles = doc.get("profiles") or {}
+    defaults = doc.get("default_profiles") or {}
+    out = []
+    for runtime in ("claude", "codex"):
+        spec = profiles.get(defaults.get(runtime)) or {}
+        home = str(spec.get("home") or "").strip()
+        if not home:
+            continue
+        out.append(Path(home).expanduser() / "link16" / "agent-registry.json")
+    return out
+
+
 def registry_path():
     """跨机 agent 目录（谁是谁 / 在哪台机 / 分管哪个仓 / open_id）的**唯一路径解析入口**。
 
@@ -103,25 +139,40 @@ def registry_path():
     三处不一致就会「读的和写的不是同一个文件」→ 登记完查不到。收到这里统一。
 
     解析顺序（先命中先用）：
-      ① 环境变量 `LINK16_AGENT_REGISTRY` —— 显式 override（测试 / 特殊部署）
-      ② `feishu/agent-registry.local.json` —— **本机真数据**（gitignore · 跨机靠 envsync 同步，不靠 git）
-      ③ `feishu/agent-registry.json` —— committed 本（迁移期仍在；PLAN-926 §S1.1 阶段③ 会摘出 git）
-      ④ `feishu/agent-registry.example.json` —— 脱敏样例（让**陌生人 clone 完**不至于直接崩，
-         并且看得到 schema 长什么样；他自己 `cp` 一份成 local 就能用）
+      ① 环境变量 `LINK16_AGENT_REGISTRY` —— 显式 override（测试 / 特殊部署 / 多账号）
+      ② `<claude profile home>/link16/agent-registry.json`（默认 `~/.claude-personal/link16/…`）
+      ③ `<codex  profile home>/link16/agent-registry.json`（默认 `~/.codex-personal/link16/…`）
+      ④ `feishu/agent-registry.local.json` —— 仓内本机本（gitignore；偏好放仓里的人用）
+      ⑤ `feishu/agent-registry.example.json` —— 脱敏样例（让**陌生人 clone 完**不至于直接崩，
+         并且看得到 schema 长什么样）
 
-    ⚠️ **语义是「整盘接管」不是合并** —— 与 `bots_config_path` 一致。不合并的理由：阶段③ 之后
-    committed 那本是**假数据样例**，一合并就会把样例里的假 bot 混进真舰队。
-    ⚠️ 迁移期安全性：另外两台机还没有 local 文件 → 命中 ③ → **行为与改动前完全一致、零风险**。
+    **为什么默认 SSOT 落在 runtime profile home（② / ③）**：这一条规则对两种人都成立，
+    不需要分叉——对维护者，`~/.claude-personal` 本身就是一个私有 git 仓的工作树，
+    通讯录**自动搭上已有的跨机同步**（push/pull，和现在一模一样，只是换了班车）；
+    对只有一台机的陌生人，它就是 `profile_bootstrap` 给他建的普通目录，本机独有，正确。
+    没装 Claude 只用 Codex 的人自然落 ③。
+    真数据因此**永远不进本仓**，本仓只留 ⑤ 那份脱敏样例。
+
+    ⚠️ **语义是「整盘接管」不是合并** —— 与 `bots_config_path` 一致。不合并的理由：
+    ⑤ 是**假数据样例**，一合并就会把样例里的假 bot 混进真舰队。
+    ⚠️ **加 ②③ 是纯附加**：机器上还没有 profile home 通讯录时直接落到 ④/⑤，
+    行为与改动前逐字节一致，零风险。
     """
     override = (os.environ.get("LINK16_AGENT_REGISTRY") or "").strip()
     if override:
         return Path(override)
+    for candidate in profile_home_registries():
+        if candidate.is_file():
+            return candidate
     here = Path(__file__).resolve().parent
     for name in ("agent-registry.local.json", "agent-registry.json", "agent-registry.example.json"):
         p = here / name
         if p.exists():
             return p
-    return here / "agent-registry.json"   # 都没有 → 回 committed 名，让调用方报「找不到」而不是报个怪路径
+    # 都没有 → 回**推荐的创建位置**（而不是一个再也不会存在的 committed 名），
+    # 这样 preflight / 报错信息直接告诉人「该把它建在哪」。
+    preferred = profile_home_registries()
+    return preferred[0] if preferred else here / "agent-registry.local.json"
 
 
 def resolve_wmux_rpc(project_root):
