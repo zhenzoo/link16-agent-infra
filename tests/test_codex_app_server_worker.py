@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,15 @@ class _FakeRpc:
 
 
 class AppServerFinalDeliveryTests(unittest.TestCase):
+    def test_app_server_child_gets_root_even_with_missing_or_stale_parent_variable(self):
+        import os
+        for inherited in ({}, {"LINK16_AGENT_INFRA_ROOT": "/stale/root"}):
+            with self.subTest(inherited=inherited), mock.patch.dict(os.environ, inherited, clear=True):
+                env = worker.worker_environment("test", "/selected/home", "/business/state")
+            self.assertEqual(env["LINK16_AGENT_INFRA_ROOT"], ROOT.as_posix())
+            self.assertEqual(env["FEISHU_BRIDGE_SESSION"], "test")
+            self.assertEqual(env["CODEX_HOME"], str(Path("/selected/home")))
+
     def test_typed_final_is_written_as_answer_without_stop_hook(self):
         final = {
             "method": "item/completed",

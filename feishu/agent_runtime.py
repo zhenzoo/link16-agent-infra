@@ -720,6 +720,12 @@ def _claude_home_settings_args(profile, cwd=None) -> str:
     return ""
 
 
+def infrastructure_env(project=None):
+    """Location of the executing Link16 installation, independent of business cwd."""
+    root = Path(project) if project is not None else Path(__file__).resolve().parent.parent
+    return {"LINK16_AGENT_INFRA_ROOT": root.resolve().as_posix()}
+
+
 def standalone_worker_cmd(
     profile_name_: str,
     cwd=None,
@@ -733,10 +739,12 @@ def standalone_worker_cmd(
     """
     profile = profile_spec(profile_name_)
     _require_profile_available(profile)
-    env = {PROFILE_ENV: profile.name}
+    env = {PROFILE_ENV: profile.name, **infrastructure_env()}
     for key, value in (extra_env or {}).items():
         if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(key)):
             raise ValueError(f"非法环境变量名：{key!r}")
+        if key in env and str(value) != env[key]:
+            raise ValueError(f"不能通过 extra_env 覆盖 {key}")
         env[str(key)] = str(value)
     if os.name == "nt" and provider_args:
         # Git Bash otherwise rewrites a native slash command such as /model
@@ -822,6 +830,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
     env = (
         f"FEISHU_BRIDGE_SESSION={name} "
         f"FEISHU_BRIDGE_OUTBOX_DIR={_q(autopilot.as_posix())} "
+        f"LINK16_AGENT_INFRA_ROOT={_q(infrastructure_env(project)['LINK16_AGENT_INFRA_ROOT'])} "
         + (f"{PROFILE_ENV}={_q(profile.name)} " if profile else "")
     )
     if spec.name == "claude":

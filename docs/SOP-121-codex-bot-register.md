@@ -14,7 +14,7 @@ does_not_own:
   - Codex Personal 的迁移（见 SOP-160）
 read_when:
   - 要新建一个 Codex（而非 Claude）飞书 bot
-last_reviewed: 2026-09-04
+last_reviewed: 2026-09-07
 ---
 # SOP-121 · 建一个 Feishu Codex bot（SOP-120 之上的 Codex 增量）
 
@@ -84,9 +84,11 @@ Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史�
 
 ## 验收
 
-- 群里 `@<新 codex bot>` 一句 → 能回（默认走 app-server typed final；`cli-legacy` 才走 Stop hook）。
-- 在该 bot 会话里 `python feishu/whoami.py` → 身份卡显示该 bot（`FEISHU_BRIDGE_SESSION` 钉的身份）。
-- 让它 `send_feishu_msg` @ 另一台机的 bot → 能送达（a2a 通）。
+- 主人私聊一句 → 能回（默认走 app-server typed final；`cli-legacy` 才走 Stop hook）。
+- 在 bot 的实际业务 cwd 读取进程或用户级 `LINK16_AGENT_INFRA_ROOT`，确认其下有 `TOOLS.md` 和 `feishu/feishu_bridge.py`；用该根目录的绝对路径运行 `whoami.py` 与 `artifact_delivery.py decide --json`。不要求业务目录里另有一份 `feishu/`。
+- 在线策略返回 `machine-policy-off` 是正常的仅本机交付；不要报成路径缺失或未注册智能体。只有定位不到根才修启动环境；只有明确要求在线交付且 API 缺权才按 SOP-120 增补所需 capability。
+- 仅选了 `group-a2a` 才验群内 @ 回复与授权的 peer 测试；个人 `core` bot 无需为验收额外入群。
+- 官方登记、权限与飞书标签的区分见 SOP-120 §1；Codex 的 `cxp` 是运行档案，不决定飞书标签颜色。
 
 ## 默认 canary（typed-event）· 老「标准路径」已弃用（主人 2026-07-23 拍板）
 

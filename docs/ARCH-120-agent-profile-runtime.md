@@ -99,6 +99,7 @@ LINK16_AGENT_PROFILE=<profile>
 Bridge 从 bot 的 `profile` 解析档案，启动主 session 时同时注入：
 
 - `LINK16_AGENT_PROFILE`
+- `LINK16_AGENT_INFRA_ROOT`（执行该启动器的 Link16 根目录，与业务 cwd 无关）
 - provider 所需的 `CLAUDE_CONFIG_DIR` 或 `CODEX_HOME`
 - 飞书身份/回传所需的 `FEISHU_BRIDGE_*`
 
@@ -111,6 +112,14 @@ launcher。wrapper 只选择 profile，不再自己拼 home、runtime 或模型�
 
 父 spawner 读取并校验 `LINK16_AGENT_PROFILE`，把同一 profile 显式交给 Link16 公共
 launcher。新 pane 不依赖 wmux daemon 或 shell 碰巧继承父进程环境。
+
+飞书主会话、手工 profile launcher、独立 worker 和 Codex app-server 子进程都必须显式传递
+`LINK16_AGENT_INFRA_ROOT`。它由启动代码所在的 Link16 根解析，不从业务 cwd、模型名或
+provider home 推断。进程参数不得覆盖它；用户级变量供存量会话的 skill 定位使用。
+业务目录不需要复制 Link16 工具，也不需要逐仓补配置。
+
+在线交付的开关仍以 `artifact_delivery.py decide --json` 为准：内建默认关闭是正常结果；
+找不到 Link16 是定位错误；开启在线交付后 API 缺 scope 才是权限错误。这三者与飞书会话标签无关。
 
 内容仓只负责“在哪个 pane、以什么业务角色启动”；Link16 负责“用哪个 agent runtime
 和账号启动”。

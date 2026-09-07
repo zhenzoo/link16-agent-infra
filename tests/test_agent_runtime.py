@@ -452,6 +452,25 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
         fixture.start()
         self.addCleanup(fixture.stop)
 
+    def test_bridge_worker_carries_infra_root_outside_link16(self):
+        import shlex
+
+        with tempfile.TemporaryDirectory(prefix="link16 root ") as tmp:
+            project = Path(tmp) / "infra"
+            media = Path(tmp) / "media"
+            for profile in ("cxp", "ccp"):
+                with self.subTest(profile=profile), patch.object(
+                    agent_runtime, "_require_profile_available"
+                ):
+                    command = agent_runtime.worker_cmd(
+                        {"name": "media-test", "profile": profile},
+                        project, project / "feishu" / "_state", cwd=str(media),
+                    )
+                self.assertIn(
+                    "LINK16_AGENT_INFRA_ROOT=" + project.resolve().as_posix(),
+                    shlex.split(command),
+                )
+
     def test_shell_prefers_env_then_path_and_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = Path(tmp) / "my-bash.exe"
@@ -563,6 +582,33 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
                           side_effect=ValueError("找不到可用 shell：测试")):
             with self.assertRaisesRegex(ValueError, "找不到可用 shell"):
                 agent_runtime.standalone_worker_cmd("cxp", cwd=str(ROOT))
+
+    def test_standalone_worker_carries_root_and_rejects_override(self):
+        import shlex
+        with patch.object(agent_runtime, "_require_profile_available"):
+            for profile in ("cxp", "ccp"):
+                command = agent_runtime.standalone_worker_cmd(profile, cwd="/unrelated/media path")
+                self.assertIn("LINK16_AGENT_INFRA_ROOT=" + ROOT.as_posix(), shlex.split(command))
+            with self.assertRaisesRegex(ValueError, "LINK16_AGENT_INFRA_ROOT"):
+                agent_runtime.standalone_worker_cmd("cxp", extra_env={"LINK16_AGENT_INFRA_ROOT": "/wrong"})
+
+    def test_generated_launcher_delivers_root_to_real_child_outside_repo(self):
+        import json
+        import os
+        import subprocess
+        code = "import json,os; print(json.dumps({k:os.environ.get(k) for k in ['LINK16_AGENT_INFRA_ROOT','LINK16_AGENT_PROFILE']}))"
+        fake_provider = ("codex() { " + agent_runtime._q(Path(sys.executable).as_posix())
+                         + " -c " + agent_runtime._q(code) + "; }; ")
+        with tempfile.TemporaryDirectory(prefix="media business ") as tmp, \
+             patch.object(agent_runtime, "_require_profile_available"):
+            command = agent_runtime.standalone_worker_cmd("cxp", cwd=tmp)
+            env = os.environ.copy()
+            env.pop("LINK16_AGENT_INFRA_ROOT", None)
+            result = subprocess.run([agent_runtime.resolve_shell(), "-c", fake_provider + command],
+                                    cwd=tmp, env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(result.stdout)
+        self.assertEqual(observed, {"LINK16_AGENT_INFRA_ROOT": ROOT.as_posix(), "LINK16_AGENT_PROFILE": "cxp"})
 
     def test_profile_name_has_no_runtime_default_tier(self):
         # 显式 profile / provider-home 反推 —— 两条有据可依的路仍然通。

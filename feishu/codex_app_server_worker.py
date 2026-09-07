@@ -23,6 +23,7 @@ from pathlib import Path
 
 from bridge_events import CONTRACT, MilestoneAccumulator, normalize_codex_notification
 import bridge_injection
+import agent_runtime
 import turn_delivery_guard
 
 
@@ -31,6 +32,16 @@ WARMUP_TIMEOUT_SEC = 120
 RECONNECT_MAX_BACKOFF = 30      # 秒·重连退避上限
 RECONNECT_ALERT_AFTER = 120     # 秒·重连这么久还挂不回去 → 告诉主人一声（走 outbox·飞书看得见）
 EXIT_SLOT_TAKEN = 3             # 退出码·席位已被别的速记员占着（调用方据此别重试）
+
+def worker_environment(bot, codex_home, state_dir):
+    env = os.environ.copy()
+    env.update(agent_runtime.infrastructure_env())
+    env["CODEX_HOME"] = str(Path(codex_home).expanduser())
+    env["FEISHU_BRIDGE_SESSION"] = bot
+    env["FEISHU_BRIDGE_OUTBOX_DIR"] = str(state_dir)
+    env["FEISHU_CODEX_EVENT_STREAM"] = "1"
+    return env
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -492,11 +503,7 @@ def run(args) -> int:
     port = _free_port()
     url = f"ws://127.0.0.1:{port}"
     log_path = state_dir / f"codex-app-server-{args.bot}.log"
-    env = os.environ.copy()
-    env["CODEX_HOME"] = str(Path(args.codex_home).expanduser())
-    env["FEISHU_BRIDGE_SESSION"] = args.bot
-    env["FEISHU_BRIDGE_OUTBOX_DIR"] = str(state_dir)
-    env["FEISHU_CODEX_EVENT_STREAM"] = "1"
+    env = worker_environment(args.bot, args.codex_home, state_dir)
     with open(log_path, "a", encoding="utf-8") as log:
         server = subprocess.Popen(
             [str(codex), "--dangerously-bypass-hook-trust", "app-server", "--listen", url],
