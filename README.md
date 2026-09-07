@@ -181,10 +181,18 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 文件 | 管什么 | 进 git 吗 |
 |---|---|---|
 | `feishu/bridge-bots.local.json` | **运行时**：本机桥要跑哪些 bot、用哪个账号、cwd 在哪 | ❌ 每台机各管各的 |
-| `feishu/agent-registry.json` | **目录**：受信 private 舰队谁是谁、在哪台机、分管哪个仓 | ✅（private collaborator 可见运维元数据；公开前必须走 PLAN-926） |
+| `~/.claude-personal/link16/agent-registry.json` | **目录**：舰队里谁是谁、在哪台机、分管哪个仓、open_id 多少 | ❌ 不在本仓（见下） |
 
 > 🚨 **第一次用的人注意**：`bridge-bots.local.json` 的语义是「**整盘接管**」——桥只跑它列的 bot。
 > committed 名册与 local example 都是空模板；缺 local 时桥会安全停住。`feishu/preflight.py` 会提示先复制空模板，再由注册脚本 upsert 本机 bot。
+>
+> 📇 **目录名册为什么不在本仓**：它装的是真实 open_id、群 chat_id、租户 key 和主机名 ——
+> 内网拓扑与身份门牌号，公开仓不能带。它的默认位置是 **runtime profile home**：
+> `~/.claude-personal/link16/agent-registry.json`（没装 Claude 则 `~/.codex-personal/link16/`）。
+> 本仓只带一份**脱敏样例** `feishu/agent-registry.example.json`，schema 一模一样，`cp` 过去改就能用。
+> 解析顺序见 `feishu/bridge_env.py` 的 `registry_path()`；用 `LINK16_AGENT_REGISTRY` 可显式指定别的路径。
+> **只有一台机的人不用管跨机同步**；多台机的人，把那个 profile home 放进自己的私有配置仓，
+> 名册就随它一起 push/pull —— 不需要为此多维护一个仓库。
 
 ---
 

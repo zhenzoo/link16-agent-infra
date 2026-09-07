@@ -40,7 +40,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bridge_env import bots_config_path, registry_path, resolve_env_path  # noqa: E402
+from bridge_env import (  # noqa: E402
+    EXAMPLE_REGISTRY_NAME, bots_config_path, registry_path, resolve_env_path)
 
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
@@ -96,8 +97,10 @@ def plan(bot):
 
 
 def registry_openid(bot):
+    # 本函数返回的路径会被 update_registry_openid 拿去【就地改写】，所以样例档必须明确
+    # 拒绝：否则若 bot 名恰好撞上样例里的示例条目，就会去改仓库自带的样例文件。
     reg = registry_path()
-    if not reg or not Path(reg).exists():
+    if not reg or not Path(reg).exists() or Path(reg).name == EXAMPLE_REGISTRY_NAME:
         return None, None
     data = json.loads(Path(reg).read_text(encoding="utf-8"))
     for item in (data.get("agents") or []):

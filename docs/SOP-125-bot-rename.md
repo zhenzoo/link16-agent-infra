@@ -34,7 +34,7 @@ last_reviewed: 2026-08-17
 
 ## 二、改名 checklist（按序）
 1. **名册** `feishu/bridge-bots.local.json`：改该 bot 的 `name`（+ 需要则 `at_name`）。**`app_id_env` 别动**（保持凭据解析不变、不碰 .env）。
-2. **目录** `feishu/agent-registry.json`：改这条的 `name` / `at_name` / `send_key`（**只改自己那半**·各机各半·见其 `_README`）。
+2. **目录**（默认 `~/.claude-personal/link16/agent-registry.json`·不在本仓·路径以 `python -c "import sys;sys.path.insert(0,'feishu');from bridge_env import registry_path;print(registry_path())"` 为准）：改这条的 `name` / `at_name` / `send_key`（**只改自己那半**·各机各半·见其 `_README`）。
 3. **扫一遍谁还按旧名硬引**（第四节）。
 4. **状态文件重认**（关键·最易漏）：见第三节。
 5. **重启桥生效**：改了名册/状态 → `python feishu/feishu_bridge.py --bot <新名>` 单起即可；改了公共码 → 全队 `stop && start`。

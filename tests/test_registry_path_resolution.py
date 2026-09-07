@@ -14,6 +14,7 @@
 3. profile home 不存在时**必须静默落回仓内旧档**——这是迁移期零风险的保证：
    还没建 profile home 通讯录的机器，行为要和改动前逐字节一致。
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -114,6 +115,53 @@ class ProfileHomeCandidates(unittest.TestCase):
     def test_empty_document_yields_no_candidates(self):
         with mock.patch.object(bridge_env, "_profiles_document", return_value={}):
             self.assertEqual(bridge_env.profile_home_registries(), [])
+
+
+class WritableRegistryGuard(unittest.TestCase):
+    """写入闸：绝不把真数据写进随仓发布的脱敏样例。
+
+    registry.py sync-groups、register_feishu_app 的自动登记、reset_bot_identity 换
+    open_id 都会【写回】解析结果。陌生人第一次注册 bot 时本机还没有名册，
+    registry_path() 会一路落到样例档 —— 那时若直接写，他的真 open_id 会被写进
+    仓库自带的样例文件，一 commit 就泄漏，而他自己的名册其实没建起来。
+    """
+
+    def test_returns_real_registry_untouched(self):
+        """正常情况：已经有真名册，原样返回，不做任何多余动作。"""
+        with temp_dir() as tmp:
+            real = tmp / "agent-registry.json"
+            real.write_text("{}", encoding="utf-8")
+            with mock.patch.object(bridge_env, "registry_path", return_value=real):
+                self.assertEqual(bridge_env.writable_registry_path(), real)
+
+    def test_refuses_example_and_seeds_empty_skeleton(self):
+        """落到样例档时：改用推荐位置，并落一份空骨架（不复制样例里的假数据）。"""
+        with temp_dir() as tmp:
+            example = tmp / bridge_env.EXAMPLE_REGISTRY_NAME
+            example.write_text(json.dumps({"agents": [{"name": "fake"}]}), encoding="utf-8")
+            target = tmp / "home" / "link16" / "agent-registry.json"
+            with mock.patch.object(bridge_env, "registry_path", return_value=example),                  mock.patch.object(bridge_env, "profile_home_registries", return_value=[target]):
+                got = bridge_env.writable_registry_path()
+            self.assertEqual(got, target)
+            self.assertTrue(target.is_file())
+            doc = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(doc["agents"], [], "空骨架不能带样例里的假 agent")
+            for key in ("shared_repos", "machines", "groups", "tenants", "agents"):
+                self.assertIn(key, doc, "空骨架必须 schema 完整，否则调用方会 KeyError")
+            self.assertEqual(example.read_text(encoding="utf-8"),
+                             json.dumps({"agents": [{"name": "fake"}]}),
+                             "样例文件一个字节都不该被动")
+
+    def test_create_false_fails_loudly_instead_of_writing_example(self):
+        """不允许创建时，宁可显式报错停住，也不回退去写样例。"""
+        with temp_dir() as tmp:
+            example = tmp / bridge_env.EXAMPLE_REGISTRY_NAME
+            example.write_text("{}", encoding="utf-8")
+            target = tmp / "home" / "link16" / "agent-registry.json"
+            with mock.patch.object(bridge_env, "registry_path", return_value=example),                  mock.patch.object(bridge_env, "profile_home_registries", return_value=[target]):
+                with self.assertRaises(SystemExit):
+                    bridge_env.writable_registry_path(create=False)
+            self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

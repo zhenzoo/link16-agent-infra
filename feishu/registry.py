@@ -25,11 +25,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bridge_env import registry_path  # noqa: E402  （路径解析唯一入口·local→committed→example）
+from bridge_env import registry_path, writable_registry_path  # noqa: E402  （路径解析唯一入口）
 
 # 名册实际路径。**别再在别处自己拼这个路径** —— 2026-08-17(PLAN-926 §S1.1) 之前三个文件各拼各的，
 # 一旦 local 覆盖启用就会出现「写进 local、却从 committed 读」的错位。统一走 bridge_env.registry_path()。
-REGISTRY_PATH = registry_path()
+REGISTRY_PATH = registry_path()          # 只读用；要写请用 writable_registry_path()
 
 
 def load_registry() -> dict:
@@ -155,12 +155,15 @@ def sync_groups(bot: str) -> list[dict]:
             cur[cid] = {"chat_id": cid, "name": g.get("name"), "external": None,
                         "note": f"sync-groups({bot}) 发现·请核对 external 真假"}
     new_groups = list(cur.values())
-    text = REGISTRY_PATH.read_text(encoding="utf-8")
+    # 写回走【写入闸】：registry_path() 的兜底档是随仓发布的脱敏样例，
+    # 直接写它会把真群号灌进仓库自带的样例文件（见 bridge_env.writable_registry_path）。
+    target = writable_registry_path()
+    text = target.read_text(encoding="utf-8")
     block = '"groups": [\n' + ",\n".join("    " + json.dumps(g, ensure_ascii=False) for g in new_groups) + "\n  ]"
     text2, n = re.subn(r'"groups":\s*\[.*?\n  \]', block, text, count=1, flags=re.S)
     if n != 1:
         raise SystemExit("❌ agent-registry.json 里没找到 groups 段（先手加一个空 `\"groups\": []`）")
-    REGISTRY_PATH.write_text(text2, encoding="utf-8")
+    target.write_text(text2, encoding="utf-8")
     return new_groups
 
 

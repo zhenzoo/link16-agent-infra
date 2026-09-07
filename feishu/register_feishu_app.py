@@ -181,8 +181,11 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
     import json
     # 路径统一走 bridge_env.registry_path()（local→committed→example）——**别在这里自己拼**：
     # 写进 committed、却从 local 读（或反过来）= 注册完查不到。见 PLAN-926 §S1.1。
-    from bridge_env import registry_path
-    reg = registry_path()
+    from bridge_env import writable_registry_path
+    # 自动登记会【写】名册。陌生人首次注册时本机还没有名册，registry_path() 会落到
+    # 随仓发布的脱敏样例上 —— 那样会把他的真 open_id 写进仓库样例文件。写入闸负责
+    # 改用 profile home 的推荐位置，必要时落一份空骨架。
+    reg = writable_registry_path()
     if not reg.exists():
         print("\n⚠️ 没找到 agent 名册（agent-registry.local.json / .json / .example.json 都不在）"
               " → 跳过自动登记（请手动加一条）", flush=True)

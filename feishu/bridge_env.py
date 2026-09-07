@@ -175,6 +175,53 @@ def registry_path():
     return preferred[0] if preferred else here / "agent-registry.local.json"
 
 
+EXAMPLE_REGISTRY_NAME = "agent-registry.example.json"
+
+_EMPTY_REGISTRY = {
+    "_README": ("本机舰队通讯录（真数据）。schema 与字段含义见仓内 "
+                "feishu/agent-registry.example.json。"
+                "查询一律走 `python feishu/registry.py`，别手 grep。"),
+    "shared_repos": [],
+    "machines": {},
+    "groups": [],
+    "tenants": [],
+    "agents": [],
+}
+
+
+def writable_registry_path(create=True):
+    """要【写】名册时用这个，不要直接用 `registry_path()`。
+
+    为什么必须分开：`registry_path()` 的最后一档是**随仓发布的脱敏样例**，它的用途是
+    「让陌生人 clone 完不崩、并且看得到 schema」。但 `registry.py sync-groups`、
+    `register_feishu_app.py` 的自动登记、`reset_bot_identity.py` 换 open_id 都会**写回**
+    解析结果 —— 陌生人第一次注册 bot 时本机还没有名册，解析就会落到样例上，于是
+    ① 他的真 bot（含真 open_id）被写进仓库里那份样例，一 commit 就泄漏；
+    ② 他自己的名册其实没建起来，数据放错了地方。
+
+    所以写入路径遇到样例档时不接受它，改用**推荐的创建位置**（runtime profile home），
+    create=True 时顺手落一份**空骨架**（schema 正确、零条目，绝不复制样例里的假数据）。
+    """
+    resolved = registry_path()
+    if resolved.name != EXAMPLE_REGISTRY_NAME and resolved.is_file():
+        return resolved
+    preferred = profile_home_registries()
+    target = preferred[0] if preferred else (
+        Path(__file__).resolve().parent / "agent-registry.local.json")
+    if target.is_file():
+        return target
+    if not create:
+        raise SystemExit(
+            "❌ 还没有可写的舰队通讯录。先建一份：" + str(target)
+            + "（schema 见 feishu/" + EXAMPLE_REGISTRY_NAME
+            + "；或跑 python feishu/preflight.py 看提示）")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(_EMPTY_REGISTRY, ensure_ascii=False, indent=2) + chr(10),
+        encoding="utf-8")
+    return target
+
+
 def resolve_wmux_rpc(project_root):
     """wmux-rpc.js 路径（连 wmux daemon 的 node 客户端 · 桥/wmux_session 跑 `node <这个> rpc …`）。
 
