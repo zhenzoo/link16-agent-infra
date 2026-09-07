@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-09-04
+last_reviewed: 2026-09-07
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -83,20 +83,29 @@ python feishu/feishu_bridge.py start --bot <新bot>
 
 ### 页面已显示创建成功、CLI 却没拿到 secret：续接原应用
 
-不要再造第二个应用。复制页面上的 `cli_...` **App ID**，并复用原来的 `--name/--bot/--profile`：
+先查 `python feishu/registration_monitor.py status --bot <原key>`。仍在有效轮询时沿用现有任务；失败后恢复同一个应用，不要求主人粘贴 secret。优先从本机凭据或任务读取 App ID，确实没有时才让人复制页面上的 `cli_...` **App ID**，并保留原来的 name、bot、profile、cwd、tenant-kind 和 capability：
 
 ```bash
 python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --profile <原profile> \
-  --app-id cli_xxxxxxxxxxxxxxxx
+  --cwd <原目录> --tenant-kind personal --capability core \
+  --app-id cli_xxxxxxxxxxxxxxxx --notify-bot <发起bot> --background
 ```
 
 `--app-id` 不是八位验证码，也不是 device code；它只用于续接本次已经创建的应用。成功后脚本会补写 `.env` 并 upsert 同一条本机 roster，不应生成第二个 bot。
+
+注册器在生成链接前检查 SDK 参数兼容性；当前依赖 `lark_oapi>=1.7.3`。新建才传 `create_only=True`；续接必须传 `create_only=False`，因为官方 SDK 的“只允许新建”优先于 `app_id`。已有本机 App ID 自动进入续接，显式 App ID 与本机记录冲突时停止，避免覆盖另一应用的凭据。
+
+后台每次请求有连接/读取超时；临时网络错误只有限重试同一个授权任务的 poll，不自动重放创建步骤或替人重新授权。任务保留 SDK 版本、请求阶段、最近进展、重试次数、HTTP 状态与错误类别；不保存 secret、token、device code、授权链接或原始响应。失败也必须回调。重复启动同一 bot 的注册器复用活任务，Windows 探活只查询进程，禁止用 `os.kill(pid, 0)`。
+
+验收分清三件事：SDK 实际返回凭据且本机登记成功，才记 `registered`；权限与主人私聊可用只是连接能力；飞书紫色“智能体”标签没有已验证的公共 API 判据，需由用户界面确认，不能用会发消息或权限齐全代替。未选 `group-a2a` 不发送“已入群”回调。`ready` 表示本次所选能力验收通过，不代表开了所有飞书权限。
+
+2026-09-07 的 media-meta 案例：手工凭据接入后能收发，但用户看到机器人标签；同一 App ID 经官方续接完成后用户确认变为智能体。首次回传中断的旧记录不足，不能归因为 SDK 改名或某个确定的网络故障。手工导入凭据不应冒充官方登记完成。
 
 > 🔌 **代理坑（2026-07-28 实证 · 已在脚本里堵死）**：飞书是**国内端点**，注册轮询**必须直连**。本机开着 Clash（`http(s)_proxy=127.0.0.1:7897` + Windows 注册表系统代理）时，OAuth 轮询会在跑了 10 分钟、**123 次正常轮询之后**突然拿回一个 HTML 错误页 → SDK `resp.json()` 抛 `JSONDecodeError`、整个注册崩、device_code 作废、授权链接得重开。→ `register_feishu_app.py` 开头现在**在进程内**清 `http(s)_proxy/ALL_PROXY` **并**设 `NO_PROXY=feishu.cn,…`（Windows 上 requests 还会读注册表系统代理，光清环境变量不够，得靠 `no_proxy` 才绕得掉）。只影响该进程，不动系统代理。**症状认领**：注册跑一半报 `JSONDecodeError: Expecting value: line 1 column 1` = 这个。
 
 **运行名册** = `feishu/bridge-bots.local.json`（gitignored · 本机 SSOT）。committed 的 `bridge-bots.json` 与 `bridge-bots.local.example.json` 都是 `bots: []` 的安全模板；缺 local 时桥 fail closed，不会接管别人的 bot。每 bot 一行：`name` + `app_id_env` + `app_secret_env` + `at_name`（+ 可选 `cwd`）。**密钥不在这里**（在 `.env`，这里只存键名）。
 - ⚠️ **cwd 机器无关铁律**：仓库类 bot **不写 cwd**（自动落本仓库根，任何机/盘自适应）；只有非本仓库目录的 bot 才写 `cwd`，且用 `~/...`（各机自己 home，绝不写死盘符/用户名）。
-- 改名册后 **重启桥**（stop→start）生效。
+- 新增 bot 后只启动该 bot；修改在跑 bot 的启动配置须遵守维护窗口，不全局重启其他会话。
 
 ### § 1.1 · 🔒 Agent Profile 铁律（2026-07-31）
 
@@ -142,7 +151,7 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 | `docs-import` | 把本地源文件上传后走 import task，并显式授权协作者 | Drive/导入/permission 类权限 | 会触发管理员审核的重能力；不用就不开 |
 | `group-listen` | 不被 @ 也主动读取全群 | `im:message.group_msg` | 可选高范围能力；不用就不开 |
 
-注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant / 创建应用（`create_only=True`，不携带权限 `addons`）；登记成功后，Monitor 按选定 capability 生成链接 2，明确列出这次要开的 tenant scopes，让人审阅后再按飞书页面要求创建版本/发布。个人租户默认 `core + group-a2a`；公司租户由 `--tenant-kind enterprise` 或 `--group` 对 registry 的租户映射自动加 `docs-consume`。需要创建文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
+注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant（新建 `create_only=True`，续接 `False`；均不携带权限 `addons`）；登记成功后，Monitor 按选定 capability 生成链接 2，明确列出这次要开的 tenant scopes，让人审阅后再按飞书页面要求创建版本/发布。个人租户默认 `core + group-a2a`；公司租户由 `--tenant-kind enterprise` 或 `--group` 对 registry 的租户映射自动加 `docs-consume`。需要创建文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
 
 **2026-09-04 `tb26-baseball-4` 端到端验真**：scope API 返回 43 项，三项新增 scope 均为已生效；随后以 bot 身份从真实产品文档读取内嵌 Sheet `A1:F8`、一张 2,030,702 字节 PNG，并导出一块 350 节点白板。图片预览链已满足 AI 解析；“原件直下”分支仍单独返回 HTTP 403，不能把“预览可读”写成“所有下载分支均可用”。
 

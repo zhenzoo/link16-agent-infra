@@ -25,6 +25,7 @@ import re
 import socket
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # 🔌 飞书 = 国内端点 → 本进程强制【直连·不走代理】。
@@ -51,6 +52,7 @@ for _s in (sys.stdout, sys.stderr):
 import lark_oapi as lark  # noqa: E402
 import bridge_scope_audit  # noqa: E402
 import registration_monitor  # noqa: E402
+import registration_transport  # noqa: E402
 
 ENV_PATH = resolve_env_path()   # 跨机解析·不写死盘符
 
@@ -105,13 +107,13 @@ def _credential_failure_summary(result):
     """只输出允许的状态字段和字段名，不回显 SDK 返回体。"""
     if not isinstance(result, dict):
         return f"response_type={type(result).__name__}"
-    fields = ",".join(sorted(str(key) for key in result)) or "(empty)"
+    fields = ",".join(sorted(set(result) & {"client_id", "client_secret", "status", "code"})) or "(empty)"
     status = result.get("status")
     code = result.get("code")
     safe = [f"fields=[{fields}]"]
-    if isinstance(status, (str, int, float, bool)):
+    if status in ("failed", "pending", "success"):
         safe.append(f"status={status}")
-    if isinstance(code, (str, int, float, bool)):
+    if isinstance(code, int):
         safe.append(f"code={code}")
     return " ".join(safe)
 
@@ -227,18 +229,53 @@ def _run_device_grant(name, app_id=None, job_id=None):
         on_qr(info)
         if job_id:
             registration_monitor.record_stage(job_id, "oauth_waiting", app_id=app_id)
-            registration_monitor.notify_oauth_link(
-                job_id, info.get("url"), info.get("expire_in")
-            )
+            for attempt in range(3):
+                receipt = registration_monitor.notify_oauth_link(
+                    job_id, info.get("url"), info.get("expire_in")
+                )
+                if receipt.get("ok"):
+                    break
+                if attempt == 2:
+                    raise registration_transport.RegistrationTransportError("oauth_link_delivery_failed")
+                time.sleep(2 ** (attempt + 1))
 
-    return lark.register_app(
-        on_qr_code=qr,
-        on_status_change=on_status,
-        app_preset={"name": name},
-        addons=None,
-        create_only=True,
-        app_id=app_id,
-    )
+    def report(**values):
+        if job_id:
+            state = registration_monitor.record_progress(job_id, **values)
+            if state.get("status") in registration_monitor.TERMINAL_STATUSES:
+                raise registration_transport.RegistrationTransportError("registration_job_ended")
+
+    def status(info):
+        value = info.get("status")
+        if value in {"polling", "slow_down", "domain_switched"}:
+            report(status=value)
+        on_status({"status": value if value in {"polling", "slow_down", "domain_switched"} else "unknown"})
+
+    with registration_transport.bounded_http(report):
+        return lark.register_app(
+            on_qr_code=qr,
+            on_status_change=status,
+            app_preset={"name": name},
+            addons=None,
+            # create_only has precedence over app_id in the official launcher.
+            create_only=app_id is None,
+            app_id=app_id,
+        )
+
+
+def _recovery_app_id(explicit, id_key, bot):
+    local = bridge_scope_audit._env_val(id_key)
+    previous = registration_monitor.get_job(bot=bot) or {}
+    recorded = previous.get("app_id")
+    if local and recorded and local != recorded:
+        raise ValueError("本机凭据与注册任务的 App ID 不一致；先核对原应用")
+    known = local or recorded
+    if explicit and known and explicit != known:
+        raise ValueError("--app-id 与该 bot 已有 App ID 不一致；不能覆盖原应用")
+    chosen = explicit or known
+    if chosen and not re.fullmatch(r"cli_[A-Za-z0-9_]+", chosen):
+        raise ValueError("App ID 格式无效，须使用 cli_...，不能使用验证码或 secret")
+    return chosen
 
 
 def _validate_group_choice(capabilities, group):
@@ -367,6 +404,11 @@ def main():
     except ValueError as exc:
         ap.error(str(exc))
     permission_scopes = bridge_scope_audit.requested_scopes(capabilities, for_fix=True)
+    try:
+        sdk_version = registration_transport.preflight()
+        args.app_id = _recovery_app_id(args.app_id, id_key, args.bot or args.name)
+    except (ValueError, registration_transport.RegistrationTransportError) as exc:
+        ap.error(str(exc))
     if args.dry_run:
         print("=== register dry-run（零写入）===")
         print(f"bot={args.bot or args.name}")
@@ -375,7 +417,8 @@ def main():
         print(f"tenant_kind={tenant_kind or 'unknown'}")
         print(f"capabilities={','.join(capabilities)}")
         print("registration_links=2")
-        print("first_link=create-only;addons=(none)")
+        print(f"sdk_version={sdk_version}")
+        print(f"first_link={'existing-app' if args.app_id else 'create-only'};addons=(none)")
         print(f"second_link_scopes={','.join(permission_scopes) or '(none)'}")
         return
     monitor = registration_monitor.get_job(args.job_id) if args.job_id else None
@@ -390,6 +433,8 @@ def main():
             id_env=id_key,
             secret_env=sec_key,
             launch=True,
+            context={"name": args.name, "profile": selected_profile.name,
+                     "cwd": selected_cwd, "tenant_kind": tenant_kind},
         )
         print(
             f"\n🛰️ 独立注册监督已启动：job={monitor['job_id']} · "
@@ -402,31 +447,35 @@ def main():
             ap.error("--background 需要注册监督器；不要同时给 --no-monitor")
         child_args = [arg for arg in sys.argv[1:] if arg != "--background"]
         child_args += ["--job-id", monitor["job_id"]]
-        pid = registration_monitor.launch_registration_worker(
-            [sys.executable, str(Path(__file__).resolve()), *child_args]
-        )
-        registration_monitor._mutate(
-            monitor["job_id"], lambda item: item.update({"registrar_pid": pid})
+        pid, started = registration_monitor.start_registration_worker(
+            monitor["job_id"], [sys.executable, str(Path(__file__).resolve()), *child_args]
         )
         print(
-            f"✅ Device Grant 已独立后台运行：job={monitor['job_id']} · pid={pid}\n"
+            f"✅ Device Grant {'已独立后台运行' if started else '复用已有注册任务'}：job={monitor['job_id']} · pid={pid}\n"
             "   授权链接会由 registration-monitor 自动注回发起 session；本命令现在即可退出。",
             flush=True,
         )
         return
 
+    if monitor and not registration_monitor.claim_registration_worker(monitor["job_id"]):
+        print(f"复用已有注册任务：job={monitor['job_id']}", flush=True)
+        return
+
     try:
+        if monitor:
+            registration_monitor.record_progress(monitor["job_id"], sdk_version=sdk_version)
         result = _run_device_grant(
             args.name,
             args.app_id,
             job_id=monitor.get("job_id") if monitor else None,
         )
     except Exception as exc:
+        error = registration_transport.safe_error(exc)
         if monitor:
-            registration_monitor.record_stage(monitor["job_id"], "failed", error=exc)
-        raise
-    app_id = result.get("client_id")
-    secret = result.get("client_secret")
+            registration_monitor.record_stage(monitor["job_id"], "failed", error=error)
+        raise SystemExit(f"注册未完成：{error}；读取 registration job 后恢复原应用，无需提供 secret") from None
+    app_id = result.get("client_id") if isinstance(result, dict) else None
+    secret = result.get("client_secret") if isinstance(result, dict) else None
     if not app_id or not secret:
         if monitor:
             registration_monitor.record_stage(
@@ -434,6 +483,27 @@ def main():
             )
         print(f"❌ 没拿到凭据：{_credential_failure_summary(result)}", flush=True)
         sys.exit(1)
+    if args.app_id and args.app_id != app_id:
+        if monitor:
+            registration_monitor.record_stage(monitor["job_id"], "failed", error="returned_app_id_mismatch")
+        raise SystemExit("SDK 返回了不同 App ID，已停止写入；请恢复原应用")
+    if monitor:
+        registration_monitor.record_sdk_result(monitor["job_id"], app_id)
+    try:
+        _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
+                              app_id, secret, monitor)
+    except Exception as exc:
+        error = registration_transport.safe_error(exc)
+        if monitor:
+            registration_monitor.record_stage(monitor["job_id"], "failed", error=f"local_registration:{error}")
+        raise SystemExit(f"官方已回传，本机登记未完成：{error}；请读取任务状态恢复") from None
+    return
+
+
+def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
+                          app_id, secret, monitor):
+    capabilities = _registration_capabilities(args.capability, args.tenant_kind or _tenant_kind_from_group(args.group))
+    permission_scopes = bridge_scope_audit.requested_scopes(capabilities, for_fix=True)
     write_env(app_id, secret, id_key, sec_key)
     action = "续接成功" if args.app_id else "创建成功"
     print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
@@ -495,14 +565,12 @@ def main():
           flush=True)
 
     # 🚨 认主：全流程最后一道、也是最容易漏的一步（2026-08-02 taoci-7 刷群事故后加·见 ARCH-110 §2.5.3）
-    print("\n🚨 最后一步·【必须让主人私聊它一次】——漏了会刷群，且不会报错：\n"
+    print("\n📋 最后一步：请主人私聊新 bot 一句话，完成认主。\n"
           "   请主人在飞书【私聊】这个新 bot 发任意一句话（『在吗』就行）。\n"
           "   为什么：bot 的主人 = 【第一个私聊它的人】自动认下的。**群里 @ 它不算**——群消息按设计\n"
           "   绝不认主（否则同群的 peer bot 会把主人身份夺走）。而 open_id 是 per-app 的，注册时\n"
           "   根本无从预先写死，只能等主人真发一条 DM 才知道。\n"
-          "   不做会怎样：它的普通回复(route=p2a 要投主人 DM)【无处可投】→ 兜底会退到「群里 @ 过它的\n"
-          "   那个 peer bot」→ bot 给 bot 发私聊 → 飞书 230013 拒收 → 全部降级【刷进群】。\n"
-          "   实证：taoci-7/8/9/10 漏了这步 → 合计 18 万+ 次 230013、往群里刷了 767 条。\n"
+          "   未认主时回复没有投递目标，会明确记失败；不会退到其他群或其他机器人。\n"
           "   ✅ 验收：私聊后桥日志出现『自动认主人 owner=ou_…』，且 feishu/_state/bridge-owner-<bot>.json 生成。\n"
           "   （Claude：请把这句话【明确转达给主人】，别默认他知道。）",
           flush=True)

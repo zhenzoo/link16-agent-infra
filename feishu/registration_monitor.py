@@ -34,6 +34,7 @@ EVENT_ORDER = (
     "owner_ready",
     "group_ready",
     "ready",
+    "failed",
     "expired",
 )
 SCHEMA_VERSION = 1
@@ -78,6 +79,23 @@ def get_job(job_id=None, bot=None):
 def _pid_alive(pid):
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if os.name == "nt":
+        # os.kill(pid, 0) calls TerminateProcess on Windows; never use it here.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE only
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: do not duplicate
+        try:
+            return kernel.WaitForSingleObject(handle, 0) == 258  # WAIT_TIMEOUT
+        finally:
+            kernel.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -98,7 +116,12 @@ def _mutate(job_id, fn):
         return state
 
 
-def arm_job(
+def arm_job(bot, *args, **kwargs):
+    with bridge_injection.injection_lock(STATE_DIR, "registration-arm", bot):
+        return _arm_job(bot, *args, **kwargs)
+
+
+def _arm_job(
     bot,
     capabilities=None,
     notify_bot=None,
@@ -108,6 +131,7 @@ def arm_job(
     secret_env=None,
     ttl_seconds=DEFAULT_TTL_SECONDS,
     launch=True,
+    context=None,
 ):
     capabilities = bridge_scope_audit.normalize_capabilities(capabilities)
     notify_bot = (notify_bot or os.environ.get("FEISHU_BRIDGE_SESSION") or "").strip() or None
@@ -120,7 +144,11 @@ def arm_job(
             and existing.get("group") == group
             and existing.get("id_env") == id_env
             and existing.get("secret_env") == secret_env
+            and (not app_id or not existing.get("app_id") or existing.get("app_id") == app_id)
+            and (not context or not existing.get("registration_context") or existing.get("registration_context") == context)
         )
+        if existing.get("status") in ACTIVE_STATUSES and not same_contract:
+            raise ValueError("该 bot 有未完成且参数不同的注册任务；先读取并取消原任务，再恢复同一应用")
         if existing.get("status") in ACTIVE_STATUSES and same_contract:
             if launch and not _pid_alive(existing.get("monitor_pid")):
                 pid = launch_monitor(existing["job_id"])
@@ -139,6 +167,7 @@ def arm_job(
         "capabilities": list(capabilities),
         "group": group,
         "app_id": app_id,
+        "registration_context": context,
         "id_env": id_env,
         "secret_env": secret_env,
         "status": "armed",
@@ -202,8 +231,59 @@ def launch_registration_worker(command):
     return subprocess.Popen(command, **kwargs).pid
 
 
+def start_registration_worker(job_id, command):
+    """Atomically reuse a live registrar, including concurrent CLI retries."""
+    with bridge_injection.injection_lock(STATE_DIR, "registration-launch", job_id):
+        state = get_job(job_id)
+        if state.get("milestones", {}).get("registered") or state.get("status") in TERMINAL_STATUSES:
+            return state.get("registrar_pid"), False
+        if _pid_alive(state.get("registrar_pid")):
+            return state["registrar_pid"], False
+        pid = launch_registration_worker(command)
+        _mutate(job_id, lambda item: item.update(registrar_pid=pid))
+        return pid, True
+
+
+def claim_registration_worker(job_id):
+    with bridge_injection.injection_lock(STATE_DIR, "registration-launch", job_id):
+        state = get_job(job_id)
+        if state.get("milestones", {}).get("registered") or state.get("status") in TERMINAL_STATUSES:
+            return False
+        pid = state.get("registrar_pid")
+        if pid != os.getpid() and _pid_alive(pid):
+            return False
+        _mutate(job_id, lambda item: item.update(registrar_pid=os.getpid()))
+        return True
+
+
+def record_progress(job_id, **values):
+    """Only structured diagnostics from the registrar; never response text."""
+    allowed = {"phase", "outcome", "attempt", "http_status", "error_kind", "sdk_version", "status"}
+    def apply(item):
+        diagnostics = item.setdefault("diagnostics", {})
+        diagnostics.update({key: value for key, value in values.items() if key in allowed})
+        diagnostics["last_progress_at"] = _now()
+        if values.get("outcome") == "retry":
+            diagnostics["retry_count"] = diagnostics.get("retry_count", 0) + 1
+        if values.get("outcome") == "request":
+            diagnostics["request_count"] = diagnostics.get("request_count", 0) + 1
+    return _mutate(job_id, apply)
+
+
+def record_sdk_result(job_id, app_id):
+    def apply(item):
+        if item.get("status") in TERMINAL_STATUSES:
+            raise ValueError("注册任务已结束，不能继续写入凭据")
+        item.update(app_id=app_id, registration_source="official_sdk", sdk_returned_at=_now())
+    return _mutate(job_id, apply)
+
+
 def record_stage(job_id, stage, app_id=None, error=None):
     def apply(state):
+        if state.get("status") in TERMINAL_STATUSES:
+            return
+        if stage == "registered" and not state.get("sdk_returned_at"):
+            raise ValueError("不能用凭据可用代替 SDK 注册回传")
         state["stage"] = stage
         if stage in ACTIVE_STATUSES:
             state["status"] = stage
@@ -214,10 +294,17 @@ def record_stage(job_id, stage, app_id=None, error=None):
             state["events"].setdefault(
                 "registered", {"event_id": f"{job_id}:registered"}
             )
+            # Queue both events atomically: the watcher may reach ready before
+            # the registrar calls request_permission_review().
+            state["events"].setdefault(
+                "permissions_review", {"event_id": f"{job_id}:permissions_review"}
+            )
         if stage in {"failed", "cancelled"}:
             state["status"] = stage
+        if stage == "failed":
+            state["events"].setdefault("failed", {"event_id": f"{job_id}:failed"})
         if error:
-            state["last_error"] = str(error)[:500]
+            state["last_error"] = type(error).__name__ if isinstance(error, BaseException) else str(error)[:500]
 
     return _mutate(job_id, apply)
 
@@ -235,10 +322,13 @@ def permission_review_link(state):
 def request_permission_review(job_id):
     """Create and immediately try to deliver the stable second-link event."""
     state = get_job(job_id)
+    if not (state or {}).get("milestones", {}).get("registered"):
+        raise ValueError("必须完成 SDK 回传和本机登记后才能审阅权限")
     permission_review_link(state or {})  # validate before mutating durable state
 
     def apply(item):
-        item["status"] = item["stage"] = "permissions_review"
+        if item.get("status") not in TERMINAL_STATUSES:
+            item["status"] = item["stage"] = "permissions_review"
         item["events"].setdefault(
             "registered", {"event_id": f"{job_id}:registered"}
         )
@@ -361,7 +451,8 @@ def _event_text(state, milestone):
         "permissions_ready": "所选 capability 权限已到位",
         "owner_ready": "主人私聊认领已检测到",
         "group_ready": "目标群成员关系已检测到",
-        "ready": "注册验收全部完成",
+        "ready": "官方登记与所选能力验收完成；飞书智能体标签以客户端确认为准",
+        "failed": "注册未完成，请查看任务诊断并恢复原应用；无需主人提供密钥",
         "expired": "注册监督已过期，仍有人工步骤未完成",
     }
     return (
@@ -421,6 +512,11 @@ def check_once(job_id, emit=True):
     if state.get("status") in TERMINAL_STATUSES:
         return _emit_pending(job_id) if emit else state
 
+    if (state.get("registrar_pid") and not state.get("milestones", {}).get("registered")
+            and not _pid_alive(state["registrar_pid"])):
+        state = record_stage(job_id, "failed", error="registrar_exited_before_completion")
+        return _emit_pending(job_id) if emit else state
+
     if _now() >= state.get("expires_at", 0):
         def expire(item):
             item["status"] = item["stage"] = "expired"
@@ -434,13 +530,15 @@ def check_once(job_id, emit=True):
     group = _group_check(state["bot"], state.get("group")) if need_group else {"status": "ready"}
 
     def apply(item):
+        if item.get("status") in TERMINAL_STATUSES:
+            return
         item["checks"] = {"permissions": permission, "owner": owner, "group": group}
         milestones = item["milestones"]
         milestones["permissions_ready"] = permission.get("status") == "ready"
         milestones["owner_ready"] = owner.get("status") == "ready"
         milestones["group_ready"] = group.get("status") == "ready"
         for name in ("registered", "permissions_ready", "owner_ready", "group_ready"):
-            if milestones.get(name):
+            if milestones.get("registered") and milestones.get(name) and (name != "group_ready" or need_group):
                 item["events"].setdefault(name, {"event_id": f"{job_id}:{name}"})
         milestones["ready"] = all(
             milestones.get(name)
