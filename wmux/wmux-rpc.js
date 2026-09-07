@@ -1,5 +1,14 @@
 #!/usr/bin/env node
 // wmux-rpc.js — direct JSON-RPC client for the wmux daemon.
+//
+// Provenance: original code, written for this repository (Apache-2.0, see ../LICENSE).
+// It is NOT vendored or derived from the wmux source tree — it only speaks wmux's
+// daemon protocol over the named pipe. wmux itself (https://github.com/openwong2kim/wmux)
+// is a separate third-party project that Link16 depends on but does not distribute
+// or vendor; its own terms and availability are its own.
+//
+// 说明：本文件是本仓自建的客户端，不是从 wmux 源码里搬来的，也没有内嵌任何第三方代码；
+// 它只是按 wmux daemon 的协议跟它对话。wmux 本体是独立的第三方项目，本仓只依赖、不分发。
 // Bypasses the MCP "Workspace identity unknown" guard by speaking the daemon
 // protocol over the named pipe with an explicit workspaceId + the on-disk token.
 //
