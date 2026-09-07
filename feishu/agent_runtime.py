@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import time
 import uuid
 from contextlib import contextmanager
@@ -41,6 +42,15 @@ CLAUDE_BLOCKING_PROMPT_FOOTER = "Enter to confirm"
 _CLAUDE_TRUST_MENU_RE = re.compile(r"(?m)^\s*❯?\s*1\.\s")
 CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
 CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
+
+# CLI versions whose startup/readiness contract was verified on a real terminal
+# here, so a silent upstream upgrade cannot quietly invalidate a screen marker
+# again. Drift is never an error — it is the signal to re-verify. Kimi Code
+# auto-installed 0.41.0 on 2026-09-06 23:19 and renamed its status-bar modes;
+# nothing noticed until every kp session had burned a 150s ready wait. Add a
+# runtime here only after actually watching that version reach a live composer.
+VERIFIED_CLI_VERSIONS = {"kimi": "0.41.0"}
+_CLI_VERSION_CACHE = {}
 
 # Codex 投递路 = typed-event app-server【默认】（主人 2026-07-23 拍板：建 codex bot 一律 canary，
 # 裸 CLI + hook 那条「命令原文刷屏」的老路弃用）。名册显式写下面任一别名才回退老路（应急用）。
@@ -459,6 +469,67 @@ def resolve_shell() -> str:
     raise ValueError("找不到可用 shell：$SHELL 未设置且 PATH 里没有 bash/sh；拒绝猜解释器")
 
 
+def cli_version(runtime: str):
+    """Installed CLI version, or None when it cannot be established.
+
+    Cached per executable *and* mtime, so a long-lived watchdog notices the
+    binary being replaced under it without paying for a subprocess every cycle.
+    Never raises: a missing or silent CLI is an unknown version, not a crash.
+    """
+    exe = shutil.which(str(runtime))
+    if not exe:
+        return None
+    try:
+        stamp = os.stat(exe).st_mtime_ns
+    except OSError:
+        stamp = 0
+    key = (exe, stamp)
+    if key in _CLI_VERSION_CACHE:
+        return _CLI_VERSION_CACHE[key]
+    try:
+        result = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    found = re.search(r"\d+\.\d+\.\d+", (result.stdout or "") + (result.stderr or ""))
+    version = found.group(0) if found else None
+    _CLI_VERSION_CACHE[key] = version
+    return version
+
+
+def cli_version_drift(name: str) -> dict:
+    """Compare a profile's installed CLI against the version we verified here.
+
+    ``drifted`` is only ever True on positive evidence — a known verified
+    version and a different installed one. An unregistered runtime or an
+    unreadable version reports False, so this can never invent an alarm.
+    """
+    runtime = profile_spec(name).runtime
+    verified = VERIFIED_CLI_VERSIONS.get(runtime)
+    installed = cli_version(runtime)
+    return {
+        "runtime": runtime,
+        "installed": installed,
+        "verified": verified,
+        "drifted": bool(verified and installed and installed != verified),
+    }
+
+
+def version_drift_note(name: str):
+    """One human line about drift, or None when there is nothing to report."""
+    drift = cli_version_drift(name)
+    if not drift["drifted"]:
+        return None
+    return (
+        f"{drift['runtime']} CLI 已升级到 {drift['installed']}，"
+        f"本机验证过的是 {drift['verified']} —— 启动/就绪判据可能对不上新版界面，"
+        f"先跑 `python feishu/agent_profile_cli.py selftest --profile {name}` 复验。"
+    )
+
+
 def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
     """Check profile assets and, when requested, this process's launch environment.
 
@@ -484,11 +555,17 @@ def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
             resolve_shell()
         except ValueError as exc:
             errors.append(str(exc))
-    return {
+    result = {
         **profile_public_dict(profile),
         "ok": not errors,
         "errors": errors,
     }
+    if check_execution_env:
+        # Report drift, never fail on it: an unverified version still starts
+        # most of the time, and turning "newer than we checked" into a hard
+        # error would take the bridge down on every upstream release.
+        result["version"] = cli_version_drift(profile.name)
+    return result
 
 
 def _require_profile_available(
@@ -983,10 +1060,16 @@ def is_ready(bot, screen: str) -> bool:
         )
     if spec.name == "kimi":
         # Native composer and status bar, not a warmup string in history.
+        # Match structure, never mode vocabulary: 0.41.0 renamed the status-bar
+        # permission modes (yolo→"Ask When Needed", auto→"Never Ask",
+        # manual→"Always Ask") and the old word match then made a live composer
+        # look unready — every kp session died on the 150s ready wait until
+        # 2026-09-07. The two marks that survived that rename are kept; a busy
+        # turn paints a spinner instead of the box, so this still refuses to
+        # type into a turn that is already running.
         return (
             "Trust this folder?" not in screen
             and "context:" in screen
-            and re.search(r"(?m)^\s*(?:yolo|auto|manual)\s+", screen) is not None
             and re.search(r"(?m)^\s*│\s*>\s*│\s*$", screen) is not None
         )
     if spec.name == "custom":

@@ -291,6 +291,17 @@ def run(args):
                             "--bot", args.bot, "--cwd", str(cwd), "--state-dir", str(state_dir)]
         with (state_dir / f"bridge-kimi-observer-{args.bot}.log").open("a", encoding="utf-8") as log:
             native = subprocess.Popen([agent_runtime.resolve_shell(), "-lc", command], cwd=cwd)
+            # Structured startup handshake, mirroring the Codex app-server worker:
+            # the bridge should learn "the right TUI for this session is up" from
+            # the process that started it, not by recognising vocabulary the CLI
+            # is free to rename. Written after Popen and stamped, so a stale file
+            # from an earlier spawn cannot pass the caller's freshness check.
+            bridge_injection.atomic_write_json(
+                state_dir / f"bridge-kimi-ready-{args.bot}.json",
+                {"session": binding["session"], "profile": profile.name, "cwd": str(cwd),
+                 "worker_pid": os.getpid(), "native_pid": native.pid, "ts": time.time(),
+                 "wire_version": WIRE_VERSION, "cli_version": agent_runtime.cli_version("kimi")},
+            )
             supervise(native, observer_command, log)
         with bridge_injection.ProcessFileLock(
             bridge_injection.lock_path(state_dir, "observer", args.bot), timeout=2,

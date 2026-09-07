@@ -906,6 +906,28 @@ def _app_server_ready_signal(bot, since):
         return False
 
 
+def _kimi_ready_signal(bot, since):
+    """Did this spawn's own Kimi worker report that it started the native TUI?
+
+    Same contract as the Codex app-server handshake: a fresh, session-matched
+    record written by the worker process itself. It survives any TUI wording
+    change, which the 0.41.0 status-bar rename proved a screen match cannot
+    (2026-09-07: a live composer read as unready for 150s, twice).
+    """
+    if agent_runtime.runtime_spec(bot).name != "kimi":
+        return False
+    path = STATE_DIR / f"bridge-kimi-ready-{bot['name']}.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            int(record.get("native_pid") or 0) > 0
+            and float(record.get("ts") or 0) >= since
+            and str(record.get("profile") or "") == agent_runtime.profile_name(bot, required=True)
+        )
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return False
+
+
 def _ready_timeout(bot, explicit=None):
     """Ready wait precedence: call override > roster override > runtime default."""
     if explicit is not None:
@@ -945,6 +967,14 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
             if (
                 _app_server_ready_signal(bot, wait_started)
                 and re.search(r"(?m)^›(?:\s+.*)?$", scr) is not None
+            ):
+                return True
+            # Kimi: same two-part rule. The handshake proves this spawn's worker
+            # attached the right session; the composer box proves the terminal
+            # can take keystrokes. Neither half depends on renameable words.
+            if (
+                _kimi_ready_signal(bot, wait_started)
+                and re.search(r"(?m)^\s*│\s*>\s*│\s*$", scr) is not None
             ):
                 return True
         except RuntimeError:
@@ -1171,9 +1201,18 @@ def _ensure_session_unlocked(bot):
             wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
         except Exception:  # noqa: BLE001
             pass
+        # Name the most likely cause instead of making the owner guess: a CLI
+        # that upgraded past the version whose startup we verified is exactly
+        # how this failure was produced on 2026-09-07.
+        try:
+            drift = agent_runtime.version_drift_note(
+                agent_runtime.profile_name(bot, required=True))
+        except Exception:  # noqa: BLE001 — 归因失败绝不吞掉原始报错
+            drift = None
         raise RuntimeError(
             f"{agent_runtime.display_name(bot)} 在 {_ready_timeout(bot):g} 秒启动窗口内未就绪。"
             "失败现场已保存，请发 /screen 查看；桥没有向仍在启动的 TUI 重复塞命令。"
+            + (f" 可能原因：{drift}" if drift else "")
         )
     newj = _detect_new_jsonl(bot, before)
     jsonl = str(newj) if newj else None

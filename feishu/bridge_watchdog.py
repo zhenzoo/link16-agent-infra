@@ -1097,7 +1097,8 @@ def cmd_run(auto=True):
       R4 桥进程 活→死              → 告警（每轮一次·不针对面板）
     要支持一种新的中断类型，就在这张表里加一行。"""
     log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 限流换号 / R3 picker跳过 / "
-        f"R5 Codex回合被掐断 / R4 桥看护 · 覆盖【全部 workspace 的全部面板】· 一视同仁")
+        f"R5 Codex回合被掐断 / R6 水位损坏 / R7 CLI版本漂移 / R4 桥看护 · "
+        f"覆盖【全部 workspace 的全部面板】· 一视同仁")
     states = {}                      # {pty: {"hash","err_stuck","lim_stuck","last_nudge"}}
     bridge_seen_alive = False
     bridge_alerted = False
@@ -1219,7 +1220,7 @@ def cmd_run(auto=True):
                            f"· 能救的两招：给这个 bot 发 /handoff 换全新 context；或者过一阵再试\n"
                            f"· 面板 {ws} / {pty}")
 
-            checks = {"r6": "ok", "r4": "ok"}
+            checks = {"r6": "ok", "r7": "ok", "r4": "ok"}
             # ---- R6 · 水位书签损坏（每轮扫一遍名册·新增才喊）----
             try:
                 _al = _alerts_load()
@@ -1246,6 +1247,45 @@ def cmd_run(auto=True):
             except Exception as _e:                       # noqa: BLE001 —— 巡检绝不因它崩
                 checks["r6"] = f"error: {_e}"
                 log(f"R6 水位损坏扫描失败（不致命）：{_e}")
+
+            # ---- R7 · runtime CLI 静默升级（升级当天就说·别等 150 秒失败才发现）----
+            # 2026-09-07 实证：Kimi Code 自己升到 0.41.0、改了状态栏用词，桥的就绪判据
+            # 当场失效，主人只看到「未就绪」，没人知道是升级引起的。这条规则把「版本变了」
+            # 提前变成一句话，而不是每轮消息烧满 150 秒。每个 runtime 只发一次、按版本号去重。
+            try:
+                _al = _alerts_load()
+                _runtimes_done = set()
+                for _spec in _iter_bots():
+                    _bn = _spec.get("name")
+                    if not _bn:
+                        continue
+                    try:
+                        _pname = agent_runtime.profile_name(_spec, required=True)
+                        _drift = agent_runtime.cli_version_drift(_pname)
+                    except Exception:                      # noqa: BLE001 —— 单只 bot 解析失败不拖垮整轮
+                        continue
+                    if not _drift["drifted"] or _drift["runtime"] in _runtimes_done:
+                        continue
+                    _runtimes_done.add(_drift["runtime"])
+                    _key = f"{_drift['runtime']}:cli_version"
+                    if _al.get(_key, {}).get("notified") == _drift["installed"]:
+                        continue
+                    delivered = notify(_bn, "cli_version_drift",
+                           f"⚠️ {_drift['runtime']} CLI 已从验证过的 {_drift['verified']} "
+                           f"升级到 {_drift['installed']}。启动/就绪判据是按旧版实测钉的，"
+                           f"新版界面若改过用词或结构，会话可能起不来（会表现为「未就绪」）。"
+                           f"建议先跑 `python feishu/agent_profile_cli.py selftest --profile {_pname}` "
+                           f"复验，再把新版本登记进 VERIFIED_CLI_VERSIONS。")
+                    if delivered:
+                        _al = _alerts_load()
+                        _al.setdefault(_key, {})["notified"] = _drift["installed"]
+                        _alerts_save(_al)
+                        acted += 1
+                    else:
+                        checks["r7"] = "pending_notification"
+            except Exception as _e:                       # noqa: BLE001 —— 巡检绝不因它崩
+                checks["r7"] = f"error: {_e}"
+                log(f"R7 CLI 版本漂移扫描失败（不致命）：{_e}")
 
             # ---- R4 · 桥进程活→死（每轮一次·不针对面板）----
             ba = bridge_alive()

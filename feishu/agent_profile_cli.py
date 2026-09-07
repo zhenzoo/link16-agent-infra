@@ -198,10 +198,17 @@ def main(argv=None) -> int:
 
         if args.command == "doctor":
             result = agent_runtime.profile_doctor(profile)
-            _print_json(result) if args.json else print(
-                f"{'OK' if result['ok'] else 'FAIL'} {profile}: "
-                + ("；".join(result["errors"]) if result["errors"] else "可启动")
-            )
+            if args.json:
+                _print_json(result)
+            else:
+                print(
+                    f"{'OK' if result['ok'] else 'FAIL'} {profile}: "
+                    + ("；".join(result["errors"]) if result["errors"] else "可启动")
+                )
+                # Drift is a warning line, not an exit code: the profile still
+                # launches, but its screen contract is no longer verified.
+                if result.get("version", {}).get("drifted"):
+                    print("WARN " + (agent_runtime.version_drift_note(profile) or ""))
             return 0 if result["ok"] else 2
 
         if args.command in {"ready", "needs-trust"}:
