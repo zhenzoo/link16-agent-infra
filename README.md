@@ -148,6 +148,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 |---|---|
 | 在一台新电脑上从零装好 | [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) |
 | 核对公开版默认配置与发布前缺口 | [PLAN-1080：隔离账号、沟通规则与新手验收](docs/PLAN-1080-public-installation-baseline.md)（实施方案，尚未全部实现） |
+| 查看飞书文档工具修复与提交交接进度 | [PLAN-1090：凭据单一来源与读写核验](docs/PLAN-1090-feishu-docio-reliability.md) |
 | 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（Codex 版：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
 | 给已有的 bot 改名 | [`docs/SOP-125-bot-rename.md`](docs/SOP-125-bot-rename.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
@@ -156,6 +157,8 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 让智能体互相喊话（a2a） | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) |
 | 给智能体排定时任务 | [`docs/ARCH-150-agent-cron.md`](docs/ARCH-150-agent-cron.md) |
 | 一个账号多个 profile（多号并行） | [`docs/ARCH-120-agent-profile-runtime.md`](docs/ARCH-120-agent-profile-runtime.md) |
+| **丢一个飞书文档/表格链接给智能体读写** | [`docs/SOP-140-feishu-document-io.md`](docs/SOP-140-feishu-document-io.md)（原理：[`ARCH-130`](docs/ARCH-130-feishu-document-io.md)） |
+| **智能体读不到某份文档，想知道差在哪** | [`docs/SPEC-220-feishu-scope-baseline.md`](docs/SPEC-220-feishu-scope-baseline.md) —— 权限基线、审批判定与协作群 |
 | **找某个工具「有没有现成的」** | [`TOOLS.md`](TOOLS.md) —— 全仓工具索引（SSOT） |
 
 ---
@@ -182,6 +185,73 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 
 > 🚨 **第一次用的人注意**：`bridge-bots.local.json` 的语义是「**整盘接管**」——桥只跑它列的 bot。
 > committed 名册与 local example 都是空模板；缺 local 时桥会安全停住。`feishu/preflight.py` 会提示先复制空模板，再由注册脚本 upsert 本机 bot。
+
+---
+
+## 飞书文档：智能体怎么读、怎么写、为什么有时读不到
+
+智能体收到一个飞书文档、表格、多维表格或白板的链接后，用**一条命令**把它读全：
+
+```powershell
+python feishu/docio_cli.py read <链接> --into <产出目录>
+python feishu/docio_cli.py coverage <产出目录>/manifest.json   # 判它到底读全没有
+```
+
+产出目录里是正文、表格数据、**图片和视频的原始文件**、评论，外加一份 `manifest.json`
+记录「文档里声明有多少 / 实际取到多少」。**"正文读到了"不等于"读全了"**——图片少下一张、
+表格被接口截断一行，`coverage` 都会判红。写回同理：默认只预览，加 `--apply` 才动，
+**写完自动回读逐格核对，对不上就算失败**。
+
+### 三种身份，各管一段
+
+| 身份 | 它是谁 | 什么时候用 | 会不会过期 |
+|---|---|---|---|
+| **机器人自己** | 正在跟你对话的那只 bot | 默认。谁在干活就用谁的身份，文档里的编辑记录也显示是它 | 不会 |
+| **协作群** | 装着全部机器人的那个群 | 把文档分享给这个群，群里所有机器人立刻都能编辑 | 不会 |
+| **你本人** | 你的飞书账号 | 兜底：文档谁都没分享给机器人、但你自己看得见 | **会**，约一周要重新授权一次（工具会提前提醒） |
+
+机器人的钥匙只存在 `.env` 一处，每次调用临时注入、用完即弃，不会在别处留第二份。
+**认不出"我是谁"就直接报错**，绝不借用别的机器人的身份干活。
+
+### 为什么有时读不到：分清两件事
+
+飞书的权限是**两道门**，两道都得过：
+
+1. **这个机器人被允许做这类事吗？**（比如"读表格"这项能力有没有开通）
+2. **这份文档分享给它了吗？**（能力开了，文档没分享，照样进不去）
+
+**第二道门最容易被误判**——很多人以为是权限没开，于是去开更多权限，其实开再多也没用，
+要做的是**把文档分享给机器人**。工具会把失败明确分成五类，直接告诉你该做哪件事：
+
+| 报的是 | 意思 | 该做什么 |
+|---|---|---|
+| 缺权限 | 这类能力没开通（会列出缺哪几项） | 用工具生成的链接去开通 |
+| 没分享 | 能力有，但这份文档没给它 | `docio share <链接> --apply` 把协作群挂上 |
+| 角色不够 | 能看，但这个操作要更高权限（比如改分享设置） | 让文档所有者来做，或提升它的协作者角色 |
+| 参数错 | 用法/类型不对，**跟权限无关** | 按提示改调用 |
+| 网络问题 | 解析或超时，**跟权限无关** | 已自动重试；持续失败查网络 |
+
+判断依据是 `feishu/feishu-error-codes.json`（只登记实测遇到过的错误码 + 官方原文），
+**没登记过的码如实报"未分类"，不会硬猜成权限问题。**
+
+### 开通权限：哪些能自己开，哪些要等管理员
+
+飞书的权限项分两档：**大部分开发者自己勾一下就生效**，少数敏感的（比如"管理云空间全部文件"
+这种大权限）**必须企业管理员审批**，个人是开不了的。
+
+本仓把这份对照表存成 `feishu/feishu-scope-levels.json`（快照，1257 项），并且：
+
+- **给智能体配的那套基线权限，全部选自"自己就能开"的那一档**，一项都不依赖管理员审批；
+  凡是要审批的大权限，都用等效的细权限替代。
+- 查某一项要不要审批：`python feishu/bridge_scope_audit.py --levels <权限名>`
+- 看每只 bot 还缺哪几项、并直接拿到开通链接：`python feishu/bridge_scope_audit.py --baseline`
+- ⚠️ **这份对照表按企业租户而定**。换公司、换租户必须重新抓一份（步骤见 SOP-140），
+  沿用别家的表会得出错误结论。
+
+### 新建一只机器人时
+
+注册脚本会**一次性把整套基线权限写进授权链接**，不再出现"用到才发现少一项"。
+再把它**拉进协作群**，它就自动继承所有已分享给该群的文档——历史文档一份都不用补挂。
 
 ---
 

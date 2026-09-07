@@ -19,6 +19,42 @@ last_reviewed: 2026-09-07
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.24.0 — Kimi 启动判据结构化 + 飞书权限基线与文档 IO 架构（2026-09-07）
+
+两件事同一个病根：**把"给人看的界面文字"当成机器判据**。Kimi Code 自动升级改了状态栏用词，桥的就绪判据当场失效；飞书这边则是"哪条权限要管理员审批"从来没有机器依据，只能试到报错。本版把两处都换成结构化信号。
+
+### 新增
+
+- **Kimi 启动握手**：worker 拉起原生 TUI 后写 `bridge-kimi-ready-<bot>.json`（会话、profile、进程号、时间戳、Wire 版本、CLI 版本）。桥优先认这个握手，与 Codex app-server 的判据同构；读屏只保留"输入框画出来没"这一条结构判据。
+- **CLI 版本漂移哨兵**：`agent_runtime.VERIFIED_CLI_VERSIONS` 登记"就绪判据在哪个版本上真机验过"；`profile_doctor` 增加 `version` 段（只告警不判错），启动失败时把漂移写进给主人的报错，看门狗新增 **R7** 规则，每个 runtime 按版本号只播报一次。
+- **飞书 scope 等级快照**：`feishu/feishu-scope-levels.json`（1257 条 · level 3 可自助 409 条 / level 4 需管理员审批 848 条）。官方 `/application/v6/scopes` 读不到审批属性，这是唯一机器依据。已脱敏，不含应用 ID、租户信息或单应用状态。
+- **权限基线**：`bridge_scope_audit.py --baseline` 按 SPEC-220 报告每只 bot 的缺口，**只为免审批缺口生成开通链**；`--levels <scope>` 直接回答"这条要不要管理员审批"。
+- **文档 IO 架构**：`ARCH-130`（部件分层、身份模型、三类失败归类）、`SPEC-220`（等级契约与基线清单）、`SOP-140`（开通、刷新快照、读写与失败处置）。
+
+### 变更
+
+- **Kimi 就绪判据不再匹配权限模式词**。0.41.0 把状态栏的 `yolo` / `auto` / `manual` 改名为 `Ask When Needed` / `Never Ask` / `Always Ask`，旧匹配让活着的输入框被判为未就绪，每次消息空烧 150 秒。现在只认结构：无信任弹窗 + 有 `context:` + 空输入框。
+- **`docs-import` 能力不再依赖 `drive:drive`**。`drive:drive` 是 level 4、需要管理员审批；`docs:document:import` 是 level 3 的等价替代，已实测可自助开通并生效。此前该能力被挂在一条批不下来的审批上。
+
+### 升级注意
+
+- 桥进程与看门狗需重启才加载新判据；只重启单只 bot 用 `feishu_bridge.py --bot <name>`。
+- `feishu-scope-levels.json` 的审批策略**按租户生效**。快照采自一个企业租户；换租户或换公司必须按 SOP-140 §3 重新抓取，沿用别家快照会得到错误的"能不能开"结论。
+- 已有 bot 需按 `--baseline` 的开通链各点一次才与基线一致。
+
+### 新增（同版本追加 · 文档 IO 工具落地）
+
+- **`feishu/docio_cli.py`**：飞书文档 IO 的唯一入口，动词为 inspect / read / write / share / coverage / doctor / profiles。身份按当前 bot 从 `.env` 取并只注入本次子进程，**解析不出身份直接失败**；bot 命令拒绝回退 CLI 默认应用。
+- **三条身份线**：bot 应用身份（默认、永久）、群协作者（一次分享全群通吃、新成员自动继承）、用户身份（兜底、7 天需续期并主动播报）。
+- **覆盖率硬闸**：读取产出 manifest 记 declared/fetched，`coverage` 机械判定；正文成功不等于读全。实测一份含 9 表 / 38 图 / 12 个 MP4 附件的文档，覆盖率 0 缺口。
+- **失败归因表** `feishu/feishu-error-codes.json`：实测码 → 五个 lane + 官方原文 + 精确动作；区分「没分享给你」与「能访问但角色不够」。
+
+### 修复
+
+- **Windows `.cmd` 命令注入与静默截断**：`lark-cli` 在 Windows 解析为 `.CMD`，经 cmd.exe 时按 `&` 切断参数——一个普通飞书链接（`?from=…&hash=…`）因此被截断，`&` 之后的内容被当命令执行。改为直接调用其 Node 入口，并对只剩 `.cmd` 兜底的情况加 fail-closed 守卫。
+- **换取 tenant token 增加退避重试**：`open.feishu.cn` 当天四次 DNS 抖动，每次都让整条命令带栈崩溃、看起来像权限问题。
+- **`file` / `view` 资源盘点**：视频等附件是 `file` 块、外面套 `view` 播放容器；此前两者都被当成未取到，一份读全的文档会产生 24 条幻影缺口。现在 `file` 真下载、`view` 认作容器（**容器无子块仍报缺**）。
+
 ## v0.23.1 — 智能体注册恢复与业务目录路径修复（2026-09-07）
 
 - **恢复原应用**：已有 App ID 自动使用官方 SDK 续接，取消恢复路径上的“只允许新建”，并拒绝覆盖不同应用；不要求主人在聊天里提供 secret。链接生成前校验 SDK 参数兼容性。
