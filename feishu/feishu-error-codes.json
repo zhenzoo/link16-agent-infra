@@ -1,0 +1,61 @@
+{
+ "schema": "link16-feishu-error-codes-v1",
+ "note": "只登记本机实测遇到过的错误码，message 为飞书接口返回的官方原文。lane 决定 docio 把失败归到 ARCH-130 §3 的哪一格；新码先按结构化 type/subtype 兜底，实测到之后再登记进来，不凭猜测填表。",
+ "lanes": {
+  "scope": "权限清单不够：应用或用户没有这条 scope。按 SPEC-220 基线开通；需管理员审批的换免审批替代。",
+  "resource": "资源没分享给这个身份：加再多 scope 都没用。把 bot 加为协作者，或把承载 bot 的群挂为协作者。",
+  "role": "已能访问该资源，但这次操作需要更高角色（管理/所有者）。让 full_access 的人提升角色或代为操作。",
+  "input": "参数或用法错误，与权限无关。按接口契约修正调用。",
+  "network": "网络/DNS/超时，与权限无关。重试；持续失败查解析与代理。"
+ },
+ "codes": {
+  "99991672": {
+   "lane": "scope",
+   "message": "One of the following scopes is required",
+   "action": "报错正文会列出可替代 scope 清单，挑一条免审批的开通",
+   "observed_at": "2026-09-07"
+  },
+  "131006": {
+   "lane": "resource",
+   "message": "resolve wiki node failed: bot lacks permission for the requested resource",
+   "action": "把 bot 或承载它的群加进该 wiki 空间",
+   "observed_at": "2026-09-07"
+  },
+  "1770032": {
+   "lane": "resource",
+   "message": "forbidden",
+   "action": "官方说明：确认当前身份是否有该文档的阅读（获取类接口）或编辑（更新/删除/创建类接口）权限",
+   "observed_at": "2026-09-07"
+  },
+  "3380004": {
+   "lane": "resource",
+   "message": "No permission to operate on this document: the current user lacks view or edit access",
+   "action": "文档没分享给这个身份；挂协作者（推荐挂群）",
+   "observed_at": "2026-09-07"
+  },
+  "40403": {
+   "lane": "resource",
+   "message": "no permission, action: View, code: DENY",
+   "action": "云空间资源未授予该身份查看权",
+   "observed_at": "2026-09-07"
+  },
+  "1063001": {
+   "lane": "role",
+   "message": "bot lacks permission for the requested resource",
+   "action": "该操作需要更高的协作者角色",
+   "observed_at": "2026-09-07"
+  },
+  "1063002": {
+   "lane": "role",
+   "message": "bot lacks permission for the requested resource",
+   "action": "能访问但读/改权限设置需要管理或所有者角色；让 full_access 的人代为操作",
+   "observed_at": "2026-09-07"
+  },
+  "1770002": {
+   "lane": "input",
+   "message": "invalid document token for this endpoint",
+   "action": "用错了资源适配器（例如拿表格 token 调文档接口）；先 inspect 确认类型",
+   "observed_at": "2026-09-07"
+  }
+ }
+}
