@@ -86,9 +86,13 @@ CAPABILITY_SPECS = {
         "requested": ["docs:document.media:upload"],
     },
     "docs-import": {
+        # drive:drive needs tenant-admin approval; docs:document:import is the
+        # granular self-serve equivalent and was verified granted without one
+        # (2026-09-07). Requesting the approval-gated umbrella by default parked
+        # this capability behind an approval queue that never cleared.
         "label": "现有 Markdown/HTML 素材导入链",
-        "groups": [["drive:drive"]],
-        "requested": ["drive:drive"],
+        "groups": [["docs:document:import", "drive:drive"]],
+        "requested": ["docs:document:import"],
     },
     "group-listen": {
         "label": "监听未@的全群消息",
@@ -109,6 +113,84 @@ REQUIRED_SCOPES = tuple(
         for scope in CAPABILITY_SPECS[name]["requested"]
     )
 )
+
+
+# SPEC-220 §5. Self-serve (level 3) scopes only: every umbrella scope that needs
+# tenant-admin approval has a granular level-3 stand-in, so a bot is never left
+# waiting on an approval queue to read or write a document.
+BASELINE_SCOPES = (
+    # 私聊收发 / 群内 @ 与 a2a
+    "im:message:send_as_bot", "im:message.p2p_msg:readonly", "im:resource",
+    "im:chat:read", "im:message.group_at_msg:readonly",
+    # 文档创建 / 写入 / 读取
+    "docx:document", "docx:document:create", "docx:document:write_only",
+    "docx:document.block:convert", "docx:document:readonly",
+    "docs:document.content:read",
+    # 表格读写
+    "sheets:spreadsheet", "sheets:spreadsheet:read", "sheets:spreadsheet:write_only",
+    "sheets:spreadsheet:create", "sheets:spreadsheet.meta:read",
+    "sheets:spreadsheet.meta:write_only",
+    # 多维表格
+    "bitable:app", "bitable:app:readonly",
+    # 文档内媒体 / 文件上传下载 / 导入导出
+    "docs:document.media:upload", "docs:document.media:download",
+    "drive:file:upload", "drive:file:download",
+    "docs:document:import", "docs:document:export",
+    # 白板
+    "board:whiteboard:node:read", "board:whiteboard:node:create",
+    "board:whiteboard:node:update", "board:whiteboard:node:delete",
+    # 评论
+    "docs:document.comment:read", "docs:document.comment:create",
+    "docs:document.comment:update", "docs:document.comment:delete",
+    # 协作者与分享 / 知识库 / 版本
+    "docs:permission.member:create", "docs:permission.member:retrieve",
+    "docs:permission.setting:read",
+    "wiki:node:read", "wiki:node:retrieve", "wiki:space:read",
+    "drive:drive:version", "drive:drive:version:readonly",
+)
+
+SCOPE_LEVELS_PATH = Path(__file__).resolve().parent / "feishu-scope-levels.json"
+_LEVELS_CACHE = {}
+
+
+def scope_levels():
+    """SPEC-220 snapshot: scope -> level. Empty dict when unavailable.
+
+    The official /application/v6/scopes API cannot tell you whether a scope needs
+    admin approval, so this file is the only machine-readable source for it. A
+    missing snapshot degrades to "unknown", never to a guess.
+    """
+    if not _LEVELS_CACHE:
+        try:
+            data = json.loads(SCOPE_LEVELS_PATH.read_text(encoding="utf-8"))
+            _LEVELS_CACHE.update({
+                row["scope"]: int(row.get("level") or 0)
+                for row in data.get("scopes") or [] if row.get("scope")
+            })
+        except (OSError, ValueError, TypeError, KeyError):
+            _LEVELS_CACHE["__unavailable__"] = 0
+    return {k: v for k, v in _LEVELS_CACHE.items() if k != "__unavailable__"}
+
+
+def self_serve(scope):
+    """True only on positive evidence that the scope is self-serve (level <= 3).
+
+    Unknown scopes report False so an approval-gated one is never mistaken for a
+    one-click grant; callers say "unknown", they do not silently generate a link.
+    """
+    level = scope_levels().get(scope)
+    return bool(level and level <= 3)
+
+
+def baseline_gap(scopes):
+    """Split the baseline shortfall into self-serve, approval-gated and unknown."""
+    missing = [s for s in BASELINE_SCOPES if s not in scopes]
+    levels = scope_levels()
+    return {
+        "self_serve": [s for s in missing if self_serve(s)],
+        "needs_approval": [s for s in missing if levels.get(s, 0) >= 4],
+        "unknown_level": [s for s in missing if s not in levels],
+    }
 
 
 def normalize_capabilities(values=None):
@@ -293,7 +375,7 @@ def roster_bots():
         return []
 
 
-def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False):
+def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False, baseline=False):
     names = normalize_capabilities(capabilities)
     scopes, error = granted_scopes(id_env, sec_env)
     if error:
@@ -310,9 +392,42 @@ def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False):
     app_id = _env_val(id_env)
     scopes_to_request = requested_scopes(missing, for_fix=True)
     result["fix_link"] = fix_auth_url(app_id, scopes_to_request) if app_id and scopes_to_request else None
+    if baseline:
+        gap = baseline_gap(scopes)
+        # Only self-serve gaps get a link. An approval-gated scope handed over as a
+        # one-click link is worse than no link: it sends the owner to a page that
+        # cannot grant it, and SPEC-220 keeps the baseline free of such scopes.
+        gap["links"] = (fix_auth_urls(app_id, gap["self_serve"])
+                        if app_id and gap["self_serve"] else [])
+        gap["ok"] = not gap["self_serve"] and not gap["unknown_level"]
+        result["baseline"] = gap
     if reviewers:
         result["reviewers"] = reviewer_status(id_env, sec_env)
     return result
+
+
+def _print_levels(names, as_json):
+    """Answer "does this scope need admin approval" from the SPEC-220 snapshot."""
+    levels = scope_levels()
+    if not levels:
+        print(f"scope 等级快照不可用：{SCOPE_LEVELS_PATH}（按 SOP-140 §3 重新抓取）")
+        return
+    if not names:
+        total = len(levels)
+        three = sum(1 for v in levels.values() if v <= 3)
+        print(f"快照 {SCOPE_LEVELS_PATH.name}：{total} 条 · "
+              f"可自助开通(level<=3) {three} 条 · 需管理员审批(level>=4) {total - three} 条")
+        return
+    rows = [{"scope": n, "level": levels.get(n),
+             "self_serve": self_serve(n),
+             "verdict": ("可自助开通" if self_serve(n)
+                         else "需管理员审批" if levels.get(n) else "快照里没有这条")}
+            for n in names]
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    for r in rows:
+        print(f"{r['scope']:<44} level={r['level'] if r['level'] else '?':<3} {r['verdict']}")
 
 
 def main():
@@ -324,14 +439,20 @@ def main():
     parser.add_argument("--raw", action="store_true", help="列出全部已授权 scope")
     parser.add_argument("--reviewers", action="store_true", help="尽力查询应用 owner/最近应用审核人")
     parser.add_argument("--all-env", action="store_true", help="审 .env 里的所有飞书应用")
+    parser.add_argument("--baseline", action="store_true",
+                        help="按 SPEC-220 基线报告每只 bot 的缺口，并只为免审批缺口生成开通链")
+    parser.add_argument("--levels", nargs="*", metavar="SCOPE",
+                        help="查 scope 等级（3=可自助开通 / 4=需管理员审批）；不给参数=打印统计")
     args = parser.parse_args()
 
     entries = discover_env_bots() if args.all_env else roster_bots()
     if args.bot:
         entries = [entry for entry in entries if entry[0] == args.bot]
     capabilities = args.capability or list(DEFAULT_CAPABILITIES)
+    if args.levels is not None:
+        return _print_levels(args.levels, args.json)
     result = {
-        bot: audit_entry(id_env, sec_env, capabilities, args.raw, args.reviewers)
+        bot: audit_entry(id_env, sec_env, capabilities, args.raw, args.reviewers, args.baseline)
         for bot, id_env, sec_env in entries
     }
 
@@ -359,6 +480,21 @@ def main():
                 print(f"  授权链: {item['fix_link']}")
         if args.reviewers:
             print("  审核身份: " + json.dumps(item.get("reviewers"), ensure_ascii=False))
+        gap = item.get("baseline")
+        if gap:
+            if gap["ok"]:
+                print("  基线: ✅ 已开满")
+            else:
+                if gap["self_serve"]:
+                    print(f"  基线缺口(可自助开通 {len(gap['self_serve'])} 条): "
+                          + ", ".join(gap["self_serve"]))
+                    for url in gap["links"]:
+                        print(f"  开通链: {url}")
+                if gap["unknown_level"]:
+                    print(f"  等级未知(快照里没有 {len(gap['unknown_level'])} 条): "
+                          + ", ".join(gap["unknown_level"]))
+            if gap["needs_approval"]:
+                print(f"  需管理员审批 {len(gap['needs_approval'])} 条 → 基线不依赖它，不生成开通链")
         if args.raw:
             for scope in item.get("scopes") or []:
                 print(f"  {scope}")

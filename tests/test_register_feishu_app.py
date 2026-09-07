@@ -64,11 +64,20 @@ class DeviceGrantRecoveryTests(unittest.TestCase):
         )
         self.assertNotIn("drive:drive", scopes)
 
-    def test_second_link_includes_broad_drive_only_for_docs_import(self):
+    def test_docs_import_requests_the_self_serve_scope_not_broad_drive(self):
+        """drive:drive needs tenant-admin approval; the import link must not need one."""
         scopes = register.bridge_scope_audit.requested_scopes(
             ["core", "docs-import"], for_fix=True
         )
-        self.assertIn("drive:drive", scopes)
+        self.assertIn("docs:document:import", scopes)
+        self.assertNotIn("drive:drive", scopes)
+        audit = register.bridge_scope_audit
+        self.assertTrue(audit.self_serve("docs:document:import"))
+        self.assertFalse(audit.self_serve("drive:drive"))
+        # Either scope still satisfies the capability, so an app that was granted
+        # the umbrella one before this change does not regress to "missing".
+        self.assertTrue(audit.cap_ok({"drive:drive"},
+                                     audit.CAPABILITY_SPECS["docs-import"]["groups"]))
 
     def test_docs_consume_requests_only_verified_read_scopes(self):
         scopes = register.bridge_scope_audit.requested_scopes(

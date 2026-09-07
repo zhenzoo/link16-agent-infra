@@ -403,7 +403,15 @@ def main():
         _validate_group_choice(capabilities, args.group)
     except ValueError as exc:
         ap.error(str(exc))
-    permission_scopes = bridge_scope_audit.requested_scopes(capabilities, for_fix=True)
+    # SPEC-220: a new bot leaves registration with the whole self-serve baseline,
+    # not just the scopes its declared capabilities happen to need. Discovering a
+    # missing scope months later — mid-task, as a bare "no permission" — was the
+    # recurring failure this closes. Approval-gated scopes are never requested;
+    # the baseline is built entirely from self-serve ones.
+    permission_scopes = tuple(dict.fromkeys(
+        list(bridge_scope_audit.requested_scopes(capabilities, for_fix=True))
+        + [s for s in bridge_scope_audit.BASELINE_SCOPES if bridge_scope_audit.self_serve(s)]
+    ))
     try:
         sdk_version = registration_transport.preflight()
         args.app_id = _recovery_app_id(args.app_id, id_key, args.bot or args.name)
