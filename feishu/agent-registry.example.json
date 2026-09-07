@@ -1,11 +1,11 @@
 {
   "_README": "【跨机 agent 目录 · 脱敏样例】把本文件 cp 成 `feishu/agent-registry.local.json` 再按自己的舰队改，它就是你本机的真名册（已 gitignore，不会被提交）。查询一律走 `python feishu/registry.py`（whois / peers / list / is-shared），别手 grep 本 JSON。路径解析顺序见 feishu/bridge_env.py 的 registry_path()：环境变量 LINK16_AGENT_REGISTRY → agent-registry.local.json → agent-registry.json → 本样例。",
-
   "_它和 bridge-bots 的分工": "两本名册各司其职，别混：① `bridge-bots.local.json` = 【运行时】——本机桥要跑哪些 bot、用哪个 profile、cwd 在哪。② 本文件 = 【目录】——全舰队谁是谁、在哪台机、分管哪个仓、open_id 多少。桥只读前者；`send_feishu_msg --to-agent <名字>` 和 `/push` 的跨机通知读后者。",
-
-  "shared_repos": ["my-shared-repo", "another-shared-repo"],
+  "shared_repos": [
+    "my-shared-repo",
+    "another-shared-repo"
+  ],
   "_shared_repos 是什么": "判据 = 【这个仓在你的云端 Git 账号上有远端仓库】，与几台机器上有它无关。列在这里的仓，`/push` 完会用 `registry.py peers <仓> --exclude-machine <本机>` 查出对面哪台机的哪只 bot 分管它，提议去通知它 pull。不在这里的仓 = 单机仓，不触发跨机通知。",
-
   "_machines_README": "机器目录。key = 机器代号，建议命名 = 产品线缩写 + 购买年份（如 tb25 / tuf19），代号本身无意义、可安全公开。**bot 命名惯例 `<machine>-<用途>`** —— register_feishu_app.py 就靠 bot 名前缀比对本表的 key 来判 machine 字段（数据驱动·加第 N 台机不用改代码）。`hostname` = 该机真实计算机名，只在「bot 名前缀判不出时按本机 hostname 兜底」用；各机自己填自己那条（跑 `hostname` 或 PowerShell `$env:COMPUTERNAME` 拿）。",
   "machines": {
     "desk24": {
@@ -19,7 +19,6 @@
       "note": "示例：笔记本 · D: 盘 · .env 键前缀 LAP25_"
     }
   },
-
   "_groups 是什么": "a2a（智能体互相喊话）用的共享群。bot 必须【人工】被拉进群才能在群里互相 @（飞书 API 加不了群成员）。chat_id 形如 oc_xxx，在群里 @ 任一 bot 后从桥日志能拿到。external=true 表示外部群（有非本人成员），发言需更谨慎。",
   "groups": [
     {
@@ -29,7 +28,25 @@
       "note": "所有 bot 都拉进这个群，a2a 才能互相 @"
     }
   ],
-
+  "_tenants_README": "飞书应用属于【注册时选的组织/租户】。同一台机器可以同时有企业租户和个人租户的 bot，而 tenant_key 决定这只 bot 该进哪个共享 a2a 群 —— tenant_probe.py 读的就是这一段。查/判定用 `python feishu/tenant_probe.py`；未知 key、无群或多 key 时保持 unknown，必须显式选择，绝不按 bot 名字或同机多数票猜。只有一个租户的人留一条就够。",
+  "tenants": [
+    {
+      "tenant_key": "0000000000000001",
+      "label": "示例企业租户",
+      "kind": "enterprise",
+      "group_chat_id": "oc_0000000000000000000000000000example",
+      "group_name": "示例共享群",
+      "note": "企业租户的 bot 进自己租户的群，不进个人租户那个"
+    },
+    {
+      "tenant_key": "0000000000000002",
+      "label": "示例个人租户",
+      "kind": "personal",
+      "group_chat_id": "oc_0000000000000000000000000000person",
+      "group_name": "示例个人共享群",
+      "note": "个人飞书账号注册的应用落这一档"
+    }
+  ],
   "_agents 字段说明": {
     "name": "bot 的唯一内部代号，惯例 `<machine>-<用途>`。它不是飞书上的显示名（显示名你在飞书里自己设，可随时改；这个不要改）。",
     "machine": "它跑在哪台机 —— 必须是上面 machines 的某个 key。跨机通知路由的依据，写错就会通知错机器。",

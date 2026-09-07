@@ -10,6 +10,14 @@ feishu/artifact-delivery.local.json
 # 样例见 feishu/agent-registry.example.json；解析顺序见 feishu/bridge_env.py 的 registry_path()
 # 当前 private 仓仍有 committed 现役本；受信 collaborator 可见这些运维元数据。
 # 若将来对外公开，必须先完成 PLAN-926 的 local 迁移与历史边界处理。
+# 舰队通讯录真数据（62 条真实 open_id + 群 chat_id + tenant_key + 主机名 + 内网 IP）
+# 【永不进本仓】—— 公开仓只带 feishu/agent-registry.example.json 那份脱敏样例。
+# 真数据的默认 SSOT 在 runtime profile home：
+#   ~/.claude-personal/link16/agent-registry.json（没装 Claude 则 ~/.codex-personal/link16/）
+# 解析顺序见 feishu/bridge_env.py 的 registry_path()。
+# 维护者的 profile home 恰好是一个私有 git 仓的工作树，所以跨机同步照旧走 push/pull；
+# 只有一台机的人它就是个本机目录。两种人共用同一条规则。
+feishu/agent-registry.json
 feishu/agent-registry.local.json
 # 改名册前留的本机备份（含本机 cwd·跨机会打架·绝不入库）· 注：gitignore 不支持行尾注释，注释必须独占一行
 feishu/*.local.json.bak*

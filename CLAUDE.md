@@ -31,7 +31,7 @@ last_reviewed: 2026-08-26
 3. [TOOLS.md](TOOLS.md)：所有现成工具及调用入口。
 
 架构理由与硬合同按任务进入相应 [ARCH](docs/ARCH-110-feishu-bridge.md) /
-[SPEC](docs/SPEC-200-cloudflare-inventory.md)。单 bot 注册见
+[SPEC](docs/SPEC-220-feishu-scope-baseline.md)。单 bot 注册见
 [SOP-120](docs/SOP-120-feishu-register.md)。
 
 ## 接到“开始部署 Link16”

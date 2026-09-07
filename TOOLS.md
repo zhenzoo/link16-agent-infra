@@ -3,9 +3,6 @@
 > 本仓所有可复用工具的唯一索引 · 分 **🔵 feishu** / **🟢 wmux** 两段 · 「有没有工具干 X」查这里。
 > 路径相对本仓根（`feishu/…` / `wmux/…`）。详细机制见 `docs/`（ARCH-110 桥 / ARCH-010 wmux / SOP-120 注册）。
 >
-> ☁️ **Cloudflare 上有什么 → `docs/SPEC-200-cloudflare-inventory.md`**：所有 Pages 站点（写作台 / mockup 展厅 / 各项目站）、
-> D1 / KV / R2、token 权限现状、以及**怎么重拉一遍**的命令。要部署站点、建库、或查某个 `*.pages.dev` 是谁的，先看它。
-> 改动了 Cloudflare 资源的人，回去更新那份。
 
 ## 🔵 feishu —— 飞书桥（`feishu/`）
 

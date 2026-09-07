@@ -84,15 +84,26 @@ class TenantRoutingTests(unittest.TestCase):
         entry = tenant_probe.tenant_entry(None, FAKE_TENANTS)
         self.assertIsNone(entry)
 
-    def test_real_registry_maps_obsbot_tenant_to_obsagent_group(self):
-        """真名册（agent-registry.json）里 企业租户A 租户必须指向 obsagent 大乱斗。"""
-        entry = tenant_probe.tenant_entry("TENANT_KEY_ENTERPRISE")
-        self.assertEqual(entry.get("group_name"), "obsagent 大乱斗")
+    def test_shipped_example_registry_maps_enterprise_tenant(self):
+        """随仓发布的样例名册必须把企业租户接到它自己的群。
+
+        这两个用例原先读 committed 的真名册、硬编码真 tenant_key。名册迁出 git 之后
+        （PLAN-926 §S1.1），公开 clone 里没有真数据，那样写等于把测试绑死在维护者
+        的私人舰队上。现在改读**样例名册**：走的仍是
+        `registry_path()` → `load_tenants()` → `tenant_entry()` 这条真实代码路径，
+        只是数据换成脱敏的，任何人 clone 下来都能跑。
+        """
+        example = ROOT / "feishu" / "agent-registry.example.json"
+        with mock.patch.dict("os.environ", {"LINK16_AGENT_REGISTRY": str(example)}):
+            entry = tenant_probe.tenant_entry("0000000000000001")
+        self.assertEqual(entry.get("group_name"), "示例共享群")
         self.assertEqual(entry.get("kind"), "enterprise")
 
-    def test_real_registry_maps_personal_tenant_exactly(self):
-        entry = tenant_probe.tenant_entry("TENANT_KEY_PERSONAL")
-        self.assertEqual(entry.get("group_name"), "tb24-25交流水吧")
+    def test_shipped_example_registry_maps_personal_tenant(self):
+        example = ROOT / "feishu" / "agent-registry.example.json"
+        with mock.patch.dict("os.environ", {"LINK16_AGENT_REGISTRY": str(example)}):
+            entry = tenant_probe.tenant_entry("0000000000000002")
+        self.assertEqual(entry.get("group_name"), "示例个人共享群")
         self.assertEqual(entry.get("kind"), "personal")
 
     def test_chat_probe_rejects_multiple_tenant_keys(self):
