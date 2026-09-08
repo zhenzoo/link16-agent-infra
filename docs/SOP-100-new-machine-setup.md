@@ -28,7 +28,7 @@ last_reviewed: 2026-08-30
 > **用途**：在一台**新机器**上从零跑起 `feishu/feishu_bridge.py`（飞书桥），挂上能被手机飞书 @ 的本机 bot，并配好**开机自启**（§9）。
 > **这是新机器部署的唯一入口文档** —— 真空白机先做下面 Stage 0；已有 Git/gh/Python 的机器 clone 后从 §1 顺着做到 §9。
 > **配套**：架构见 [`ARCH-110-feishu-bridge.md`](ARCH-110-feishu-bridge.md)（§4.1 跨机可移植）· 依赖见 [`feishu/requirements.txt`](../feishu/requirements.txt) · 注册 bot 细节见 [`SOP-120-feishu-register.md`](SOP-120-feishu-register.md)。
-> **实证**：2026-06-16 第二台机（`zhenz` / `D:`）跑通 §1–§8；2026-07-25 第一台机（`zhuzhen` / `E:`）跑通 §9 开机自启。
+> **实证**：2026-06-16 第二台机（`machine-a` / `D:`）跑通 §1–§8；2026-07-25 第一台机（`machine-b` / `E:`）跑通 §9 开机自启。
 > **原名** `feishu/SETUP-new-machine.md`（2026-07-25 按全局 `TYPE-NNN-slug` 规范搬进 `docs/` 并编号）。
 
 ---

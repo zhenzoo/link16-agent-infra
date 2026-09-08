@@ -43,7 +43,7 @@ last_reviewed: 2026-09-06
 > **状态（v8 · 2026-06-16 已部署 + 真机验证）**：回传从「轮询 jsonl + 单线程发送」重构为 **hook→outbox→drainer 事件驱动 push + doctor 机械自愈**（§2.5）——根治长 turn 队头阻塞 / 10min 卡片死 / autopilot 永不结束 / background-shell 唤醒轮丢失 / 补发淹没。早前（2026-06-15 P140）：**owned-session 多 bot 已实现跑通**（每 bot 一进程一飞书长连接 · 会话死自动重生 · 桥重启自恢复）。本轮（P140）补齐并上线三件生产级能力：**① 回复用飞书「互动卡片」流式发**（实时进度 + 最终答案 + 过程小结·§2.6）**② jsonl 钉死防串台**（多会话同目录不再读错文件·§2.5）**③ 必达发送 + trace 日志监控**（四级降级绝不丢 + 每道闸有痕迹·§2.6/§2.7）。
 > **启动**：`python feishu/feishu_bridge.py`（裸跑即把所有 bot 各起一隐藏进程后台常驻 · `stop`/`status` 管理）。
 >
-> ⚠️ **2026-06-28 切流后更新（详见 CHANGELOG v0.2.0）**：① 注入标记格式已改为 `[飞书_from_<发>_to_<收>]`（下文多处仍写旧 `[飞书-<bot>]`·语义同·hook 兼容两者）② 回信路由改 **per-turn**——a2a(群)消息回【群】发**纯文字+@**(非互动卡片)、p2a/DM 才发卡片 ③ 本机(zhenz/D:)现 **17 bot**、跑 `link16/feishu`、开机自启已配。本文标题/「6 bot」/「不开机自启」/「互动卡片发回」等为**抽离前旧述·待整体校订**。
+> ⚠️ **2026-06-28 切流后更新（详见 CHANGELOG v0.2.0）**：① 注入标记格式已改为 `[飞书_from_<发>_to_<收>]`（下文多处仍写旧 `[飞书-<bot>]`·语义同·hook 兼容两者）② 回信路由改 **per-turn**——a2a(群)消息回【群】发**纯文字+@**(非互动卡片)、p2a/DM 才发卡片 ③ 本机(machine-a/D:)现 **17 bot**、跑 `link16/feishu`、开机自启已配。本文标题/「6 bot」/「不开机自启」/「互动卡片发回」等为**抽离前旧述·待整体校订**。
 
 ---
 
@@ -681,7 +681,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 > 📖 **装到新机器的完整 runbook**（requirements.txt / 怎么拿 wmux handler / 为什么之前拿不到 / **开机自启** / 排错速查）→ [`SOP-100-new-machine-setup.md`](SOP-100-new-machine-setup.md)。下面只讲可移植机制本身。
 
-> 一句话：桥本来把 `.env` 路径和 bot 名册都写死成**一台机**的绝对路径（`E:\…\.env` + committed `bridge-bots.json` 里全是 `E:`/`zhuzhen`）。换台机（盘符/用户名不同）就读不到凭据、改名册又跟另一台机 git 打架。现在两处都改成「**不写死盘符 + 机器本地优先**」，每台电脑能各跑各的桥、各管各的 bot，互不冲突。
+> 一句话：桥本来把 `.env` 路径和 bot 名册都写死成**一台机**的绝对路径（`E:\…\.env` + committed `bridge-bots.json` 里全是 `E:`/`machine-b`）。换台机（盘符/用户名不同）就读不到凭据、改名册又跟另一台机 git 打架。现在两处都改成「**不写死盘符 + 机器本地优先**」，每台电脑能各跑各的桥、各管各的 bot，互不冲突。
 
 **① `.env` 路径跨机解析**（`feishu/bridge_env.py:resolve_env_path` · 桥/register/probe 三个入口共用）：
 优先级 `XHS_ENV_FILE`（显式全路径）→ `VIBECODING_ROOT/.env`（每台机一次性设·权威位置）→ 从仓库逐级上溯找到的第一个 `.env`（无需任何 env var·兼容 `Post/xhs-card-gen` 与 `Post/tools/xhs-card-gen` 两种布局）→ legacy `E:\410_VibeCoding\.env` 兜底（绝不破坏老机器）。**不再写死盘符**（符合用户 CLAUDE.md 跨机铁律）。

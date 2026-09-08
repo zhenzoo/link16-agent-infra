@@ -189,7 +189,7 @@ python feishu/registry.py whois tb24-link16   # 查一条
 python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某共享仓对面谁管（repo-sync 路由）
 ```
 
-- 本机 D:（tb25 · zhenz · 19 bot · verified ✅）+ 另一台 E:（tb24 · zhuzhen · 8 bot · verified ✅）。**各机只改自己那半**（`machine` 字段 == 本机的记录）· git 同步 · 两机改不同记录天然不冲突（详见 `agent-registry.json` 的 `_README` + [`PROPOSAL-911`](PROPOSAL-911-repo-sync-notify.md)）。
+- 本机 D:（tb25 · machine-a · 19 bot · verified ✅）+ 另一台 E:（tb24 · machine-b · 8 bot · verified ✅）。**各机只改自己那半**（`machine` 字段 == 本机的记录）· git 同步 · 两机改不同记录天然不冲突（详见 `agent-registry.json` 的 `_README` + [`PROPOSAL-911`](PROPOSAL-911-repo-sync-notify.md)）。
 - **send_key**（=.env slug·`send_feishu_msg --to-agent` 认它·方案B 让你只用显示名喊）：tb25 段 == 显示名；tb24 段 = 旧 xhs slug（`link16`/`config`/…·plan B 已让它对用户隐身）；`tb24-xhs-autopilot` 已加别名 slug `TB24_XHS_AUTOPILOT`（2026-07-04·原裸 `FEISHU_BRIDGE_APP_ID`·旧「xhs总控桥」正名来）。
 
 > **🔒 拉 bot 进群只能在飞书 App 手动**（群设置 → 添加成员/群机器人 → 搜 bot 名 → 加）。**API 加不了**（实测）：别的 app 的 bot 去加报 `99992361 open_id cross app`；bot 加自己报 `232011 Operator can NOT be out of the chat`。→ 建新 bot 的 §4 清单「拉进共享群」这步**必须人工**。（跨应用 open_id 命名空间隔离 → 没有「开了就能拉别 app 机器人进群」的权限·`im:chat:operate` 只解「群限管理员加人」设置。）
@@ -384,7 +384,7 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 |---|---|---|
 | 本地 inbound / outbox / outbound / receipts | ✅ **自动接上** | 这些文件按 **bot 名字** 存，同名就继续写同一批文件，`bridge_history.py` 出来是一条连续时间线 |
 | 飞书里那段 DM 会话 | ❌ **接不上** | 新应用 = 新 bot = 和你之间一个全新的 p2p 会话；飞书没有「把 A 应用的会话过继给 B」的机制，删了应用那段记录就没了 |
-| `open_id` | ❌ 必换 | **per-app**。2026-08-27 实测同一个人在三个应用下：`ou_ffcb0d…` / `ou_ca0efa…` / `ou_878174…` |
+| `open_id` | ❌ 必换 | **per-app**。2026-08-27 实测同一个人在三个应用下：`ou_xxxxx12…` / `ou_xxxxx13…` / `ou_xxxxx14…` |
 
 **⚠️ 最大的坑**：`bridge-owner-<bot>.json` 里存的是**上一个应用下**的主人 open_id。留着 → 桥以为已认主 →
 拿一个在新应用下不存在的 open_id 投 DM → `230013` → **投递失败并如实记账**（`delivered=false`）。

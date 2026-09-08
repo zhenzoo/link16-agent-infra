@@ -13,14 +13,14 @@ read_when:
 note: 切流已完成，本文保留为历史执行记录。
 last_reviewed: 2026-08-17
 ---
-# SOP-131 · 本机版切流清单（zhenz / D: · xhs/orchestrator → link16/feishu）
+# SOP-131 · 本机版切流清单（machine-a / D: · xhs/orchestrator → link16/feishu）
 
-> **这是什么**：[`SOP-130-cutover.md`](SOP-130-cutover.md) 的**本机实例化**。SOP-130 是通用切流步骤（按 TB25 / `E:` / 无 `tools/` 层 写的）；本机（`zhenz` / `D:` / 有 `tools/` 层）与它有 **4 处偏差**，照搬 SOP-130 会踩坑 → 本文把偏差 patch 掉、把本机硬动作写成可照敲的确切命令。
+> **这是什么**：[`SOP-130-cutover.md`](SOP-130-cutover.md) 的**本机实例化**。SOP-130 是通用切流步骤（按 TB25 / `E:` / 无 `tools/` 层 写的）；本机（`machine-a` / `D:` / 有 `tools/` 层）与它有 **4 处偏差**，照搬 SOP-130 会踩坑 → 本文把偏差 patch 掉、把本机硬动作写成可照敲的确切命令。
 > **谁来切**：**Owner 手动**在键盘前跑 §3 的 stop/start（会断当前飞书对话 · agent/watchdog 不能自跑也帮不上）。
 > **本文性质**：调研产出的待执行清单 · 调研全程只读、未切桥、未 stop/start。
 > **建档**：2026-06-28 20:51（北京时间）· 调研实测 HEAD `bfb8fe7`。
 
-> ## 🟢 切流前准备已全部完成（2026-06-28 晚 · zhenz/ccp 这台执行 · §2 的 A/B 已做完可跳过）
+> ## 🟢 切流前准备已全部完成（2026-06-28 晚 · machine-a/ccp 这台执行 · §2 的 A/B 已做完可跳过）
 > - **A ✅** 名册已整盘拷到 `link16/feishu/bridge-bots.local.json`（17 bot·验过·无空 cwd）。
 > - **B ✅** `FeishuBridge-Autostart` 已改指 link16（B1·验过 Arguments/WD）。
 > - **C ✅** `bridge_history.py` 已迁进 `link16/feishu/` + `bridge-history` skill 路径已改（grep 零 orchestrator 残留·py_compile 过）。

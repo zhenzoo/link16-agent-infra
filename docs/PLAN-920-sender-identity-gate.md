@@ -13,7 +13,7 @@
 | 2 | 不给 `--to` 默认发到 `--bot` 自己的 DM | `send_feishu_media.py:106` `target = a.to or sess.get("chat_id")` |
 | 3 | 凭据全在共享 `.env` → 任意 agent 取得到任意 bot 密码 | `_bot_creds(--bot)` → `_env(...)` |
 | 4 | a2a 信封 `[飞书_from_X]` 发信方自盖·接收方反查不出 → 可伪造发信人 | `send_feishu_msg.py:312` |
-| 5 | 事故坐实：CV(tb25-phd-taoci-3) session chat_id = `oc_dd72889…a68e` 逐字匹配事故通道；professor 自己 DM=`oc_b5d48448…` | 读 `bridge-session-*.json` |
+| 5 | 事故坐实：CV(tb25-phd-taoci-3) session chat_id = `oc_xxxxxx7…a68e` 逐字匹配事故通道；professor 自己 DM=`oc_xxxxxxx8…` | 读 `bridge-session-*.json` |
 | 6 | 身份锚可靠：`agent_runtime.worker_cmd` 启动命令即焊 `FEISHU_BRIDGE_SESSION=<bot名>`·spawn 定死·整会话不变 | `agent_runtime.py:229` |
 
 ## §1 · 方案（核心：把「以谁身份发」和「发给谁」彻底分开）

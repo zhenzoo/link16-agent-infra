@@ -745,7 +745,7 @@ class ClaudeStartupPromptTests(unittest.TestCase):
     TRUST_SCREEN = (
         "───────────────────────────────────────────────────────────────\n"
         " Accessing workspace:\n\n"
-        " C:\\Users\\ZhuZhen\\AppData\\Local\\Temp\\claude\\scratchpad\\trustlab-a\n\n"
+        " C:\\Users\\user\\AppData\\Local\\Temp\\claude\\scratchpad\\trustlab-a\n\n"
         " Quick safety check: Is this a project you created or one you trust?\n\n"
         " Claude Code'll be able to read, edit, and execute files here.\n\n"
         " ❯ 1. Yes, I trust this folder\n"
@@ -1079,7 +1079,7 @@ class BridgeStartupRecoveryTests(unittest.TestCase):
                 patch.object(
                     feishu_bridge,
                     "read_screen",
-                    return_value="remo@host MINGW64 /c/repo\n$ ",
+                    return_value="user@host MINGW64 /c/repo\n$ ",
                 ),
                 patch.object(feishu_bridge.wmux_session, "pty_state", return_value=(True, "")),
                 patch.object(feishu_bridge, "_worker_cmd", return_value="launch-claude"),

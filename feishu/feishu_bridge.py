@@ -805,8 +805,8 @@ def _gate_verdict(bot, sender, cmd, text=None):
 
     ⚠️ 发信人怎么认（2026-08-03 上线当晚自查发现并修）：**open_id 是 per-app 的**——
     `agent-registry.json` 里存的是【某一个应用视角】下的 open_id，跟「它发消息到**我这个**应用时」
-    的 open_id **根本不是同一个值**（实证：名册里 tb25-phd-taoci = ou_acd4e2d4…，它发给我时是
-    ou_3d12b059…）。所以 `name_for_open_id` 对 peer 恒查不到 ⇒ 初版闸会把【持有授权的 peer 也拒掉】，
+    的 open_id **根本不是同一个值**（实证：名册里 tb25-phd-taoci = ou_xxxxxxx3…，它发给我时是
+    ou_xxxxxxx4…）。所以 `name_for_open_id` 对 peer 恒查不到 ⇒ 初版闸会把【持有授权的 peer 也拒掉】，
     等于「谁都关不了」。⇒ 认人退回 a2a 戳 `[飞书_from_<X>_to_<Y>]`（`a2a_from_name` 一直用它，
     信封上的 from= 能显示正确名字靠的就是它）。
     诚实的边界：戳是发信方自己写的、可伪造 ⇒ 这道闸防的是**误操作**，不是恶意冒名；

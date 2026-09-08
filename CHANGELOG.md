@@ -276,7 +276,7 @@ last_reviewed: 2026-09-07
 自己的应用查的）。
 
 **验证**：全量 **157 项全绿**。真机：`_roster_bots()` 照常返回本机 3 只；`whoami` 现在正确分报
-「我的 `ou_d2563cc…`（与名册一致）」和「主人 `ou_b94af11…`」。
+「我的 `ou_xxxxxx1…`（与名册一致）」和「主人 `ou_xxxxxx2…`」。
 
 ## v0.13.3 — 没有本机名册就停住：新机器起桥不再抢走别人的飞书应用（2026-08-18）
 
@@ -466,7 +466,7 @@ Google / Slack token、Bearer 令牌、私钥、webhook URL **全部 0 命中**�
 
 **WHAT**
 
-- **授权闸认不出 peer（`5800ce2`）**：闸只用 `name_for_open_id(sender)` 认发信人，但飞书 open_id 是 **per-app** 的——`agent-registry.json` 存的是某一个应用视角下的值，跟「它发消息到我这个应用时」的 open_id 不是同一个（实证：名册里 tb25-phd-taoci = `ou_acd4e2d4…`，发到 tb25-link16 时是 `ou_3d12b059…`）⇒ 对任何 peer 都查不到名字 → 走 fail-closed → **连持有授权的 peer 也一起拒**。改成 ① open_id 查得到就用 ② 查不到退 a2a 戳 `[飞书_from_<X>_to_<Y>]` 认人，两者都拿不到才拒；放行原因带「认人来源」写进 receipts。诚实边界写进 docstring：戳由发信方自己写、**可伪造** ⇒ 本闸防的是误操作、不是恶意冒名，真防线是「主人没私聊过就 claim 不到授权」+ 放行拒绝全量留痕。
+- **授权闸认不出 peer（`5800ce2`）**：闸只用 `name_for_open_id(sender)` 认发信人，但飞书 open_id 是 **per-app** 的——`agent-registry.json` 存的是某一个应用视角下的值，跟「它发消息到我这个应用时」的 open_id 不是同一个（实证：名册里 tb25-phd-taoci = `ou_xxxxxxx3…`，发到 tb25-link16 时是 `ou_xxxxxxx4…`）⇒ 对任何 peer 都查不到名字 → 走 fail-closed → **连持有授权的 peer 也一起拒**。改成 ① open_id 查得到就用 ② 查不到退 a2a 戳 `[飞书_from_<X>_to_<Y>]` 认人，两者都拿不到才拒；放行原因带「认人来源」写进 receipts。诚实边界写进 docstring：戳由发信方自己写、**可伪造** ⇒ 本闸防的是误操作、不是恶意冒名，真防线是「主人没私聊过就 claim 不到授权」+ 放行拒绝全量留痕。
 - **解锁闸的那把钥匙自己是坏的（`e372684`）**：`agent_grant.py` 里 `from bridge_env import resolve_project_root` 引用了不存在的函数，且那句 import 搁在 try **外面** ⇒ 写好的兜底永远轮不到，CLI 的 `status/claim/revoke` 不带 `--state-dir` 一跑就 ImportError。桥的运行时闸没事（显式传了 state_dir），坏掉的恰恰是 SOP 里写给主人的那条补救命令。import 挪进 try。
 - **补上本该拦住它的「入口」闸（`2bf79e3`）**：原有单测全部显式传 `state_dir=`，**恰好避开唯一会崩的那条路径**——典型的「测了功能、没测入口」。新增：不传参也能解析、**CLI 写授权的目录必须等于桥读授权的目录**（不等则 claim 显示成功而闸静默失效，比崩了更难发现）、真把 CLI 当命令 subprocess 跑一遍断言无 ImportError、跑真 loader 逐 bot `profile_name(required=True)` 不抛。
 - **跨机盲区写进测试本身（`b56ec9b`）**：`test_every_loaded_bot_resolves_a_profile` 在 TB25 上根本没跑到它要防的盲区（TB25 顶层 `defaults` 为空、32 bot 全显式写 profile），只有 TB24（有 `defaults.profiles`、9 bot 靠装载注入）才真验到 ⇒ 两台机名册形状不同、**互为对方的盲区补全**，这类闸别只看一台机绿就下结论。
@@ -583,7 +583,7 @@ Google / Slack token、Bearer 令牌、私钥、webhook URL **全部 0 命中**�
 
 **验证**：ast 语法 OK · 真调用三态（造假指针→删得掉 / 文件缺失时重复调用不抛异常 / 不误伤别的 bot）· **端到端**：重启 creator-research 加载新码后，主人实打一次 `/close` → 指针文件确实消失。⚠️ 仓库未装 pytest，测试套件未跑。
 
-**顺带**：登记 **`tb24-pressroom`**（App `cli_0000000000000006` · open_id `ou_ddca1bc663…`）——分管 `Post/pressroom` 宣发引擎仓，tb24 由 12 只增至 13 只。补上 `register_feishu_app.py` 不知道的两格：`repo: pressroom` + `shared: true`（pressroom 本就在 `shared_repos` 内，repo-sync 跨机路由靠这一格）。运行时 roster 在 gitignored 的 `bridge-bots.local.json`。**待办**：应用身份权限（`drive:drive`+`docx:document(:create)`+`im:chat`+`group_at_msg`+`group_msg`）待主人点一键链开通发布；拉进「tb24-25交流水吧」群只能人工。
+**顺带**：登记 **`tb24-pressroom`**（App `cli_0000000000000006` · open_id `ou_xxxxxxxxx5…`）——分管 `Post/pressroom` 宣发引擎仓，tb24 由 12 只增至 13 只。补上 `register_feishu_app.py` 不知道的两格：`repo: pressroom` + `shared: true`（pressroom 本就在 `shared_repos` 内，repo-sync 跨机路由靠这一格）。运行时 roster 在 gitignored 的 `bridge-bots.local.json`。**待办**：应用身份权限（`drive:drive`+`docx:document(:create)`+`im:chat`+`group_at_msg`+`group_msg`）待主人点一键链开通发布；拉进「tb24-25交流水吧」群只能人工。
 
 ---
 
@@ -597,7 +597,7 @@ Google / Slack token、Bearer 令牌、私钥、webhook URL **全部 0 命中**�
 - **§9.2 整段机器无关、可照抄**：`(Get-Command pythonw).Source` 取解释器 · `$env:USERDOMAIN\$env:USERNAME` 取账号 · `$env:VIBECODING_ROOT` 取根 + 「有的机多一层 `Post\tools\`」自动兜底 → **零硬编码盘符/用户名**。本机把文档原文粘回 PowerShell 实跑验证过（带 `-Force` 幂等重建，参数与预期逐项一致）。
 - **🚨 决策记死在 §9.0：触发器必须 `-AtLogOn`，不准「改进」成开机不等登录。** 两条硬理由：① **wmux 是 Electron 桌面应用**（进程带 `--type=renderer` / `--type=gpu-process`），必须有交互式桌面会话 → 没登录 = 没 wmux = 桥连上飞书了也**开不出面板**，第一条消息就白扔；② 「不等登录」只能以 **SYSTEM** 跑，其 home 是 `C:\Windows\System32\config\systemprofile` → `~/.claude-personal`、`~/.wmux`、`$VIBECODING_ROOT\.env` **一个都找不到**，桥连起都起不来。真要「通电即用」的正解 = 开 Windows 自动登录（权衡也写进去了）。
 - **参数取舍表**（每项写清为什么）：`pythonw`（无控制台不闪黑窗·已验无 console 时 `sys.stdout is None`、`print` 是安全空操作，**不会**打断 `cmd_start` 后面的 `bridge_cron.py start`）· `Delay PT1M`（等 wmux+网络）· `LogonType Interactive`（保 `Path.home()`/env 正确）· `ExecutionTimeLimit 0`（**防默认 3 天上限杀掉常驻桥**）· `MultipleInstances IgnoreNew`。
-- **本机（tb24 · `zhuzhen`/`E:`）已建好并验收**：`LastTaskResult=0`，**12 bot + 1 cron 守护 = 13 进程全起**，各 `feishu/_logs/bridge-<bot>.log` 有新 `restart` 分隔线 + `connected to wss://msg-frontier.feishu.cn`。此前本机**没有**该任务（只有 `zhenz`/`D:` 那台有）。
+- **本机（tb24 · `machine-b`/`E:`）已建好并验收**：`LastTaskResult=0`，**12 bot + 1 cron 守护 = 13 进程全起**，各 `feishu/_logs/bridge-<bot>.log` 有新 `restart` 分隔线 + `connected to wss://msg-frontier.feishu.cn`。此前本机**没有**该任务（只有 `machine-a`/`D:` 那台有）。
 - **顺带修**：`ARCH-101`→`ARCH-110` 失效引用、搬家后的相对链接、clone 示例从 `xhs-card-gen` 改 link16；删掉附录 B 里**已作废**的 `_autopilot/spawn_worker.py` + `watchdog.py` 硬编码条目（核实：link16 仓无 `_autopilot/`）。改锚 3 处引用方：`ARCH-110 §4.1` / `SOP-131 §E` / `feishu/bridge_env.py` docstring；`CLAUDE.md` 文档表登记新条目。
 
 ---
@@ -764,10 +764,10 @@ Google / Slack token、Bearer 令牌、私钥、webhook URL **全部 0 命中**�
 
 ## v0.2.0 — Phase 2B 切流完成 + 回信路由/标记/工具补齐（2026-06-28）
 
-**WHY**：本机(zhenz/D:)正式从 `xhs/orchestrator` 切到 `link16/feishu` 跑桥（17 bot）；切流中暴露并修掉若干 link16 早期快照缺口 + 加入用户要的「谁→谁」标记。（另一台 zhuzhen/E: 已先在 link16 跑。）
+**WHY**：本机(machine-a/D:)正式从 `xhs/orchestrator` 切到 `link16/feishu` 跑桥（17 bot）；切流中暴露并修掉若干 link16 早期快照缺口 + 加入用户要的「谁→谁」标记。（另一台 machine-b/E: 已先在 link16 跑。）
 
 **WHAT**
-- **切流完成**：停老桥(xhs/orchestrator)→ 起新桥(link16/feishu)·开机自启任务改指 link16·名册整盘拷入·17 bot 全连。本机 runbook = `docs/SOP-131-cutover-zhenz-d.md`。
+- **切流完成**：停老桥(xhs/orchestrator)→ 起新桥(link16/feishu)·开机自启任务改指 link16·名册整盘拷入·17 bot 全连。本机 runbook = `docs/SOP-131-cutover-machine-a.md`。
 - **回信路由 per-turn**（修「长回复(>5min)被 300s 墙钟误判过期 → 错投 owner DM → 跨机 230013 → webhook 乱投通知群」）：删时间窗 → `chat_kind`(a2a/p2a) → 再到 per-turn（UserPromptSubmit hook + 旁路 route 文件）·三来源(群a2a/飞书DM/terminal)交错不串台、不漏隐私。
 - **标记点名**：注入标记 `[飞书-<bot>]` → `[飞书_from_<发>_to_<收>]`（open_id 按 app 隔离·接收方反查不出发信人 → 发信方 `send_feishu_msg --to-agent` 自己盖章；`feishu_bridge` 见盖章不重复加、p2a 补 `from_host`；`bridge_userprompt` hook 兼容旧式）。
 - **送达修复**：入站注入一律 `paste`（治长消息吞吐截断）；关 SDK 文字防抖合并（`merge_batch` 漏填 `content_text` → 误判「未知类型」丢正文）。

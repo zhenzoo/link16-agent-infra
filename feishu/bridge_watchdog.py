@@ -444,7 +444,7 @@ def _alert_target(bot_name):
       在 TB24 永远暴露不出来，又一条只有跨机才验得出的失效。）
 
     ⚠️ **open_id 是按 app 隔离的**：同一个人在不同 bot 眼里 id 不同
-      （tb25 实测：主人在 tb25-ccp 眼里是 ou_8b055e1b…、在 tb25-link16 眼里是 ou_9284b2e6…；
+      （tb25 实测：主人在 tb25-ccp 眼里是 ou_xxxxxxx16…、在 tb25-link16 眼里是 ou_xxxxxxx17…；
       本机 22 个 owner 文件有 16 个不同 open_id）。
       ⇒ **必须读那个 bot 自己的 owner 文件**，绝不能拿别的 bot 的 open_id 去发。
     """

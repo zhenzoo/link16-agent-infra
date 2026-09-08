@@ -59,9 +59,9 @@ class BridgeHookUtf8Tests(unittest.TestCase):
             state = Path(tmp)
             payload = json.dumps({
                 "prompt": (
-                    "李郑安：@tb26-baseball 你是干什么的\n"
+                    "同事A：@tb26-baseball 你是干什么的\n"
                     "[飞书 from=ou_sender to=tb26-baseball via=群 "
-                    "route=p2a-ext dest=oc_92cf4938 at=ou_8781b03a]"
+                    "route=p2a-ext dest=oc_xxxxxxx18 at=ou_xxxxxxx19]"
                 )
             }, ensure_ascii=False).encode("utf-8")
             env = os.environ.copy()
@@ -85,8 +85,8 @@ class BridgeHookUtf8Tests(unittest.TestCase):
             )
             self.assertEqual({key: route.get(key) for key in ("kind", "dest", "at")}, {
                 "kind": "p2a-ext",
-                "dest": "oc_92cf4938",
-                "at": "ou_8781b03a",
+                "dest": "oc_xxxxxxx18",
+                "at": "ou_xxxxxxx19",
             })
             self.assertTrue(route["active"])
             self.assertTrue(route["turn_key"])

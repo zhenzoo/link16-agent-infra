@@ -65,3 +65,6 @@ docs/mockups/index.html
 
 # 一次性临时脚本（探索用·勿提交）
 feishu/_fs_list_tmp.py
+
+# 各机自己的定时任务定义（含私有业务 prompt）· 本机文件，不入库；格式见 feishu/cron-jobs/README.md
+feishu/cron-jobs/*.yaml

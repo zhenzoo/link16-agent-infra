@@ -63,14 +63,14 @@
 ```yaml
 # link16/agent-registry.yaml（committed·跨机 SSOT·只登【共享仓】）
 xhs-card-gen:
-  - { agent: tb25-xhs-card-gen, machine: zhenz-d,   cwd: D:/410_VibeCoding/Post/tools/xhs-card-gen }
-  - { agent: tb24-xhs-card-gen, machine: zhuzhen-e,  cwd: E:/410_VibeCoding/Post/tools/xhs-card-gen }
+  - { agent: tb25-xhs-card-gen, machine: machine-a,   cwd: D:/410_VibeCoding/Post/tools/xhs-card-gen }
+  - { agent: tb24-xhs-card-gen, machine: machine-b,  cwd: E:/410_VibeCoding/Post/tools/xhs-card-gen }
 link16-agent-infra:
-  - { agent: tb25-link16, machine: zhenz-d,  cwd: D:/410_VibeCoding/Post/tools/link16-agent-infra }
-  - { agent: tb24-link16, machine: zhuzhen-e, cwd: E:/410_VibeCoding/Post/tools/link16-agent-infra }
+  - { agent: tb25-link16, machine: machine-a,  cwd: D:/410_VibeCoding/Post/tools/link16-agent-infra }
+  - { agent: tb24-link16, machine: machine-b, cwd: E:/410_VibeCoding/Post/tools/link16-agent-infra }
 claude-personal:
-  - { agent: tb25-ccp, machine: zhenz-d,  cwd: C:/Users/zhenz/.claude-personal }
-  - { agent: tb24-ccp, machine: zhuzhen-e, cwd: E:/... }
+  - { agent: tb25-ccp, machine: machine-a,  cwd: C:/Users/<user>/.claude-personal }
+  - { agent: tb24-ccp, machine: machine-b, cwd: E:/... }
 ```
 
 - 路由 = 「我 push 的仓 R → 名册里 R 名下、**机器 ≠ 本机**的 agent，逐个 send 通知」。

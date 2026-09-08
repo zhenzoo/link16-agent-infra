@@ -10,7 +10,7 @@
 ## §0 · 承重事实（主 session 亲 Read 代码验证·file:line）
 
 1. **problem 1 根因 = 桥【丢弃】晚到的 a2a 回复**（不是收不到）。对端 B 回复经 B 的 drainer 发到共享群、@ 发起方 A、尾缀哨兵 `PEER_LOOP_MARK`（`feishu_bridge.py:1578`）。A 的桥**确实收到这条事件**（`on_message`·`is_group` + `mentioned_bot`），但 `feishu_bridge.py:1320` 见哨兵就 `return` 丢弃（防 A↔B 回环）。⇒ **唯一接住晚到回复的是 `send_feishu_msg.py --wait` 那个独立子进程**（`send_feishu_msg.py:316 wait_for_reply`）；窗口一关，回复落群没人接（今日实证：tb25-ccp 12:02 回复、120s 窗超时、只能 `bridge_feishu_probe --group` 手捞）。
-2. **problem 2 根因 = 信封 `from` 直接塞 open_id**。`feishu_bridge.py:1476-1481`：群消息（a2a）时 `from_disp = (sender or "agent")`，`sender = msg.sender.open_id`（`:1310`）⇒ 注入的信封成 `[飞书 from=ou_e7225b23… to=tb25-link16 via=群 · route=a2a …]`，`from` 是裸 open_id 不是名字。
+2. **problem 2 根因 = 信封 `from` 直接塞 open_id**。`feishu_bridge.py:1476-1481`：群消息（a2a）时 `from_disp = (sender or "agent")`，`sender = msg.sender.open_id`（`:1310`）⇒ 注入的信封成 `[飞书 from=ou_xxxxxxx6… to=tb25-link16 via=群 · route=a2a …]`，`from` 是裸 open_id 不是名字。
 3. **SSOT 已在消息里**：发信方 `send_feishu_msg.py:418` 盖 `[飞书_from_<发>_to_<收>]`（用**名字**·非 open_id）。到 `:1476` 时这个戳仍在 `text`（mentions/at_name 已 strip、纯文本戳保留）。⇒ **problem 2 解 = 解析这个已在场的戳，零 API、零硬编码**（与 ARCH-140 §5b「SDK 事件侧认 from 靠可见标记」同一结论：event 侧 open_id 按 app 隔离、不可靠，戳才是 SSOT）。
 4. **problem 3 名册漂移**（`bridge-bots.local.json`）：`tb25-codex` 的 `at_name=@tb25-speech-codex` ≠ `@`+name（其余 bot 都守 `at_name==@+name`）；`tb25-coacho` 的 `app_id_env=FEISHU_BRIDGE_COACHO_APP_ID`（缺 `TB25_` 段·其余都 `FEISHU_BRIDGE_TB25_*`）。三个名（内部 `name` / `@` 用的 `at_name` / 飞书显示名 `display_name`·未填）无一处机械对照——`bridge_doctor.py` 只查 outbox 运行态、**没有名册一致性检查**。
 5. **problem 4 不可发现**：`send_feishu_msg.py` 只登记在本仓 `TOOLS.md:21`（link16 内部索引）；别的仓的 Claude Code 不读它 ⇒ 不知道有「按名喊智能体」这原语。**无用户级 skill 靠 description 自动浮现。**

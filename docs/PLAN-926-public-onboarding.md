@@ -111,9 +111,9 @@ last_reviewed: 2026-08-17
 - [ ] **S1.2 · 清掉文档与 CHANGELOG 里的主机名/用户名**
   - **问题**：`docs/ARCH-010-wmux-orchestration.md`(11 行)、`docs/PROPOSAL-911-repo-sync-notify.md`(6 行)、`CHANGELOG.md`(3 行) 等散着真实机器名与 Windows 用户名。
   - **矛盾**：全删会让实证记录失去可追溯性（「哪台机上实测的」是有价值的信息）。
-  - **推荐**：**保留机器代号**（`tb25` / `tb24` / `tuf19` 是无意义代号，无泄漏）、**替换掉真实 hostname 与 Windows 用户名**（`TUF19_HOSTNAME` / `ZhuZhen` 这类）。
+  - **推荐**：**保留机器代号**（`tb25` / `tb24` / `tuf19` 是无意义代号，无泄漏）、**替换掉真实 hostname 与 Windows 用户名**（`TUF19_HOSTNAME` / `machine-b` 这类）。
   - **交付物**：一份逐处替换清单。
-  - **验证**：`grep -riE 'TB25_HOSTNAME|TB24_HOSTNAME|TUF19_HOSTNAME|ZhuZhen'` 全仓 = 0 命中。
+  - **验证**：`grep -riE 'TB25_HOSTNAME|TB24_HOSTNAME|TUF19_HOSTNAME|<用户名>'` 全仓 = 0 命中。
 
 ### S2 · 门面：重写 `README.md`（**这是「更容易上手」的主体**）
 

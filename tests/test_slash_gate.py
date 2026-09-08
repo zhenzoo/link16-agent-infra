@@ -156,7 +156,7 @@ class GateIdentifiesPeerViaStampTest(unittest.TestCase):
     """open_id 是 per-app 的 → 名册按 open_id 恒查不到 peer；必须退 a2a 戳认人。
 
     2026-08-03 上线当晚自查发现：初版闸只用 name_for_open_id，而名册里存的 open_id
-    是【另一个应用视角】下的值（实证 tb25-phd-taoci：名册 ou_acd4e2d4… vs 实际发来 ou_3d12b059…）
+    是【另一个应用视角】下的值（实证 tb25-phd-taoci：名册 ou_xxxxxxx3… vs 实际发来 ou_xxxxxxx4…）
     ⇒ 持有授权的 peer 也会被拒 = 闸装了等于谁都关不了。
     """
     BOT = {"name": "victim"}
