@@ -146,6 +146,18 @@ def _profile_snapshot(roster: dict) -> dict:
                 ))
                 hooks.append({"profile": name, "runtime": "claude", "ok": ok,
                               "evidence": str(settings)})
+            elif spec.runtime == "kimi":
+                # Kimi uses its native TUI and Wire observer, not Codex hooks.
+                required = [HERE / "kimi_native_worker.py", HERE / "kimi_events.py"]
+                missing = [str(path) for path in required if not path.is_file()]
+                hooks.append({
+                    "profile": name, "runtime": "kimi", "ok": not missing,
+                    "evidence": "; ".join(
+                        f"{path} ({'ok' if path.is_file() else 'missing'})" for path in required
+                    ),
+                    "status": "missing" if missing else "ok",
+                    "error": "missing Kimi transport: " + ", ".join(missing) if missing else "",
+                })
             else:
                 worker = HERE / "codex_app_server_worker.py"
                 hook_row, _desired = install_codex_bridge_hooks.hooks_plan(

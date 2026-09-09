@@ -16,7 +16,7 @@ does_not_own:
 read_when:
   - 准备实现公开版默认安装体验
   - 选择应随 Link16 提供的用户级规则
-last_reviewed: 2026-09-07
+last_reviewed: 2026-09-09
 ---
 
 # Link16 公开安装基线
@@ -55,7 +55,8 @@ feishu_bridge 的四个命令分支、ROLE-010、SOP-100、PLAN-926，以及下�
 默认配置的含义是：安装清单已经列明的常规步骤连续执行，自动跳过健康项；只在真实登录、授权、
 已有配置冲突等依赖处指导用户操作。不是假定新用户已经批准所有机器权限和所有后续任务。
 Claude/Codex 的选择可一次说明；未选择的 provider 不安装、不计验收失败。不强制增加 ccp2 或其他账号。
-Kimi 可保留可选入口；本次默认命名要求先覆盖用户明确点名的 ccp/cxp。
+2026-09-08 用户补充要求：Kimi 也进入首次安装的默认选中清单，可单独取消；账号名称仍由用户选择。
+本计划的 ccp/cxp 默认命名与公开模板工作保持原范围，三种 CLI 的程序安装位置均遵循官方安装器。
 
 AnySearch、Jina、media-dl、BrowserAct、付费 API 轮换器、社媒工具、Mattermost、envsync、
 私人 push/pull/commit/align/toolify/vendor、Lab 毕业体系均不作为公开版默认依赖。
@@ -163,3 +164,36 @@ PLAN-926 §5.2 已记录“保留历史、不另建仓、整仓公开”的决�
 - [ ] 后续发布准备：按 PLAN-926 清理当前树、补分发说明、重新扫描、记录候选版本证据；届时再执行可见性变更。
 
 本轮没有修改任何 provider home、模型、权限参数、运行中的桥或仓库可见性；这些状态不得由方案文本冒充。
+
+## 2026-09-09 · 补齐三种 CLI 的首次安装链路
+
+baseline：Claude/Codex 已使用官方 PowerShell 安装器且不指定程序目录；默认七项清单、
+profile 初始化参数、Agent CLI 检查与 service doctor 尚未完整包含原生 Kimi Code。
+target：默认八项（核心五项 + 可取消的三种 CLI）；只选 Kimi 也能初始化隔离 profile 并通过对应的配置检查。
+observed：已核对官方安装脚本；Claude 为 `~/.local/bin/claude.exe`，Codex 为
+`%LOCALAPPDATA%/Programs/OpenAI/Codex/bin/codex.exe`，Kimi 为 `~/.kimi-code/bin/kimi.exe`。
+这些是程序入口，隔离账号 home 仍由 registry 管理；已有安装不自动卸载或迁移。
+evidence：windows_bootstrap、profile_bootstrap、preflight、service_doctor 及其回归测试；
+官方入口见 SOP-100 的三种 CLI 安装表。
+
+- [x] Stage 1：核对官方安装源、默认目录与 Kimi 缺口；实际 09-09 09:34。
+- [x] Stage 2：补齐默认选项、Kimi profile 参数与专用体检，更新 SOP/README/TOOLS/示例；实际 09:41。
+- [x] Stage 3：全默认、只选 Kimi、已有安装、缺组件失败与注册 dry-run 均通过，文档链接及 diff 检查通过；实际 09:46。
+
+阶段证据：四个安装/体检测试模块 56 passed、8 subtests；入口文档检查 6 passed；
+本机只读 `windows_bootstrap.py --json` 返回 applied=false、八项清单及三种 CLI 的官方默认程序路径。
+没有使用全新 Windows 虚拟机实际下载/安装，也未把现有账号登录状态当作新用户登录验收。
+
+09:45 补充：首次全仓回归为 703 passed、1 failed、81 subtests；失败的既有注册回调测试
+没有指定 notify_bot，依赖运行 pytest 的会话身份。为测试明确指定已 mock 的回调目标后，
+注册模块 21 项通过，生产回调规则未变。另补齐注册器 `--runtime kimi` 及其零写入 dry-run 测试；
+因此 Stage 3 从原 ETA 09:45 调整到 09:48，等待最终全仓结果。
+
+09:46 最终结果：`python -m pytest -q --tb=short` 为 705 passed、81 subtests passed；
+仅有第三方 lark_oapi/protobuf 的两条弃用警告。`git diff --check`、受改文档 front matter
+和本地链接检查通过。恢复后的总 ETA 原为 09:55，实际 09:46，提前 9 分钟：官方脚本已在缓存，
+隔离测试与最终全仓回归耗时低于预估。代码与说明已在本地工作区就绪，尚未提交或推送。
+
+本子任务只修改安装代码、文档和隔离测试夹具，不对本机运行中的 CLI、账号或桥执行安装/迁移。
+上轮网络抓取超时后任务中断；恢复时官方脚本已落盘，没有残留下载进程。此前 ETA 已失效，按恢复时间重排。
+本子任务通过不代表前文公开模板、真人登录、首次 DM 与命令教学的发布门槛已通过。

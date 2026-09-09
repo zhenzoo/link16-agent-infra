@@ -17,6 +17,27 @@ import register_feishu_app as register  # noqa: E402
 
 
 class DeviceGrantRecoveryTests(unittest.TestCase):
+    def test_explicit_kimi_runtime_registration_dry_run_is_read_only(self):
+        profile = mock.Mock(name="kimi_profile")
+        profile.name = "kimi-work"
+        profile.runtime = "kimi"
+        with mock.patch.object(register.agent_runtime, "profile_spec", return_value=profile), \
+             mock.patch.object(register.agent_runtime, "profile_doctor", return_value={"ok": True}), \
+             mock.patch.object(register.registration_transport, "preflight", return_value="test-sdk"), \
+             mock.patch.object(register, "_recovery_app_id", return_value=None), \
+             mock.patch.object(register.registration_monitor, "arm_job") as arm, \
+             mock.patch.object(register, "_run_device_grant") as grant, \
+             mock.patch.object(register, "write_env") as write, \
+             mock.patch.object(sys, "argv", ["register", "--name", "test", "--bot", "test",
+                 "--profile", "kimi-work", "--runtime", "kimi", "--tenant-kind", "personal",
+                 "--capability", "core", "--dry-run"]), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            register.main()
+        self.assertIn("profile=kimi-work runtime=kimi", output.getvalue())
+        arm.assert_not_called()
+        grant.assert_not_called()
+        write.assert_not_called()
+
     def test_known_app_id_recovers_without_requesting_credentials(self):
         with mock.patch.object(register.bridge_scope_audit, "_env_val", return_value="cli_original"), \
              mock.patch.object(register.registration_monitor, "get_job", return_value=None):
@@ -187,11 +208,15 @@ class RegistrationLifecycleTests(unittest.TestCase):
                           "verification_uri_complete": "https://example.invalid/authorize"}),
                 response({"client_id": "cli_test", "client_secret": "secret-private"}),
             ]))
+            # This callback test owns an explicit mocked recipient; it must not
+            # depend on whether pytest itself was launched inside a Feishu bot.
             stack.enter_context(mock.patch.object(sys, "argv", ["register", "--name", "test", "--bot", "test",
-                               "--profile", "cxp", "--cwd", str(root), "--tenant-kind", "personal", "--capability", "core"]))
+                               "--profile", "cxp", "--cwd", str(root), "--tenant-kind", "personal", "--capability", "core",
+                               "--notify-bot", "test-controller"]))
             output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             register.main()
             state = monitor.get_job(bot="test")
+            self.assertEqual(state["notify_bot"], "test-controller")
             self.assertEqual(state["registration_source"], "official_sdk")
             self.assertTrue(state["sdk_returned_at"])
             self.assertTrue(state["milestones"]["registered"])

@@ -14,7 +14,7 @@ does_not_own:
   - 架构与精确合同（见 docs/ARCH-*、docs/SPEC-*）
 read_when:
   - 第一次了解或部署 Link16
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-09
 ---
 
 # Link 16 · 用飞书（Lark）遥控你电脑上的 Claude Code、Codex 与 Kimi Code
@@ -157,16 +157,16 @@ last_reviewed: 2026-09-06
 > agent 的共同部署职责与人工停点见 [`docs/ROLE-010-link16-deployment-engineer.md`](docs/ROLE-010-link16-deployment-engineer.md)。
 
 ```powershell
-# 0) 展示 7 项 Windows 清单；默认不修改，确认后才 apply
+# 0) 展示 8 项 Windows 清单（核心五项 + Claude/Codex/Kimi）；默认不修改，确认后才 apply
 python feishu/windows_bootstrap.py
 python feishu/windows_bootstrap.py --apply --yes
 
 # 1) 装 Python 依赖
 pip install -r feishu/requirements.txt
 
-# 2) 建本机隔离 profile registry（示例同时选 Claude 与 Codex；也可只给其中一组）
-python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work
-python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --apply
+# 2) 建本机隔离 profile registry（示例选三种 CLI；只提供实际选择的参数组）
+python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --kimi-profile kimi-work --kimi-home ~/.kimi-work
+python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --kimi-profile kimi-work --kimi-home ~/.kimi-work --apply
 python feishu/profile_bootstrap.py                   # 预览 profile/入口/feishu skill 安装
 python feishu/profile_bootstrap.py --apply
 python feishu/profile_bootstrap.py --doctor
@@ -192,10 +192,13 @@ python feishu/service_doctor.py           # 文件/配置/运行/真实收发四
 ```
 
 gstack 不在默认安装范围。clone Link16 会带上 repo-owned `feishu` skill 真源；
-`profile_bootstrap.py` 按本机 local registry 安装用户自己命名的 Claude/Codex profile、Shell 入口和 skill。
+三种 CLI 的新安装均走官方原生安装器及其默认程序目录，可用 `--skip` 取消不需要的项；
+例如只选 Kimi 时使用 `--skip claude,codex`。已有安装先复用，不自动卸载或迁移。
+程序路径与隔离账号目录的区别见 [SOP-100 安装清单](docs/SOP-100-new-machine-setup.md#部署前只确认一次8-项安装清单)。
+`profile_bootstrap.py` 按本机 local registry 安装用户自己命名的 Claude/Codex/Kimi profile、Shell 入口和 skill。
 anysearch、push、pull、align 等个人 workflows 只是可选增强，不是运行依赖。
 
-通了之后：@ 它说句话，它会在你指定的仓库目录里用所选 Claude/Codex profile 开会话干活，干完把结果发回飞书。
+通了之后：@ 它说句话，它会在你指定的仓库目录里用所选 Claude/Codex/Kimi profile 开会话干活，干完把结果发回飞书。
 
 **卡住了？** 先看 [`docs/SOP-100`](docs/SOP-100-new-machine-setup.md) 的「附录 A · 排错速查」——
 常见症状（依赖没装 / wmux 连不上 / 会话起不来 / 凭据读不到）都在那张表里。
@@ -293,7 +296,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 
 | 能干什么 | 什么时候用 |
 |---|---|
-| `windows_bootstrap.py` | 新机器第一步，7 项 Windows 清单 |
+| `windows_bootstrap.py` | 新机器第一步，8 项 Windows 清单；三种 CLI 默认选中、可取消 |
 | `profile_bootstrap.py` | 建隔离 profile、shell 入口、装仓内 feishu skill |
 | `preflight.py` | 装之前体检：Python / node / wmux / 编码 / 凭据 / 名册 |
 | `service_doctor.py` · `bridge_doctor.py` | 装之后验收：文件 / 配置 / 运行 / 真实收发四层 |

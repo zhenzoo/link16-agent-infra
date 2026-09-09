@@ -426,12 +426,12 @@ def check_registry():
 
 
 def check_agent_cli():
-    """面板里真正干活的那个 CLI（claude / codex）至少得有一个。"""
-    found = [n for n in ("claude", "codex") if _fresh_which(n)]
+    """面板里真正干活的那个 CLI（claude / codex / kimi）至少得有一个。"""
+    found = [n for n in ("claude", "codex", "kimi") if _fresh_which(n)]
     if found:
         return Result("Agent CLI", OK, "、".join(found))
-    return Result("Agent CLI", FAIL, "PATH 里既没有 claude 也没有 codex",
-                  "装 Claude Code（https://claude.com/claude-code）或 Codex CLI —— "
+    return Result("Agent CLI", FAIL, "PATH 里没有 claude、codex 或 kimi",
+                  "按 SOP-100 安装所选 Claude Code、Codex CLI 或 Kimi Code CLI —— "
                   "桥只负责把消息接进面板，面板里得有东西干活")
 
 

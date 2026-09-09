@@ -34,17 +34,24 @@ class ComponentPlanTests(unittest.TestCase):
         with mock.patch.object(wb, "_python312_executable", return_value=fresh):
             self.assertEqual(wb.detect_component("python"), fresh)
 
-    def test_default_plan_has_exactly_seven_and_never_installs_gstack_or_provider_via_npm(self):
+    def test_default_plan_has_eight_and_providers_use_official_native_installers(self):
         self.assertEqual([row.key for row in wb.COMPONENTS],
-                         ["git", "gh", "python", "node", "wmux", "claude", "codex"])
+                         ["git", "gh", "python", "node", "wmux", "claude", "codex", "kimi"])
         serialized = json.dumps([row.install_command for row in wb.COMPONENTS]).lower()
         self.assertNotIn("gstack", serialized)
         self.assertNotIn("npm", serialized)
         self.assertIn("https://claude.ai/install.ps1", serialized)
         self.assertIn("https://chatgpt.com/codex/install.ps1", serialized)
+        self.assertIn("https://code.kimi.com/kimi-code/install.ps1", serialized)
+        for row in wb.COMPONENTS:
+            if not row.required:
+                self.assertEqual(row.install_command[0], "powershell.exe")
+                self.assertNotIn("winget", " ".join(row.install_command).lower())
+                self.assertNotIn("uv", row.install_command)
 
     def test_only_provider_components_can_be_skipped(self):
         self.assertEqual(wb.parse_skips(["claude,codex"]), {"claude", "codex"})
+        self.assertEqual(wb.parse_skips(["kimi"]), {"kimi"})
         with self.assertRaisesRegex(ValueError, "核心依赖"):
             wb.parse_skips(["git"])
 
@@ -53,6 +60,57 @@ class ComponentPlanTests(unittest.TestCase):
         with mock.patch.object(wb, "detect_component", return_value=fake):
             rows = wb.installation_plan()
         self.assertTrue(all(row["status"] == "installed" for row in rows))
+
+    def test_blank_machine_installs_three_providers_and_skips_have_no_side_effects(self):
+        decision = wb.network_route.RouteDecision("direct", True, "reachable", "direct", ())
+        for skipped in ((), ("kimi",), ("claude", "codex")):
+            with self.subTest(skipped=skipped), \
+                 mock.patch.object(wb, "detect_component", return_value=None), \
+                 mock.patch.object(wb.network_route, "proxy_url", return_value=None), \
+                 mock.patch.object(wb.network_route, "detect", return_value=decision) as probe, \
+                 mock.patch.object(wb.network_route, "child_environment", side_effect=lambda *_: {}), \
+                 mock.patch.object(wb.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+                rows = wb.installation_plan(skipped)
+                results = wb.apply_missing(rows)
+            selected = [component for component in wb.COMPONENTS if component.key not in skipped]
+            self.assertEqual([row["key"] for row in results], [row.key for row in selected])
+            self.assertEqual([call.args[0] for call in probe.call_args_list], [row.probe_url for row in selected])
+            for call, row in zip(run.call_args_list, selected):
+                self.assertEqual(call.args[0], list(row.install_command))
+                self.assertEqual(call.kwargs["env"].get("CODEX_NON_INTERACTIVE"),
+                                 "1" if row.key == "codex" else None)
+
+    def test_installed_kimi_is_never_reinstalled(self):
+        with mock.patch.object(wb, "detect_component", return_value=Path("existing/kimi.exe")), \
+             mock.patch.object(wb.network_route, "detect") as probe, \
+             mock.patch.object(wb.subprocess, "run") as run:
+            rows = wb.installation_plan()
+            self.assertEqual(wb.apply_missing(rows), [])
+        probe.assert_not_called()
+        run.assert_not_called()
+
+    def test_official_default_paths_are_detected_when_parent_path_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local = home / "AppData" / "Local"
+            paths = {
+                "claude": home / ".local" / "bin" / "claude.exe",
+                "codex": local / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe",
+                "kimi": home / ".kimi-code" / "bin" / "kimi.exe",
+            }
+            for path in paths.values():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            with mock.patch.object(wb.preflight, "_fresh_which", return_value=None), \
+                 mock.patch.object(wb.Path, "home", return_value=home), \
+                 mock.patch.dict(os.environ, {"LOCALAPPDATA": str(local)}):
+                for key, path in paths.items():
+                    self.assertEqual(wb.detect_component(key), path)
+
+    def test_existing_path_entry_is_preserved_instead_of_implicitly_migrated(self):
+        installed = "C:/existing-manager/claude.exe"
+        with mock.patch.object(wb.preflight, "_fresh_which", return_value=installed):
+            self.assertEqual(wb.detect_component("claude"), Path(installed))
 
     def test_apply_missing_stops_when_real_source_probe_is_unusable(self):
         row = {"key": "codex", "status": "missing", "probe_url": "https://example.invalid/",
@@ -73,10 +131,11 @@ class ComponentPlanTests(unittest.TestCase):
             {"key": "claude", "status": "installed"},
             {"key": "codex", "status": "skipped"},
             {"key": "node", "status": "missing"},
+            {"key": "kimi", "status": "installed"},
         ]
         result = wb.software_user_plan(rows, runtime_health={"profiles": {"runtimes": {}}})
         self.assertEqual([row["user_status"] for row in result], [
-            "已存在跳过", "需要登录", "本次不安装", "将安装",
+            "已存在跳过", "需要登录", "本次不安装", "将安装", "需要登录",
         ])
         self.assertTrue(all(row["user_status"] in wb.USER_STATUSES for row in result))
 

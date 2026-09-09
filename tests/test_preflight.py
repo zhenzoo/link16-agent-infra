@@ -67,6 +67,16 @@ class TerminalDefaultsChecks(unittest.TestCase):
 
 
 class PortableSetupChecks(unittest.TestCase):
+    def test_kimi_only_machine_passes_agent_cli_check(self):
+        with mock.patch.object(preflight, "_fresh_which", side_effect=lambda name: "kimi.exe" if name == "kimi" else None):
+            row = preflight.check_agent_cli()
+        self.assertEqual(row.status, preflight.OK)
+        self.assertEqual(row.detail, "kimi")
+
+    def test_missing_all_agent_clis_is_a_failure(self):
+        with mock.patch.object(preflight, "_fresh_which", return_value=None):
+            self.assertEqual(preflight.check_agent_cli().status, preflight.FAIL)
+
     def test_fresh_which_reads_persistent_path_after_desktop_process_starts(self):
         with tempfile.TemporaryDirectory() as tmp:
             exe = Path(tmp) / "node.EXE"

@@ -326,7 +326,7 @@ def main():
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
     ap.add_argument("--bot", default=None,
                     help="bot 标识（如 ws2）→ 写 FEISHU_BRIDGE_<BOT>_APP_ID/SECRET；不给 = 默认键")
-    ap.add_argument("--runtime", choices=("claude", "codex"), default=None,
+    ap.add_argument("--runtime", choices=sorted(agent_runtime._PROFILE_RUNTIMES), default=None,
                     help="目标 runtime；不给时由 --profile 推导，无 profile 则兼容默认 claude")
     ap.add_argument("--profile", default=None,
                     help="Link16 agent profile（如 cck/cxp）；不给则取同 runtime 的本机默认")

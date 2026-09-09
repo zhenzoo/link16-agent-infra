@@ -222,3 +222,35 @@ def test_profile_snapshot_checks_the_selected_codex_home_hooks(monkeypatch, tmp_
     broken = sd._profile_snapshot(roster)["hooks"][0]
     assert broken["ok"] is False
     assert broken["status"] == "conflict"
+
+
+def test_kimi_snapshot_uses_native_transport_and_rejects_missing_components(monkeypatch, tmp_path):
+    home = tmp_path / "user"
+    registry = tmp_path / "profiles.json"
+    pb.initialize_registry(registry, [
+        {"name": "kimi-work", "runtime": "kimi", "home": "~/.kimi-work"},
+    ], apply=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LINK16_AGENT_PROFILE_REGISTRY", str(registry))
+    pb.bootstrap(home, apply=True, profiles=("kimi-work",), registry_path=registry)
+
+    def reject_codex_hooks(*args, **kwargs):
+        raise AssertionError("Kimi must not read or install Codex hooks")
+
+    monkeypatch.setattr(sd.install_codex_bridge_hooks, "hooks_plan", reject_codex_hooks)
+    worker_dir = tmp_path / "transport"
+    worker_dir.mkdir()
+    monkeypatch.setattr(sd, "HERE", worker_dir)
+    roster = {"bots": [{"name": "bot", "profile": "kimi-work"}]}
+    for files, expected in (((), False), (("kimi_native_worker.py",), False),
+                            (("kimi_events.py",), True)):
+        for name in files:
+            (worker_dir / name).write_text("# fixture", encoding="utf-8")
+        snapshot = sd._profile_snapshot(roster)
+        assert snapshot["errors"] == []
+        row = snapshot["hooks"][0]
+        assert row["runtime"] == "kimi"
+        assert row["ok"] is expected
+        assert row["status"] == ("ok" if expected else "missing")
+    assert not (home / ".kimi-work" / "hooks.json").exists()

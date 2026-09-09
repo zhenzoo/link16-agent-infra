@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "feishu"))
@@ -209,10 +210,45 @@ class ProfileBootstrapTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "至少提供一个"):
                 pb.initialize_registry(Path(tmp) / "empty.json", [], apply=True)
-            for forbidden in ("~/.claude", "~\\.CODEX\\"):
+            for forbidden in ("~/.claude", "~\\.CODEX\\", "~/.kimi-code"):
                 with self.subTest(forbidden=forbidden):
                     with self.assertRaisesRegex(ValueError, "禁止"):
                         pb._new_profile("bad", "claude", forbidden)
+
+    def test_kimi_only_cli_initialization_bootstraps_isolated_home_without_codex_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "new-user"
+            registry = root / "agent-profiles.local.json"
+            args = ["--init-registry", "--kimi-profile", "kimi-work", "--kimi-home", "~/.kimi-work", "--json"]
+            with mock.patch.object(pb.agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH", registry):
+                self.assertEqual(pb.main(args), 0)
+                self.assertFalse(registry.exists())
+                self.assertEqual(pb.main(args + ["--apply"]), 0)
+                first = registry.read_bytes()
+                self.assertEqual(pb.main(args + ["--apply"]), 0)
+                self.assertEqual(registry.read_bytes(), first)
+            doc = json.loads(first)
+            self.assertEqual(doc["default_profiles"], {"kimi": "kimi-work"})
+            pb.bootstrap(home, apply=True, profiles=("kimi-work",), registry_path=registry)
+            self.assertTrue((home / ".kimi-work").is_dir())
+            self.assertTrue((home / ".agents" / "skills" / "feishu" / "SKILL.md").is_file())
+            self.assertFalse((home / ".kimi-work" / "hooks.json").exists())
+            self.assertFalse((home / ".kimi-code").exists())
+            self.assertEqual(list(home.rglob("auth.json")), [])
+            self.assertIn("kimi-work", (home / ".bashrc").read_text(encoding="utf-8"))
+            checked = pb.bootstrap(home, profiles=("kimi-work",), registry_path=registry)
+            self.assertTrue(all(row["status"] == "ok" for row in checked))
+
+    def test_kimi_initialization_requires_both_name_and_home_before_any_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "profiles.json"
+            with mock.patch.object(pb.agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH", registry):
+                for option, value in (("--kimi-profile", "kimi-work"), ("--kimi-home", "~/.kimi-work")):
+                    with self.subTest(option=option), self.assertRaises(SystemExit) as error:
+                        pb.main(["--init-registry", option, value, "--apply"])
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertFalse(registry.exists())
 
     def test_legacy_registry_migration_is_exact_and_conflict_safe(self):
         with tempfile.TemporaryDirectory() as tmp:

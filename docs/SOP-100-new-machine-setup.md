@@ -8,7 +8,7 @@ owns:
   - 依赖安装顺序与验证
   - wmux 与 RPC 客户端的就位检查
   - private GitHub collaborator 登录、main-only clone 与同步验收
-  - 新机机型/年份前缀与用户显式命名的隔离 Claude/Codex profile
+  - 新机机型/年份前缀与用户显式命名的隔离 Claude/Codex/Kimi profile
   - 本机 .env 凭据与 bot 名册的建立
   - 起桥与验收
   - 开机自启（桥的计划任务 + wmux 的 Run 键）
@@ -21,7 +21,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-08-30
+last_reviewed: 2026-09-09
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -46,7 +46,7 @@ agent 负责运行后文的命令、选路、修复和验收。用户只会经�
 | GitHub 浏览器登录/设备码页 | 用自己的 GitHub 账号登录、接受 private 仓邀请 | 验真账号并只 clone `main` |
 | 网络检测结果 | 若被提示，打开 v2rayN；不需要猜端口 | 对真实 GitHub/PyPI URL 测直连和候选 mixed port |
 | 「机型 + 建议前缀」 | 仅当年份不对或名称冲突时纠正 | 只读型号/BIOS 年份，不读序列号/UUID |
-| Claude / Codex 登录页 | 登录用户本轮选择并命名的隔离 profile；不用的 provider 可明确跳过 | 建立 local registry、隔离 home 与对应入口，不复制任何认证 |
+| Claude / Codex / Kimi 登录页 | 登录用户本轮选择并命名的隔离 profile；不用的 provider 可明确跳过 | 建立 local registry、隔离 home 与对应入口，不复制任何认证 |
 | 飞书 Device Grant 链接 | 在页面核对账号和目标组织，然后授权 | 创建应用并把凭据只写入本机 `.env` |
 | 飞书权限审阅链接 | 核对本次能力与权限，按页面要求创建版本/发布或等管理员审核 | 只申请所选 capability，并持续检查真实授权状态 |
 | 绿色验收表 | 在飞书私聊 bot 发一句「在吗」 | 核对 Git Bash、wmux、profile、桥和 `main` 全绿 |
@@ -73,11 +73,11 @@ winget install --id Python.Python.3.13 -e --accept-source-agreements --accept-pa
 重开终端，确认 `git --version`、`gh --version`、`python --version`（必须 3.12+），再按 §1.1 登录并 clone。
 若 `winget` 本身不存在，先从 Microsoft Store 安装/更新“应用安装程序”；这是空白机唯一额外人工安装点。
 
-### 部署前只确认一次：7 项安装清单
+### 部署前只确认一次：8 项安装清单
 
 agent 在真正安装前必须一次性展示下表并问：**“默认全装；哪项不要？”**
 已经安装的只验版本/路径，不重复安装。前五项是 Link16 核心依赖，不能取消；
-Claude Code / Codex 默认都装，但只用一种 provider 时可以取消另一种。
+Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要的 provider。
 
 | # | 默认 | 组件 | 安装源与规则 |
 |---:|---|---|---|
@@ -86,23 +86,41 @@ Claude Code / Codex 默认都装，但只用一种 provider 时可以取消另�
 | 3 | ☑ 必需 | Python 3.12+ | Python Software Foundation 官方包 |
 | 4 | ☑ 必需 | Node.js LTS | OpenJS 官方 LTS；仓库 RPC 运行时依赖 |
 | 5 | ☑ 必需 | wmux | wmux 官方 WinGet 包；安装后建桌面快捷方式并设 Git Bash |
-| 6 | ☑ 可取消 | Claude Code | 优先 Anthropic 原生安装器；不再默认 `npm -g` |
-| 7 | ☑ 可取消 | Codex CLI | 优先 OpenAI Windows standalone 安装器；不再默认 `npm -g` |
+| 6 | ☑ 可取消 | Claude Code | Anthropic 官方 native 安装器 `https://claude.ai/install.ps1` |
+| 7 | ☑ 可取消 | Codex CLI | OpenAI 官方 Windows standalone 安装器 `https://chatgpt.com/codex/install.ps1` |
+| 8 | ☑ 可取消 | Kimi Code CLI | Moonshot 官方原生安装器 `https://code.kimi.com/kimi-code/install.ps1`；不是旧 Python kimi-cli |
+
+全新 Windows 用户按默认安装时，三种 CLI 都使用上述官方脚本，不通过 WinGet/npm/uv 安装，
+也不传自定义程序安装目录。官方默认程序入口如下（未设置官方安装目录覆盖变量时）：
+
+| CLI | 官方默认程序入口 | 官方说明 |
+|---|---|---|
+| Claude Code | `%USERPROFILE%/.local/bin/claude.exe` | [安装与更新](https://code.claude.com/docs/en/setup) |
+| Codex CLI | `%LOCALAPPDATA%/Programs/OpenAI/Codex/bin/codex.exe` | [官方安装脚本](https://chatgpt.com/codex/install.ps1) |
+| Kimi Code CLI | `%USERPROFILE%/.kimi-code/bin/kimi.exe` | [官方安装说明](https://github.com/MoonshotAI/kimi-code#install) |
+
+程序目录与账号数据目录分开：同一程序服务多个隔离 profile，账号 home 由 §1.3 的 registry 决定。
+下载安装不等于已登录；登录后还需 profile 真启动及飞书真实往返验收。
+Codex 安装子进程使用官方 `CODEX_NON_INTERACTIVE=1`，跳过安装结束时的可选启动询问；
+账号登录留在后续明确的 profile 步骤。
 
 **gstack 不在清单里，默认不安装。** 它是独立的第三方 skill 套件，不是 Link16、wmux、
-Claude Code 或 Codex 的运行依赖。检测/执行器如下；默认仅预览，用户确认后 agent 才加 `--apply --yes`：
+Claude Code、Codex 或 Kimi 的运行依赖。检测/执行器如下；默认仅预览，用户确认后 agent 才加 `--apply --yes`：
 
 ```powershell
 python feishu/windows_bootstrap.py
 python feishu/windows_bootstrap.py --apply --yes
 # 例如只用 Codex：
-python feishu/windows_bootstrap.py --skip claude --apply --yes
+python feishu/windows_bootstrap.py --skip claude,kimi --apply --yes
+# 例如只用 Kimi：
+python feishu/windows_bootstrap.py --skip claude,codex --apply --yes
 ```
 
 脚本会同时读取当前进程与持久化用户/系统 PATH，避免桌面客户端开得太久，
 把刚装好的 Node/Claude 误报成“未安装”。执行每个缺失项前还会对该组件的真实官方来源 URL
 比较直连与已配置代理，沿用 `LINK16_ROUTE_DEFAULT` 预设，只有另一条明显更快时才切换；两路都失败就停。
-已有安装保持现有安装管理器，不在装机时偷偷迁移或重复覆盖。
+已有安装保持现有安装管理器，不在装机时偷偷迁移或重复覆盖；因此已有 WinGet/npm 版本的机器
+不能仅凭“使用默认安装”就宣称已迁移成官方原生版，应先报告实际路径和安装方式。
 脚本还会持久化当前用户的 `PYTHONUTF8=1`；这是 Python 运行时设置，不会改 Windows 的系统区域或影响旧软件。
 由于已经启动的终端、wmux 和计划任务不会倒灌新环境，设置后必须重开终端；生产桥只在安排好的维护窗口重启。
 
@@ -197,13 +215,15 @@ python feishu/network_route.py probe --url https://pypi.org/simple/lark-oapi/
 ```powershell
 python feishu/machine_identity.py
 
-# 新机：示例同时选 Claude/Codex；只装一个 provider 时只提供对应的一组参数
+# 新机：示例同时选三种 CLI；只装部分 provider 时只提供对应的参数组
 python feishu/profile_bootstrap.py --init-registry `
   --claude-profile claude-work --claude-home ~/.claude-work `
-  --codex-profile codex-work --codex-home ~/.codex-work
+  --codex-profile codex-work --codex-home ~/.codex-work `
+  --kimi-profile kimi-work --kimi-home ~/.kimi-work
 python feishu/profile_bootstrap.py --init-registry `
   --claude-profile claude-work --claude-home ~/.claude-work `
-  --codex-profile codex-work --codex-home ~/.codex-work --apply
+  --codex-profile codex-work --codex-home ~/.codex-work `
+  --kimi-profile kimi-work --kimi-home ~/.kimi-work --apply
 
 # 已有旧机：不改名、不搬认证，先逐字迁入 local registry
 python feishu/profile_bootstrap.py --migrate-registry
@@ -216,14 +236,17 @@ python feishu/profile_bootstrap.py --doctor
 ```
 
 `--doctor` 必须同时看到 repo-owned `feishu` skill 与所选 Codex home 的 bridge hooks 为 `ok`。已有的私人 hooks 会保留；损坏或结构非法的 `hooks.json` 报 conflict，安装器不会覆盖。
+Kimi 通过原生终端与 Wire 观察程序接桥，`service_doctor.py` 检查 Kimi 的 worker/event 组件，
+不向 Kimi home 安装 Codex `hooks.json`。只选 Kimi 时，Agent CLI 检查也应通过。
 
 - 前缀约定 = 产品线缩写 + 年份，例 `tb25` / `tb24` / `tuf19`。自动年份来自 BIOS，不等于购买年；用户告知时用 `--year 2025` 覆盖。
 - 本机名示例：`<prefix>-link16`、`<prefix>-baseball`。写入共享 agent registry 前，要说明 private collaborator 可见主机元数据。
-- profile ID 与 home 由用户选择；新建流程拒绝精确的 `~/.claude`、`~/.codex`，推荐 `~/.claude-work`、`~/.codex-work2` 这类隔离目录。
+- profile ID 与 home 由用户选择；新建流程拒绝精确的 `~/.claude`、`~/.codex`、`~/.kimi-code`，推荐 `~/.claude-work`、`~/.codex-work2`、`~/.kimi-work` 这类隔离目录。
 - `agent-profiles.local.json` 是 gitignored 的单一本机有效 registry，不与 committed 文件合并；旧机迁移期 committed `agent-profiles.json` 只作显式 fallback。
-- Claude 的 `feishu` 安装到各所选 profile home；Codex 按官方用户级规则安装到 `$HOME/.agents/skills/feishu`，供同一 Windows 用户的 Codex profiles 共用。
+- Claude 的 `feishu` 安装到各所选 profile home；Codex/Kimi 共用用户级 `$HOME/.agents/skills/feishu`。
 - 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
 - 重开 Git Bash，用用户自己命名的 profile 函数进入对应账号并在官方页面登录；不复制别人的认证文件。
+- Kimi 示例：`kimi-work login`，随后 `kimi-work --version` 和 `python feishu/agent_profile_cli.py selftest --profile kimi-work`；版本检查只证明程序可启动，仍需真实模型回复验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。
 
 ### 1.4 · 装 OpenSSH Server（仅 `envsync` 的硬前置 · 要管理员）
 

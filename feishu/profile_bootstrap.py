@@ -350,8 +350,8 @@ def _normalized_profile_home(value: str) -> str:
     home = str(value or "").strip().replace("\\", "/").rstrip("/")
     if not home.startswith("~/") or home == "~":
         raise ValueError("profile home 必须是 HOME-relative（例如 ~/.claude-work）")
-    if home.casefold() in {"~/.claude", "~/.codex"}:
-        raise ValueError("新 profile 禁止使用 ~/.claude 或 ~/.codex；请选择隔离名称")
+    if home.casefold() in {"~/.claude", "~/.codex", "~/.kimi-code"}:
+        raise ValueError("新 profile 禁止使用 ~/.claude、~/.codex 或 ~/.kimi-code；请选择隔离名称")
     return home
 
 
@@ -372,7 +372,7 @@ def _new_profile(name, runtime, home, launcher="direct", label="") -> dict:
 def initialize_registry(target: Path, specs, *, apply=False) -> dict:
     rows = [_new_profile(**spec) for spec in specs]
     if not rows:
-        raise ValueError("新 registry 首次建立必须至少提供一个 Claude 或 Codex profile")
+        raise ValueError("新 registry 首次建立必须至少提供一个 Claude、Codex 或 Kimi profile")
     names = [row["name"] for row in rows]
     homes = [row["home"].casefold() for row in rows]
     if len(names) != len(set(names)) or len(homes) != len(set(homes)):
@@ -558,7 +558,7 @@ def main(argv=None) -> int:
     operation.add_argument("--migrate-registry", action="store_true",
                            help="把 legacy committed registry 无损迁入本机 local registry")
     operation.add_argument("--init-registry", action="store_true",
-                           help="为新用户用显式 Claude 和/或 Codex 名称与 home 建 local registry")
+                           help="为新用户用所选 Claude/Codex/Kimi 名称与 home 建 local registry")
     operation.add_argument("--register-profile", metavar="NAME",
                            help="向已存在的 local registry 新增一个隔离 profile")
     parser.add_argument("--profile", action="append", default=[],
@@ -572,6 +572,8 @@ def main(argv=None) -> int:
     parser.add_argument("--claude-home")
     parser.add_argument("--codex-profile")
     parser.add_argument("--codex-home")
+    parser.add_argument("--kimi-profile")
+    parser.add_argument("--kimi-home")
     parser.add_argument("--migrate-legacy-feishu-adapter", action="store_true",
                         help="把 marker-owned 旧 Codex feishu adapter 移到可恢复备份目录")
     args = parser.parse_args(argv)
@@ -586,6 +588,7 @@ def main(argv=None) -> int:
         pairs = {
             "claude": (args.claude_profile, args.claude_home),
             "codex": (args.codex_profile, args.codex_home),
+            "kimi": (args.kimi_profile, args.kimi_home),
         }
         incomplete = [runtime for runtime, pair in pairs.items() if bool(pair[0]) != bool(pair[1])]
         if incomplete:
@@ -596,7 +599,7 @@ def main(argv=None) -> int:
             for runtime, (name, profile_home) in pairs.items() if name
         ]
         if not specs:
-            parser.error("--init-registry 至少需要一组 --claude-profile/--claude-home 或 --codex-profile/--codex-home")
+            parser.error("--init-registry 至少需要一组 --claude-profile/--claude-home、--codex-profile/--codex-home 或 --kimi-profile/--kimi-home")
         rows = [initialize_registry(local_registry, specs, apply=args.apply)]
     elif args.register_profile:
         if not args.runtime or not args.profile_home:
