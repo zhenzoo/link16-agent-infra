@@ -8,6 +8,7 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
+| `feishu/miaoda_delivery.py` | 已有 HTML 发布妙搭的资源允许清单与版本核验；只测量明确资源、回读精确 release，不上传整仓、不改可见范围、不发消息。流程见 repo-owned feishu skill 的 HTML→妙搭 reference | `inventory --root <目录> --entry <HTML> --files <清单.json> --output <回执.json>`；`verify-release --project <应用仓> --release-id <ID> --expected-commit <SHA> --output <回执.json>` |
 | `feishu/kimi_native_worker.py` | 原生 Kimi TUI 与可独立重启的 Wire 1.5 观察程序；由 registry 锁定 profile/home，复用 outbox 和卡片 | 桥通过 `agent_runtime.worker_cmd()` 启动；`--observe-only --bot <bot> --cwd <cwd> --state-dir <state>` 只观察已绑定会话，不另建会话；机制见 ARCH-120 §11 |
 | `feishu/bridge_process.py` | 桥、cron、watchdog 共用的 Windows 进程观测与服务互斥；查询失败为未知，受控停止等待退出，同一服务持有系统文件锁到退出 | 库；通过三种服务的 `start` / `stop` / `status` 使用 |
 | `feishu/artifact_delivery.py` | **本机全局产物交付策略 SSOT**：只决定是否允许创建飞书在线副本；默认 off，所有 Link16 profile/bot 共读。绝对路径始终显示、附件仍需明确授权、GUI 打开仍由 `$open-local` 决定；`send --doc` / 在线媒体在网络前执行失败闸 | `status [--json]`；`set-online on|off`；`decide --explicit auto|online|local [--json]` |
