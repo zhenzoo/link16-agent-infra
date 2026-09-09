@@ -64,10 +64,7 @@ class RegistrationBaselineTests(unittest.TestCase):
         self.register = register_feishu_app
 
     def test_second_link_covers_the_whole_self_serve_baseline(self):
-        scopes = tuple(dict.fromkeys(
-            list(audit.requested_scopes(("core", "group-a2a", "docs-consume"), for_fix=True))
-            + [s for s in audit.BASELINE_SCOPES if audit.self_serve(s)]
-        ))
+        scopes = audit.registration_scopes(("core", "group-a2a", "docs-consume"))
         for wanted in ("sheets:spreadsheet", "docx:document", "drive:file:download",
                        "docs:document:import", "docs:document.comment:read"):
             self.assertIn(wanted, scopes)
@@ -78,3 +75,15 @@ class RegistrationBaselineTests(unittest.TestCase):
             self.register._registration_capabilities(None, "enterprise"),
             ("core", "group-a2a", "docs-consume"),
         )
+
+    def test_registration_scopes_is_the_single_source_and_subtracts_granted(self):
+        """Dry-run, console print and the monitor's second link must all agree."""
+        full = audit.registration_scopes(("core", "group-a2a", "group-listen"))
+        self.assertIn("im:message.group_msg", full)
+        for scope in audit.BASELINE_SCOPES:
+            self.assertIn(scope, full)
+        self.assertNotIn("drive:drive", full)
+        held = set(audit.BASELINE_SCOPES)
+        remaining = audit.registration_scopes(("core", "group-a2a", "group-listen"), held)
+        self.assertEqual(remaining, ("im:message.group_msg",))
+        self.assertEqual(audit.registration_scopes(("core", "group-a2a"), held), ())

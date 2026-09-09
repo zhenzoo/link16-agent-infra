@@ -15,7 +15,9 @@ sys.path.insert(0, str(ROOT / "feishu"))
 import registration_monitor as monitor  # noqa: E402
 
 
-class RegistrationMonitorTests(unittest.TestCase):
+class _MonitorCase(unittest.TestCase):
+    """Shared fixtures: isolated state dir + a registered job for tb26-test."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.state_dir = Path(self.tmp.name)
@@ -42,6 +44,8 @@ class RegistrationMonitorTests(unittest.TestCase):
         monitor.record_sdk_result(state["job_id"], "cli_safe")
         return monitor.record_stage(state["job_id"], "registered", app_id="cli_safe")
 
+
+class RegistrationMonitorTests(_MonitorCase):
     def test_process_probe_keeps_real_child_alive(self):
         child = subprocess.Popen([sys.executable, "-u", "-c",
                                   "import time; print('ready', flush=True); time.sleep(30)"],
@@ -143,12 +147,13 @@ class RegistrationMonitorTests(unittest.TestCase):
             bot_groups=lambda _bot: [{"chat_id": "oc_group", "name": "tb24-25交流水吧"}]
         )
         with mock.patch.dict(sys.modules, {"bridge_feishu_probe": probe}), \
-             mock.patch.object(monitor.bridge_scope_audit, "audit_entry",
-                               return_value={"status": "ready", "missing": []}), \
+             mock.patch.object(monitor.bridge_scope_audit, "granted_scopes",
+                               return_value=(set(monitor.bridge_scope_audit.BASELINE_SCOPES), None)), \
              mock.patch.object(monitor.bridge_injection, "inject_bot_prompt",
                                return_value={"ok": True, "workspace_id": "ws"}) as inject:
             result = monitor.check_once(state["job_id"])
         self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["checks"]["permissions"]["verified_twice"])
         self.assertTrue(result["milestones"]["ready"])
         self.assertEqual(
             result["events"]["ready"]["event_id"], f"{state['job_id']}:ready"
@@ -230,6 +235,87 @@ class RegistrationMonitorTests(unittest.TestCase):
         self.assertNotIn("delivered_at", event)
         self.assertEqual(event["last_error"], "composer stuck")
         self.assertEqual(event["event_id"], first["events"]["registered"]["event_id"])
+
+
+class RegistrationPermissionBaselineTests(_MonitorCase):
+    """SPEC-220 §6: the second link is audited first, judged against the baseline,
+    and permissions_ready only flips after two independent reads agree."""
+
+    def test_second_link_is_audited_first_and_only_carries_the_gap(self):
+        state = self.registered(self.arm(["core", "group-a2a"]))
+        granted = set(monitor.bridge_scope_audit.BASELINE_SCOPES) - {"docx:document", "sheets:spreadsheet"}
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes", return_value=(granted, None)):
+            urls, capabilities, scopes, audit = monitor.permission_review_link(state)
+        self.assertEqual(sorted(scopes), ["docx:document", "sheets:spreadsheet"])
+        self.assertEqual(len(urls), 1)
+        self.assertIn("docx:document", urls[0])
+        self.assertEqual(audit["granted"], len(granted))
+        self.assertIsNone(audit["error"])
+
+    def test_second_link_covers_whole_baseline_when_audit_is_unavailable(self):
+        state = self.registered(self.arm(["core", "group-a2a"]))
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes", return_value=(set(), "缺凭据")):
+            urls, _capabilities, scopes, audit = monitor.permission_review_link(state)
+        for wanted in ("docx:document:create", "drive:file:download", "docs:document:import"):
+            self.assertIn(wanted, scopes)
+        self.assertNotIn("drive:drive", scopes)
+        self.assertEqual(audit["error"], "缺凭据")
+        self.assertTrue(urls)
+        text = monitor._event_text(state, "permissions_review")
+        self.assertIn("注册前审计", text)
+        for url in urls:
+            self.assertIn(url, text)
+
+    def test_capabilities_ready_but_baseline_short_is_not_ready(self):
+        state = self.registered(self.arm(["core"]))
+        partial = {"im:message:send_as_bot", "im:message.p2p_msg:readonly", "im:resource"}
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes", return_value=(partial, None)):
+            result = monitor._permission_check(state)
+        self.assertEqual(result["capability_status"], "ready")
+        self.assertFalse(result["baseline_ok"])
+        self.assertEqual(result["status"], "missing")
+        self.assertIn("baseline", result["missing"])
+        self.assertIn("docx:document:create", result["remaining_scopes"])
+        self.assertTrue(result["fix_links"])
+        self.assertNotIn("scopes", result)
+
+    def test_full_baseline_is_ready_with_no_remaining_links(self):
+        state = self.registered(self.arm(["core", "group-a2a"]))
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes",
+                               return_value=(set(monitor.bridge_scope_audit.BASELINE_SCOPES), None)):
+            result = monitor._permission_check(state)
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["baseline_ok"])
+        self.assertEqual(result["remaining_scopes"], [])
+        self.assertEqual(result["fix_links"], [])
+
+    def test_permissions_ready_requires_two_consecutive_agreeing_reads(self):
+        state = self.registered(self.arm(["core"]))
+        reads = iter([{"status": "ready"}, {"status": "missing", "missing": ["baseline"]}])
+        with mock.patch.object(monitor, "_permission_check", side_effect=lambda _s: next(reads)),              mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}):
+            result = monitor.check_once(state["job_id"], emit=False)
+        self.assertFalse(result["milestones"]["permissions_ready"])
+        self.assertNotIn("permissions_ready", result["events"])
+        self.assertEqual(result["checks"]["permissions"]["status"], "missing")
+
+        with mock.patch.object(monitor, "_permission_check", return_value={"status": "ready", "total_scopes": 66}),              mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}):
+            result = monitor.check_once(state["job_id"], emit=False)
+        self.assertTrue(result["milestones"]["permissions_ready"])
+        self.assertTrue(result["checks"]["permissions"]["verified_twice"])
+        self.assertEqual(result["checks"]["permissions"]["verify_count"], 1)
+        self.assertIn("两次独立读取一致", monitor._event_text(result, "permissions_ready"))
+        self.assertIn("再次复核", monitor._event_text(result, "ready"))
+
+    def test_ready_pass_re_reads_permissions_again(self):
+        state = self.registered(self.arm(["core"]))
+        with mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}) as check,              mock.patch.object(monitor, "_owner_check", return_value={"status": "missing"}):
+            monitor.check_once(state["job_id"], emit=False)
+        self.assertEqual(check.call_count, 2)  # first flip: read + independent re-read
+        with mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}) as check,              mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}):
+            result = monitor.check_once(state["job_id"], emit=False)
+        self.assertEqual(check.call_count, 1)  # milestone already set: still one fresh read before "ready"
+        self.assertTrue(result["milestones"]["ready"])
+        self.assertEqual(result["checks"]["permissions"]["verify_count"], 2)
 
 
 if __name__ == "__main__":

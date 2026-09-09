@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-09-07
+last_reviewed: 2026-09-09
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -97,7 +97,7 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 后台每次请求有连接/读取超时；临时网络错误只有限重试同一个授权任务的 poll，不自动重放创建步骤或替人重新授权。任务保留 SDK 版本、请求阶段、最近进展、重试次数、HTTP 状态与错误类别；不保存 secret、token、device code、授权链接或原始响应。失败也必须回调。重复启动同一 bot 的注册器复用活任务，Windows 探活只查询进程，禁止用 `os.kill(pid, 0)`。
 
-验收分清三件事：SDK 实际返回凭据且本机登记成功，才记 `registered`；权限与主人私聊可用只是连接能力；飞书紫色“智能体”标签没有已验证的公共 API 判据，需由用户界面确认，不能用会发消息或权限齐全代替。未选 `group-a2a` 不发送“已入群”回调。`ready` 表示本次所选能力验收通过，不代表开了所有飞书权限。
+验收分清三件事：SDK 实际返回凭据且本机登记成功，才记 `registered`；权限与主人私聊可用只是连接能力；飞书紫色“智能体”标签没有已验证的公共 API 判据，需由用户界面确认，不能用会发消息或权限齐全代替。未选 `group-a2a` 不发送“已入群”回调。`ready` 表示本次所选能力**与 SPEC-220 免审基线**均验收通过（两次独立读取一致）；level 4 需管理员审批的伞形权限永远不在基线内，`ready` 不代表开了它们。
 
 2026-09-07 的 media-meta 案例：手工凭据接入后能收发，但用户看到机器人标签；同一 App ID 经官方续接完成后用户确认变为智能体。首次回传中断的旧记录不足，不能归因为 SDK 改名或某个确定的网络故障。手工导入凭据不应冒充官方登记完成。
 
@@ -151,7 +151,7 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 | `docs-import` | 把本地源文件上传后走 import task，并显式授权协作者 | Drive/导入/permission 类权限 | 会触发管理员审核的重能力；不用就不开 |
 | `group-listen` | 不被 @ 也主动读取全群 | `im:message.group_msg` | 可选高范围能力；不用就不开 |
 
-注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant（新建 `create_only=True`，续接 `False`；均不携带权限 `addons`）；登记成功后，Monitor 按选定 capability 生成链接 2，明确列出这次要开的 tenant scopes，让人审阅后再按飞书页面要求创建版本/发布。个人租户默认 `core + group-a2a`；公司租户由 `--tenant-kind enterprise` 或 `--group` 对 registry 的租户映射自动加 `docs-consume`。需要创建文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
+注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant（新建 `create_only=True`，续接 `False`；均不携带权限 `addons`）；登记成功后，Monitor **先跑一次 scope 审计**（`bridge_scope_audit.granted_scopes`），再按 `registration_scopes()` 生成链接 2：内容 = 选定 capability 的增量 scope **∪ SPEC-220 免审基线**（与舰队其他 bot 对齐）**− 已授权**，只列真正待开的项，超长自动拆成多条；回调文案会写明「已授权 N 项 / 共需 M 项 / 本次待开 K 项」。让人审阅后再按飞书页面要求创建版本/发布。`permissions_ready` 同时要求 capability 与基线全部开满，且 Monitor 在翻绿前**独立再读一次**飞书接口、两次一致才回调；此后每一轮（含最终 `ready` 那一轮）都重新读取，回调不会骑在旧的成功读数上。（2026-09-09 定：此前 Monitor 只发 8 项能力档链接、注册脚本 dry-run 却承诺 41 项，tb26-baseball-5 以 39 项被判 ready，兄弟号 66+；现在三处共用 `registration_scopes()` 一个真源。）个人租户默认 `core + group-a2a`；公司租户由 `--tenant-kind enterprise` 或 `--group` 对 registry 的租户映射自动加 `docs-consume`。需要创建文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
 
 **2026-09-04 `tb26-baseball-4` 端到端验真**：scope API 返回 43 项，三项新增 scope 均为已生效；随后以 bot 身份从真实产品文档读取内嵌 Sheet `A1:F8`、一张 2,030,702 字节 PNG，并导出一块 350 节点白板。图片预览链已满足 AI 解析；“原件直下”分支仍单独返回 HTTP 403，不能把“预览可读”写成“所有下载分支均可用”。
 

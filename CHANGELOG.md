@@ -11,13 +11,29 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-07
+last_reviewed: 2026-09-09
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.24.1 — 注册第二链按基线一次开满 + 监督器双读复核（2026-09-09）
+
+**病根**：v0.24.0 定了 SPEC-220 基线并让 `register_feishu_app.py` dry-run 按"能力档 ∪ 基线"算 41 项，但真正把链接发给主人的 `registration_monitor.py` 自己另算了一份只含 8 项能力档的链接，`permissions_ready` 也不查基线。tb26-baseball-5 以 39 项被判 `ready`，兄弟号 66+，飞书文档创建/导入/上传全缺，主人事后追问才发现。
+
+### 修复
+
+- **`bridge_scope_audit.registration_scopes(capabilities, granted)`**：注册该开哪些 scope 的唯一真源（capability 增量 ∪ SPEC-220 免审基线 − 已授权）。注册脚本 dry-run、登记打印、监督器第二链三处共用。
+- **监督器第二链先审计再生成**：`permission_review_link` 先读当前授权，只列增量，超长自动拆链；回调文案写明"已授权 N / 共需 M / 本次待开 K"。审计不可用时按整套申请，不静默漏项。
+- **`permissions_ready` 同时要求 capability + 基线开满**，翻绿前独立再读一次接口、两次一致才回调（`verified_twice` / `verify_count` / `verified_at` 落状态）；此后每轮含 `ready` 继续重读。回调文案带"两次独立读取一致 · 共 N 项 · 基线已开满"。
+- 状态里的 `fix_link` 改为 `fix_links`（一组可点开的链），`remaining_scopes` 明列还差哪几条。
+
+### 验证
+
+- `tests/test_registration_monitor.py`（新增 6 例：审计优先、审计不可用兜底、能力够但基线短 ≠ ready、基线满无剩余链、双读不一致不翻绿、ready 轮再读）+ `test_scope_baseline.py` + `test_register_feishu_app.py` 共 51 例通过。
+- 真实 job `tb26-baseball-5`：已授权 66 / 共需 41 / 待开 0，`_permission_check` 判 ready 且 baseline_ok；老号 `tb26-baseball` 按新规则同样开满，基线与舰队现状一致。
 
 ## v0.24.0 — Kimi 启动判据结构化 + 飞书权限基线与文档 IO 架构（2026-09-07）
 

@@ -116,6 +116,12 @@ level 4 scope **永久不进基线**。它们提供的每一项能力都已有 l
 - `bridge_scope_audit.py` 以本文件为准，报告每只 bot 相对基线缺哪几条，
   并只为 level 3 的缺口生成开通链接；遇到 level 4 缺口直接说明"需管理员审批、
   基线不依赖它"，不生成误导性的开通链接。
+- 注册流程的"该开哪些 scope"只有一个真源：`bridge_scope_audit.registration_scopes(capabilities, granted)`
+  = capability 增量 ∪ 本基线 − 已授权。注册脚本的 dry-run、登记打印和 `registration_monitor`
+  的第二条链接三处共用它，不允许各算一份（2026-09-09：监督器曾只发 8 项、dry-run 承诺 41 项）。
+- `registration_monitor` 在生成第二条链接前先审计当前授权；`permissions_ready` 同时要求
+  capability 与基线开满，并在里程碑翻绿前独立再读一次接口、两次一致才回调；其后每一轮
+  （含 `ready`）继续重读，最终回调不骑在旧读数上。
 
 ## 7 · 用户身份（user）授权基线
 

@@ -310,13 +310,29 @@ def record_stage(job_id, stage, app_id=None, error=None):
 
 
 def permission_review_link(state):
-    """Rebuild the second human-review link without persisting the URL."""
+    """Rebuild the second human-review links without persisting the URLs.
+
+    SPEC-220 §6: the scope audit runs *before* the link is built, and the link
+    carries everything the app does not yet hold — capability fix scopes plus the
+    whole self-serve baseline — so a new bot leaves registration as fully opened
+    as every other one. Returns (urls, capabilities, scopes, audit); `audit` says
+    how many scopes were already granted, or why the pre-check was unavailable.
+    """
     app_id = str(state.get("app_id") or "").strip()
     if not app_id:
         raise ValueError("registration job 尚无 app_id，不能生成权限审阅链接")
     capabilities = bridge_scope_audit.normalize_capabilities(state.get("capabilities"))
-    scopes = bridge_scope_audit.requested_scopes(capabilities, for_fix=True)
-    return bridge_scope_audit.fix_auth_url(app_id, scopes), capabilities, scopes
+    granted, error = bridge_scope_audit.granted_scopes(state.get("id_env"), state.get("secret_env"))
+    if error:
+        granted = set()  # pre-check unavailable → plan the whole set; never silently drop a scope
+    scopes = bridge_scope_audit.registration_scopes(capabilities, granted)
+    urls = bridge_scope_audit.fix_auth_urls(app_id, scopes)
+    audit = {
+        "granted": len(granted),
+        "error": error,
+        "planned": len(bridge_scope_audit.registration_scopes(capabilities)),
+    }
+    return urls, capabilities, scopes, audit
 
 
 def request_permission_review(job_id):
@@ -423,35 +439,75 @@ def _group_check(bot, group):
 
 
 def _permission_check(state):
+    """One fresh read of the app's granted scopes, judged against BOTH the selected
+    capabilities and the SPEC-220 self-serve baseline. "ready" means the bot is as
+    fully opened as every other Link16 bot, not merely that its declared
+    capabilities happen to work (2026-09-09: a bot went "ready" on 39 scopes while
+    its siblings held 66+)."""
     result = bridge_scope_audit.audit_entry(
         state.get("id_env"),
         state.get("secret_env"),
         state.get("capabilities"),
+        raw=True,
+        baseline=True,
     )
+    if result.get("status") == "unknown":
+        return result
+    granted = set(result.pop("scopes", None) or ())
+    gap = result.get("baseline") or {}
+    result["capability_status"] = result["status"]
+    result["baseline_ok"] = bool(gap.get("ok"))
+    if result["status"] == "ready" and not result["baseline_ok"]:
+        result["status"] = "missing"
+        result["missing"] = list(result.get("missing") or []) + ["baseline"]
+    remaining = bridge_scope_audit.registration_scopes(state.get("capabilities"), granted)
+    app_id = str(state.get("app_id") or "").strip()
+    result["remaining_scopes"] = list(remaining)
+    result["fix_links"] = (
+        bridge_scope_audit.fix_auth_urls(app_id, remaining) if app_id and remaining else []
+    )
+    result.pop("fix_link", None)
+    gap.pop("links", None)  # superseded by fix_links: capability + baseline in one set
     return result
 
 
 def _event_text(state, milestone):
     if milestone == "permissions_review":
-        url, capabilities, scopes = permission_review_link(state)
+        urls, capabilities, scopes, audit = permission_review_link(state)
         labels = [
             bridge_scope_audit.CAPABILITY_SPECS[name]["label"]
             for name in capabilities
         ]
+        if audit.get("error"):
+            audit_line = (f"注册前审计：未能读取当前授权（{audit['error']}），"
+                          f"按整套 {audit['planned']} 项申请")
+        else:
+            audit_line = (f"注册前审计：已授权 {audit['granted']} 项；能力档 + SPEC-220 免审基线共 "
+                          f"{audit['planned']} 项（与舰队其他 bot 对齐），本次待开 {len(scopes)} 项")
+        links = "\n".join(
+            (f"[{i}/{len(urls)}] {u}" if len(urls) > 1 else u) for i, u in enumerate(urls, 1)
+        ) or "（无增量 scope：能力档与基线已全部开通）"
         return (
             f"Link16 注册回调：{state['bot']} 的第二步权限审阅链接已生成。"
             "请把下面裸链接回复给主人；让人核对权限并按飞书页面要求创建版本/发布，代码不会代点：\n"
             f"能力：{', '.join(capabilities)}（{'；'.join(labels)}）\n"
+            f"{audit_line}\n"
             f"权限：{', '.join(scopes) or '无增量 scope'}\n"
-            f"{url}\n"
+            f"{links}\n"
             f"请读取 registration job {state['job_id']} 的状态并继续处理；这不是用户重复催办。"
         )
+    permission = (state.get("checks") or {}).get("permissions") or {}
+    scope_note = (
+        f"两次独立读取一致 · 共 {permission.get('total_scopes')} 项 · 基线已开满"
+        if permission.get("verified_twice") else "已按能力档与基线复核"
+    )
     labels = {
         "registered": "OAuth/应用登记已完成",
-        "permissions_ready": "所选 capability 权限已到位",
+        "permissions_ready": f"所选 capability 与 SPEC-220 免审基线权限已到位（{scope_note}）",
         "owner_ready": "主人私聊认领已检测到",
         "group_ready": "目标群成员关系已检测到",
-        "ready": "官方登记与所选能力验收完成；飞书智能体标签以客户端确认为准",
+        "ready": (f"官方登记与所选能力验收完成，权限在本次回调前再次复核（{scope_note}）；"
+                  "飞书智能体标签以客户端确认为准"),
         "failed": "注册未完成，请查看任务诊断并恢复原应用；无需主人提供密钥",
         "expired": "注册监督已过期，仍有人工步骤未完成",
     }
@@ -525,6 +581,19 @@ def check_once(job_id, emit=True):
         return _emit_pending(job_id) if emit else state
 
     permission = _permission_check(state)
+    prior = (state.get("checks") or {}).get("permissions") or {}
+    if permission.get("status") == "ready":
+        # SPEC-220 §6: flip permissions_ready only when a second, independent API
+        # read agrees. Every later pass — including the one that flips "ready" —
+        # re-reads again, so no callback ever rides on a stale success.
+        if not state.get("milestones", {}).get("permissions_ready"):
+            recheck = _permission_check(state)
+            if recheck.get("status") != "ready":
+                permission = recheck
+        if permission.get("status") == "ready":
+            permission["verified_twice"] = True
+            permission["verify_count"] = int(prior.get("verify_count") or 0) + 1
+            permission["verified_at"] = _iso()
     owner = _owner_check(state["bot"])
     need_group = "group-a2a" in state.get("capabilities", [])
     group = _group_check(state["bot"], state.get("group")) if need_group else {"status": "ready"}

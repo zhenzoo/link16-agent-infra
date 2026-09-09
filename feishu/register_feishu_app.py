@@ -411,10 +411,7 @@ def main():
     # missing scope months later — mid-task, as a bare "no permission" — was the
     # recurring failure this closes. Approval-gated scopes are never requested;
     # the baseline is built entirely from self-serve ones.
-    permission_scopes = tuple(dict.fromkeys(
-        list(bridge_scope_audit.requested_scopes(capabilities, for_fix=True))
-        + [s for s in bridge_scope_audit.BASELINE_SCOPES if bridge_scope_audit.self_serve(s)]
-    ))
+    permission_scopes = bridge_scope_audit.registration_scopes(capabilities)
     try:
         sdk_version = registration_transport.preflight()
         args.app_id = _recovery_app_id(args.app_id, id_key, args.bot or args.name)
@@ -514,7 +511,7 @@ def main():
 def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
                           app_id, secret, monitor):
     capabilities = _registration_capabilities(args.capability, args.tenant_kind or _tenant_kind_from_group(args.group))
-    permission_scopes = bridge_scope_audit.requested_scopes(capabilities, for_fix=True)
+    permission_scopes = bridge_scope_audit.registration_scopes(capabilities)
     write_env(app_id, secret, id_key, sec_key)
     action = "续接成功" if args.app_id else "创建成功"
     print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
@@ -554,10 +551,11 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
     print("\n🔐 第二步：请人工审阅本次能力与权限，并按飞书页面要求创建版本/发布：\n"
           f"   capability: {', '.join(capabilities)}\n"
           f"   能力: {'；'.join(labels)}\n"
-          f"   tenant scopes: {', '.join(permission_scopes) or '无（只用官方 preset）'}\n"
+          f"   tenant scopes（能力档 + SPEC-220 免审基线 · 与舰队其他 bot 对齐）: "
+          f"{', '.join(permission_scopes) or '无（只用官方 preset）'}\n"
           f"{permission_link}\n"
-          "   第一条链接只创建应用；本链接不自动发布。如飞书把其中某项标为需审核，以开发者后台"
-          "的实时标识为准；监督器会持续复查真实授权状态。",
+          "   第一条链接只创建应用；本链接不自动发布。监督器回调给发起 session 的链接会先审计当前授权、"
+          "只列增量；如飞书把其中某项标为需审核，以开发者后台的实时标识为准；监督器会两次独立复核真实授权状态。",
           flush=True)
 
     # 🔒 登记协议：建完必回写。§4 见 docs/SOP-120。agent-registry stub 上面已【自动】补·其余照单核对。

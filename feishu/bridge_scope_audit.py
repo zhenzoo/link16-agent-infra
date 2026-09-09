@@ -214,6 +214,23 @@ def requested_scopes(capabilities=None, for_fix=False):
     ))
 
 
+def registration_scopes(capabilities=None, granted=None):
+    """SPEC-220 §6: everything a registration must open, in one stable order.
+
+    Capability fix scopes plus the whole self-serve baseline, minus what the app
+    already holds. This is the single source for the dry-run, the console print
+    and the monitor's second link so the three cannot drift apart again
+    (2026-09-09: the monitor delivered 8 scopes while the dry-run promised 41).
+    Approval-gated scopes are never planned; the baseline is built without them.
+    """
+    planned = tuple(dict.fromkeys(
+        list(requested_scopes(capabilities, for_fix=True))
+        + [s for s in BASELINE_SCOPES if self_serve(s)]
+    ))
+    held = set(granted or ())
+    return tuple(s for s in planned if s not in held)
+
+
 def capability_status(scopes, capabilities=None):
     names = normalize_capabilities(capabilities)
     return {
