@@ -19,6 +19,38 @@ last_reviewed: 2026-09-09
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.25.0 — 新用户带着自己的 context 上手：盘点导入 + 按活跃项目建 bot + 3050 装机十缺口（2026-09-10）
+
+**病根**：2026-09-08 一位只用过 Claude 桌面版的同事在机器 3050 装 Link16，3 小时 16 分才通，通了也不肯用——「bot 丢了太多 context」。bot 出生在全新的 `.claude-work`、cwd 是助手编的空文件夹，而他的记忆躺在 `~/.claude` 与 Claude 桌面版 Cowork memory 里没人读；一路还踩了十个「代码知道却没拦」的坑。本版把「盘点 → 勾选导入 → 按真实项目建 bot」变成首次安装的固定动作，并把十个坑变成机械检查。计划与证据见 `docs/PLAN-1000-newcomer-context-import.md`。
+
+### 新增
+
+- **`link16-init` skill**（`.agents/skills/link16-init/SKILL.md` 真源 + `.claude/skills/` 薄壳）：装依赖 → profile 登录 → 盘点 → 勾选导入 → `register --from-scan` 建 2～3 只 bot → 验收；只在 ROLE-010 人工停点停；完成判据 = 私聊 bot 问「我在做什么项目、我有什么偏好」答得出来。仓库 CLAUDE.md / README / SOP-100 入口全部指向它。
+- **`feishu/context_scan.py`**：只读盘点五类来源（`~/.claude`、Claude 桌面版 Cowork 记忆 exe/MSIX 两种落点、`~/.codex`、ChatGPT 桌面版只提示导出、下载目录官方导出包）+ 近 7 天活跃项目三路打分（git 提交/改动文件、非 git 改动、Claude 会话 cwd）+ `<机器代号>-<项目简称>` bot 名建议（代号推不出用 hostname，不问）。本机 24 仓 3.5 秒。
+- **`feishu/context_import.py`**：指令文件以 `imported-from` 标记段追加（同源同 hash 幂等）、记忆笔记补 frontmatter 进 `<home>/memory/` + 索引、项目记忆按 slug 对拷、skills/commands 复制、settings 白名单合并、导出包 memories/projects 转记忆、conversations 抽近 90 天交 `claude -p --allowedTools Read` 蒸馏（默认开）；永不复制凭据/会话；receipt + `--rollback`。
+- **`register_feishu_app.py --from-scan --pick N`**：按盘点报告填 name/bot/cwd，不再有 `my-first-bot` 与空目录。
+- **preflight 两项**：「bash 在 PATH」（拒 System32 WSL 启动器）、「profile 登录态」（`agent_runtime.profile_login_state`：Claude `.credentials.json`/`oauthAccount`/第三方端点，Codex `auth.json`；只对名册与默认用到的 profile 判 FAIL）。
+- **`windows_bootstrap` `user-path` 任务**：把 Git `bin` 与 `~/.local/bin` 追加进用户 PATH；`_real_local_appdata()` 绕 MSIX 重定向；在 Claude 桌面版里跑时打印「三条注意」。
+
+### 修复
+
+- 首只 bot 注册不再因「没有已存在 bot 可投递链接」抛 `oauth_link_delivery_failed` 中止；链接真源是终端，投递失败只记 job 状态。
+- `agent-registry.json` 追加改 JSON 解析写回，空骨架 `"agents": []` 也能登记。
+- 桥 spawn 前登录闸：profile 明确没登录直接回人话，不开面板不等 90 秒；冷启动每 30 秒心跳；冷启动窗口内到达的 `/close` 先二次确认；回执文案改「约 1～2 分钟」。
+- 「wmux 默认 Shell」降为 WARN（桥自己敲 bash，不依赖它）；`needs-gui` 不再算装机失败；SOP-010 补「下拉框没有 Git Bash」分支。
+- 名册模板 `defaults.profiles` 不再写死别台机器的 `ccp/cxp`；README/SOP-100 示例名统一为 `<机器代号>-<项目简称>`。
+- `registration_monitor cancel --job-id`、`service_installer apply --digest` 作为别名接受。
+
+### 验证
+
+- `tests/test_plan1000_s1.py` 27 · `test_context_scan.py` 12 · `test_context_import.py` 11（幂等 / 回滚 / 输出永不含 SECRET / 蒸馏钩子）· `test_registration_transport.py` 改为新合同；全量 750 通过。
+- 本机 preflight：新增两项均 OK；`context_scan` 建议 `tb26-agent / tb26-miaoda / tb26-obsbot`（`tb26-link16` 已存在故让位）。
+
+### 升级注意
+
+- 桥进程需重启才加载登录闸与心跳。
+- 3050 机器：`git pull --ff-only origin main` 后在普通 PowerShell 跑 `python feishu/windows_bootstrap.py --apply --yes`（补 PATH、修 Run 键）、`python feishu/preflight.py`、再按 `link16-init` 2.3～2.5 盘点导入并按活跃项目重建 bot。
+
 ## v0.24.1 — 注册第二链按基线一次开满 + 监督器双读复核（2026-09-09）
 
 **病根**：v0.24.0 定了 SPEC-220 基线并让 `register_feishu_app.py` dry-run 按"能力档 ∪ 基线"算 41 项，但真正把链接发给主人的 `registration_monitor.py` 自己另算了一份只含 8 项能力档的链接，`permissions_ready` 也不查基线。tb26-baseball-5 以 39 项被判 `ready`，兄弟号 66+，飞书文档创建/导入/上传全缺，主人事后追问才发现。
