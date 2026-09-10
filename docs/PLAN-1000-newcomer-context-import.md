@@ -39,7 +39,7 @@ last_reviewed: 2026-09-10
 4. **证据来源**：`C:\Users\remo\Downloads\Link16-安装记录.zip`（3050 机器 2026-09-08 完整 429 条对话 + 结构化档案）；本仓代码定位见 §1 各 Step 括号里的文件行号；Claude 桌面版数据落点来自 claude.com 官方 data-storage 文档与两篇逆向文章。
 5. **写入归属**：本 PLAN 由 tb26-link16 session 撰写；执行阶段每个 Step 落地前先 `git pull --ff-only`，S1 的修复优先合 main 让 3050 机器能直接 pull。
 6. **host 拍板（2026-09-10 08:50）**：四个问题全按推荐——默认合并到主 profile；聊天记录蒸馏默认进行、不询问；机器代号推不出时 hostname 兜底、不询问；S1 先合 main。另加一条原则：整套做成**首次安装 skill**（仓库自带、随 profile_bootstrap 装进 profile home），skill 里带工具、替用户确认与推进，而不是一堆散命令。
-7. **当前 Step 与恢复点**：S4 收尾 → 提交并合 main（2026-09-10 09:20）；S5 等同事在 3050 上 pull 重跑。
+7. **当前 Step 与恢复点**：S1～S4 已合 main 并打 `v0.25.0`（2026-09-10 09:19）；当前 S5.1，等 host 转告同事在 3050 上 `git pull --ff-only origin main` 后按 link16-init 2.1～2.6 重跑，回执贴回 DM。
 
 ## §1 计划
 
@@ -63,12 +63,12 @@ last_reviewed: 2026-09-10
 　✅ S3.2 目标策略三选一并默认合并：合并到用户主 profile（默认，来源标注、冲突取最近修改）/ 分别导入（Claude 侧→claude profile，Codex/ChatGPT 侧→codex profile）/ 只导一个来源。（ETA 09-11 08:00）
 　✅ S3.3 硬边界与回滚：永不复制 `.claude.json`、`.credentials.json`、`auth.json`、sessions、token；每次导入写 receipt，`--rollback --receipt` 一键撤回。（ETA 09-11 10:00）
 　⏳ S3.4（等 S5 在 3050 上验）验收：导入后私聊 bot 问「我最近在做什么项目、我有什么工作偏好」，回答引用到导入的 memory。（ETA 09-11 12:00）
-🔄 **S4｜封装成首次安装 skill `link16-init`：SKILL.md 剧本串起 装依赖→profile 登录→盘点导入→按「机器代号-项目简称」默认建 2～3 只 bot（ETA 2026-09-11 16:00）**
+✅ **S4｜封装成首次安装 skill `link16-init`：SKILL.md 剧本串起 装依赖→profile 登录→盘点导入→按「机器代号-项目简称」默认建 2～3 只 bot（实际 2026-09-10 09:18，原 ETA 09-11 16:00，提前）**
 　✅ S4.1 `register_feishu_app.py --from-scan`：读 S2.2 前 3 项目，用 `machine_identity.suggest_prefix` 出前缀（推不出时问一次，hostname 兜底），项目简称取目录名去前缀、小写、≤12 字符，提议 `tb26-link16` 风格名与 cwd，用户逐只确认；不再出现 `Desktop\bot` 这种空目录。（ETA 09-11 14:00）
 　✅ S4.2 SOP-100 桌面入口表加「盘点清单 → 勾选」「建议 bot 名 → 确认」两行；首次运行顺序改为 装依赖 → profile 登录 → 盘点导入 → 注册 bot，让 bot 出生就有记忆。（ETA 09-11 15:00）
 　✅ S4.3 `.agents/skills/link16-init/SKILL.md`：触发词「开始部署 Link16 / 初始化 / 首次安装 / 把我的记忆导进来」；剧本按顺序调用 windows_bootstrap → profile_bootstrap → 登录检查 → context_scan → 勾选 → context_import → register --from-scan → preflight → 真实收发验收；profile_bootstrap 与 feishu skill 同机制装进 profile home；仓库 CLAUDE.md 与 README 的「开始部署 Link16」入口指向它。（ETA 09-11 15:30）
 　✅ S4.4 TOOLS.md 登记 `context_scan.py`、`context_import.py`、`--from-scan` 与 `link16-init` skill。（ETA 09-11 16:00）
-⏳ **S5｜用 3050 机器回归：同事 pull main 后重跑，验收「bot 认得他」（ETA 2026-09-12 18:00，取决于同事在场）**
+🔄 **S5｜用 3050 机器回归：同事 pull main 后重跑，验收「bot 认得他」（ETA 2026-09-12 18:00，取决于同事在场）**
 　⏳ S5.1 host 转告同事三句话：pull、跑 `python feishu/context_scan.py`、勾选后跑 import；我们只看回执。（ETA 09-12 12:00）
 　⏳ S5.2 验收四项：preflight 无 FAIL；冷启动期间收到心跳；bot 回答引用到他的项目与偏好；wmux 升级后 Run 键仍指稳定 `wmux.exe`。（ETA 09-12 18:00）
 
@@ -87,4 +87,4 @@ last_reviewed: 2026-09-10
 - 2026-09-10 09:20 · S3 `context_import.py` 落地（receipt 回滚、蒸馏走 `claude -p --allowedTools Read`）；`tests/test_context_import.py` 11 项通过。
 - 2026-09-10 09:20 · S4 skill `link16-init` 落地：`.agents/skills/link16-init/SKILL.md` 真源 + `.claude/skills/link16-init/` 薄壳；仓库 CLAUDE.md、README、SOP-100 入口表、TOOLS.md 三行登记；register `--from-scan --pick`。
 - 已知无关失败：`tests/test_profile_bootstrap.py::test_unmanaged_same_hash_is_adopted_but_different_content_conflicts` 因另一 session 未提交的 `.agents/skills/feishu/references/` 改变了 skill 树 hash，不属本 PLAN。
-
+- 2026-09-10 09:19 · 六个 commit（de51233 fix / b20db11 scan / 2027aab import / deea77c skill / de2115a docs / 3f66f6e changelog）已推 `feat/kimi-default-install`，main 快进到 3f66f6e，tag `v0.25.0` 已推远端；未提交的 miaoda / feishu skill references 属另一 session，原样未动。
