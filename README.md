@@ -153,7 +153,11 @@ last_reviewed: 2026-09-09
 > 下面只是「跑出第一只能对话的 bot」。命令以 **PowerShell** 为准（Windows 自带）。
 >
 > **不懂 terminal 也可以**：在你已经使用的 Claude / Codex / QX 桌面客户端里说
-> **「开始部署 Link16」**。agent 跑命令；你只会看到 GitHub/飞书/provider 登录链接和绿色验收结果。
+> **「开始部署 Link16」**。agent 按 [`.agents/skills/link16-init/SKILL.md`](.agents/skills/link16-init/SKILL.md) 跑命令；
+> 你只会看到 GitHub/飞书/provider 登录链接、**一张「你已有的记忆 / 活跃项目 / 建议 bot 名」勾选清单**、和绿色验收结果。
+> 它会把你在 Claude 桌面版、Claude Code、Codex 里积累的 CLAUDE.md / 记忆 / skills 一键导进 bot 的账号（不碰任何登录凭据），
+> 并按你近 7 天最活跃的 2～3 个项目建 bot（名字如 `tb26-link16`，工作目录就是那个项目）——**装完的判据是：私聊 bot 问
+> 「我在做什么项目、我有什么偏好」它答得出来**。
 > agent 的共同部署职责与人工停点见 [`docs/ROLE-010-link16-deployment-engineer.md`](docs/ROLE-010-link16-deployment-engineer.md)。
 
 ```powershell
@@ -177,7 +181,9 @@ python feishu/profile_bootstrap.py --doctor
 python feishu/preflight.py
 
 # 5) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
-python feishu/register_feishu_app.py --name my-first-bot --bot my-first-bot --profile <所选profile> --background
+#    名字用「机器代号-项目简称」（机器代号由 python feishu/machine_identity.py 给，如 tb26；项目简称=它要干活的仓库名）
+#    --cwd 指向真实项目目录，别给它一个空文件夹
+python feishu/register_feishu_app.py --name tb26-link16 --bot tb26-link16 --profile <所选profile> --cwd <项目目录> --background
 
 # 6) 起桥
 python feishu/feishu_bridge.py start

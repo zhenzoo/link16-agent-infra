@@ -47,12 +47,30 @@ agent 负责运行后文的命令、选路、修复和验收。用户只会经�
 | 网络检测结果 | 若被提示，打开 v2rayN；不需要猜端口 | 对真实 GitHub/PyPI URL 测直连和候选 mixed port |
 | 「机型 + 建议前缀」 | 仅当年份不对或名称冲突时纠正 | 只读型号/BIOS 年份，不读序列号/UUID |
 | Claude / Codex / Kimi 登录页 | 登录用户本轮选择并命名的隔离 profile；不用的 provider 可明确跳过 | 建立 local registry、隔离 home 与对应入口，不复制任何认证 |
-| 飞书 Device Grant 链接 | 在页面核对账号和目标组织，然后授权 | 创建应用并把凭据只写入本机 `.env` |
+| 「你已有的记忆 / 活跃项目 / 建议 bot 名」勾选清单 | 勾掉不想导入的来源；bot 名不满意就改 | `context_scan.py` 只读盘点 `~/.claude`、Claude 桌面版 Cowork 记忆、`~/.codex`、官方导出包与近 7 天活跃项目 |
+| 导入预览（新建/修改哪些文件） | 点头 | `context_import.py --apply` 把 CLAUDE.md / 记忆 / skills 合并进所选 profile home，留 receipt 可回滚；永不复制凭据 |
+| 飞书 Device Grant 链接（每只 bot 一次） | 在页面核对账号和目标组织，然后授权 | `register_feishu_app.py --from-scan --pick N`：名字 `<机器代号>-<项目简称>`，cwd = 真实项目目录；创建应用并把凭据只写入本机 `.env` |
 | 飞书权限审阅链接 | 核对本次能力与权限，按页面要求创建版本/发布或等管理员审核 | 只申请所选 capability，并持续检查真实授权状态 |
 | 绿色验收表 | 在飞书私聊 bot 发一句「在吗」 | 核对 Git Bash、wmux、profile、桥和 `main` 全绿 |
 
 展示给用户的说明应聚焦「现在会发生什么 / 你要点哪里」；
 alias、PATH、环境变量、wrapper 等内部细节只在排错时再解释。
+
+#### 在 Claude 桌面版（MSIX 客户端）里跑的三条注意（2026-09-08 机器 3050 实证）
+
+1. **`LOCALAPPDATA` 被容器重定向**成 `...\Packages\Claude_xxx\LocalCache\Local`。`windows_bootstrap.py` 与
+   `service_installer.py` 已自动改用 `%USERPROFILE%\AppData\Local` 找 wmux/Python；`service_installer plan` 时仍要核对
+   after 路径不含 `Packages\Claude_`，否则去普通 PowerShell 里跑。
+2. **cowork 工作区路径太长**，`git clone` 会报 `fatal: '$GIT_DIR' too big`：先 `$env:GIT_DIR=$null` 再 clone。
+3. **装完软件后已打开的终端 PATH 与 PowerShell profile 是旧的**：`gh` / `claude-work` 报「找不到命令」不是没装好，
+   让用户新开一个窗口（或 `. $PROFILE`）。给用户的 fallback 命令必须是 PowerShell 语法，不要给 bash 语法。
+
+#### 首条消息前的两道硬检查（2026-09-08 机器 3050 实证 · 现已进 preflight）
+
+- **profile 登录过没有**：`preflight.py` 的「profile 登录态」读凭据文件（Claude `.credentials.json` / `.claude.json` 的
+  `oauthAccount`，Codex `auth.json`）；没登录过的 bot 收到消息会开面板但停在登录页。桥在 spawn 前也会拦下并回人话。
+- **`bash` 在 PATH 上**：桥开面板后第一行敲的是裸 `bash`。Git 装在用户目录时 bin 不在 PATH，`windows_bootstrap --apply`
+  的 `user-path` 任务会补进用户级 PATH；改完必须重启 wmux 才继承。「wmux 默认 Shell」只是 WARN，不阻塞。
 
 ### 部署工程师的职责与完成闸
 

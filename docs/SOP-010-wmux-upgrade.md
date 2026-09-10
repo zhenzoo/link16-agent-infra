@@ -98,7 +98,10 @@ python -c "import sys;sys.path.insert(0,'feishu');import wmux_session as w;ws=w.
 
 # 3) 默认 shell 没被安装器改回 PowerShell（静态 + 真 workspace 两层验）
 #    wmux Settings → Default Shell 若漂移，重新选 preflight 发现到的 Git Bash
-python feishu/preflight.py                     # wmux 默认 Shell / Windows Terminal 默认 Shell 都应 [ OK ]
+#    ⚠️ 下拉框里【没有】Git Bash 这一项 = Git 装在用户目录（%LOCALAPPDATA%\Programs\Git），wmux 3.5x 探测不到，
+#       写 session.json 也会被它重启覆盖。这不阻塞：桥开面板后自己敲一行 bash 切过去，preflight 只给 [WARN]。
+#       硬条件是下一行「bash 在 PATH」必须 [ OK ]（windows_bootstrap --apply 的 user-path 任务会补，补完重启 wmux）。
+python feishu/preflight.py                     # 「bash 在 PATH」「Windows Terminal 默认 Shell」应 [ OK ]；「wmux 默认 Shell」允许 [WARN]
 python feishu/wmux_session.py spawn --name link16-shell-probe --cwd <任意目录> --cmd env --no-shell-init
 node wmux/wmux-rpc.js read <上一步返回的 pty> 80  # 必须看到 MSYSTEM=MINGW64
 python feishu/wmux_session.py close --id <上一步返回的 workspace_id>
