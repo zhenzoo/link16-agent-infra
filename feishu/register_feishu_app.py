@@ -213,17 +213,47 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
     stub = {"name": name, "machine": machine, "send_key": send_key, "open_id": oid or "",
             "at_name": f"@{name}", "repo": "", "shared": False, "runtime": runtime,
             "role": "", "verified": bool(oid)}
-    text = reg.read_text(encoding="utf-8")
-    idx = text.rfind("\n  ]")                 # agents 数组闭合行 → 在它前插一条(保原格式·不整文件 reformat)
-    if idx < 0:
-        print("\n⚠️ agent-registry.json 结构异常(找不到 agents 闭合) → 跳过（手动加）", flush=True)
+    # 2026-09-08 机器 3050：空骨架把数组写成一行 `"agents": []`，旧的字符串定位（找换行加两空格加 `]`）
+    # 命中不了就静默跳过。改为按结构追加、整文件 JSON 回写（indent=2·保 key 顺序·不引入依赖）。
+    agents = data.get("agents")
+    if not isinstance(agents, list):
+        print("\n⚠️ agent-registry.json 结构异常(agents 不是数组) → 跳过（手动加）", flush=True)
         return None
-    text = text[:idx].rstrip() + ",\n    " + json.dumps(stub, ensure_ascii=False) + text[idx:]
-    reg.write_text(text, encoding="utf-8")
+    agents.append(stub)
+    data["agents"] = agents
+    reg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"\n✅ 已【自动】登记进 agent-registry.json：{name}"
           f"（machine={machine} · send_key={send_key} · open_id={oid or '❌现查失败·待补'} · verified={bool(oid)}）", flush=True)
     print("   ⚠️ 运行本脚本的 agent 请核对/补两字段：**repo**(它分管哪个仓·脚本不知道) + 必要时 **machine**；是共享仓则改 shared:true。", flush=True)
     return stub
+
+
+def _deliver_oauth_link(job_id, info):
+    """把授权链接推给发起 bot；推不出去【不中止注册】。
+
+    2026-09-08 机器 3050 首次装机：第一只 bot 没有任何已存在的投递通道，旧逻辑三次投递失败后
+    抛 oauth_link_delivery_failed，把整个 Device Grant 轮询一起杀掉——而链接其实已经由 on_qr
+    打在终端上了。链接的真源永远是终端输出；bot 投递只是"顺手转发"，失败只记 job 状态。
+    返回 True=已投递，False=未投递（终端链接仍有效、轮询继续）。
+    """
+    state = registration_monitor.get_job(job_id) or {}
+    if not state.get("notify_bot"):
+        print("ℹ️ 回调目标未绑定（本机还没有可投递的 bot，第一只 bot 就是这样）："
+              "请把上面的链接转给主人，本进程继续等待授权。", flush=True)
+        registration_monitor.notify_oauth_link(job_id, info.get("url"), info.get("expire_in"))
+        return False
+    receipt = {}
+    for attempt in range(3):
+        receipt = registration_monitor.notify_oauth_link(
+            job_id, info.get("url"), info.get("expire_in")
+        )
+        if receipt.get("ok"):
+            return True
+        if attempt < 2:
+            time.sleep(2 ** (attempt + 1))
+    print(f"⚠️ 授权链接没能推给 {state.get('notify_bot')}（{receipt.get('error')}）："
+          "请把上面的链接转给主人，本进程继续等待授权。", flush=True)
+    return False
 
 
 def _run_device_grant(name, app_id=None, job_id=None):
@@ -232,15 +262,7 @@ def _run_device_grant(name, app_id=None, job_id=None):
         on_qr(info)
         if job_id:
             registration_monitor.record_stage(job_id, "oauth_waiting", app_id=app_id)
-            for attempt in range(3):
-                receipt = registration_monitor.notify_oauth_link(
-                    job_id, info.get("url"), info.get("expire_in")
-                )
-                if receipt.get("ok"):
-                    break
-                if attempt == 2:
-                    raise registration_transport.RegistrationTransportError("oauth_link_delivery_failed")
-                time.sleep(2 ** (attempt + 1))
+            _deliver_oauth_link(job_id, info)
 
     def report(**values):
         if job_id:
@@ -321,6 +343,33 @@ def _registration_capabilities(requested=None, tenant_kind=None):
     return tuple(capabilities)
 
 
+def _apply_scan_pick(args, ap):
+    """--from-scan：从盘点报告取第 N 个建议 bot 填 name/bot/cwd（PLAN-1000 S4.1）。
+
+    2026-09-08 机器 3050：助手给 bot 起名 my-first-bot、cwd 指向自己编的空文件夹 Desktop\\bot，
+    bot 一出生就站在空房间里。这里改成：名字 = <机器代号>-<项目简称>（如 tb26-link16），
+    cwd = 近 7 天最活跃的真实项目目录。用户显式给的 --name/--bot/--cwd 仍然优先。
+    """
+    try:
+        report = json.loads(Path(args.from_scan).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        ap.error(f"--from-scan 读不了：{exc}")
+    bots = report.get("suggested_bots") or []
+    if not bots:
+        ap.error("盘点报告里没有建议的 bot（没扫到活跃项目）；用 --name/--bot/--cwd 手动给，或 context_scan.py --roots 再扫")
+    if args.pick < 1 or args.pick > len(bots):
+        ap.error(f"--pick 超范围：报告里有 {len(bots)} 个建议")
+    pick = bots[args.pick - 1]
+    if args.name == ap.get_default("name"):
+        args.name = pick["display_name"]
+    if not args.bot:
+        args.bot = pick["bot"]
+    if not args.cwd:
+        args.cwd = pick["cwd"]
+    print(f"📋 按盘点建议 #{args.pick}：name={args.name} · bot={args.bot} · cwd={args.cwd}"
+          f"（{pick.get('reason') or '活跃项目'}）", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="一键创建飞书智能体应用并写凭据进 .env")
     ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
@@ -351,7 +400,12 @@ def main():
                     help="只显示 profile/cwd/capability/增量 scopes，不创建应用、不写文件")
     ap.add_argument("--trusted-same-owner-devices", action="store_true",
                     help="仅当目标是同一所有者的受信设备时，显示 envsync 后续指引")
+    ap.add_argument("--from-scan", default=None,
+                    help="用 context_scan.py --out 的盘点报告填 name/bot/cwd（按「机器代号-项目简称」建议；显式给的参数优先）")
+    ap.add_argument("--pick", type=int, default=1, help="--from-scan 时取第几个建议（默认 1）")
     args = ap.parse_args()
+    if args.from_scan:
+        _apply_scan_pick(args, ap)
 
     requested = (args.profile or "").strip().lower()
     if requested:

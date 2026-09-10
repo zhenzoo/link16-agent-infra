@@ -2,15 +2,13 @@
   "_README": "机器本地 bot 名册模板（ARCH-110 §4.1、ARCH-120）。它存在为 bridge-bots.local.json 时整盘覆盖 committed 名册。账号身份只写 profile/defaults.profiles；profile→runtime/home/launcher 的唯一映射在 agent-profiles.json。禁止写 agent/account/claude_config_dir/codex_home。",
   "_用法": [
     "1) cp feishu/bridge-bots.local.example.json feishu/bridge-bots.local.json",
-    "2) python feishu/register_feishu_app.py --name 本机助手 --bot local1 --profile cxp   # OAuth 前 profile doctor，成功后自动 upsert 本机名册",
+    "2) python feishu/register_feishu_app.py --name <机器代号>-<项目简称> --bot <机器代号>-<项目简称> --profile <本机 profile>   # 如 tb26-link16；OAuth 前 profile doctor，成功后自动 upsert 本机名册",
     "3) 核对 defaults.profiles 与非身份字段；cwd 用 $VIBECODING_ROOT/~/相对 token，绝不写死盘符",
     "4) python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start"
   ],
+  "_defaults_说明": "defaults.profiles 留空时按 agent-profiles.local.json 的 default_profiles 取本机默认；只有想让某 runtime 的 bot 默认用别的 profile 才在这里写（值必须是本机真实存在的 profile 名，不是 ccp/cxp 这类别人机器的名字）",
   "defaults": {
-    "profiles": {
-      "claude": "ccp",
-      "codex": "cxp"
-    }
+    "profiles": {}
   },
   "bots": [],
   "_example_bot": {
@@ -19,6 +17,6 @@
     "app_secret_env": "FEISHU_BRIDGE_LOCAL1_APP_SECRET",
     "at_name": "@本机助手",
     "cwd": "$VIBECODING_ROOT/Post/your-repo",
-    "profile": "cxp"
+    "profile": "<本机 profile 名>"
   }
 }

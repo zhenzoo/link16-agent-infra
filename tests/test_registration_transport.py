@@ -66,21 +66,21 @@ class RegistrationTransportTests(unittest.TestCase):
         def invoke_sdk(**kwargs):
             kwargs["on_qr_code"]({"url": "https://example.invalid/private", "expire_in": 600})
             return {"client_id": "cli_test", "client_secret": "private"}
-        for receipts, expected_calls, fails in (
-            ([{"ok": False}, {"ok": True}], 2, False),
-            ([{"ok": False}] * 3, 3, True),
+        # PLAN-1000 S1.1（2026-09-08 机器 3050）：投递失败不再中止注册——链接真源是终端输出，
+        # bot 投递只是顺手转发。绑定了 bot 就重试三次；没绑定（第一只 bot）只记一次状态。
+        for job, receipts, expected_calls in (
+            ({"notify_bot": "tb26-link16"}, [{"ok": False}, {"ok": True}], 2),
+            ({"notify_bot": "tb26-link16"}, [{"ok": False, "error": "x"}] * 3, 3),
+            ({"notify_bot": None}, [{"ok": False, "error": "未绑定 notify_bot"}], 1),
         ):
-            with self.subTest(fails=fails), \
+            with self.subTest(job=job, receipts=len(receipts)), \
                  mock.patch.object(register.lark, "register_app", side_effect=invoke_sdk), \
                  mock.patch.object(register, "on_qr"), \
                  mock.patch.object(register.registration_monitor, "record_stage"), \
+                 mock.patch.object(register.registration_monitor, "get_job", return_value=job), \
                  mock.patch.object(register.registration_monitor, "notify_oauth_link", side_effect=receipts) as notify, \
                  mock.patch.object(register.time, "sleep"):
-                if fails:
-                    with self.assertRaisesRegex(transport.RegistrationTransportError, "oauth_link_delivery_failed"):
-                        register._run_device_grant("test", job_id="test-job")
-                else:
-                    self.assertEqual(register._run_device_grant("test", job_id="test-job")["client_id"], "cli_test")
+                self.assertEqual(register._run_device_grant("test", job_id="test-job")["client_id"], "cli_test")
                 self.assertEqual(notify.call_count, expected_calls)
 
     def test_poll_retry_budget_and_diagnostics_never_include_response_body(self):

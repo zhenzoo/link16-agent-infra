@@ -454,6 +454,61 @@ def profile_public_dict(profile: ProfileSpec) -> dict:
     }
 
 
+def profile_login_state(profile: ProfileSpec) -> dict:
+    """Has this profile ever completed a provider login? Evidence only, never a network call.
+
+    2026-09-08 机器 3050：`claude-work` 从没登录过，bot 收到消息后面板开出来、Claude 停在登录页，
+    桥干等 90 秒才报「未就绪」。doctor 当时只看目录/launch.sh/CLI，看不到登录态。这里把
+    「登录过没有」变成机械证据：
+      claude → home/.credentials.json（OAuth token）或 .claude.json 的 oauthAccount；
+               第三方端点（launch.sh 设了 ANTHROPIC_AUTH_TOKEN / API_KEY）视为不需要登录。
+      codex  → home/auth.json
+      kimi   → 尚无稳定凭据文件合同 → unknown（不拦）
+    返回 {"status": "ok"|"missing"|"unknown", "evidence": str, "fix": {"powershell": str, "bash": str}}。
+    """
+    home = profile.home_path
+    fix = {
+        "powershell": f"{profile.name}   # 新开 PowerShell 窗口；找不到命令就先 . $PROFILE",
+        "bash": f"{profile.name}   # 新开 Git Bash；登录完看到正常输入框再 /exit",
+    }
+    if not home.is_dir():
+        return {"status": "missing", "evidence": f"home 不存在：{profile.home}", "fix": fix}
+    if profile.runtime == "claude":
+        if (home / ".credentials.json").is_file():
+            return {"status": "ok", "evidence": ".credentials.json 存在", "fix": fix}
+        # 默认 home（~/.claude）的 .claude.json 在用户根目录；CLAUDE_CONFIG_DIR 隔离 home 的在 home 里。
+        json_candidates = [home / ".claude.json"]
+        try:
+            if home.resolve() == (Path.home() / ".claude").resolve():
+                json_candidates.append(Path.home() / ".claude.json")
+        except OSError:
+            pass
+        data = {}
+        for candidate in json_candidates:
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("oauthAccount"):
+                return {"status": "ok", "evidence": f"{candidate.name} 含 oauthAccount", "fix": fix}
+        launch = home / "launch.sh"
+        try:
+            text = launch.read_text(encoding="utf-8") if launch.is_file() else ""
+        except OSError:
+            text = ""
+        if "export ANTHROPIC_AUTH_TOKEN" in text or "export ANTHROPIC_API_KEY" in text:
+            return {"status": "ok", "evidence": "launch.sh 走第三方端点/API key，无需 OAuth 登录", "fix": fix}
+        return {"status": "missing",
+                "evidence": "没有 .credentials.json，.claude.json 也没有 oauthAccount（从没登录过）",
+                "fix": fix}
+    if profile.runtime == "codex":
+        if (home / "auth.json").is_file():
+            return {"status": "ok", "evidence": "auth.json 存在", "fix": fix}
+        fix = {"powershell": f"{profile.name} login", "bash": f"{profile.name} login"}
+        return {"status": "missing", "evidence": "没有 auth.json（从没登录过）", "fix": fix}
+    return {"status": "unknown", "evidence": f"{profile.runtime} 的登录凭据位置尚未纳入合同", "fix": fix}
+
+
 def resolve_shell() -> str:
     """Resolve the POSIX shell used to exec a generated command line.
 
@@ -559,6 +614,8 @@ def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
         **profile_public_dict(profile),
         "ok": not errors,
         "errors": errors,
+        # 登录态只报告不判死：第三方端点/Kimi 没有统一凭据文件；桥在 spawn 前按 status=="missing" 拦。
+        "login": profile_login_state(profile),
     }
     if check_execution_env:
         # Report drift, never fail on it: an unverified version still starts

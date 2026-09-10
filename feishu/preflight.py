@@ -216,6 +216,26 @@ def check_git_bash():
                   "重装 Git for Windows，并确认 bin\\bash.exe 可直接启动")
 
 
+def check_bash_on_path():
+    """桥开面板后第一行敲的是裸 `bash`（wmux_session.spawn 的 shell_init）——它靠面板 shell 从 PATH 找。
+
+    2026-09-08 机器 3050：Git 装在 %LOCALAPPDATA%/Programs/Git，bash.exe 文件在、check_git_bash 绿，
+    但 bin 目录不在 PATH，面板里敲 bash 直接 command not found，桥等满 90 秒报未就绪。
+    这里只认「PATH 能解析到 Git 的 bash」；System32 的 bash.exe 是 WSL 启动器，不算。
+    """
+    bash = _git_bash_path()
+    found = _fresh_which("bash")
+    if found and "system32" not in str(found).lower() and _looks_like_git_bash(found):
+        return Result("bash 在 PATH", OK, str(found))
+    where = str(bash.parent) if bash else "C:\\Program Files\\Git\\bin"
+    return Result("bash 在 PATH", FAIL,
+                  ("PATH 里的 bash 是 WSL 的 System32 启动器" if found else "PATH 里没有 bash")
+                  + "（桥开面板第一行就敲 bash，会 command not found）",
+                  "python feishu/windows_bootstrap.py --apply --yes 会把 Git 的 bin 目录写进用户 PATH；"
+                  f"或手动：[Environment]::SetEnvironmentVariable('Path', $env:Path + ';{where}', 'User')；"
+                  "改完【重启 wmux】才继承新 PATH")
+
+
 def check_windows_terminal_default():
     """Windows Terminal 不是桥硬依赖，但本机操作标准要求新窗口默认进入 Git Bash。"""
     local = os.environ.get("LOCALAPPDATA")
@@ -277,9 +297,13 @@ def check_wmux_default_shell():
                       "在 wmux Settings 重新选择 Git Bash 后重开 wmux")
     if _looks_like_git_bash(shell) and Path(str(shell)).is_file():
         return Result("wmux 默认 Shell", OK, str(shell))
-    return Result("wmux 默认 Shell", FAIL, f"当前 defaultShell = {shell or '未设置'}",
-                  "wmux → Settings → Default Shell → C:\\Program Files\\Git\\bin\\bash.exe；"
-                  "安装或升级 wmux 后都要复核")
+    # 2026-09-08 机器 3050：wmux 3.5x 的下拉框只列 PowerShell/WSL/CMD，Git 装在用户目录时探测不到，
+    # 写 session.json 也会被 wmux 重启覆盖 → 这项曾经永远 FAIL。它其实不阻塞：桥开面板后自己敲一行
+    # `bash` 切进 Git Bash（见 check_bash_on_path）。降为 WARN，把真正的硬条件交给「bash 在 PATH」。
+    return Result("wmux 默认 Shell", WARN,
+                  f"当前 defaultShell = {shell or '未设置'}（不阻塞：桥开面板后会自己敲 bash 切过去）",
+                  "想变绿：wmux → Settings → Default Shell → Git Bash；下拉框里没有 Git Bash 说明 Git 装在用户目录，"
+                  "wmux 探测不到，可忽略或把 Git 装到 C:\\Program Files\\Git")
 
 
 def check_encoding():
@@ -435,9 +459,64 @@ def check_agent_cli():
                   "桥只负责把消息接进面板，面板里得有东西干活")
 
 
+def check_profile_login():
+    """本机 registry 里每个 profile 是否登录过（读凭据文件，不联网）。
+
+    2026-09-08 机器 3050：profile 建好、doctor 全绿，但从没登录，第一条消息就卡死 90 秒。
+    这里在装桥前就把「哪个 profile 还没登录 + 在哪个终端敲什么」列出来。
+    """
+    try:
+        sys.path.insert(0, str(HERE))
+        import agent_runtime
+        specs = agent_runtime.profile_specs()
+    except Exception as e:  # noqa: BLE001
+        return Result("profile 登录态", WARN, f"读不到 profile registry：{e}",
+                      "python feishu/profile_bootstrap.py --doctor")
+    if not specs:
+        return Result("profile 登录态", WARN, "registry 里没有 profile", "python feishu/profile_bootstrap.py --init-registry ...")
+    # 只有「桥真会用到」的 profile 没登录才算 FAIL：本机名册里 bot 指定的 profile + 各 runtime 的机器默认。
+    # registry 里登记了但本机没用的（别台机器的号、历史遗留）只 WARN，不挡装机。
+    used = set()
+    try:
+        for runtime in sorted({s.runtime for s in specs}):
+            try:
+                used.add(agent_runtime.machine_default_profile(runtime))
+            except Exception:  # noqa: BLE001
+                pass
+        roster = Path(agent_runtime.ROSTER_LOCAL_PATH)
+        if roster.is_file():
+            for bot in json.loads(roster.read_text(encoding="utf-8")).get("bots") or []:
+                if isinstance(bot, dict) and bot.get("profile"):
+                    used.add(str(bot["profile"]))
+    except Exception:  # noqa: BLE001
+        pass
+    missing, unknown, ok = [], [], []
+    for spec in specs:
+        state = agent_runtime.profile_login_state(spec)
+        (ok if state["status"] == "ok" else unknown if state["status"] == "unknown" else missing).append((spec, state))
+    blocking = [(s, st) for s, st in missing if s.name in used]
+    idle = [(s, st) for s, st in missing if s.name not in used]
+    if blocking:
+        names = "、".join(s.name for s, _ in blocking)
+        fix = chr(10).join(
+            f"        {s.name}（{s.runtime}）：PowerShell → {st['fix']['powershell']}   |   Git Bash → {st['fix']['bash']}"
+            for s, st in blocking)
+        return Result("profile 登录态", FAIL,
+                      f"没登录过：{names}（bot 收到消息会开面板但停在登录页）",
+                      "新开一个终端窗口登录（旧窗口的 PATH/函数是旧的）：\n" + fix)
+    detail = "、".join(f"{s.name} ✓" for s, _ in ok) or "没有已登录的 profile"
+    if unknown:
+        detail += "；未纳入合同：" + "、".join(s.name for s, _ in unknown)
+    if idle:
+        detail += "；登记了但本机未用且未登录：" + "、".join(s.name for s, _ in idle)
+    return Result("profile 登录态", OK if ok and not idle else WARN, detail,
+                  "" if not idle else "这些 profile 若本机要用，先登录；不用可从 agent-profiles.local.json 移除")
+
+
 CHECKS = (check_python, check_deps, check_node, check_github_cli, check_repository_main, check_git_bash,
-          check_windows_terminal_default, check_wmux, check_wmux_default_shell, check_encoding,
-          check_env_file, check_proxy_config, check_local_roster, check_registry, check_agent_cli)
+          check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_default_shell,
+          check_encoding, check_env_file, check_proxy_config, check_local_roster, check_registry,
+          check_agent_cli, check_profile_login)
 
 
 def run_checks(checks=CHECKS):

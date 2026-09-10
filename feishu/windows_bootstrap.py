@@ -92,8 +92,37 @@ def _first_file(paths):
     return None
 
 
+def _real_local_appdata():
+    """真实的 %LOCALAPPDATA%，绕开 MSIX 容器重定向。
+
+    2026-09-08 机器 3050：在 Claude 桌面版（MSIX 封装）里跑本脚本时，LOCALAPPDATA 被重定向成
+    ...\\Packages\\Claude_xxx\\LocalCache\\Local，wmux/Python/WinGet 的目录全在这个假根下找不到，
+    Run 键因此算出带版本号的错误路径。判据：LOCALAPPDATA 路径里含 \\Packages\\ 就改用 USERPROFILE 推。
+    """
+    local = os.environ.get("LOCALAPPDATA") or ""
+    if "\\packages\\" in local.replace("/", "\\").casefold():
+        profile = os.environ.get("USERPROFILE") or str(Path.home())
+        return str(Path(profile) / "AppData" / "Local")
+    return local or None
+
+
+def inside_desktop_client():
+    """是否在 Claude 桌面版之类的 MSIX 客户端里跑（LOCALAPPDATA 被重定向或 cwd 是 cowork 工作区）。"""
+    local = (os.environ.get("LOCALAPPDATA") or "").replace("/", "\\").casefold()
+    cwd = str(Path.cwd()).replace("/", "\\").casefold()
+    return "\\packages\\claude_" in local or "\\claude\\scratch-workspaces\\" in cwd
+
+
+DESKTOP_CLIENT_NOTES = (
+    "LOCALAPPDATA 被 MSIX 容器重定向：本脚本已自动改用 %USERPROFILE%\\AppData\\Local 找 wmux/Python；"
+    "service_installer plan 前请核对 after 路径不含 Packages\\Claude_。",
+    "cowork 工作区路径很长，git clone 可能报 `$GIT_DIR too big`：先 `$env:GIT_DIR=$null` 再 clone。",
+    "装完软件后【已打开的终端】PATH 和 PowerShell profile 是旧的：gh / claude-work 报找不到命令 → 新开一个窗口。",
+)
+
+
 def _winget_package(pattern):
-    local = os.environ.get("LOCALAPPDATA")
+    local = _real_local_appdata()
     if not local:
         return None
     base = Path(local) / "Microsoft" / "WinGet" / "Packages"
@@ -122,7 +151,7 @@ def _python312_executable():
     found = preflight._fresh_which("python")
     if found:
         candidates.append(Path(found))
-    local = os.environ.get("LOCALAPPDATA")
+    local = _real_local_appdata()
     if local:
         try:
             candidates.extend((Path(local) / "Programs" / "Python").glob("Python*/python.exe"))
@@ -142,7 +171,7 @@ def _python312_executable():
 
 
 def wmux_executable():
-    local = os.environ.get("LOCALAPPDATA")
+    local = _real_local_appdata()
     candidates = []
     if local:
         root = Path(local) / "wmux"
@@ -536,6 +565,60 @@ def configure_python_utf8(*, apply=False):
             "detail": "已写入用户级 PYTHONUTF8=1；重开终端后由 preflight 验收"}
 
 
+def _user_path_entries():
+    raw = _user_env_value("Path") or ""
+    return [part for part in raw.split(";") if part.strip()]
+
+
+def _same_dir(a, b):
+    return str(a).replace("/", "\\").rstrip("\\").casefold() == str(b).replace("/", "\\").rstrip("\\").casefold()
+
+
+def configure_user_path(*, apply=False):
+    """把桥真正依赖、但官方安装器不写的两个目录补进【用户级】PATH。
+
+    2026-09-08 机器 3050：① Git 装在用户目录，bin 不在 PATH → 桥开面板敲 `bash` 直接 command not found；
+    ② Claude Code 原生安装器把 claude.exe 放在 ~/.local/bin 却明说「not in your PATH」。
+    只追加、不删、不重排；已在则 ok。改完新面板才继承 → detail 里提醒重启 wmux。
+    """
+    wanted = []
+    bash = preflight._git_bash_path()
+    if bash:
+        wanted.append(("git-bin", bash.parent))
+    local_bin = Path.home() / ".local" / "bin"
+    if (local_bin / "claude.exe").is_file():
+        wanted.append(("claude-local-bin", local_bin))
+    if not wanted:
+        return {"task": "user-path", "status": "ok", "detail": "没有需要补的目录"}
+    if os.name != "nt":
+        return {"task": "user-path", "status": "ok", "detail": "非 Windows，跳过"}
+    current = _user_path_entries()
+    missing = [(label, d) for label, d in wanted if not any(_same_dir(d, e) for e in current)]
+    if not missing:
+        return {"task": "user-path", "status": "ok",
+                "detail": "已在用户 PATH：" + "、".join(str(d) for _, d in wanted)}
+    listing = "、".join(f"{label}={d}" for label, d in missing)
+    if not apply:
+        return {"task": "user-path", "status": "missing", "detail": f"将追加到用户 PATH：{listing}；完成后须重启 wmux/终端"}
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                raw, kind = winreg.QueryValueEx(key, "Path")
+            except OSError:
+                raw, kind = "", winreg.REG_EXPAND_SZ
+            parts = [part for part in str(raw).split(";") if part.strip()]
+            parts.extend(str(d) for _, d in missing)
+            winreg.SetValueEx(key, "Path", 0, kind if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) else winreg.REG_EXPAND_SZ,
+                              ";".join(parts))
+        _broadcast_environment_change()
+        os.environ["PATH"] = os.environ.get("PATH", "") + "".join(f";{d}" for _, d in missing)
+    except OSError as exc:
+        return {"task": "user-path", "status": "blocked", "detail": str(exc)}
+    return {"task": "user-path", "status": "applied",
+            "detail": f"已追加到用户 PATH：{listing}；【重启 wmux】新面板才继承"}
+
+
 def apply_missing(rows):
     results = []
     for row in rows:
@@ -576,6 +659,8 @@ def deployment_failures(rows, installs, post_install):
     failures.extend(
         f"post:{row['task']}:{row['status']}" for row in post_install
         if row.get("status") in {"blocked", "needs-gui"}
+        # wmux 默认 Shell 只是「想变绿」的 GUI 项，桥不依赖它（开面板后自己敲 bash）——不算装机失败。
+        and not (row.get("task") == "wmux-default-shell" and row.get("status") == "needs-gui")
     )
     return failures
 
@@ -597,7 +682,7 @@ def main(argv=None):
         parser.error(f"--apply 需要 --yes；agent 必须先把 {len(COMPONENTS)} 项清单一次性展示给用户")
     installs = apply_missing(initial_rows) if args.apply else []
     rows = installation_plan(skipped) if args.apply else initial_rows
-    post = [configure_python_utf8(apply=args.apply)]
+    post = [configure_python_utf8(apply=args.apply), configure_user_path(apply=args.apply)]
     if "wmux" not in skipped:
         post.extend([
             configure_windows_terminal_git_bash(apply=args.apply),
@@ -611,9 +696,11 @@ def main(argv=None):
     software = software_user_plan(rows, installed_this_run=installed_this_run,
                                   runtime_health=raw_health)
     link16 = link16_user_plan(raw_health, evaluated_health)
+    desktop_notes = list(DESKTOP_CLIENT_NOTES) if inside_desktop_client() else []
     payload = {"applied": args.apply, "components": software, "software": software,
                "link16": link16, "installs": installs,
-               "post_install": post, "failures": failures, "gstack_default": False}
+               "post_install": post, "failures": failures, "gstack_default": False,
+               "desktop_client_notes": desktop_notes}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -629,6 +716,10 @@ def main(argv=None):
             print(f"  {idx}. [{row['user_status']}] {row['label']} · {row['detail']}")
         if failures:
             print("  [  FAIL   ] 安装后复查未通过：" + ", ".join(failures))
+        if desktop_notes:
+            print("\n在 Claude 桌面版里跑的三条注意：")
+            for note in desktop_notes:
+                print(f"  · {note}")
         if not args.apply:
             print("下一步：把清单展示给用户；确认后运行 --apply --yes，可用 --skip claude,codex,kimi 跳过不需要的 CLI。")
     return 1 if failures else 0

@@ -1191,6 +1191,20 @@ def _ensure_session_unlocked(bot):
             wmux_session.close(rec["workspace_id"])
         except Exception:  # noqa: BLE001
             pass
+    # 2026-09-08 机器 3050：profile 从没登录，面板开了、Claude 停在登录页，桥干等 90 秒才报未就绪。
+    # spawn 前先看凭据证据：明确「没登录过」就立刻报人话，不开面板、不等 90 秒。unknown（Kimi/第三方端点）不拦。
+    try:
+        _login = agent_runtime.profile_login_state(
+            agent_runtime.profile_spec(agent_runtime.profile_name(bot, required=True)))
+    except Exception:  # noqa: BLE001 — 登录探测失败不能挡住正常启动
+        _login = {"status": "unknown"}
+    if _login.get("status") == "missing":
+        _pname = agent_runtime.profile_name(bot, required=True)
+        raise RuntimeError(
+            f"账号 {_pname} 还没登录过（{_login.get('evidence')}）。请在电脑上新开一个终端，"
+            f"PowerShell 里跑 `{_login['fix']['powershell'].split('   #')[0].strip()}`，"
+            "走完浏览器登录、看到正常输入框后 /exit，再 @ 我一次。"
+        )
     before = {str(p) for p, _ in _project_jsonls(bot)}
     cwd = current_cwd(bot)  # 沿用【当前所在目录】：/cd 过则自愈重生仍回那个目录（与账号自愈对称）·/close 清过或没 /cd 过则回名册默认
     agent_runtime.ensure_codex_trust(bot, cwd)  # Codex 首启 trust 弹窗会在 app-server warmup 上游就把会话挡死 → spawn 前预写目录信任（Claude 侧由就绪等待自动回车，无需预写）
@@ -1993,6 +2007,21 @@ def _run_bot(bot_name=None):
         sys.exit(2)
 
     msg_lock = asyncio.Lock()   # 本 bot 进程内消息串行（防并发注入交错 / ensure_session race · 见 on_message）
+    # 冷启动窗口 [start, end]：/close 若在这个窗口内【到达】（哪怕被 msg_lock 排到注入之后才执行），先要确认再关。
+    # 2026-09-08 机器 3050：用户在冷启动第 129 秒发 /close，排队到注入后 2 秒执行，把正要回答的会话关了。
+    startup_window = {"start": 0.0, "end": 0.0}
+    close_confirm = {"at": 0.0}
+    STARTUP_HEARTBEAT_SEC = 30
+
+    async def _startup_heartbeat(chat_id, started):
+        """冷启动期间每 30 秒报一次「还在起」，直到 ensure_session 返回被取消。"""
+        try:
+            while True:
+                await asyncio.sleep(STARTUP_HEARTBEAT_SEC)
+                waited = int(time.time() - started)
+                await reply(chat_id, f"⏳ 还在启动（已等 {waited} 秒，冷启动通常 1～2 分钟）·别发 /close，它会把正要回答的会话关掉")
+        except asyncio.CancelledError:
+            pass
 
     def make_handler(bot, channel):
         account_default = agent_runtime.account_snapshot(bot)   # 名册默认账号快照（/account 临时切·/close 切回这个）
@@ -2028,7 +2057,7 @@ def _run_bot(bot_name=None):
             _acc = agent_runtime.current_account(bot)
             await reply(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
-        async def handle_slash(chat_id, text, sender=None, from_group=False):
+        async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None):
             cmd = text.split()[0].lower()
             arg = text[len(cmd):].strip()
             # 🚧 破坏性命令授权闸（PLAN-930 · 2026-08-03）。
@@ -2087,6 +2116,13 @@ def _run_bot(bot_name=None):
                         "residual": "（输入框仍有顽固残留·去终端瞄一眼）"}.get(status, "")
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
+                _arrived = arrived or time.time()
+                _in_window = startup_window["start"] <= _arrived <= startup_window["end"] + 15
+                if _in_window and time.time() - close_confirm["at"] > 120:
+                    close_confirm["at"] = time.time()
+                    await reply(chat_id, "🚧 会话正在冷启动/刚就绪，现在关会丢掉正要生成的回答。确认要关：2 分钟内再发一次 /close；想看现场发 /screen，想打断发 /stop。")
+                    return
+                close_confirm["at"] = 0.0
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /close=结束会话=撤销投递契约→清账（§2.13）
                 agent_runtime.reset_account(bot, account_default)         # /close = 结束本会话 = 账号切回名册默认
                 if alive:
@@ -2459,10 +2495,11 @@ def _run_bot(bot_name=None):
 
             # 🔒 串行化：同一 bot 同时收到多条消息时一条一条处理，防「并发注入交错 + ensure_session race」
             # （Zara 式「运行中的消息排队下一轮」· 2026-06-15 实证：连发两条，第二条的回复被冲掉没发回）。
+            arrived_at = time.time()          # 到达时刻（拿锁之前）：/close 是否落在冷启动窗口按这个判
             async with msg_lock:
                 text = _unmangle_slash(text)      # 修 Git-Bash 把 /close 改写成 C:/Program Files/Git/close
                 if text.startswith("/"):
-                    await handle_slash(msg.chat_id, text, sender=sender, from_group=is_group)
+                    await handle_slash(msg.chat_id, text, sender=sender, from_group=is_group, arrived=arrived_at)
                     return
                 # /cd 编号待选：上条 `/cd` 列了编号清单 → 本条若是纯数字就切目录；非数字=改主意，清掉待选照常处理
                 _cdp = await asyncio.to_thread(load_cd_pending, bot["name"])
@@ -2488,10 +2525,21 @@ def _run_bot(bot_name=None):
                         _dir = await asyncio.to_thread(current_cwd, bot)
                         _acc_lbl, _dir_lbl = runtime_labels(_dir)
                         await reply(msg.chat_id,
-                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}…十几秒后开始流式进度"
+                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}…冷启动约 1～2 分钟，每 30 秒报一次进度，别发 /close"
                                      if ws_present else
-                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}…十几秒后开始流式显示进度"))
-                    ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
+                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}…冷启动约 1～2 分钟，每 30 秒报一次进度，别发 /close"))
+                    _hb = None
+                    if not reusable:
+                        startup_window["start"] = time.time()
+                        startup_window["end"] = float("inf")
+                        _hb = asyncio.create_task(_startup_heartbeat(msg.chat_id, startup_window["start"]))
+                    try:
+                        ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
+                    finally:
+                        if _hb:
+                            _hb.cancel()
+                        if not reusable:
+                            startup_window["end"] = time.time()
                     # 入站附件：真下载字节到 inbox，注入【本地路径】而非 SDK 的 `![image](key)` 占位。
                     # download_resource_to_file 带 message_id → 走 im/v1/messages/{id}/resources（入站正确端点·非 image.get）。
                     caption = _strip_media_markup(text)

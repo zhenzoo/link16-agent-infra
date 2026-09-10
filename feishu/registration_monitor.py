@@ -652,14 +652,14 @@ def main():
     arm.add_argument("--capability", action="append", choices=tuple(bridge_scope_audit.CAPABILITY_SPECS))
     arm.add_argument("--ttl", type=int, default=DEFAULT_TTL_SECONDS)
     run_parser = sub.add_parser("run", help="运行某个监督任务")
-    run_parser.add_argument("--job", required=True)
+    run_parser.add_argument("--job", "--job-id", dest="job", required=True)
     run_parser.add_argument("--once", action="store_true")
     run_parser.add_argument("--interval", type=int, default=10)
     status = sub.add_parser("status", help="读取监督状态")
-    status.add_argument("--job")
+    status.add_argument("--job", "--job-id", dest="job")
     status.add_argument("--bot")
     stop = sub.add_parser("cancel", help="取消监督任务")
-    stop.add_argument("--job", required=True)
+    stop.add_argument("--job", "--job-id", dest="job", required=True)
     args = parser.parse_args()
 
     if args.command == "arm":

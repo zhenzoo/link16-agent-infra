@@ -433,7 +433,7 @@ def main(argv=None) -> int:
     plan_p.add_argument("--json", action="store_true")
     apply_p = sub.add_parser("apply")
     apply_p.add_argument("--yes", action="store_true")
-    apply_p.add_argument("--expect", required=True, help="用户审阅过的 plan digest")
+    apply_p.add_argument("--expect", "--digest", dest="expect", required=True, help="用户审阅过的 plan digest（--digest 是别名）")
     apply_p.add_argument("--json", action="store_true")
     rollback_p = sub.add_parser("rollback")
     rollback_p.add_argument("--receipt", required=True)
