@@ -4,6 +4,11 @@
 The policy controls only whether Link16 may create an online Feishu copy.
 Local-path display, original-file attachment authority, and GUI opening are
 separate decisions owned by the calling workflow.
+
+It also owns the canonical three-line artifact receipt (SPEC-210 §交付回执):
+title line, online-URL line, local-absolute-path line.  A missing line is
+never dropped; it is replaced by a parenthesised reason so the reader always
+sees the same shape.
 """
 
 from __future__ import annotations
@@ -26,6 +31,46 @@ class ArtifactDeliveryPolicyError(ValueError):
 
 class OnlineArtifactDeliveryDisabled(RuntimeError):
     """Raised before network work when online publication is not authorized."""
+
+
+ONLINE_DOC_LABEL = "飞书在线文档·登录飞书查看"
+NO_ONLINE_SWITCH_OFF = "本机在线开关 off，本轮未建在线副本"
+NO_ONLINE_NOT_REQUESTED = "本轮未建在线副本"
+NO_LOCAL_FILE = "本地无此文件，仅在线文档"
+
+
+def render_artifact_receipt(
+    title: str,
+    *,
+    url: str | None = None,
+    local_paths: "list[str | Path] | tuple[str | Path, ...] | str | Path | None" = None,
+    url_missing_reason: str | None = None,
+    label: str = ONLINE_DOC_LABEL,
+    icon: str = "📄",
+) -> str:
+    """Render the fixed three-line receipt for one reviewable artifact.
+
+    Line 1: ``<icon> <title>（<label>）：``
+    Line 2: the real https URL, or ``（<reason>）`` when there is no online copy.
+    Line 3+: one plain absolute local path per file, or ``（本地无此文件，仅在线文档）``.
+
+    Paths are plain copyable text — never Markdown links, code spans or file:///.
+    """
+    clean_title = " ".join(str(title or "").split()) or "在线文档"
+    lines = [f"{icon} {clean_title}（{label}）："]
+    clean_url = (url or "").strip()
+    if clean_url:
+        lines.append(clean_url)
+    else:
+        lines.append(f"（{(url_missing_reason or NO_ONLINE_NOT_REQUESTED).strip('（）')}）")
+    if isinstance(local_paths, (str, Path)):
+        local_paths = [local_paths]
+    paths = [str(Path(p).resolve()) for p in (local_paths or []) if str(p).strip()]
+    if paths:
+        lines.extend(paths)
+    else:
+        lines.append(f"（{NO_LOCAL_FILE}）")
+    return chr(10).join(lines)
 
 
 @dataclass(frozen=True)
@@ -133,7 +178,24 @@ def main(argv: list[str] | None = None) -> int:
     decide = sub.add_parser("decide", help="解析一次产物交付决策")
     decide.add_argument("--explicit", choices=["auto", "online", "local"], default="auto")
     decide.add_argument("--json", action="store_true")
+    rcpt = sub.add_parser("receipt", help="渲染固定三行产物回执：标题行 / URL 行 / 本机绝对路径行")
+    rcpt.add_argument("--title", required=True, help="第一行的产物标题（中文说明）")
+    rcpt.add_argument("--url", default=None, help="真实 https URL；没有就按当前策略自动写括号原因")
+    rcpt.add_argument("--path", action="append", default=[], help="本机文件路径，可重复；没有就写括号说明")
+    rcpt.add_argument("--reason", default=None, help="没有 URL 时的括号原因（默认按全局开关推断）")
+    rcpt.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.command == "receipt":
+        reason = args.reason
+        if not args.url and not reason:
+            enabled, _ = load_online_setting(POLICY_PATH)
+            reason = NO_ONLINE_NOT_REQUESTED if enabled else NO_ONLINE_SWITCH_OFF
+        text = render_artifact_receipt(
+            args.title, url=args.url, local_paths=args.path, url_missing_reason=reason,
+        )
+        print(json.dumps({"receipt": text}, ensure_ascii=False) if args.json else text)
+        return 0
 
     if args.command == "set-online":
         set_online_setting(args.value == "on")
