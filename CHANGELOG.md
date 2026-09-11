@@ -11,13 +11,38 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-11
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.26.0 — 飞书产物回执固定三行块 + 看门狗 R8 长静默自动按 Esc（2026-09-11）
+
+**病根**：主人在飞书 DM 里收到的产物回执一直漂——有时只有本地路径、有时只有在线链接、有时链接带标题，三种形态随机出现，对不上「哪份产物在哪个文件」。根因是 SPEC-210 / feishu skill / 用户级 CLAUDE.md 只规定「有哪几行」，四个交付动作各自独立，没有任何一处把三行绑成一块，也没规定缺行怎么写；而「📄 标题 + URL」两行是 `send --doc` 自己发的一张卡，与 agent 最终答复是两条消息。本版把三行块升为合同并由唯一渲染器机械保证。
+
+### 新增
+
+- **`artifact_delivery.render_artifact_receipt` + CLI `receipt`**：固定输出「📄 标题（飞书在线文档·登录飞书查看）：」/ 真实 https URL / 本机绝对路径三行；多媒体每文件一行。缺行换成三句固定括号措辞——`（本机在线开关 off，本轮未建在线副本）` / `（在线副本创建失败：<原因>）` / `（本地无此文件，仅在线文档）`，绝不省行。`receipt --title --url --path --reason --json`；没 URL 又没 reason 时按本机全局开关推断原因。
+- **看门狗 R8**（`bridge_watchdog.py`）：每 120 秒自动巡，屏上在跑（Codex `• Working` / Claude `esc to interrupt`）+ 该 bot outbox ≥30 分钟无写入 + agentStatus 非 idle → 发 Esc 打断、注入通用推进话、DM 告知主人；同一场静默只打断一次。新增 `stall-check` 只读预演。修 tb26-baseball-5 卡 13h56m 零回传的盲区（Codex 请求无超时、旧 R5 只认回合出错、桥静默卡只在主人刚发消息时查）。
+
+### 变更
+
+- `feishu_bridge.py send --doc` 卡片、`send_feishu_media.py` 媒体卡、`bridge_outbox.py` drainer 的「本轮在线文档」块三处改为共用同一渲染器；outbox `doc_delivery` 记录新增 `local_path`，旧记录缺该字段时第三行写占位不省行。
+- SPEC-210 §45 升为三行块硬合同；`.agents/skills/feishu/SKILL.md` §4、TOOLS.md、ARCH-110 §send --doc 同步；用户级 `~/.claude-personal/CLAUDE.md`「飞书 DM 里的产物交付」节同步；两份 feishu skill 副本重新 materialize。
+
+### 验证
+
+- 新增 `tests/test_artifact_receipt.py` 10 例（三行完整 / 缺 URL 括号 / 缺路径括号 / 括号不重复包裹 / 媒体多文件 / CLI 按开关推断 / `cmd_send` 卡片三行 / 队列记录带 `local_path` / drainer 三行与占位）；`test_outbound_delivery` 等既有交付套件 52 通过；全量 791 通过（两个失败为另一 session 工作树未提交改动所致，与本版无关）。
+- tb26-link16 实发 SPEC-210 修订稿到主人 DM，卡片为三行块，outbox 记录已带 `local_path`。
+- R8 live：baseball-5 首轮即按 Esc + 注入 + DM，bot 起新回合，第二轮不再重复打断。
+
+### 升级注意
+
+- 桥与看门狗进程需重启才加载新卡片正文与 R8。
+- agent 手写回执一律跑 `python feishu/artifact_delivery.py receipt ...` 输出，不再自行拼「路径」「URL」或「标题 + URL」两行。
 
 ## v0.25.0 — 新用户带着自己的 context 上手：盘点导入 + 按活跃项目建 bot + 3050 装机十缺口（2026-09-10）
 
