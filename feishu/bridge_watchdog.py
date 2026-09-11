@@ -42,6 +42,11 @@ import bridge_process
 import bridge_env          # noqa: E402
 import agent_runtime       # noqa: E402
 import agent_quota         # noqa: E402
+import bridge_outbox       # noqa: E402  # R8：outbox 静默分钟数（每只 bot 独立的回程真信号）
+try:
+    import wmux_session    # noqa: E402  # R8：pty_agent_status（结构信号·排除死壳）
+except Exception:          # noqa: BLE001 —— 缺它时 R8 退化成「只看屏 + outbox」，不崩
+    wmux_session = None
 
 bridge_env.force_utf8_std()
 
@@ -407,6 +412,62 @@ def codex_dead_turn(bot_name, bot_obj):
     return find_dead_turn(tail), True
 
 
+# ---------- R8 · 回合进行中静默：屏上在跑、但很久没有任何回传（请求发出去了、响应永不回来）----------
+#
+# 🩸 2026-09-09 tb26-baseball-5 实证（这条规则的立项现场）：
+#   19:55:46 Codex 把一个 6.9 MB 的 /responses 请求经本机代理发出，响应头再也没回来。
+#   Codex 0.153.4 发这个请求时 timeout=None（codex-api/src/provider.rs），`stream_idle_timeout_ms`
+#   只包在「响应头到达之后」的正文流上，`request_max_retries` 只在「返回了错误」时触发。
+#   于是它既不报错也不重试：屏上 Working 计时一直走，飞书零回传，直到主人第二天 09:52
+#   在终端按 Esc 才醒（Codex 日志里就是一条 op: Interrupt）。R5 只认「回合以错误收尾」，
+#   看到回合进行中就跳过 → 落在盲区；桥的「回程静默」卡只在主人刚发过一条没回的消息时才查，
+#   主人不发消息它一次都不看（主人 2026-09-11 原话：「必须让我发消息给他，他才会检测」）。
+#
+# 判据（主人 2026-09-11 拍板 · 就是他描述的三条，全用现成结构信号，不碰 rollout/thread）：
+#   ① 屏上挂着【正在跑】的活动指示（Codex `• Working`、Claude `esc to interrupt`）——
+#      证明是「回合在跑」而不是「已回到输入框空等」（空等的会话不能去打断、更不能替它开新活）。
+#   ② 这个 bot 的 **outbox 已经 ≥ STALL_MIN 分钟没被写过**（= 没有任何消息回传、没有进度卡）。
+#      outbox 最后写入时间是回程唯一真信号（见 bridge_outbox.silent_minutes 的长注释）。
+#   ③ agentStatus 不是 idle（wmux 结构信号·排除死壳/裸壳）。
+# 为什么不读 rollout / 不认 thread：baseball 家好几只 bot 共用同一个 codex_home + cwd，
+#   rollout 只能靠 thread_id 区分，而 thread 状态文件会过期（2026-09-11 实测 baseball-5 的
+#   thread 文件冻结在 09-09、指向早已结束的旧回合）→ 认 thread 就会读错文件、永不触发。
+#   屏 + outbox 都是【每只 bot 各自独立】的信号，天然免疫共用目录，且顺带覆盖 Claude。
+# 动作 = 主人按 Esc 那一下：发 escape 打断 → 注一句**通用**的推进话（不重发上一条，
+#   主人 2026-09-11：「不能只是草率的发上一条消息」）→ 用这个 bot 的 DM 告诉主人。
+#   同一场静默只打断一次（outbox 一有新写入就算翻篇）；打断后仍静默 → 只告警、不再动手。
+# ⚠️ 已知边界：一个工具真跑超过 STALL_MIN 分钟又不发进度卡（长渲染），也会被当成卡住打断。
+#   主人知道并接受这个代价（宁可误打断一次，也不要再沉默一夜）。阈值好调：改 STALL_MIN 一处。
+STALL_MIN = 30
+STALL_NUDGE_TEXT = ("⚠️ 你已经 {mins} 分钟没有任何新进度了（屏上还在 Working，但没有回传、没有进度）。"
+                    "看门狗替主人按了一下 Esc。先查一下刚才卡在哪、为什么停住，"
+                    "然后从上次停的地方继续推进，并回一条当前进度。若你其实在跑一个很长的操作，也回一句说明。")
+# 屏上「正在跑」的活动指示：Codex 现在时态 `• Working`（区别于收尾的 `Worked for`）；
+# Claude 的 `esc to interrupt` 页脚。只在最后几行（状态区）里找，别扫正文（2026-06-18 老教训：
+# 正文提到某词 ≠ 真状态）。两者都没有 = 已回到输入框 / 已收尾，不动它。
+_WORKING_RE = re.compile(r"(?:•\s*Working\b|\besc to interrupt\b)", re.I)
+
+
+def working_now(pane_text):
+    """屏幕状态区是否挂着「正在跑」的活动指示。纯函数。只看最后 5 个非空行。"""
+    lines = [ln for ln in (pane_text or "").splitlines() if ln.strip()][-5:]
+    return any(_WORKING_RE.search(ln) for ln in lines)
+
+
+def bridge_outbox_mtime(bot_name):
+    """该 bot outbox 最后写入的 epoch 秒（= 一场静默的场次 id）。读不到 → 0。"""
+    try:
+        return os.path.getmtime(bridge_outbox.outbox_path(str(STATE_DIR), bot_name))
+    except OSError:
+        return 0.0
+
+
+def interrupt_pane(pty):
+    """= 主人在那个面板按一下 Esc。返回 True=键发出去了（wmux 只保证送达，TUI 理不理会看下一轮）。"""
+    out = rpc(["key", pty, "escape"] + _allow(pty))
+    return not out.startswith("__RPC_FAIL__")
+
+
 # ---------- 告警 ----------
 
 def _alerts_load():
@@ -425,7 +486,7 @@ def _alerts_save(data):
 
 
 # 状态类（会持续成立）→ 冷却；动作类（一次性）→ 必发不吞。
-_STATEFUL_KINDS = {"limit", "policy_stuck", "hwm_corrupt"}
+_STATEFUL_KINDS = {"limit", "policy_stuck", "hwm_corrupt", "stall_stuck"}
 
 
 def _alert_target(bot_name):
@@ -1093,11 +1154,12 @@ def cmd_run(auto=True):
       R3 停在交互 picker           → **什么都不做**（在等主人回答，注回车会替他乱选）
       R2 撞额度上限（屏 + API 双源）→ 换号 + 把原任务交接给新会话
       R1 API/网络错 + 静止 2 轮     → 注「继续」
+      R8 Codex 回合进行中静默 ≥30min → 按 Esc + 注「查原因·继续推进」+ DM；同一回合只动一次
       R5 Codex 回合被服务端掐断     → 告警 + 注「继续」；连着 3 个回合都被掐 → 停手只告警
       R4 桥进程 活→死              → 告警（每轮一次·不针对面板）
     要支持一种新的中断类型，就在这张表里加一行。"""
     log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 限流换号 / R3 picker跳过 / "
-        f"R5 Codex回合被掐断 / R6 水位损坏 / R7 CLI版本漂移 / R4 桥看护 · "
+        f"R8 Codex回合静默{STALL_MIN}min按Esc / R5 Codex回合被掐断 / R6 水位损坏 / R7 CLI版本漂移 / R4 桥看护 · "
         f"覆盖【全部 workspace 的全部面板】· 一视同仁")
     states = {}                      # {pty: {"hash","err_stuck","lim_stuck","last_nudge"}}
     bridge_seen_alive = False
@@ -1128,7 +1190,8 @@ def cmd_run(auto=True):
                 bot_name = bot_by_pty.get(pty)
                 st = states.setdefault(pty, {"err_sig": None, "err_stuck": 0,
                                             "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0,
-                                            "dead_turn": None, "dead_streak": 0, "dead_alert_at": 0.0})
+                                            "dead_turn": None, "dead_streak": 0, "dead_alert_at": 0.0,
+                                            "stall_ep": None, "stall_alert_at": 0.0})
 
                 # ---- R3 · picker → 什么都不做 ----
                 if at_picker(text, bot_name):
@@ -1175,6 +1238,40 @@ def cmd_run(auto=True):
                         notify(bot_name, "nudged",
                                f"🔧 {bot_name} 卡在『{err[:60]}』（API/网络错·没在自己重试）· 已自动注「继续」\n"
                                f"面板 {ws} / {pty}｜还卡就去看一眼")
+
+                # ---- R8 · 回合进行中静默 ≥ STALL_MIN → 按 Esc + 注「查原因·继续推进」+ DM ----
+                # 判据 = 屏上在跑（working_now）+ 该 bot outbox 静默 ≥ STALL_MIN 分钟 + agentStatus 非 idle。
+                # 全是【每只 bot 独立】的结构信号，不认 rollout/thread（共用目录会读错）。理由见 R8 那节长注释。
+                sm = bridge_outbox.silent_minutes(str(STATE_DIR), bot_name) if bot_name else None
+                ast = (wmux_session.pty_agent_status(pty) if wmux_session else None)
+                if (bot_name and sm is not None and sm >= STALL_MIN
+                        and working_now(text) and ast != "idle"):
+                    mins = int(sm)
+                    ep = int(bridge_outbox_mtime(bot_name))     # 静默场次 = outbox 最后写入时刻；一有新写入就翻篇
+                    if st.get("stall_ep") != ep:
+                        st["stall_ep"] = ep
+                        st["stall_alert_at"] = now
+                        st["last_nudge"] = now
+                        acted += 1
+                        esc_ok = interrupt_pane(pty)
+                        time.sleep(3)                          # 给 TUI 一拍把回合真正收掉，再注推进话
+                        nudge_pane(pty, STALL_NUDGE_TEXT.format(mins=mins))
+                        esc_note = "" if esc_ok else "（但 Esc 键没发出去，wmux RPC 失败）"
+                        log(f"[R8] {ws}/{bot_name} 屏上在跑但已静默 {mins} 分钟 → 已按 Esc{esc_note} + 注「查原因·继续推进」")
+                        notify(bot_name, "stall_nudged",
+                               f"⏱️ {bot_name} 已 {mins} 分钟零进展：屏上一直 Working，但没有任何回传、没有进度\n"
+                               f"· 看门狗已替你按了 Esc{esc_note}，并注入「查一下为什么停住 → 继续推进 → 回一条进度」\n"
+                               f"· 面板 {ws} / {pty}｜几分钟内还没回传就去看一眼")
+                        continue
+                    elif (now - st.get("stall_alert_at", 0)) >= ALERT_COOLDOWN:
+                        st["stall_alert_at"] = now
+                        log(f"[R8] {ws}/{bot_name} 按过 Esc 后仍静默 {mins} 分钟 → 只告警不再动手")
+                        notify(bot_name, "stall_stuck",
+                               f"🔴 {bot_name} 我按过 Esc 但它没醒：仍 {mins} 分钟零进展（屏上还在 Working）\n"
+                               f"· 我不再自动打断了，需要你去面板 {ws} / {pty} 看一眼（Ctrl+C 或 /close 重开）")
+                    continue                                   # R8 已认定这只 bot 卡住并处理过 → 不再让 R5 对它动手
+                else:
+                    st["stall_ep"] = None                     # 不再静默 / 已回输入框 → 翻篇，下次卡住重新算一场
 
                 # ---- R5 · Codex 回合被服务端掐断 → 告警 + 注「继续」（连 3 轮被掐就停手）----
                 # 判据读 Codex 自己的 rollout（结构化），**不读屏** —— 理由见文件上半部 R5 那节的长注释。
@@ -1630,6 +1727,28 @@ def cmd_status(verbose=False):
     return 0
 
 
+def cmd_stall_check(stall_min=STALL_MIN):
+    """R8 只读预演：逐个 bot 打印「屏上在不在跑 / outbox 静默几分钟 / agentStatus」+ 会不会出手，**不动手**。
+    验收和主人自查用：怀疑某只 bot 又沉默了，跑这条就知道看门狗下一轮会不会替你按 Esc。"""
+    pty_by_bot = {b: p for p, b in live_bot_by_pty().items()}
+    print(f"R8 预演 · 阈值 {stall_min} 分钟 · {datetime.now(TZ):%H:%M:%S}（只读·不动手）")
+    if not pty_by_bot:
+        print("  名册里没有带面板的 bot")
+        return 0
+    for name in sorted(pty_by_bot):
+        pty = pty_by_bot[name]
+        sm = bridge_outbox.silent_minutes(str(STATE_DIR), name)
+        ast = wmux_session.pty_agent_status(pty) if wmux_session else None
+        text = read_pane(pty) or ""
+        run = working_now(text)
+        hit = (sm is not None and sm >= stall_min and run and ast != "idle")
+        verdict = ("🔴 会出手（按 Esc + 注继续 + DM）" if hit else
+                   "🟡 屏上在跑但还没到阈值" if (run and ast != "idle") else "🟢 没在跑 / 已收尾 → 不动")
+        smtxt = f"{sm:.0f}m" if sm is not None else "无记录"
+        print(f"  · {name:22} 屏上{'在跑' if run else '没在跑':4} · outbox静默 {smtxt:>7} · status={str(ast):8} → {verdict}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Link16 看门狗 · 撞限流自动接管")
     sub = ap.add_subparsers(dest="cmd")
@@ -1637,6 +1756,8 @@ def main():
     sub.add_parser("start")
     sub.add_parser("stop")
     st = sub.add_parser("status"); st.add_argument("--verbose", "-v", action="store_true")
+    sc = sub.add_parser("stall-check", help="R8 只读预演：哪只 Codex bot 回合进行中却静默了（不动手）")
+    sc.add_argument("--min", type=int, default=STALL_MIN, help=f"静默阈值（分钟·默认 {STALL_MIN}）")
     # 第 5 个动词，与 bridge_cron 的 4 动词契约有意不同 —— 书面理由：
     # 换号是【破坏性】动作，必须能被主人手动触发一次（验收 / 他自己想换时），
     # 且必须能 --dry-run 预演。塞进 status 会让语义混乱。
@@ -1655,6 +1776,8 @@ def main():
         return cmd_stop()
     if args.cmd == "failover":
         return 0 if failover(args.bot, target=args.to, dry_run=args.dry_run) else 1
+    if args.cmd == "stall-check":
+        return cmd_stall_check(args.min)
     return cmd_status(getattr(args, "verbose", False))
 
 
