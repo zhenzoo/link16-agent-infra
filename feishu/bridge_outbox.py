@@ -576,6 +576,7 @@ def _remember_doc_delivery(state, record):
         "source_bytes": int(record.get("source_bytes") or 0),
         "source_chars": record.get("source_chars"),
         "direct_delivered": bool(record.get("direct_delivered")),
+        "local_path": (str(record.get("local_path") or "").strip() or None),
         "ts": int(record.get("ts") or 0),
     }
     pending = state.setdefault("pending_docs", [])
@@ -598,10 +599,22 @@ def _answer_with_docs(text, docs):
         # A target hidden inside [label](url) is not visibly reconcilable.
         if not re.search(rf"(?m)^\s*{re.escape(url)}\s*$", text):
             title = re.sub(r"\s+", " ", str(doc.get("title") or "在线文档")).strip()
-            entries.append(f"{title or '在线文档'}：\n{url}")
+            # SPEC-210 固定三行回执：标题 / URL / 本机绝对路径；本地路径不明时括号说明，不省行
+            entries.append(_artifact_receipt(title or "在线文档", url, doc.get("local_path")))
     if not entries:
         return text
     return text.rstrip() + "\n\n本轮在线文档：\n" + "\n".join(entries)
+
+
+def _artifact_receipt(title, url, local_path):
+    try:
+        import artifact_delivery  # 同目录；drainer 与 send --doc 共用同一渲染器
+        return artifact_delivery.render_artifact_receipt(
+            title, url=url, local_paths=[local_path] if local_path else None,
+        )
+    except Exception:  # noqa: BLE001 — 渲染器不可用也不能吞掉 URL
+        path_line = local_path or "（本地无此文件，仅在线文档）"
+        return f"📄 {title}（飞书在线文档·登录飞书查看）：\n{url}\n{path_line}"
 
 
 # ---------- 处理一批记录（纯逻辑·可单测）----------

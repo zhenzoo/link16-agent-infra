@@ -134,7 +134,11 @@ def main():
     url = res.get("url")
     title = a.title or paths[0].stem
     kinds = "、".join(sorted({it["kind"] for it in res.get("items", [])})) or "媒体"
-    link_line = f"🖼 {title}（飞书在线文档·{len(paths)} 个{kinds}·在线看不占手机内存）：\n{url}"
+    # SPEC-210 固定三行回执：标题行 / URL 行 / 每个媒体文件一行本机绝对路径
+    link_line = artifact_delivery.render_artifact_receipt(
+        title, url=url, local_paths=paths, icon="🖼",
+        label=f"飞书在线文档·{len(paths)} 个{kinds}·在线看不占手机内存",
+    )
     body = (a.text + "\n\n" + link_line) if a.text else link_line
     sent = _send_text(app_id, app_secret, target, body)
 

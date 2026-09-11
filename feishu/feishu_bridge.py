@@ -3102,7 +3102,8 @@ def _doc_source_stats(path):
     return {"source_bytes": source_bytes, "source_chars": source_chars}
 
 
-def _queue_doc_delivery(bot_name, *, explicit_to, doc_url, title, stats, direct_delivered):
+def _queue_doc_delivery(bot_name, *, explicit_to, doc_url, title, stats, direct_delivered,
+                        local_path=None):
     """Queue a p2a document URL for final-answer reconciliation.
 
     Only a tool running inside the same bot's bridge session may enqueue.  A
@@ -3125,6 +3126,7 @@ def _queue_doc_delivery(bot_name, *, explicit_to, doc_url, title, stats, direct_
         "source_bytes": stats.get("source_bytes"),
         "source_chars": stats.get("source_chars"),
         "direct_delivered": bool(direct_delivered),
+        "local_path": local_path,
     })
 
 
@@ -3219,7 +3221,10 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
         body = text
         if doc_url:
             title = (doc_name or Path(doc).name).strip()
-            link_line = f"📄 {title}（飞书在线文档·登录飞书查看）：\n{doc_url}"
+            # SPEC-210 固定三行回执：标题行 / URL 行 / 本机绝对路径行（缺行用括号说明，永不只发两行）
+            link_line = artifact_delivery.render_artifact_receipt(
+                title, url=doc_url, local_paths=[doc],
+            )
             body = (text + "\n\n" + link_line) if text else link_line
         via = await card_send(ch, target, body, bot_name) if body else None
         return (img_ok, via, doc_ok, doc_url, doc_error,
@@ -3236,6 +3241,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             bot_name, explicit_to=to, doc_url=doc_url,
             title=(doc_name or Path(doc).name).strip(), stats=doc_stats,
             direct_delivered=(via != "failed"),
+            local_path=str(Path(doc).resolve()),
         )
         if reconcile_queued is False:
             blog(bot_name, "⚠️ 在线文档已创建，但 final 对账记录写入 outbox 失败")
