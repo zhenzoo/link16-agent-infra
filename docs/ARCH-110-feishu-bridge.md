@@ -457,6 +457,8 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **入口**：先用 `python feishu/artifact_delivery.py status` 看本机全局值。开关 on 时调用 `python feishu/feishu_bridge.py send --bot <name> --doc <file.md|.html> [--text "说明"] [--name "文档标题"]`；用户本轮明确要求在线稿但不改变全局值时追加 `--explicit-online`。
 
+**卡片正文（SPEC-210 固定三行回执 · 2026-09-11）**：`send --doc` 发出的卡片、`send_feishu_media.py` 的媒体卡和 drainer 追加到 final 的“本轮在线文档”块，都由 `artifact_delivery.render_artifact_receipt` 渲染成同一块三行：`📄 <标题>（飞书在线文档·登录飞书查看）：` / 真实 URL / 本机绝对路径。`doc_delivery` outbox 记录新增 `local_path` 字段供 drainer 补第三行；旧记录没有该字段时第三行写 `（本地无此文件，仅在线文档）`，不省行。
+
 **生产链路（全 `tenant_access_token` · 始终使用当前 bot 身份）**：
 1. Markdown/TXT 先走原生 docx：建文档 → Markdown 转块 → 分批写入 → 设组织内凭链接可读；不依赖 `drive:drive`。失败才试 upload/import 兼容链。
 2. HTML/Office 只走 upload/import；它需要 `drive:drive` 或等价窄口权限。

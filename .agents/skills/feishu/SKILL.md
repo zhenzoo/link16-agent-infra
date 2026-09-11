@@ -64,8 +64,9 @@ description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文
 
 ## 4. 交付规则
 
-- 每份可审阅产物都在回执中显示一行完整本机绝对路径，使用普通可复制文字，不放代码块，也不写成 Markdown / `file:///` 假链接。飞书当前只对 `http://` / `https://` 提供可靠链接语义。
-- 创建在线副本前先运行 `python feishu/artifact_delivery.py decide --json`。默认全局开关为 off：不调用在线文档/媒体工具，回复里也没有 HTTPS 行；开关为 on 时才按文件类型调用在线工具。用户本轮明确要求在线稿可在发送命令加 `--explicit-online` 单次覆盖，不修改全局值。
+- 每份可审阅产物的回执固定是一块三行（SPEC-210）：第一行 `📄 <中文标题>（飞书在线文档·登录飞书查看）：`，第二行真实 https URL，第三行本机绝对路径。三行连写、任何一行不得省略：没有在线副本时第二行写括号原因（`（本机在线开关 off，本轮未建在线副本）` / `（在线副本创建失败：<原因>）`），本机没有文件时第三行写 `（本地无此文件，仅在线文档）`。禁止只发路径、只发 URL 或“标题 + URL”两行。路径用普通可复制文字，不放代码块，也不写成 Markdown / `file:///` 假链接；飞书只对 `http://` / `https://` 提供可靠链接语义。
+- 三行块由 `python feishu/artifact_delivery.py receipt --title <标题> [--url <URL>] --path <文件>` 渲染；`send --doc`、`send_feishu_media.py` 和 drainer 的 final 对账块已内置同一渲染器，agent 手写回执时也用它输出，不自行拼行。
+- 创建在线副本前先运行 `python feishu/artifact_delivery.py decide --json`。默认全局开关为 off：不调用在线文档/媒体工具，第二行写开关 off 的括号原因；开关为 on 时才按文件类型调用在线工具并把真实 URL 放进第二行。用户本轮明确要求在线稿可在发送命令加 `--explicit-online` 单次覆盖，不修改全局值。
 - `set-online on|off` 是持久用户偏好，不是一次发送的临时事务。单次在线交付必须用 `--explicit-online`，不得先开全局值再依赖 shell `finally` 恢复；外层执行器超时或被终止会让恢复语句来不及运行。
 - 用户要在线文档就用 `send --doc`；两条在线链都失败时如实报失败与权限/频控原因，**绝不自动发送本地原文件附件**。只有用户明确要“把文件内容发成聊天文字”时才用 `--file-as-text`，不得跨 bot 代发。
 - Markdown/TXT 优先走不依赖 `drive:drive` 的原生 docx；HTML/Office 才优先走 import。在线失败时按需运行权限审计并给修复入口，不擅自降低交付形态。
