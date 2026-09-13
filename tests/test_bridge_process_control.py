@@ -17,6 +17,7 @@ import ast
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,50 @@ import bridge_process as bp
 @pytest.fixture(autouse=True)
 def isolated_locks(tmp_path, monkeypatch):
     monkeypatch.setattr(bp, 'LOCK_DIR', tmp_path)
+
+
+def test_ready_reader_does_not_block_windows_atomic_replace(monkeypatch):
+    """The parent polling readiness must not hold a Windows handle during replace."""
+    from bridge_injection import atomic_write_json
+    path = bp.ready_path('test-readiness')
+    atomic_write_json(path, {'pid': 1})
+    reading, release, writing, done = (threading.Event() for _ in range(4))
+    errors = []
+    original = Path.read_text
+
+    def held_read(self, *args, **kwargs):
+        if self != path:
+            return original(self, *args, **kwargs)
+        with self.open('r', encoding='utf-8') as handle:
+            reading.set()
+            assert release.wait(5)
+            return handle.read()
+
+    def writer():
+        writing.set()
+        try:
+            atomic_write_json(path, {'pid': 2})
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(Path, 'read_text', held_read)
+    reader = threading.Thread(target=bp.ready_pid, args=('test-readiness',))
+    writer_thread = threading.Thread(target=writer)
+    reader.start()
+    try:
+        assert reading.wait(5)
+        writer_thread.start()
+        assert writing.wait(5)
+        assert not done.wait(0.15), 'writer must wait until the readiness reader closes'
+    finally:
+        release.set()
+        reader.join(5)
+        if writer_thread.ident is not None:
+            writer_thread.join(5)
+    assert not errors
+    assert bp.ready_pid('test-readiness') == 2
 
 
 def _rows(*pids):

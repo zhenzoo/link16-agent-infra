@@ -713,7 +713,7 @@ class CodexCanaryRuntimeTests(unittest.TestCase):
         self.assertTrue(agent_runtime.is_ready(remote, "status\n›   \n"))
         trust = (
             "Do you trust the contents of this directory?\n"
-            "Press enter to continue\n› Use /skills"
+            "› 1. Yes, continue\n2. No, quit\nPress enter to continue\n"
         )
         self.assertFalse(agent_runtime.is_ready(remote, trust))
 
@@ -858,9 +858,7 @@ class ClaudeHomeSettingsTests(unittest.TestCase):
 
 
 class CodexTrustPreseedTests(unittest.TestCase):
-    """2026-08-25 · Codex 首启 trust 弹窗会在 app-server warmup 上游挡死会话
-    （刷屏自动回车来不及）→ spawn 前把目录信任预写进 profile 的 config.toml。
-    Codex 自己持久化的就是小写 key，且查找大小写不敏感（当天 throwaway 目录实测）。"""
+    """The remote TUI must find its exact cwd, without changing saved decisions."""
 
     CODEX = {"name": "trustlab-codex", "agent": "codex"}
     CLAUDE = {"name": "trustlab-claude", "agent": "claude"}
@@ -869,23 +867,95 @@ class CodexTrustPreseedTests(unittest.TestCase):
         from types import SimpleNamespace
         return SimpleNamespace(home_path=home, runtime=runtime, name="test")
 
-    def test_seeds_lowercase_key_into_missing_config(self):
+    def test_seeds_exact_resolved_key_into_missing_config(self):
+        import tomlkit
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
+            project = home / "Mixed-Case-Repo"
+            project.mkdir()
             with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
-                agent_runtime.ensure_codex_trust(self.CODEX, "C:/410_VibeCoding/Post/Some-Repo")
-            text = (home / "config.toml").read_text(encoding="utf-8")
-            self.assertIn("[projects.'c:\\410_vibecoding\\post\\some-repo']", text)
-            self.assertIn('trust_level = "trusted"', text)
+                agent_runtime.ensure_codex_trust(self.CODEX, project)
+            parsed = tomlkit.parse((home / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual(parsed["projects"][str(project.resolve())]["trust_level"], "trusted")
 
-    def test_existing_key_is_not_duplicated_case_insensitively(self):
+    def test_existing_exact_key_preserves_comments_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            project = home / "Mixed-Case-Repo"
+            project.mkdir()
+            config = home / "config.toml"
+            original = f'# keep this\n[projects.{json.dumps(str(project.resolve()))}]\ntrust_level = "trusted" # explicit\n'
+            config.write_text(original, encoding="utf-8")
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                agent_runtime.ensure_codex_trust(self.CODEX, project)
+                agent_runtime.ensure_codex_trust(self.CODEX, project)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path aliases")
+    def test_lowercase_legacy_decisions_are_visible_to_exact_tui_lookup(self):
+        import tomlkit
+        for decision in ("trusted", "untrusted"):
+            with self.subTest(decision=decision), tempfile.TemporaryDirectory() as td:
+                home = Path(td)
+                project = home / "Mixed-Case-Repo"
+                project.mkdir()
+                key = str(project.resolve())
+                legacy = key.lower()
+                config = home / "config.toml"
+                config.write_text(f"[projects.'{legacy}']\ntrust_level = '{decision}'\n", encoding="utf-8")
+                with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                    agent_runtime.ensure_codex_trust(self.CODEX, key.lower().replace("\\", "/"))
+                    first = config.read_text(encoding="utf-8")
+                    agent_runtime.ensure_codex_trust(self.CODEX, project)
+                self.assertEqual(first, config.read_text(encoding="utf-8"))
+                projects = tomlkit.parse(first)["projects"]
+                self.assertEqual(projects[key]["trust_level"], decision)
+                self.assertEqual(projects[legacy]["trust_level"], decision)
+
+    def test_inline_project_and_apostrophe_path_keep_unrelated_settings(self):
+        import tomlkit
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            project = home / "Owner's Repo"
+            project.mkdir()
+            key = str(project.resolve())
+            config = home / "config.toml"
+            config.write_text(f'model = "saved-model" # keep\n[projects]\n{json.dumps(key)} = {{ note = "keep" }}\n', encoding="utf-8")
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                agent_runtime.ensure_codex_trust(self.CODEX, project)
+            text = config.read_text(encoding="utf-8")
+            parsed = tomlkit.parse(text)
+            self.assertIn('# keep', text)
+            self.assertEqual(parsed['model'], 'saved-model')
+            self.assertEqual(parsed['projects'][key], {'note': 'keep', 'trust_level': 'trusted'})
+
+    def test_bad_config_or_failed_replace_does_not_silently_succeed(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
             config = home / "config.toml"
-            config.write_text("[projects.'C:\\410_VibeCoding\\Post\\Some-Repo']\ntrust_level = \"trusted\"\n", encoding="utf-8")
             with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
-                agent_runtime.ensure_codex_trust(self.CODEX, "c:/410_vibecoding/post/some-repo")
-            self.assertEqual(config.read_text(encoding="utf-8").count("projects."), 1)
+                original = '[broken\n'
+                config.write_text(original, encoding="utf-8")
+                with self.assertRaises(Exception):
+                    agent_runtime.ensure_codex_trust(self.CODEX, home / 'repo')
+                self.assertEqual(config.read_text(encoding="utf-8"), original)
+                original = 'model = "saved-model"\n'
+                config.write_text(original, encoding="utf-8")
+                with patch.object(agent_runtime.os, 'replace', side_effect=PermissionError('busy')):
+                    with self.assertRaises(PermissionError):
+                        agent_runtime.ensure_codex_trust(self.CODEX, home / 'repo')
+                self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_concurrent_launches_preserve_both_projects(self):
+        import tomlkit
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            paths = [home / 'Repo-A', home / 'Repo-B']
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    list(pool.map(lambda path: agent_runtime.ensure_codex_trust(self.CODEX, path), paths))
+            projects = tomlkit.parse((home / 'config.toml').read_text(encoding='utf-8'))['projects']
+            self.assertEqual(set(projects), {str(path.resolve()) for path in paths})
 
     def test_claude_runtime_is_a_noop(self):
         with tempfile.TemporaryDirectory() as td:
@@ -919,7 +989,11 @@ class CodexTrustPreseedTests(unittest.TestCase):
                     first = config.read_text(encoding="utf-8")
                     agent_runtime.ensure_codex_trust(self.CODEX, user_home)
                 self.assertEqual(first, config.read_text(encoding="utf-8"))
-                self.assertIn(f"[projects.'{key}']\ntrust_level = \"untrusted\"", first)
+                import tomlkit
+                projects = tomlkit.parse(first)["projects"]
+                self.assertEqual(projects[str(user_home)]["trust_level"], "untrusted")
+                if existing_trust and os.name == "nt":
+                    self.assertEqual(projects[key]["trust_level"], "untrusted")
                 self.assertIn('model = "recent-choice"\nmodel_reasoning_effort = "low"', first)
                 self.assertIn('[projects.other]\ntrust_level = "trusted"', first)
                 self.assertEqual(other_config.read_text(encoding="utf-8"), 'model = "other-account"\n')
@@ -941,6 +1015,56 @@ class BridgeProcessSnapshotTests(unittest.TestCase):
 
 
 class AppServerReadySignalTests(unittest.TestCase):
+    def test_startup_reads_uncapped_screen_and_confirms_top_modal_once(self):
+        bot = {"name": "test-tall-codex", "agent": "codex"}
+        for rows in (24, 45, 60):
+            with self.subTest(rows=rows):
+                modal = 'Do you trust the contents of this directory?\n› 1. Yes, continue\n2. No, quit\nPress enter to continue\n' + '\n' * (rows - 4)
+                screens = iter([modal, modal, '› Use /skills'])
+                reads = []
+                def read(pty, tail=30):
+                    reads.append(tail)
+                    screen = next(screens, modal)
+                    return screen if tail is None else '\n'.join(screen.splitlines()[-tail:])
+                with (
+                    patch.object(feishu_bridge, 'read_screen', side_effect=read),
+                    patch.object(feishu_bridge, 'wmux') as send,
+                    patch.object(feishu_bridge, '_app_server_ready_signal', return_value=True),
+                    patch.object(feishu_bridge.time, 'sleep'),
+                ):
+                    self.assertTrue(feishu_bridge._wait_agent_ready(bot, 'pty', 'ws', timeout=1))
+                self.assertEqual(reads, [None, None, None])
+                send.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
+
+    def test_unknown_modal_and_backend_only_signal_never_become_ready(self):
+        bot = {"name": "test-not-ready-codex", "agent": "codex"}
+        for screen in ('', 'LINK16_APP_SERVER_READY', 'LINK16_APP_SERVER_READY\n› 1. Enable something\nPress enter to continue'):
+            with (
+                self.subTest(screen=screen),
+                patch.object(feishu_bridge, 'read_screen', return_value=screen),
+                patch.object(feishu_bridge, '_app_server_ready_signal', return_value=True),
+                patch.object(feishu_bridge, 'wmux') as send,
+                patch.object(feishu_bridge.time, 'sleep'),
+            ):
+                self.assertFalse(feishu_bridge._wait_agent_ready(bot, 'pty', 'ws', timeout=0.01))
+                send.assert_not_called()
+
+    def test_old_trust_text_does_not_confirm_a_live_composer(self):
+        bot = {"name": "test-old-trust", "agent": "codex"}
+        screen = 'Do you trust the contents of this directory?\nPress enter to continue\n› Ask Codex to do anything'
+        with (
+            patch.object(feishu_bridge, 'read_screen', return_value=screen),
+            patch.object(feishu_bridge, '_app_server_ready_signal', return_value=True),
+            patch.object(feishu_bridge, 'wmux') as send,
+        ):
+            self.assertTrue(feishu_bridge._wait_agent_ready(bot, 'pty', 'ws', timeout=1))
+            send.assert_not_called()
+
+    def test_uncapped_read_omits_tail_rpc_argument(self):
+        with patch.object(feishu_bridge, 'wmux', return_value='{"text":"complete"}') as rpc:
+            self.assertEqual(feishu_bridge.read_screen('pty', tail=None), 'complete')
+        rpc.assert_called_once_with('read', 'pty')
+
     def test_runtime_specific_ready_timeout_contract_and_overrides(self):
         default_codex = {"name": "codex", "agent": "codex"}
         self.assertGreater(

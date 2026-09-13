@@ -193,7 +193,11 @@ def ready_path(identity):
 
 def ready_pid(identity):
     try:
-        return json.loads(ready_path(identity).read_text(encoding='utf-8'))['pid']
+        path = ready_path(identity)
+        # Windows readers hold a handle that denies replacement. Share the
+        # existing writer lock so startup polling cannot kill the new service.
+        with ProcessFileLock(path.with_name(f'.{path.name}.write.lck')):
+            return json.loads(path.read_text(encoding='utf-8'))['pid']
     except (OSError, ValueError, KeyError, TypeError):
         return None
 

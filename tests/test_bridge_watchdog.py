@@ -558,7 +558,7 @@ def test_r5_认不出thread就明说认不出_而不是当没事(monkeypatch):
     """「尺子坏了但输出正常」是本仓最常见的故障形状 —— 认不出 thread 必须能被看见（进心跳行）。"""
     monkeypatch.setattr(w, "_is_codex", lambda _b: True)
     monkeypatch.setattr(w, "codex_thread_id", lambda _b: None)
-    assert w.codex_dead_turn("某个codex bot", {}) == (None, False), "第二个值 = 认不认得出，必须是 False"
+    assert w.codex_dead_turn("某个codex bot", {}) == (None, None), "读不到最后回合事件，必须明确返回未知"
 
     src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
     body = src[src.index("def cmd_run("):]
@@ -571,7 +571,7 @@ def test_r5_尾巴读不到回合事件就算认不出_而不是报一切正常(
     monkeypatch.setattr(w, "_is_codex", lambda _b: True)
     monkeypatch.setattr(w, "codex_thread_id", lambda _b: "t-1")
     monkeypatch.setattr(w, "codex_rollout_tail", lambda *a, **k: '{"payload": {"type": "reasoning"}}')
-    assert w.codex_dead_turn("某bot", {}) == (None, False)
+    assert w.codex_dead_turn("某bot", {}) == (None, None)
 
 
 def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypatch):

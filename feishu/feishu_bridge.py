@@ -885,7 +885,7 @@ def wmux(*cmd_args):
 
 
 def read_screen(pty, tail=30):
-    raw = wmux("read", pty, str(tail))
+    raw = wmux("read", pty, *([] if tail is None else [str(tail)]))
     try:
         return json.loads(raw).get("text", raw)
     except json.JSONDecodeError:
@@ -952,11 +952,14 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
     trust_sent = False
     while time.time() < deadline:
         try:
-            scr = read_screen(pty)
-            if agent_runtime.needs_trust_confirmation(bot, scr) and workspace_id and not trust_sent:
-                wmux("enter", pty, "--allow-ws", workspace_id)
-                trust_sent = True
-                time.sleep(0.5)
+            # A startup modal can be at the top of a tall terminal, above the
+            # normal 30-line tail. Use the existing uncapped screen read here.
+            scr = read_screen(pty, tail=None)
+            if agent_runtime.needs_trust_confirmation(bot, scr):
+                if workspace_id and not trust_sent:
+                    wmux("enter", pty, "--allow-ws", workspace_id)
+                    trust_sent = True
+                time.sleep(READY_POLL_SEC)
                 continue
             if agent_runtime.is_ready(bot, scr):
                 return True
@@ -966,7 +969,7 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
             # process-level readiness signal.
             if (
                 _app_server_ready_signal(bot, wait_started)
-                and re.search(r"(?m)^›(?:\s+.*)?$", scr) is not None
+                and agent_runtime.codex_composer_visible(scr)
             ):
                 return True
             # Kimi: same two-part rule. The handshake proves this spawn's worker
@@ -1207,7 +1210,7 @@ def _ensure_session_unlocked(bot):
         )
     before = {str(p) for p, _ in _project_jsonls(bot)}
     cwd = current_cwd(bot)  # 沿用【当前所在目录】：/cd 过则自愈重生仍回那个目录（与账号自愈对称）·/close 清过或没 /cd 过则回名册默认
-    agent_runtime.ensure_codex_trust(bot, cwd)  # Codex 首启 trust 弹窗会在 app-server warmup 上游就把会话挡死 → spawn 前预写目录信任（Claude 侧由就绪等待自动回车，无需预写）
+    agent_runtime.ensure_codex_trust(bot, cwd)  # Backend readiness does not bypass the remote TUI's directory trust.
     r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)  # cwd 交给 spawn 单独发 cd + 探就绪(分行不合并)
     ws, pty = r["workspace_id"], r["pty"]
     if not _finish_worker_startup(bot, ws, pty, cwd):
