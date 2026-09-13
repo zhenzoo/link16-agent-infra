@@ -215,16 +215,16 @@ class S15MsixLocalAppDataTests(unittest.TestCase):
     """S1.5 Claude 桌面版（MSIX）里 LOCALAPPDATA 被重定向，wmux 路径要从真实 AppData\\Local 推。"""
 
     def test_redirected_localappdata_uses_userprofile(self):
-        env = {"LOCALAPPDATA": r"C:\Users\u\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local",
-               "USERPROFILE": r"C:\Users\u"}
+        env = {"LOCALAPPDATA": r"C:\Users\example\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local",
+               "USERPROFILE": r"C:\Users\example"}
         with mock.patch.dict(os.environ, env):
-            self.assertEqual(windows_bootstrap._real_local_appdata(), str(Path(r"C:\Users\u") / "AppData" / "Local"))
+            self.assertEqual(windows_bootstrap._real_local_appdata(), str(Path(r"C:\Users\example") / "AppData" / "Local"))
             self.assertTrue(windows_bootstrap.inside_desktop_client())
 
     def test_plain_localappdata_untouched(self):
-        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\u\AppData\Local"}), \
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\example\AppData\Local"}), \
              mock.patch.object(Path, "cwd", return_value=Path(r"C:\repo")):
-            self.assertEqual(windows_bootstrap._real_local_appdata(), r"C:\Users\u\AppData\Local")
+            self.assertEqual(windows_bootstrap._real_local_appdata(), r"C:\Users\example\AppData\Local")
             self.assertFalse(windows_bootstrap.inside_desktop_client())
 
     def test_wmux_executable_prefers_stable_shim_under_real_root(self):
