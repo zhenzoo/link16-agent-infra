@@ -319,18 +319,21 @@ ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
 _ROLLOUT_CACHE = {}          # {(bot, thread): Path} —— sessions/ 递归 glob 不便宜，解析一次就存住
 
 
-def last_turn_event(tail_text):
+def last_turn_event(tail_text, with_timestamp=False):
     """Return the latest structured turn event, including running and manual stop."""
     last = None
     for line in (tail_text or "").splitlines():
         if not any(k in line for k in _TURN_EVENTS):
             continue                      # 便宜的预筛（rollout 绝大多数行是 reasoning / tool 输出）
         try:
-            payload = json.loads(line).get("payload") or {}
+            event = json.loads(line)
+            payload = event.get("payload") or {}
         except Exception:                 # noqa: BLE001
             continue                      # 尾部截断出来的半行 → 跳过
         if payload.get("type") in _TURN_EVENTS:
             last = payload
+            if with_timestamp:
+                last = dict(payload, _event_timestamp=event.get("timestamp"))
     return last
 
 
@@ -410,7 +413,10 @@ def codex_dead_turn(bot_name, bot_obj):
         # 尾巴里一条回合事件都没有（单个回合的输出超过 ROLLOUT_TAIL_BYTES 时会这样）——
         # 这把尺子**对它没有读数**，绝不能返回「一切正常」：那就又是一条「尺子坏了但输出正常」。
         return None, None
-    return find_dead_turn(tail), last_turn_event(tail)
+    last = last_turn_event(tail, with_timestamp=True)
+    if last:
+        last["_thread_id"] = thread
+    return find_dead_turn(tail), last
 
 
 # ---------- R8 · 回合进行中静默：屏上在跑、但很久没有任何回传（请求发出去了、响应永不回来）----------
@@ -434,6 +440,9 @@ def codex_dead_turn(bot_name, bot_obj):
 #   rollout 只能靠 thread_id 区分，而 thread 状态文件会过期（2026-09-11 实测 baseball-5 的
 #   thread 文件冻结在 09-09、指向早已结束的旧回合）→ 认 thread 就会读错文件、永不触发。
 #   屏 + outbox 都是【每只 bot 各自独立】的信号，天然免疫共用目录，且顺带覆盖 Claude。
+# 2026-09-12 补充：app-server TUI 正常收尾后仍可能留下 Working。允许已结束事件否决 R8，
+# 但结束时间必须晚于当前可见计时起点 / 同 thread 的本轮提示入口时间；旧 thread 的完成记录
+# 不能压住新回合。读不到这种对应证据时，保留原来的屏 + outbox 检测。
 # 动作 = 主人按 Esc 那一下：发 escape 打断 → 注一句**通用**的推进话（不重发上一条，
 #   主人 2026-09-11：「不能只是草率的发上一条消息」）→ 用这个 bot 的 DM 告诉主人。
 #   同一场静默只打断一次（outbox 一有新写入就算翻篇）；打断后仍静默 → 只告警、不再动手。
@@ -453,6 +462,83 @@ def working_now(pane_text):
     """屏幕状态区是否挂着「正在跑」的活动指示。纯函数。只看最后 5 个非空行。"""
     lines = [ln for ln in (pane_text or "").splitlines() if ln.strip()][-5:]
     return any(_WORKING_RE.search(ln) for ln in lines)
+
+
+def working_elapsed_seconds(pane_text):
+    """Read the visible turn timer, or None when the screen has no usable timer."""
+    lines = [ln for ln in (pane_text or "").splitlines() if ln.strip()][-5:]
+    for line in lines:
+        if not _WORKING_RE.search(line):
+            continue
+        match = re.search(r"\(((?:\d+[hms]\s*)+)[•·]", line)
+        if match:
+            return sum(int(n) * {"h": 3600, "m": 60, "s": 1}[unit]
+                       for n, unit in re.findall(r"(\d+)([hms])", match[1]))
+    return None
+
+
+def fresh_working_timer(pane_text, minutes=STALL_MIN):
+    """A fresh visible Codex turn must not inherit hours of old outbox silence."""
+    elapsed = working_elapsed_seconds(pane_text)
+    return elapsed is not None and elapsed < minutes * 60
+
+
+def current_turn_silent_minutes(bot_name, last_turn, now):
+    """Idle time before a real prompt/turn start is never current-turn silence.
+
+    The per-bot prompt hook and Codex task_started record also cover timerless
+    app-server screens. Old starts cannot increase the outbox silence reading.
+    Missing records preserve the existing watchdog behavior.
+    """
+    silent = bridge_outbox.silent_minutes(str(STATE_DIR), bot_name) if bot_name else None
+    if silent is None:
+        return None
+    starts = []
+    if bot_name:
+        try:
+            route = json.loads((STATE_DIR / f"bridge-turn-route-{bot_name}.json").read_text(encoding="utf-8"))
+            if route.get("session"):
+                starts.append(float(route.get("started_at") or 0))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    if last_turn and last_turn.get("type") == "task_started":
+        try:
+            starts.append(datetime.fromisoformat(
+                str(last_turn.get("_event_timestamp")).replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError, OverflowError):
+            pass
+    for started in starts:
+        if 0 < started <= now:
+            silent = min(silent, (now - started) / 60)
+    return silent
+
+
+def finished_visible_turn(last_turn, pane_text, now, bot_name=None):
+    """An old thread's terminal record must not veto a newer visible working turn."""
+    if not last_turn or last_turn.get("type") not in ("task_complete", "turn_aborted"):
+        return False
+    elapsed = working_elapsed_seconds(pane_text)
+    starts = [now - elapsed] if elapsed is not None else []
+    if bot_name:
+        try:
+            route = json.loads((STATE_DIR / f"bridge-turn-route-{bot_name}.json").read_text(encoding="utf-8"))
+            if route.get("session") and route["session"] != last_turn.get("_thread_id"):
+                return False  # current prompt belongs to another thread
+            started = float(route.get("started_at") or 0)
+            if route.get("session") and started > 0:
+                starts.append(started)  # app-server TUI may render Working without a timer
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    if not starts:
+        return False
+    try:
+        completed = last_turn.get("completed_at")
+        ended = (float(completed) if completed is not None else
+                 datetime.fromisoformat(str(last_turn.get("_event_timestamp")).replace("Z", "+00:00")).timestamp())
+    except (TypeError, ValueError, OverflowError):
+        return False
+    # Two seconds cover screen-timer rounding; an older completion proves nothing.
+    return max(starts) - 2 <= ended <= now + 2
 
 
 def bridge_outbox_mtime(bot_name):
@@ -1240,13 +1326,20 @@ def cmd_run(auto=True):
                                f"🔧 {bot_name} 卡在『{err[:60]}』（API/网络错·没在自己重试）· 已自动注「继续」\n"
                                f"面板 {ws} / {pty}｜还卡就去看一眼")
 
+                bot_obj = bots.get(bot_name) if bot_name else None
+                dead, last_turn = codex_dead_turn(bot_name, bot_obj) if bot_name else (None, None)
+                now = time.time()  # a new prompt may arrive while the pane/rollout scan runs
+
                 # ---- R8 · 回合进行中静默 ≥ STALL_MIN → 按 Esc + 注「查原因·继续推进」+ DM ----
-                # 判据 = 屏上在跑（working_now）+ 该 bot outbox 静默 ≥ STALL_MIN 分钟 + agentStatus 非 idle。
-                # 全是【每只 bot 独立】的结构信号，不认 rollout/thread（共用目录会读错）。理由见 R8 那节长注释。
-                sm = bridge_outbox.silent_minutes(str(STATE_DIR), bot_name) if bot_name else None
+                # 判据 = 屏上在跑 + 本轮静默 ≥ STALL_MIN 分钟 + agentStatus 非 idle。
+                # 本轮静默从真实 prompt/turn start 与最后 outbox 写入中较晚者开始，排除先前空闲。
+                # 已结束记录只在时间/本轮入口对应时否决 R8，避免旧 thread 让新卡顿失明。
+                sm = current_turn_silent_minutes(bot_name, last_turn, now)
                 ast = (wmux_session.pty_agent_status(pty) if wmux_session else None)
                 if (bot_name and sm is not None and sm >= STALL_MIN
-                        and working_now(text) and ast is not None and ast != "idle"):
+                        and working_now(text) and not fresh_working_timer(text)
+                        and not finished_visible_turn(last_turn, text, now, bot_name)
+                        and ast is not None and ast != "idle"):
                     mins = int(sm)
                     ep = int(bridge_outbox_mtime(bot_name))     # 静默场次 = outbox 最后写入时刻；一有新写入就翻篇
                     if st.get("stall_ep") != ep:
@@ -1279,8 +1372,6 @@ def cmd_run(auto=True):
                 # ---- R5 · Codex 回合被服务端掐断 → 告警 + 注「继续」（连 3 轮被掐就停手）----
                 # 判据读 Codex 自己的 rollout（结构化），**不读屏** —— 理由见文件上半部 R5 那节的长注释。
                 # 只在「最后一个回合已经收尾」时动手 ⇒ 结构上不可能打断正在跑的活。
-                bot_obj = bots.get(bot_name) if bot_name else None
-                dead, last_turn = codex_dead_turn(bot_name, bot_obj) if bot_name else (None, None)
                 if bot_name and _is_codex(bot_obj):
                     r5_seen += 1
                     if not last_turn:
@@ -1738,22 +1829,29 @@ def cmd_stall_check(stall_min=STALL_MIN):
     """R8 只读预演：逐个 bot 打印「屏上在不在跑 / outbox 静默几分钟 / agentStatus」+ 会不会出手，**不动手**。
     验收和主人自查用：怀疑某只 bot 又沉默了，跑这条就知道看门狗下一轮会不会替你按 Esc。"""
     pty_by_bot = {b: p for p, b in live_bot_by_pty().items()}
+    bots = {b["name"]: b for b in _iter_bots()}
     print(f"R8 预演 · 阈值 {stall_min} 分钟 · {datetime.now(TZ):%H:%M:%S}（只读·不动手）")
     if not pty_by_bot:
         print("  名册里没有带面板的 bot")
         return 0
     for name in sorted(pty_by_bot):
         pty = pty_by_bot[name]
-        sm = bridge_outbox.silent_minutes(str(STATE_DIR), name)
         ast = wmux_session.pty_agent_status(pty) if wmux_session else None
         text = read_pane(pty) or ""
         run = working_now(text)
+        _, last_turn = codex_dead_turn(name, bots.get(name))
+        now = time.time()
+        sm = current_turn_silent_minutes(name, last_turn, now)
+        finished = finished_visible_turn(last_turn, text, now, name)
         hit = (sm is not None and sm >= stall_min and run
+               and not fresh_working_timer(text, stall_min)
+               and not finished
                and ast is not None and ast != "idle" and not at_picker(text, name))
         verdict = ("🔴 会出手（按 Esc + 注继续 + DM）" if hit else
+                   "🟢 可见回合已结束 → 不按 Esc；错误收尾交给 R5" if finished else
                    "🟡 屏上在跑但还没到阈值" if (run and ast != "idle") else "🟢 没在跑 / 已收尾 → 不动")
         smtxt = f"{sm:.0f}m" if sm is not None else "无记录"
-        print(f"  · {name:22} 屏上{'在跑' if run else '没在跑':4} · outbox静默 {smtxt:>7} · status={str(ast):8} → {verdict}")
+        print(f"  · {name:22} 屏上{'在跑' if run else '没在跑':4} · 本轮静默 {smtxt:>7} · status={str(ast):8} → {verdict}")
     return 0
 
 

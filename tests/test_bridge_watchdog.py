@@ -617,7 +617,8 @@ def test_r5_只在回合收尾时动手_结构上不会打断正在跑的活():
     body = src[src.index("def cmd_run("):]
     i = body.index("R5 · Codex")
     seg = body[i:i + 3200]
-    assert "codex_dead_turn(" in seg
+    assert "dead, last_turn = codex_dead_turn(" in body[:i]  # shared snapshot read before R8 and R5
+    assert "if not dead:" in seg
     assert "POLICY_NUDGE_TEXT" in seg, "R5 要注的是自己那句，不是 R1 的 NUDGE_TEXT"
     assert "POLICY_NUDGE_MAX" in seg, "连着被掐 N 次必须停手，别无限白撞"
     assert 'notify(bot_name, "policy_stuck"' in seg, "停手之后【绝不静默】——静默正是这套东西要根治的病"
