@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import turn_delivery_guard  # noqa: E402
+import bridge_inbox  # noqa: E402
 
 
 def _read_stdin_json():
@@ -43,6 +44,9 @@ def main():
         inp = {}
     prompt = inp.get("prompt") or ""
     sd = _state_dir()
+    # This event confirms that the actual session consumed the exact prompt.
+    # No terminal rendering, timing threshold, or model response is involved.
+    bridge_inbox.confirm_prompt(sd, bot, prompt, inp.get("session_id") or inp.get("thread_id"))
 
     # 桥把回址焊进【本条消息】的信封 [飞书 … route=<p2a|p2a-ext|a2a> dest=.. at=..]，永远缀在消息【末尾】。
     # 取【最末】一个信封 → 防正文里先出现的假信封劫持路由(spoof·2026-06-30 TB25-link16 review 复现：

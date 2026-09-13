@@ -86,6 +86,95 @@ class AppServerFinalDeliveryTests(unittest.TestCase):
             self.assertIn("✅ 已完成", records[0]["text"])
 
 
+class RemoteResumePermissionTests(unittest.TestCase):
+    def test_remote_tui_inherits_permissions_from_app_server(self):
+        """Codex 0.154 rejects permission overrides on a remote resume.
+
+        Exercise the worker launch path, including server-side policy setup;
+        accepting the TUI command must not remove the unattended server policy.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            codex = state / "codex.exe"
+            codex.touch()
+            worker._thread_state_path(state, "test-bot").write_text(
+                json.dumps({"thread_id": "existing-thread"}), encoding="utf-8"
+            )
+            args = worker.build_parser().parse_args([
+                "--bot", "test-bot", "--cwd", tmp, "--state-dir", tmp,
+                "--codex", str(codex), "--codex-home", tmp,
+            ])
+            rpc = mock.Mock()
+            rpc.request.side_effect = [{}, {"config": {}}, {"thread": {"id": "existing-thread"}}]
+            server = mock.Mock()
+            server.poll.return_value = None
+            tui = mock.Mock(pid=12345)
+            tui.poll.return_value = 0
+            launched = []
+
+            def popen(command, **kwargs):
+                launched.append(command)
+                if "app-server" in command:
+                    return server
+                # Reproduce the native CLI validation observed on 0.154.0.
+                overrides = {
+                    "--dangerously-bypass-approvals-and-sandbox", "--yolo",
+                    "--sandbox", "-s", "--ask-for-approval", "-a", "--approve-for-me",
+                }
+                tui.wait.return_value = int(bool(overrides.intersection(command)))
+                return tui
+
+            with mock.patch.object(worker, "_wait_rpc", return_value=rpc), \
+                    mock.patch.object(worker.subprocess, "Popen", side_effect=popen), \
+                    mock.patch.object(worker.threading, "Thread"), \
+                    mock.patch.object(worker, "_wait_observer", return_value={"observer_pid": 123}), \
+                    mock.patch.object(worker.codex_startup, "TuiGateway") as gateway:
+                gateway.return_value.session = {"source": "thread/resume", "thread_id": "existing-thread"}
+                result = worker.run(args)
+
+            self.assertEqual(result, 0, "remote resume rejected a TUI permission override")
+            rpc.request.assert_any_call("thread/resume", {
+                "threadId": "existing-thread", "cwd": str(state.resolve()),
+                "approvalPolicy": "never", "sandbox": "danger-full-access",
+            })
+            command = launched[-1]
+            self.assertIn("--remote", command)
+            self.assertEqual(command[-2:], ["resume", "existing-thread"])
+            self.assertIn("--dangerously-bypass-hook-trust", command)
+            self.assertFalse(worker._ready_state_path(state, "test-bot").exists())
+            server.terminate.assert_called_once()
+
+
+class ResumeProviderTests(unittest.TestCase):
+    def test_resumed_thread_uses_explicit_effective_profile_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            worker._thread_state_path(state, "test-bot").write_text(
+                json.dumps({"thread_id": "existing-thread"}), encoding="utf-8")
+            rpc = mock.Mock()
+            rpc.request.side_effect = [
+                {"config": {"model_provider": "openai-long-idle"}},
+                {"thread": {"id": "existing-thread"}},
+            ]
+            self.assertEqual(worker._start_or_resume_thread(
+                rpc, state_dir=state, bot="test-bot", cwd=state), "existing-thread")
+            rpc.request.assert_any_call("thread/resume", {
+                "threadId": "existing-thread", "cwd": str(state),
+                "approvalPolicy": "never", "sandbox": "danger-full-access",
+                "modelProvider": "openai-long-idle",
+            })
+
+    def test_config_read_failure_does_not_silently_resume_old_provider(self):
+        rpc = mock.Mock()
+        rpc.request.side_effect = RuntimeError("config unreadable")
+        with tempfile.TemporaryDirectory() as tmp:
+            worker._thread_state_path(Path(tmp), "test-bot").write_text(
+                json.dumps({"thread_id": "existing-thread"}), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "config unreadable"):
+                worker._start_or_resume_thread(rpc, state_dir=Path(tmp), bot="test-bot", cwd=Path(tmp))
+        self.assertEqual([c.args[0] for c in rpc.request.call_args_list], ["config/read"])
+
+
 class LoopbackTransportTests(unittest.TestCase):
     """对端是本机 app-server 的连接，永远不许经过代理。
 

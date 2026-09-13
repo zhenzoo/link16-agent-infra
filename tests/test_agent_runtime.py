@@ -1016,11 +1016,11 @@ class BridgeProcessSnapshotTests(unittest.TestCase):
 
 class AppServerReadySignalTests(unittest.TestCase):
     def test_startup_reads_uncapped_screen_and_confirms_top_modal_once(self):
-        bot = {"name": "test-tall-codex", "agent": "codex"}
+        bot = {"name": "test-tall-codex", "agent": "codex", "codex_transport": "cli-legacy"}
         for rows in (24, 45, 60):
             with self.subTest(rows=rows):
                 modal = 'Do you trust the contents of this directory?\n› 1. Yes, continue\n2. No, quit\nPress enter to continue\n' + '\n' * (rows - 4)
-                screens = iter([modal, modal, '› Use /skills'])
+                screens = iter([modal, modal, 'OpenAI Codex\n› Use /skills'])
                 reads = []
                 def read(pty, tail=30):
                     reads.append(tail)
@@ -1042,7 +1042,7 @@ class AppServerReadySignalTests(unittest.TestCase):
             with (
                 self.subTest(screen=screen),
                 patch.object(feishu_bridge, 'read_screen', return_value=screen),
-                patch.object(feishu_bridge, '_app_server_ready_signal', return_value=True),
+                patch.object(feishu_bridge, '_app_server_ready_signal', return_value=False),
                 patch.object(feishu_bridge, 'wmux') as send,
                 patch.object(feishu_bridge.time, 'sleep'),
             ):
@@ -1067,9 +1067,9 @@ class AppServerReadySignalTests(unittest.TestCase):
 
     def test_runtime_specific_ready_timeout_contract_and_overrides(self):
         default_codex = {"name": "codex", "agent": "codex"}
-        self.assertGreater(
+        self.assertEqual(
             feishu_bridge._ready_timeout(default_codex),
-            codex_app_server_worker.WARMUP_TIMEOUT_SEC,
+            feishu_bridge.codex_startup.STARTUP_TIMEOUT_SEC,
         )
         self.assertEqual(feishu_bridge._ready_timeout({"agent": "claude"}), 90)
         self.assertEqual(feishu_bridge._ready_timeout({
@@ -1088,7 +1088,11 @@ class AppServerReadySignalTests(unittest.TestCase):
             feishu_bridge.STATE_DIR = Path(tmp)
             try:
                 path = Path(tmp) / f"bridge-codex-app-ready-{bot['name']}.json"
-                path.write_text(json.dumps({"worker_pid": 123, "ts": 20}), encoding="utf-8")
+                path.write_text(json.dumps({
+                    "contract": "codex-startup-v2", "bot": bot["name"], "startup_id": "current",
+                    "stage": "ready", "source": "thread/start", "thread_id": "thread",
+                    "worker_pid": os.getpid(), "tui_pid": os.getpid(), "observer_pid": os.getpid(), "ts": 20,
+                }), encoding="utf-8")
                 callback()
             finally:
                 feishu_bridge.STATE_DIR = previous
@@ -1138,7 +1142,11 @@ class AppServerReadySignalTests(unittest.TestCase):
             try:
                 path = Path(tmp) / "bridge-codex-app-ready-test-resumed-codex.json"
                 path.write_text(
-                    json.dumps({"worker_pid": 123, "ts": time.time() + 1}),
+                    json.dumps({
+                        "contract": "codex-startup-v2", "bot": bot["name"], "startup_id": "current",
+                        "stage": "ready", "source": "thread/resume", "thread_id": "thread",
+                        "worker_pid": os.getpid(), "tui_pid": os.getpid(), "observer_pid": os.getpid(), "ts": time.time() + 1,
+                    }),
                     encoding="utf-8",
                 )
                 with patch.object(

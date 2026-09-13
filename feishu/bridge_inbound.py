@@ -96,7 +96,7 @@ def append_message(state_dir: Path, bot: str, msg, *, raw_text: str, text: str,
     return record
 
 
-def read_records(state_dir: Path, bot: str, *, dedupe: bool = True) -> list[dict]:
+def read_records(state_dir: Path, bot: str, *, dedupe: bool = True, strict: bool = False) -> list[dict]:
     """Read valid records; a malformed/torn line never hides later valid lines."""
     path = ledger_path(state_dir, bot)
     rows: list[dict] = []
@@ -118,7 +118,11 @@ def read_records(state_dir: Path, bot: str, *, dedupe: bool = True) -> list[dict
                         continue
                     seen_ids.add(message_id)
                 rows.append(record)
+    except FileNotFoundError:
+        return []
     except OSError:
+        if strict:
+            raise
         return []
     return rows
 
