@@ -5,7 +5,7 @@ title: 飞书桥：@bot 注入、v8 回传链、多 bot 模型与自愈
 status: active
 purpose: 解释一条飞书消息如何变成本机 agent 会话里的一次执行，以及执行结果如何回到飞书。
 owns:
-  - @bot → 会话注入的完整链路
+  - "@bot → 会话注入的完整链路"
   - 回传 v8（hook → outbox → drainer）的事件驱动模型
   - 入站消息持久账本与历史合并边界
   - 回复呈现形态：互动卡片、进度合并、长文分条、必达兜底
@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-13
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -31,7 +31,9 @@ last_reviewed: 2026-09-06
 
 `bridge_process.py` 是桥、cron、watchdog 的共用进程控制入口。查询结果区分合法进程列表、已确认空表与未知；PowerShell 必须返回成功标记及合法 JSON，非零退出、错误输出、超时和坏数据都不能当成空表。15 秒失败后使用 45 秒窗口重试，耗尽则命令失败。
 
-每个 bot 桥以 `bridge:<bot>`、守护以 `cron` / `watchdog` 为身份，持有操作系统文件锁到退出。锁位于当前 Windows 用户的 `~/.link16/service-locks`，不随 runtime home 或 checkout 分叉；这不提供跨 Windows 用户互斥。`run` 无权替换旧实例；`start` 在控制锁内查询、停止旧实例并等待退出，再启动新进程确认服务锁。持锁确认不等于 WebSocket 已连上，部署还须检查连接日志和收发。
+每个 bot 桥以 `bridge:<bot>`、守护以 `cron` / `watchdog` 为身份，持有操作系统文件锁到退出。锁位于当前 Windows 用户的 `~/.link16/service-locks`，不随 runtime home 或 checkout 分叉；这不提供跨 Windows 用户互斥。`run` 无权替换旧实例；`start` 在控制锁内查询、停止旧实例并等待退出，再启动新进程。桥启动验收同时要求服务锁 PID 与 `bridge-control-v1` 的实际连接就绪记录匹配；只有进程出现或持锁不能算连接成功。
+
+支持 `bridge-control-v1` 的桥由 `bridge_control.py` 写入绑定进程 nonce 的停止请求。桥停止领取新待办，完成当前消息交接，然后关闭飞书连接并退出；余下待办保留在磁盘。启动器等实际 PID 退出再拉起替代进程，180 秒只是失败上限，正常完成即推进；超时不强杀正在交接的新桥。旧桥没有该接口，首次迁移仍走原有精确 PID 停止，需要维护窗口，不能追溯保证旧内存队列安全。
 
 整体 `stop` 先持有桥和两种守护的控制锁，取得合法快照，再停止桥，最后停守护；查询失败没有服务变动，桥停止失败保留守护。部分停止失败必须报错，不能声称全停成功。单 bot 启停不动其他 bot 或守护。进程匹配检查脚本参数与 `run`，不以命令行包含文件名来误杀测试或查询进程。
 
@@ -167,11 +169,12 @@ python feishu/install_codex_bridge_hooks.py --write
 
 Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026-07-23 起这是所有 Codex bot 的默认路**（`agent_runtime.codex_transport()`：名册没写 = `app-server-canary`；只有显式写 `cli-legacy` 才回退到已弃用的裸 CLI + hook「命令原文」路）。拓扑：
 
-`官方 Codex TUI --remote` ↔ `该 bot 私有 app-server` ↔ `Link16 typed-event observer` → `milestone-v1 outbox` → 共享 drainer。
+`官方 Codex TUI --remote` ↔ `本机透明 WebSocket 网关` ↔ `该 bot 私有 app-server`；网关将 TUI 收到的允许事件镜像给独立 observer → `milestone-v1 outbox` → 共享 drainer。
 
 - TUI 仍是官方 TUI，wmux 注入、slash command、resume 体验不由 Link16 重写。
-- **启动等待合同**：新 app-server thread 在 remote TUI 出现前，会先跑一轮最多 120 秒的 warm-up；桥的 app-server 默认 ready timeout 必须大于这个上游窗口并留出 TUI 启动余量。`ready_timeout_sec` 仍可按 bot 覆盖，调用方显式 `timeout` 优先；Claude 与 `cli-legacy` 继续用短默认。桥不得用通用 30 秒默认提前宣判一个仍处在合法 warm-up 窗口内的 Codex worker 失败。
-- `app-server-canary` 的 remote TUI 就绪接受三条等价可信路径：标准 composer（`› Use /skills` 或空 `›`）；新 thread 的精确 warmup 标记 `LINK16_APP_SERVER_READY`；以及 resumed thread 的**本轮 fresh worker ready 文件 + 可见 composer**。第三条必须按 `agent_runtime.uses_app_server()` 的统一语义判断，因而名册省略 `codex_transport`（默认 app-server）与显式 `app-server-canary` 完全等价；`cli-legacy` 和非 Codex runtime 不得消费该 ready 文件。普通 Codex CLI 仍保留 banner + composer 双确认。若把 remote TUI 误判为未就绪，补发逻辑会把 worker 启动命令投进已经运行的 composer，并在第二次超时后误关活 workspace。
+- **启动合同（PLAN-1110）**：新会话由官方 remote TUI 自己 `thread/start`，启动期间不发送模型预热任务；已有会话沿用 `thread/resume`。本机网关核对 TUI 请求 ID 与对应成功响应中的 thread.id/cwd，将根线程交给已连接的独立观察进程；观察进程确认绑定后才向 TUI 放行成功响应。不能拿 `thread/started` 代替这道闸：实测它不保证另一条原生连接收到后续回答。观察者消费的是 TUI 同一连接里的事件，原生帧原样转发，只有通过现有 milestone 白名单的事件进入有界队列；未收到序号确认的事件保留至观察者重连重放，不持久化原始 prompt、reasoning 或工具输入输出。保留旧 worker 的已有线程直连观察入口以兼容独立回程修复。
+- `app-server-canary` 的就绪证据是本次启动标识、TUI 会话成功响应、同线程观察者绑定以及活的 worker/TUI/observer 进程。桥不再把模型标记、banner、推荐文案或输入框字符当作 app-server 就绪合同；协议字段缺失、线程不符、观察连接未绑定或进程退出均不可放行。等待上限只约束故障，不规定最短等待，已确认失败不得再重发启动命令。启动阶段与错误写入本地状态并显示具体进度。`ready_timeout_sec` 及调用方显式 `timeout` 保留覆盖能力；其它 runtime 保留各自合同。
+- 本地控制连接明确绕过代理：Python WebSocket 使用 `proxy=None`，remote TUI 的专属环境移除 HTTP/HTTPS/ALL_PROXY 的大小写变体并保留 loopback NO_PROXY；模型流量所在的 app-server 保留原代理。失效外网代理不能再阻塞本地会话接入。RPC 连接关闭会立即唤醒等待中的请求；进程已退出时不等满监听超时。终端接管屏幕前逐阶段输出短提示，接管后由桥读取结构化状态并回传具体阶段与已用时间；提示协程显式接收当前 handler 的 reply，避免作用域错误导致无进度。
 - observer 只接 root thread 的 typed item；collab child thread 不进入主人卡，root collab item 只渲完成度。
 - `agentMessage.phase=commentary` 原文进入进行中卡；`final_answer` 同时写脱敏 ledger 和 answer outbox，typed observer 是 app-server 模式的唯一最终回复 producer。
 - `reasoning`、命令全文、tool input/output、等待 UI、token transport 事件全部丢弃。命令字段只允许在 producer 内存中做一次保守分类，raw 值不得进入 ledger、outbox、progress-state 或卡片。
@@ -206,7 +209,30 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 - **并发与损坏恢复**：append 在按 bot 的跨进程文件锁内完成，一条 JSON + 换行作为一个写入单元，并 flush/fsync；reader 对单个坏行降级跳过，不让一条半写记录遮住其余历史。SDK 重投由 `message_id` 确定性去重，同文但不同 message ID 必须保留。
 - **历史合并**：账本是部署后的入站 SSOT；旧 transcript 仅补账本 cutover 之前的历史。`source=backfill` 的人工/API 可证记录不改变 cutover。禁止按“文本相同 + 时间接近”模糊去重，因为用户在失败后重发同一句是两条真实消息。
 
-`bridge_history.py` 继续把入站账本与出站 outbox/receipts 合成一条秒级时间线；没有账本的旧 bot 仍兼容读取当前 transcript。这个账本保证的是 Link16 handler 接纳后的消息，不声称覆盖 SDK 在 handler 之前已去重、策略拒绝或禁用媒体的原始 WS 事件。
+`bridge_history.py` 继续把入站账本与出站 outbox/receipts 合成一条秒级时间线；没有账本的旧 bot 仍兼容读取当前 transcript。这个账本用于历史查询；可恢复的待办消费另由下节收件箱负责，不能把“查得到历史”当作“会自动继续处理”。
+
+### § 2.4.4 · 入站持久交接与重启恢复（PLAN-1120）
+
+`bridge_inbox_channel.py` 在 SDK 原始同步回调内先完成身份、群 @、私聊 owner/白名单与 SDK policy 检查，再将消息 ID、正文、消息类型和附件引用提交到 `bridge_inbox.py` 的每 bot SQLite 收件箱。提交使用 `synchronous=FULL`；成功后才返回，让 WebSocket 应答成功。保存失败直接向 SDK 抛错，实际帧返回 500，不确认未保存的消息。鉴权头、app secret 和 header token 不写入收件箱；未授权私聊与未 @ 的群旁观消息不留存。
+
+原 SDK 内存队列不再承担消息派发。磁盘消费者依原消息 ID 去重并按收到顺序领取；使用 SDK 的内容归一化与附件解析，但已接纳待办恢复时不再经过按消息年龄丢弃的闸。正常新消息由事件唤醒立即处理；失败准备按退避重试，不挡住后面的 `/stop`。下载完成的附件路径持久化复用，不同消息的同名文件使用不同目录；长文本保存失败保留完整待办，不能截断后假装提交。
+
+首次切换到收件箱时，旧历史账本的接收 ID 导入为 `legacy_received`，用于阻止重连补投把旧任务当新任务再执行；不将没有完成凭据的历史记录伪记为 done，也不主动重投历史。收件箱已有的当前待办优先，不被导入覆盖。迁移水位只在历史读取和导入成功后保存；读失败不能当作空历史继续上线。
+
+| 状态 | 重启后的行为 |
+|---|---|
+| queued / processing | 尚未越过终端操作边界；恢复准备、下载或会话接入 |
+| submitting | 已准备开始粘贴/回车；异常退出后转 uncertain，不能直接再次粘贴 |
+| awaiting_confirmation | 桥已完成注入操作，等待真实输入确认；不自动重贴 |
+| done | 实际输入 hook 已确认或桥内命令处理完成；不重做，清空队列中的原始 payload |
+| command / uncertain | 强制结束恰好跨越命令或终端副作用时，保留结果不明记录；不盲目执行第二次 |
+| cancelled | `/stop`、已确认 `/close`、`/clear`、`/new` 等撤销此前待办；不恢复旧任务 |
+
+普通提示词提交前保存精确内容摘要，信封带该条飞书消息 ID。现有 `UserPromptSubmit` hook 对本次真实输入求摘要，匹配后记录实际 session 并完成交接；换行仅规范 CRLF/CR。它证明会话接收了这条输入，不代表模型已经回答。桥先退出而 hook 后到时，hook 仍能独立提交同一条确认。
+
+受控 `start` / `stop` 等待当前 handler 结束，因而普通附件、斜杠命令和输入都不会在交接中途被主动结束；无需等待模型完成整个任务。任意强杀或断电恰好跨越不可查询的 TUI/斜杠副作用，仍有无法自动判定的窗口，这是保留 uncertain 的明确边界。正常的桥重启不靠重复发任务解决它。入站未收到平台事件、磁盘损坏和平台撤回资源不属于本地收件确认保证。
+
+SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口时启动报错。升级验收必须运行真实 WebSocket 帧“保存成功→200 / 保存失败→500”和原生 Codex 输入 hook 探针，不能以启动页面文案或包版本号替代语义验证。当前实测 lark-channel-sdk 1.0.0、Codex 0.154.0，证据见 RESEARCH-090。
 
 ---
 
@@ -296,7 +322,7 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 > **当前铁律**：呈现由 route 决定，而不是由目标 ID 的 `oc_` 前缀决定。真人的 `p2a`/`p2a-ext` final 用互动卡片；peer 的 a2a 用纯文字。单卡满约 2800 字时无损拆成 1～N 张有序卡；卡片发送失败降级文字并在 receipt 标明原因。下方较早版本记录只用于解释演进，不得覆盖本段与 `SPEC-210`。
 
-- **进度卡（原地长大 + 满则轮换）**：PostToolUse/typed event 把【当前轮结构化 steps】写 outbox；drainer 维护「当前卡」的 message_id，每来新进度就 `update_card` **原地刷新这张卡**。正文只展示 commentary/plan 的进展、下一份交付和 agent 写出的绝对完成点，header 保留计划完成度与实际工具总数；工具 label 不铺正文。卡满 ~2800 字 **或 update_card 失败（撞飞书改卡上限）→ 冻结当前卡、开新卡接着写**。**关键：`update_card` = `im.message.patch` 普通消息编辑·不是流式卡·无 10min 死**；卡数随信息量有界增长，不随时间线性刷屏。
+- **进度卡（原地长大 + 满则轮换）**：PostToolUse/typed event 把【当前轮结构化 steps】写 outbox；drainer 持久化当前卡 message_id、已确认事件版本及冻结 route，重启后继续 `update_card` **原地刷新同一张卡**。正文只展示 commentary/plan 的进展、下一份交付和 agent 写出的绝对完成点，header 保留计划完成度与实际工具总数；工具 label 不铺正文。卡满 ~2800 字或 provider 明确确认旧卡已撤回／达到编辑上限时才轮换；临时网络失败保留原卡等待同一次更新成功。每次新卡先保存创建意图与请求 ID，再调用网络，逐片确认，状态保存失败不推进发送位置；具体合同见 SPEC-210 §2.1。**`update_card` = `im.message.patch` 普通消息编辑，不需要在桥重启时重建流式连接**；卡数随信息量有界增长。
 - **计划不是 prose 推断（PLAN-1000）**：`📋 当前计划` 只在收到真实 `kind=plan` / `turn/plan/updated` 后出现；renderer 不从“计划已更新”之类 commentary 反向合成。Codex 长任务必须调用 `update_plan`，Claude 长任务必须更新其 task/todo surface；否则本地 ledger、progress state 和飞书卡都不会凭空得到计划。
 - **Claude 计划适配（PLAN-1000 S10）**：PostToolUse 重放 transcript 中成功的 TodoWrite/TaskCreate/TaskUpdate，恢复同 session 的历史任务 ID，再把当前轮公开正文与计划输出为 `milestone-v1`。它与 Codex 共用编号、缩进、状态和 outbox 修订逻辑；正文不再经过旧 140 字单行预览。失败或尚未返回的任务调用不会改变计划，隐藏 thinking 和 final 不进入该进度投影。
 - **计划卡格式与有效心跳（PLAN-1000）**：plan adapter 把所有顶层 Stage 机械渲染为 `1. / 2. / 3.` 有序列表，状态固定为 `✅ / 🔄 / ⏳`，并把当前 Stage 文本中的 `1.1 / 1.2` Step 保持缩进；agent 负责提供明确对象、实际时间/绝对 ETA。连续执行 10 分钟无其他事件时，agent 的心跳必须给出当前 Stage/Step、比 Step 更细的具体动作、已用有效执行时间、绝对 ETA 和下一个可验证结果。工具事件不是心跳；milestone 卡在只有工具变化时保留最近的 plan/commentary 上下文，没有任何用户可见上下文时不发“思考中”占位卡。
@@ -497,7 +523,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 ## § 2.12 · 起会话怎么把命令喂进终端（分行发 + 读屏探就绪 · 2026-06-18 根治）
 
-> 一句话：桥起会话 = `workspace.new` → **三行各自独立发**：`bash` → `cd "<cwd>"` → claude 启动命令。每发一行**读屏轮询到 shell 提示符回来再发下一行**（取代固定 `sleep(0.4)` 盲等），探不到则超时回退原盲等。根治「冷机/新 shell 没就绪 → 下一行被吞」。
+> Codex app-server：`workspace.new` → 一条短命令 `bash "<本次启动脚本>"` 与一次 Enter；脚本按顺序确认 cwd、设置 registry 生成的环境并执行 worker，后续按 §2.4.2 的协议回执推进。其它 runtime 保留分行 `bash` → `cd "<cwd>"` → launcher，各行读屏等 shell 提示符。最后一条启动命令不再附加固定 0.4 秒等待。
 
 **根因（2026-06-18 实测 · 两个症状同一病根）**：`wmux_session.spawn` 旧版每发一行只 `time.sleep(0.4)` 就发下一行。冷机上嵌套 git-bash 这 0.4s 还没起到可接收输入，下一行糊到没就绪的终端 → 被吞。两个看似无关的症状其实同根：
 
@@ -511,7 +537,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 - `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=8` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
-- 配套 `feishu_bridge._wait_agent_ready`：**先读后睡**（首轮不空等），并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 为 150s。
+- 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。app-server 分支不读屏判就绪、不重发启动命令，也不再等待模型预热。
 - **超时兜底**：探不到提示符 → 回退原 `sleep(0.4)` 照发，最坏不比旧版差、绝不卡死 / 少发。
 
 **2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。手动 `/handoff` 另以 `bridge-handoff-attempt-<bot>.json` 记录 pending/failed/complete：旧会话已经关掉但新会话没起成时，6 小时内再次发 `/handoff` 会复用原快照重试，不会要求已经不存在的旧会话再活一次；complete 后同一快照不可重放。
@@ -599,6 +625,8 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 ---
 
 ## § 2.13 · 注入投递保证（撞 auto-compact 不再静默黑洞 · 2026-06-18 根治）
+
+**当前边界（2026-09-13）**：新飞书消息由 §2.4.4 收件箱负责交接，不再写旧 pending 以触发静默重投。Codex app-server 路径即使读到 cron/旧版本留下的 pending，也只检查与提示，不凭 outbox 零增长再次提交。下面保留非 app-server 的旧 pending/cron 路径及历史事故依据；不能用这些历史判据替代当前入站交接合同。
 
 > 一句话：桥注入一条消息后**记一笔 pending**；若那一轮被 **auto-compact 吃掉**（上下文满时提交触发压缩、消息没被当成 turn 处理、会话回 idle、零回复），doctor 会**检测到并必达重投 + 通知你**——不再像以前那样无声丢失、你干等不到回复。
 

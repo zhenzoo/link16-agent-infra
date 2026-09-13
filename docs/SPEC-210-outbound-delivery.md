@@ -7,6 +7,7 @@ purpose: 精确定义自动回复和主动发送的格式选择、稳定分片�
 owns:
   - route 到消息格式的映射
   - answer 与 fragment 身份及持久 ACK
+  - milestone 进度卡的持久创建意图与跨进程续接
   - active turn 主动发送闸
   - unified outbound ledger schema 与历史去重
 does_not_own:
@@ -15,7 +16,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-09-05
+last_reviewed: 2026-09-13
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -63,6 +64,20 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 - 旧 outbox、HWM 与 answer-state 不做迁移或清空：未 ACK 的旧 fragment 在重放时按原 `fragment_id` 派生合法 provider UUID，已 ACK 的 fragment 继续跳过。
 - 新 answer 在第一次网络请求前必须把 `split_policy`、`render_target` 和无正文 fragment manifest 原子写入 answer-state。manifest 至少含每片的 `part/total/content_start/content_end/content_sha256/fragment_id/guard_chars`；重启必须按 manifest 从原 answer 重建并校验，禁止按当前 splitter 重新切。已有 answer-state 若缺少这些字段，按 legacy `2800` policy 重建并回填 manifest，确保旧 ACK/ID 不漂移。升级或回滚到不认识某 policy 的二进制前，必须机械确认该 policy 的 incomplete answer 为 `0`。
 - 非网络逻辑异常同样不得推进 HWM。drainer 在既有 per-bot bridge log 留下 `bot/offset/kind/error_type/error`；`kind` 必须指向批内实际出错 record，未知异常的 `error` 只能是摘要哈希，不能带正文、路径、token 或 secret。同一 `(offset,kind,error_type,error_digest)` 在 HWM 未变化时只记一次，避免永久毒记录制造日志洪水。
+
+### 2.1 Milestone 进度卡跨进程续接
+
+`milestone-v1` 的 `bridge-progress-state-<bot>.json` 保存当前 turn、允许公开的步骤快照、原卡 message_id、已确认 event revision、当前卡包含的事件 ID 和冻结的 route。进度卡使用普通消息 PATCH，重启不需要重建 CardKit 流式连接。
+
+- 创建新进度卡之前先持久化 pending 操作：冻结渲染后的每片正文、route、卡片事件归属，以及每片稳定的 64 位摘要 ID；provider UUID 复用 §2 的 UUIDv5 映射。恢复时先完成这个冻结操作，再消费更新的快照，禁止给同一次未确认发送换 ID 或换正文。
+- 每片成功取得 message_id 后立即保存 ACK 和卡号，再发送下一片。pending 完成后保存 event revision；状态保存失败不得推进 outbox HWM，也不得在发送意图尚未保存时调用网络。状态内容 flush/fsync 后原子替换。
+- 新建或改卡的临时失败保留原卡 ID／pending 操作与未确认 revision。同一 PATCH 再次成功只更新原卡；不得把超时或连接失败直接解释为“旧卡不能用了”而创建另一张卡。
+- 只有超过卡片容量，或 provider 明确返回消息已撤回（230011）、达到编辑次数上限（230072），才允许轮换新卡。新卡继续使用上述持久创建操作；消息权限错误不等于原卡应被替换。
+- 原卡 message_id 已确定目标，改卡时不得再读取下一轮的 turn-route 决定是否跳过更新。群 progress 仍在创建前按冻结 route 抑制，不因此改变 DM 卡的恢复行为。
+- answer 封口当前卡，不代表当前 turn 永远不再产生进度；交互后仍使用相同 turn ID 的新事件继续按 event revision 投递，已确认快照不重发。只有已切换到其他 turn 后重放的旧 turn 才受完成列表拦截；已确认的旧 answer 不能关闭当前新 turn 的卡。重启后的第一次轮询可立即处理积存进度，后续更新继续遵守原 coalesce 间隔。
+- 本地确认与 provider 请求去重是两个边界：本地已确认片不重发；远端已接收但本地 ACK 丢失时，同一请求编号在飞书规定的一小时内防止重复消息。跨越该窗口、磁盘损坏或远端卡片被撤回不属于无条件续接保证。
+
+适用对象是当前三种 runtime 共用的 `milestone-v1` 路径；历史 legacy progress/ask 的内存状态不因此获得同等持久性。本节也不保证新入站消息的消费恢复：入站日志能查询历史，不等于具备“收到—提交—完成”的可恢复收件队列。
 
 ## 3. Active turn 防双发
 
