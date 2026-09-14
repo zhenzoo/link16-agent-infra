@@ -36,7 +36,7 @@ last_reviewed: 2026-09-10
    3. 测试：`feishu/tests/test_context_scan.py`、`test_context_import.py`、`test_register_first_bot_fallback.py`，离线 fixture 覆盖 Claude 桌面版 exe 与 MSIX 两种落点、空骨架名册、无 notify_bot 首只 bot。
    4. 验收数字：盘点清单至少覆盖 5 类来源；活跃项目扫描本机 24 仓 ≤ 5 秒；导入后 0 个认证文件被复制；3050 机器 preflight 从「14 OK / 1 FAIL」变为「全 OK 或 WARN」。
 3. **用户输入**（2026-09-09 host DM）：同事说 bot「丧失了太多 context」；他此前只用 Claude / ChatGPT 桌面版；要求扫近一周活跃项目取 1～3 个、把桌面版记忆一键检索并让他勾选导入到所选 profile（`.claude-work` / `.claude-personal` / `.codex-*` 取决于他装的）、默认建 2～3 只 bot 按 `TB26-link16` 这种「机器代号-仓库简称」命名、通俗解释、先对齐再动手。
-4. **证据来源**：`C:\Users\remo\Downloads\Link16-安装记录.zip`（3050 机器 2026-09-08 完整 429 条对话 + 结构化档案）；本仓代码定位见 §1 各 Step 括号里的文件行号；Claude 桌面版数据落点来自 claude.com 官方 data-storage 文档与两篇逆向文章。
+4. **证据来源**：`$HOME/Downloads/Link16-安装记录.zip`（3050 机器 2026-09-08 完整 429 条对话 + 结构化档案）；本仓代码定位见 §1 各 Step 括号里的文件行号；Claude 桌面版数据落点来自 claude.com 官方 data-storage 文档与两篇逆向文章。
 5. **写入归属**：本 PLAN 由 tb26-link16 session 撰写；执行阶段每个 Step 落地前先 `git pull --ff-only`，S1 的修复优先合 main 让 3050 机器能直接 pull。
 6. **host 拍板（2026-09-10 08:50）**：四个问题全按推荐——默认合并到主 profile；聊天记录蒸馏默认进行、不询问；机器代号推不出时 hostname 兜底、不询问；S1 先合 main。另加一条原则：整套做成**首次安装 skill**（仓库自带、随 profile_bootstrap 装进 profile home），skill 里带工具、替用户确认与推进，而不是一堆散命令。
 7. **当前 Step 与恢复点**：S1～S4 已合 main 并打 `v0.25.0`（2026-09-10 09:19）；当前 S5.1，等 host 转告同事在 3050 上 `git pull --ff-only origin main` 后按 link16-init 2.1～2.6 重跑，回执贴回 DM。
