@@ -166,15 +166,15 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 #### § 2.1 · 一个 bot 的【三个名】+ 全员名册（★ 名单 SSOT = `feishu/agent-registry.json` · 本节只讲概念，名单查工具）
 
-**每个 bot 有 3 个名，存在 3 个地方，改一个不会自动改另俩 —— 哪个是「机器认的」？**
+**应用身份、固定内部代号与用户看到的名称分开维护。普通改名按 [SOP-125](SOP-125-bot-rename.md) 同步。**
 
 | 名 | 是什么 · 存哪 | 机器认它吗 |
 |---|---|---|
-| **代号**（roster `name` + `.env` 键 `FEISHU_BRIDGE_<代号>_APP_ID`）| **机器内部名 = SSOT**：代码全靠它（`--to-agent` / `--bot` / 存档文件名 / 凭据键 / whoami）| ✅ **这个才是机器认的** |
-| **@名**（roster `at_name`）| 群里 @ 它时打的·惯例 = `@`+代号（@ 实际靠 open_id 解析·at_name 主要给人读 + strip mention）| 半 |
-| **飞书显示名**（Feishu `app_name`·`bot/v3/info` 现拉·飞书后台改）| 你在飞书 App 里看到的那个（头像旁）| ❌ 纯给人看·机器不认 |
+| **内部代号**（roster `name`）| 固定运行身份；状态文件和会话用它。凭据由 `app_id_env` / `app_secret_env` 明确指向 | ✅ 状态真源 |
+| **@名**（`at_name`）| 等于 `@` + 当前显示名；真实 @ 仍靠 open_id | ✅ 名称解析入口 |
+| **飞书显示名**（API `app_name`，本地 `display_name`）| 人在飞书看到的名字，经改名工具回读并同步；历史名称保留在 `aliases` | ✅ 同步后可按新名或别名查找 |
 
-> **🔒 命名铁律（2026-07-02 定）：三名保持一致 —— 代号 == @名去掉@ == 飞书显示名。** 你在飞书后台改了显示名后，**必回来把代号(roster name + .env 键) + @名 也改齐**。跑 **`python feishu/bridge_doctor.py --roster --live`** 一眼看出谁没跟上（⚠️ 三名漂移）。根因案例：把 bot 飞书显示名改成 `tb24-notes` 但代号还是 `twitter` → 那个 bot `whoami` 查名册老本子 → 自我认知错乱「我是 twitter 还是 notes？」。whoami 现在**当场拉飞书真实显示名**，不再错。
+> **2026-09-14 更新：显示名与 @名保持一致，内部代号和凭据键保持固定。** 普通改名执行 `rename_bot.py plan → apply → verify`；doctor 对照已登记 display_name 和线上名称，不再强迫改内部代号。旧的“三名合一并改 .env 键”要求已由 SOP-125 的保留身份流程替代。
 
 **交流水吧群 chat_id = `oc_00000000000000000000000000000001`**（「tb24-25交流水吧」）—— ⚠️ **这只是【个人租户】的群**；企业租户（企业租户A 企业租户A）的 bot 进「obsagent 大乱斗」，判定见 [§ 4.2](#-42--该进哪个群--按租户判定绝不按名字前缀猜)。open_id / 显示名由 `bot/v3/info` 现拉（`gather_bots` / whoami·不写死）。
 

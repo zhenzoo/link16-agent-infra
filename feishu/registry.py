@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bridge_env import registry_path, writable_registry_path  # noqa: E402  （路径解析唯一入口）
+from bot_names import find_entry, labels, normalize, display_name
 
 # 名册实际路径。**别再在别处自己拼这个路径** —— 2026-08-17(PLAN-926 §S1.1) 之前三个文件各拼各的，
 # 一旦 local 覆盖启用就会出现「写进 local、却从 committed 读」的错位。统一走 bridge_env.registry_path()。
@@ -42,16 +43,11 @@ def load_agents() -> list[dict]:
 
 
 def _match(agent: dict, query: str) -> bool:
-    q = (query or "").strip()
-    return agent.get("name") == q or agent.get("open_id") == q or agent.get("at_name") == q \
-        or agent.get("at_name") == ("@" + q)
+    return normalize(query) in labels(agent) or agent.get("open_id") == query
 
 
 def find(query: str) -> dict | None:
-    for a in load_agents():
-        if _match(a, query):
-            return a
-    return None
+    return find_entry(load_agents(), query)
 
 
 def name_for_open_id(open_id: str, default: str | None = None) -> str | None:
@@ -172,10 +168,11 @@ def sync_groups(bot: str) -> list[dict]:
 def _fmt_rows(agents: list[dict]) -> str:
     if not agents:
         return "（无匹配）"
-    headers = ["名字", "发送键", "机", "仓", "shared", "✓", "open_id", "备注"]
+    headers = ["显示名", "内部代号", "发送键", "机", "仓", "shared", "✓", "open_id", "备注"]
     rows = []
     for a in agents:
         rows.append([
+            display_name(a),
             a.get("name", ""),
             a.get("send_key") or "—",
             a.get("machine", ""),

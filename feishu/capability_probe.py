@@ -181,8 +181,13 @@ def main():
     ap.add_argument("--alternatives", action="store_true", help="只出「能力 → 可替代权限」总表")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+    if args.bot:
+        from bot_names import local_name
+        args.bot = local_name(args.bot)
 
     bots = [b for b in load_bots() if not args.bot or b["name"] == args.bot]
+    if args.bot and not bots:
+        raise SystemExit(f"未找到智能体：{args.bot}；未执行能力探测")
     ctx = {"doc": args.doc, "media": args.media, "msg": args.msg, "key": args.key}
     alt_map, rows = {}, []
     for bot in bots:

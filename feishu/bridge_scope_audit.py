@@ -464,7 +464,11 @@ def main():
 
     entries = discover_env_bots() if args.all_env else roster_bots()
     if args.bot:
+        from bot_names import local_name
+        args.bot = local_name(args.bot)
         entries = [entry for entry in entries if entry[0] == args.bot]
+        if not entries:
+            raise SystemExit(f"未找到待审计智能体：{args.bot}；没有执行权限检查")
     capabilities = args.capability or list(DEFAULT_CAPABILITIES)
     if args.levels is not None:
         return _print_levels(args.levels, args.json)

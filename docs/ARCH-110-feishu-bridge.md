@@ -29,6 +29,18 @@ last_reviewed: 2026-09-06
 
 ## 服务启停与 Windows 查询合同（v0.22.1）
 
+### 智能体显示名与固定内部代号
+
+飞书应用身份由 App ID 和凭据确定；`bridge-bots.local.json` 的 `name` 是固定内部代号，
+用于进程、owner、会话、outbox、去重游标与 cron 的状态寻址。普通改名不迁移这些状态。
+`display_name` 是经线上回读的当前显示名，`at_name` 与它一致，`aliases` 保留以前使用过的名称；
+运行名册与舰队名册同时保存名称字段，`app_id_env`、`app_secret_env` 和 `send_key` 保持原映射。
+`bot_names.py` 在用户 CLI 边界把显示名/别名解析成固定内部代号，冲突直接失败；
+`registry.py` 对舰队名称提供相同规则。发送者身份与去重仍按固定内部代号校验。
+执行与恢复只认 [SOP-125](SOP-125-bot-rename.md)，不因线上改名强制重启生产桥。
+
+### 服务控制
+
 `bridge_process.py` 是桥、cron、watchdog 的共用进程控制入口。查询结果区分合法进程列表、已确认空表与未知；PowerShell 必须返回成功标记及合法 JSON，非零退出、错误输出、超时和坏数据都不能当成空表。15 秒失败后使用 45 秒窗口重试，耗尽则命令失败。
 
 每个 bot 桥以 `bridge:<bot>`、守护以 `cron` / `watchdog` 为身份，持有操作系统文件锁到退出。锁位于当前 Windows 用户的 `~/.link16/service-locks`，不随 runtime home 或 checkout 分叉；这不提供跨 Windows 用户互斥。`run` 无权替换旧实例；`start` 在控制锁内查询、停止旧实例并等待退出，再启动新进程确认服务锁。持锁确认不等于 WebSocket 已连上，部署还须检查连接日志和收发。

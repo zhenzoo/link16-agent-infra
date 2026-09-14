@@ -102,6 +102,8 @@ def main():
     ap.add_argument("--text", default=None, help="附带说明（飞书文件消息不支持 caption → 作为单独一条消息发）")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     a = ap.parse_args()
+    from bot_names import local_name
+    a.bot = local_name(a.bot)
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
     p = Path(a.file)
     if not p.is_file():

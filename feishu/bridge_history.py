@@ -338,6 +338,8 @@ def main():
             print("\n（用 --bot <名> 看某个 bot 的消息时间线）")
         return
 
+    from bot_names import local_name
+    a.bot = local_name(a.bot, bots=_bots())
     names = [b.get("name") for b in _bots()]
     if a.bot not in names:
         raise SystemExit(f"未知 bot '{a.bot}'。可选：{', '.join(n for n in names if n)}")

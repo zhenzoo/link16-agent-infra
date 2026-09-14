@@ -1775,6 +1775,8 @@ def main():
     if args.cmd == "stop":
         return cmd_stop()
     if args.cmd == "failover":
+        from bot_names import local_name
+        args.bot = local_name(args.bot)
         return 0 if failover(args.bot, target=args.to, dry_run=args.dry_run) else 1
     if args.cmd == "stall-check":
         return cmd_stall_check(args.min)

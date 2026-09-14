@@ -287,6 +287,8 @@ def assert_sender_identity(bot):
     me = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not me:
         return  # 无身份锚 = 可信操作者场景（terminal / 手动 / cron 守护进程）→ 放行
+    from bot_names import local_name
+    bot, me = local_name(bot), local_name(me)
     if _norm_bot(bot) == _norm_bot(me):
         return  # 以自己身份发
     if _norm_bot(bot) in _may_send_as(me):

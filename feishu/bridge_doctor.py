@@ -100,24 +100,26 @@ def _roster_slug(name):
 
 def diagnose_roster(bots, *, live_names=None):
     """名册命名一致性（静态·纯读名册 + 可选 live 显示名）。逐 bot 判：
-      · **用户可见三名一致**（代号 == @名去@ == 飞书显示名）—— 这是【重要】检查（防 bot 认错自己/派错活）。
+      · display_name == @名去@ == 飞书显示名；未登记 display_name 的旧条目以内部代号为预期。
       · .env 键守习惯（`FEISHU_BRIDGE_<SLUG>_APP_ID`·SLUG 由代号推）—— 这是【次要】内部约定（不一致也能 work）。
     bots=名册条目 list；live_names={代号: 飞书显示名} 可选（--live 时现拉·没拉到的 bot 跳过显示名核）。
     返回 [{name, at, exp_at, disp, key, exp_key, name_drift:[...], key_ok}]。"""
     rows = []
     for b in bots:
         name = b.get("name") or ""
+        expected_display = b.get("display_name") or name
         at = b.get("at_name") or ""
         at_bare = at.lstrip("@")
         disp = (live_names or {}).get(name)
         key = b.get("app_id_env") or ""
         exp_key = f"FEISHU_BRIDGE_{_roster_slug(name)}_APP_ID"
         drift = []
-        if at_bare != name:
-            drift.append(f"@名={at}≠@{name}")
-        if disp and disp != name:
-            drift.append(f"飞书显示名={disp}≠{name}")
-        rows.append({"name": name, "at": at, "exp_at": "@" + name, "disp": disp,
+        if at_bare != expected_display:
+            drift.append(f"@名={at}≠@{expected_display}")
+        if disp and disp != expected_display:
+            drift.append(f"飞书显示名={disp}≠{expected_display}")
+        rows.append({"name": name, "at": at, "exp_at": "@" + expected_display, "disp": disp,
+                     "display_name": expected_display, "live_verified": bool(disp),
                      "key": key, "exp_key": exp_key, "name_drift": drift, "key_ok": key == exp_key})
     return rows
 
@@ -143,11 +145,15 @@ def _live_display_names(bots):
     return out
 
 
-def _print_roster(live):
+def _print_roster(live, bot=None):
     try:
         bots = json.loads(BOTS_CONFIG.read_text(encoding="utf-8")).get("bots", [])
     except (OSError, json.JSONDecodeError, KeyError):
         print("❌ 读不到名册"); return
+    if bot:
+        from bot_names import local_name
+        canonical = local_name(bot, bots=bots, required=True)
+        bots = [b for b in bots if b["name"] == canonical]
     live_names = _live_display_names(bots) if live else None
     rows = diagnose_roster(bots, live_names=live_names)
     print(f"飞书桥 名册命名一致性 @ {time.strftime('%H:%M:%S')}"
@@ -157,15 +163,17 @@ def _print_roster(live):
     for r in rows:
         if r["name_drift"]:
             n_drift += 1
-            print(f"  ⚠️ {r['name']:<20} 三名漂移：{'；'.join(r['name_drift'])}")
+            print(f"  ⚠️ {r['name']:<20} 显示名称漂移：{'；'.join(r['name_drift'])}")
         else:
             disp = f" 显示名={r['disp']}" if r["disp"] else ""
-            print(f"  ✅ {r['name']:<20} 代号=@名{('=' + '显示名' if r['disp'] else '')} 一致{disp}")
+            mark = "✅" if not live or r['live_verified'] else "❓"
+            print(f"  {mark} {r['name']:<20} 已登记显示名={r['display_name']}{disp}"
+                  + ("（线上未知）" if live and not r['live_verified'] else ""))
         if not r["key_ok"]:
             n_keynit += 1
             print(f"     ℹ️ .env 键 {r['key']} 未守习惯 {r['exp_key']}（内部约定·不影响 work）")
     print("-" * 72)
-    print(f"总计 {len(rows)} bot · ⚠️ 三名漂移 {n_drift} · ℹ️ 键名习惯 {n_keynit}"
+    print(f"总计 {len(rows)} bot · ⚠️ 显示名称漂移 {n_drift} · ℹ️ 键名习惯 {n_keynit}"
           + ("" if live else " · 未拉飞书显示名(加 --live 才核显示名)"))
 
 
@@ -177,8 +185,11 @@ def main():
     ap.add_argument("--live", action="store_true", help="配 --roster：现拉每个 bot 的飞书真实显示名对照")
     a = ap.parse_args()
     if a.roster:
-        _print_roster(a.live)
+        _print_roster(a.live, a.bot)
         return
+    if a.bot:
+        from bot_names import local_name
+        a.bot = local_name(a.bot, required=True)
     bots = [a.bot] if a.bot else list_bots()
     now = time.time()
     print(f"飞书桥 outbox 投递健康 @ {time.strftime('%H:%M:%S')}  (stale={a.stale_sec}s)")

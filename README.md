@@ -354,7 +354,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 核对公开版默认配置与发布前缺口 | [PLAN-1080：隔离账号、沟通规则与新手验收](docs/PLAN-1080-public-installation-baseline.md)（实施方案，尚未全部实现） |
 | 查看飞书文档工具修复与提交交接进度 | [PLAN-1090：凭据单一来源与读写核验](docs/PLAN-1090-feishu-docio-reliability.md) |
 | 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（Codex 版：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
-| 给已有的 bot 改名 | [`docs/SOP-125-bot-rename.md`](docs/SOP-125-bot-rename.md) |
+| 给已有的 bot 改名、查专属后台并同步新旧名称 | [`SOP-125`](docs/SOP-125-bot-rename.md)：`rename_bot.py plan → apply → verify`；执行与本机验证见 [PLAN-1100](docs/PLAN-1100-bot-rename-workflow.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
 | 弄懂桥到底怎么运转 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) |
 | 弄懂 wmux 面板怎么被驱动 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) |

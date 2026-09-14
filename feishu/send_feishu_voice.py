@@ -178,6 +178,8 @@ def main():
     ap.add_argument("--no-transcode", action="store_true", help="跳过转码（输入须已是 Ogg/Opus）")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     a = ap.parse_args()
+    from bot_names import local_name
+    a.bot = local_name(a.bot)
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
 
     src = Path(a.audio)

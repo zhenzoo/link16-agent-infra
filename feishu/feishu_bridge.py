@@ -3335,6 +3335,9 @@ def main():
     ap.add_argument("--to", default=None, help="send：目标 chat_id/open_id（不给=会话 chat_id → owner open_id）")
     ap.add_argument("--json", action="store_true", help="send：机器可读 JSON 输出")
     args = ap.parse_args()
+    if args.bot:
+        from bot_names import local_name
+        args.bot = local_name(args.bot)
     if args.cmd == "run":
         run(args.bot)
     elif args.cmd == "start":

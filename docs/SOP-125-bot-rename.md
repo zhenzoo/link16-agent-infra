@@ -1,100 +1,167 @@
 ---
 doc_type: SOP
 doc_id: SOP-125
-title: 给已存在的飞书 bot 改名
+title: 飞书智能体改名与本地名称同步
 status: active
-purpose: 改一个已存在 bot 的名字时，列全要改的名与文件，并强制改完重新认主人，避免回复发错人。
+purpose: 用 Link16 的统一工具完成应用定位、后台改名交接、名称同步、验收及故障恢复。
 owns:
-  - 改名涉及的四个名与各自的文件
-  - 按 name 命名的状态文件的迁移或重建
-  - 改完必须私聊一次重新认主人的硬要求
+  - 现有飞书应用改显示名的操作顺序与人工动作
+  - 名册同步、验收、后台监督及恢复步骤
 does_not_own:
-  - 新建 bot（见 SOP-120）
-  - 桥的主人解析机制（见 ARCH-110）
+  - 新建应用和凭据轮换（见 SOP-120）
+  - 固定内部代号与显示名的架构边界（见 ARCH-110）
+  - 生产桥重启或迁移账号
 read_when:
-  - 要改一个已存在 bot 的任一名字
-  - 改名后出现回复发错人 / 230013 / 消息发不出去（2026-08-30 拆兜底后不再刷群，改为如实记 delivered=false）
-last_reviewed: 2026-08-17
+  - 用户要给已有智能体改名或索取该应用后台链接
+  - 飞书改名后本地脚本、其他智能体或历史查询不认识新名
+last_reviewed: 2026-09-14
 ---
-# SOP-125 · 给飞书 bot 改名（rename）—— 改哪些名 / 扫哪些文件 / 改完怎么让它重新「认主人」
 
-> **什么时候读它**：你要改一个**已存在** bot 的名字（内部代号 / 飞书显示名 / .env 键 / @名 任一），照这份走一遍，避免改完出现「桥找不到主人档案 → bot 被群里派活后回复发错人 → 兜底扔进群」这类隐患（2026-07-05 `tb24-xhs-arch` 实证：改名后主人档案孤立，群里派活的回复报 `230013 Bot has NO availability to this user`、退到 webhook 扔群）。
->
-> **一句话机制**：桥的一批【状态文件】是**按 bot 的 `name` 命名**的（`bridge-owner-<name>.json` / `bridge-session-<name>.json` / `bridge-outbox-<name>.jsonl` …）。改了 `name`，桥就按**新名**去找 → 旧文件被**孤立**、等于「丢了」。其中最要命的是 **`bridge-owner-<name>.json`（主人档案）**：丢了它，bot 被【群里】派活后不知道回给谁 → `mirror_target` 回退到「最后跟它说话的人」（群里那个 agent）→ 那个 agent 它发不到 → 四级兜底最后 webhook 扔群。
+# 飞书智能体改名与本地名称同步
 
-## 一、一个 bot 有几个「名」（改名前先分清你改的是哪个）
-| 名 | 存在哪 | 谁认它 | 改它要动 |
-|---|---|---|---|
-| **内部代号 `name`** | 名册 `bridge-bots.local.json` 的 `name` · `--bot X` · **状态文件名** | 桥 / 机器 | 名册 + registry + **状态文件重认**（第三节） |
-| **飞书显示名** | 飞书开发者后台（授权时 Owner 设） | 人看 | 后台改（Owner 手动·不碰代码/文件） |
-| **.env 键名 `send_key`（slug）** | `.env` 的 `FEISHU_BRIDGE_<SLUG>_APP_ID` · 名册 `app_id_env` 反推 | `send_feishu_msg --to-agent` | **一般不动**（`app_id_env` 把代号和 .env 键解耦：改代号不必改 .env） |
-| **@名 `at_name`** | 名册 `at_name` · registry `at_name` | 群里 @ | 名册 + registry |
+## 给人看的实际案例：5 号智能体改名时，具体做哪八步
 
-> 「三名合一」= 把上面几个名对齐成一个 ascii slug（好记）。但**只改「引用这个名的地方」还不够** —— 按名命名的**状态文件会被落下**。本 SOP 的重点就是补这一步。
+以这次真实的 `tb26-baseball-5` → `tb26-tc101P-baseball-5` 为例，按完整操作顺序看每一步查哪里、改哪里。本次你已经先改好飞书，第 4 步无需再做；公开文档中的应用编号以省略号脱敏，密钥用 `***` 隐去。
 
-## 二、改名 checklist（按序）
-1. **名册** `feishu/bridge-bots.local.json`：改该 bot 的 `name`（+ 需要则 `at_name`）。**`app_id_env` 别动**（保持凭据解析不变、不碰 .env）。
-2. **目录**（默认 `~/.claude-personal/link16/agent-registry.json`·不在本仓·路径以 `python -c "import sys;sys.path.insert(0,'feishu');from bridge_env import registry_path;print(registry_path())"` 为准）：改这条的 `name` / `at_name` / `send_key`（**只改自己那半**·各机各半·见其 `_README`）。
-3. **扫一遍谁还按旧名硬引**（第四节）。
-4. **状态文件重认**（关键·最易漏）：见第三节。
-5. **重启桥生效**：改了名册/状态 → `python feishu/feishu_bridge.py --bot <新名>` 单起即可；改了公共码 → 全队 `stop && start`。
+- **1. 我先查“这只智能体登记在哪里”**：在 Link16 的 `feishu/bridge-bots.local.json` 中找到 `name=tb26-baseball-5`，读出它使用哪两项应用编号和密钥配置，避免找错应用。
+- **2. 我去 .env 读取原来的编号和密钥，只读不改**：本例是 `FEISHU_BRIDGE_TB26_BASEBALL_5_APP_ID=cli_aa15…1d24`、`FEISHU_BRIDGE_TB26_BASEBALL_5_APP_SECRET=***`；前者是应用的固定编号，后者是程序连接它的钥匙，改名后仍用这两项。
+- **3. 我按这个编号给你准确的后台链接**：地址结构是 `https://open.feishu.cn/app/cli_aa15…1d24/baseinfo`（此处已脱敏，实际操作时我会给你可打开的完整链接）；链接里用的是固定编号，所以改名前后地址不变。
+- **4. 你在飞书后台改应用名称**：把 `tb26-baseball-5` 改成 `tb26-tc101P-baseball-5` 并保存；如页面要求发布或审核，按提示完成。这一步改变飞书上看到的名字，电脑里的登记还要继续同步。
+- **5. 我向飞书核对“同一只应用是否已换成新名字”**：仍用第 2 步的编号和密钥查询，必须读到新名字 `tb26-tc101P-baseball-5` 才继续；还没生效就等待，不提前改电脑名册。
+- **6. 我改本机名册 feishu/bridge-bots.local.json 的名称信息**：把 `at_name` 从 `@tb26-baseball-5` 改成 `@tb26-tc101P-baseball-5`，补上显示名 `display_name=tb26-tc101P-baseball-5` 和旧名别名 `aliases=[tb26-baseball-5]`；内部编号 `name=tb26-baseball-5` 保留，让原来的会话和记录继续接得上。
+- **7. 我把另一份“智能体总通讯录”也同步好**：本例登记在 `~/.claude-personal/link16/agent-registry.json`（`~` 表示当前用户目录），对同一只智能体做第 6 步相同的三项名称更新，让其他智能体能按新名字查到它；连接原凭据的配置保持原样。其他电脑若也要用新名字，需取得这份更新及支持别名的程序。
+- **8. 我检查并留下一份操作记录**：用新名字和旧名字分别查找，确认都指向 `cli_aa15…1d24` 这只应用、同一份密钥和原来的历史记录，再告诉你完成；本例实际改变的是飞书名称和两份名册的名称信息，`.env`、后台链接、已有会话及权限均保留。
 
-## 三、改完必做：让 bot「重新认主人」（否则群里派活会发错人）
-桥按**新 `name`** 找 `feishu/_state/bridge-*-<新name>.*`；旧的按旧名躺着 = 孤立、等于没有。**主人档案 `bridge-owner-<新name>.json` 尤其要补**。二选一：
+本流程属于 Link16 自带的 feishu 技能，可从任何业务仓调用。执行目录始终是通过
+`LINK16_AGENT_INFRA_ROOT` 定位的 Link16 根目录，工具为 `feishu/rename_bot.py`。
+业务仓不另建改名脚本、不复制名册或凭据。
 
-- **（推荐·自愈）你【私聊 DM 一次】这个 bot** → 桥发现它没有主人档案 → 把「**第一个私聊它的人**」（= 你）自动认作主人、当场写好 `bridge-owner-<新name>.json`。会话/outbox 等也随新名重新生成。**零 OAuth、零手动。**
-- **（手动·仅当你确知自己在这个 app 的 open_id）** 直接写 `feishu/_state/bridge-owner-<新name>.json`，内容就一行：
-  ```json
-  {"open_id": "ou_你在这个app里的身份号"}
-  ```
-  ⚠️ **没有可靠 open_id 就别猜**（bot 从没被你私聊过 → 无从得知你在它 app 里的 id）→ 一律走上面「自愈 DM」。
+普通“改名”修改飞书显示名和本地名称映射，保留同一个应用。内部代号及
+`.env` 变量继续指向原凭据，会话、owner、历史、cron 和 profile 继续使用原内部代号。
+改名后的后台链接仍属于同一个 App ID，不会创建一只新 bot。
 
-> **为什么必须私聊、群里 @ 不行**：认主人逻辑 `is_allowed()` **只对私聊 DM 生效·群里 @ 不触发**（群里 @ 它的可能是别的 agent·不能乱认作主人）。这正是「只被群里派活、从没被你 DM 过」的 bot 主人档案一直建不起来的根因。
+## 1. 核对对象与目标名称
 
-## 四、扫描（找出所有按旧名硬引 / 会孤立的地方）
-```bash
-# ① 仓内代码 / 文档硬引旧名（应尽量为 0——名都该走名册/registry、别硬编码）
-grep -rn "<旧名>" feishu/ docs/
-# ② 会被孤立的状态文件（按名命名的那批）
-ls feishu/_state/ | grep "<旧名>"
-# ③ 改完自检：新名有没有主人档案（没有=还没 DM 过=会发错人）
-ls feishu/_state/bridge-owner-<新名>.json   # 不存在 → 去私聊 DM 一次
+从用户明确指定的原名、新名开始。语音转写、大小写或编号有歧义时，只澄清歧义项；
+继续检查其他已确定对象。不能由产品仓名、profile 或名称前缀猜是哪只应用。
+
+使用 `registry.py whois` 或改名工具定位。原名、新显示名、`@名称` 和已登记历史别名
+均可查；名称冲突会失败，不取第一条。多个 bot 按每只独立计划、逐只预览和应用，避免
+前一只的修改使后一只预先保存的全文件指纹过期。
+
+## 2. 生成预览和专属后台链接
+
+以下名称为示例。操作文件放在 gitignored 的 `feishu/_state/bot-renames/`，每次用新的文件名：
+
+```powershell
+python feishu/rename_bot.py plan --bot desk-camera --name desk-sports-camera --out feishu/_state/bot-renames/rename-example-20260914-1010.json
 ```
 
-## 五、常见坑
-- **改完只被群里用、你没私聊过** → 主人档案不自建 → 群里派活的回复发错人、兜底扔群。**改完记得私聊 DM 一次。**
-- **顺手把 `.env` 键也改了** → 不必要且危险（`app_id_env` 已把代号和 .env 键解耦）。除非你就是要改 `send_key`（那要连 `.env` 一起动·动密钥·走 envsync·参 SOP-120）。
-- **旧 slug 状态文件不用手删**（孤立但无害·桥不看它们）；想清爽可留到确认新名跑通后再删。
+输出包含应用 App ID、`console_url`、飞书实时名称、目标名称、两本名册的精确名称
+before/after，以及凭据的**变量名**。不打印 Secret、Token 或 `.env` 正文。
+如需保留本地尚未登记、但用户确认曾经使用的名称，加 `--alias 旧显示名`。
 
-## 六、（可选）做成工具
-上面是「机制 + 人工 checklist」。若改名变频繁，可把第二、四节固化成 `feishu/rename_bot.py <旧名> <新名>`：改名册/registry + 扫描报告 + 打印「记得私聊 DM 一次」提示（认主人这步是判断活·不自动替你 DM）。目前频率低、先留 SOP。
+状态含义：
 
-## 七、变体：把名字【让给一个新应用】（改名弃用 + 同名重建 · 2026-08-27）
+- `ready`：飞书实时名称已等于目标，可以执行本地同步。
+- `waiting_for_feishu`：飞书仍是其他名称，交付此应用的后台链接。
+- `live_unavailable`：网络或身份回读不可用；仍给出本地 App ID 对应链接，但不能宣称改名成功。
+- 重名、缺凭据、示例名册、错误 send_key 或输入冲突：明确失败；先修复已证实的问题。
 
-上面六节讲的是「同一个应用换个名」。另有一种：**旧应用不要了，但删除要管理员审批** ——
-把旧应用**改名让位**、再注册一个新应用**顶上原来的名字**，把本地收发记录无缝接过去。
-这比删除更划算：不等审批、旧凭据还留着（哪天批下来再删）。
+用户已明确要求改名，即授权对应范围内的本地名称同步，不再重复索要确认。
+`plan` 本身不改名册；指定 `--out` 只保存不含秘密的操作计划。
 
-与 [SOP-120 §4.3](SOP-120-feishu-register.md) 的删除路径**只差第 3 步**，其余完全一样。
+## 3. 飞书侧唯一人工动作与后台监督
 
-**第 3 步改成（两件事一起做，别只做一半）**：
-1. **飞书后台**把旧应用显示名改成 `<bot>-abandon`（腾出名字）。
-2. **`.env` 键跟着改名**：`FEISHU_BRIDGE_<SLUG>_APP_ID/_SECRET` → `FEISHU_BRIDGE_<SLUG>_ABANDON_APP_ID/_SECRET`。
-   **必须先改**，否则下一步注册会用 `_set_key` 把同名键**原地覆盖**，旧应用凭据从 `.env` 消失。
+向用户交付工具返回的原始 `console_url`，说明原名和准确新名：
+用有应用管理权限的账号打开页面，编辑应用名称并保存；若页面要求发布或审核，按页面完成。
+Link16 此工具不模拟后台登录、不重置密钥，也不把注册一个同名新应用当成改名。
 
-**同时必须做的一件事**：**不要给弃用应用保留 roster 条目**。
-`bridge-bots.local.json` 里那条要被新应用顶掉（`upsert_runtime_bot` 按 `name` 就地更新、不会重复加），
-**别另起一条 `<bot>-abandon`** —— 留着的话 `feishu_bridge.py start`（不带 `--bot`）会把它拉起来、
-占一条长连接、抢走发给它的消息。凭据留在 `.env` 里就够了，`bridge_scope_audit.py --all-env` 照样审得到它。
+需要等用户操作时，在交付链接后启动监督：
 
-**顺手清一个陈旧字段**：旧条目上如果有 `"doc_delivery_fallback": "attachment"`（当年发不了在线文档时加的），
-`upsert_runtime_bot` **不会**帮你删；现在该字段已不再支持，手动去掉即可。`send --doc` 在线失败会统一发原文件附件。
+```powershell
+python feishu/rename_bot.py watch --plan feishu/_state/bot-renames/rename-example-20260914-1010.json --background
+```
 
-**弃用应用之后是什么状态**：还装在租户里、还在你的飞书通讯录里叫 `<bot>-abandon`，
-但没有任何本地进程驱动它 —— 你私聊它不会有人应答。这是预期行为。
+监督进程隐藏运行，默认观察一小时、每 15 秒回读；可用 `--timeout` 设置观察秒数。
+它只有看到同 App ID 的实际名称等于目标、且原计划的名册未变化，才自动应用本地名称。
+网络未知会继续观察；名册变更则进入 `needs_review`，要求重新预览。
+观察到期保持 `timed_out`，不视为成功；以后可重跑 watch 或 apply。不得用短 shell timeout
+包住前台 watch。
 
-**如果连改名也要审批**：先试，改显示名通常比删除轻。真被卡住就别改，
-直接注册新应用并占用同一显示名（应用身份是 `app_id`、不是名字）；代价只是通讯录里两只同名 bot 看着乱，
-机器不会认错。**但此时 `.env` 键改名那步仍然必须做**，否则旧凭据被覆盖。
+返回的 `status_file` 是机械继续信号，agent 根据其中的 `applied` 或
+`already_applied` 和 receipt 继续验收；该监督器不发送消息、不自动宣称全链路完成。
+取消尚未完成的监督用：
 
-> 相关：注册**新** bot = `SOP-120`；桥怎么路由回复（p2a 回主人 / a2a 回群 / p2a-ext 回外部群）+ 主人档案在路由里的角色 = `ARCH-140 §3` / `ARCH-110`。
+```powershell
+python feishu/rename_bot.py cancel --plan feishu/_state/bot-renames/rename-example-20260914-1010.json
+```
+
+取消后状态成为 `cancelled`。重新发起改名应使用新的 plan 文件名。
+如果用户已经改好线上名称，直接进入下一步，不启动等待进程。
+
+## 4. 应用本地名称并验证
+
+```powershell
+python feishu/rename_bot.py apply --plan feishu/_state/bot-renames/rename-example-20260914-1010.json
+python feishu/rename_bot.py verify --bot desk-sports-camera
+python feishu/registry.py whois desk-sports-camera
+python feishu/bridge_doctor.py --roster --live --bot desk-sports-camera
+```
+
+工具只修改运行名册与舰队名册中此 bot 的 `display_name`、`at_name` 和
+`aliases`，旧名称保留为兼容入口。保留 `name`、`send_key`、凭据变量名、App ID、
+Secret、open_id、profile、cwd、owner、权限与全部状态文件。
+
+每次写入前检查计划指纹，写入后回读，并记录不含凭据的 `.receipt.json`。
+同一计划重复 apply 可返回 `already_applied`，不会重新建 bot 或覆盖原回滚回执。
+后续再改显示名仍走本 SOP，新旧名字均可作为查找入口。
+
+常用 CLI 的 `--bot` 已在入口处统一解析到固定内部代号：桥控制/交付、文字/文件/媒体/
+语音发送、历史、doctor、文档 IO、权限/能力/租户检查、cron 与 watchdog 手动换号。
+发送者身份和本轮重复投递拦截仍按固定内部代号校验，别名不扩大代发权限。
+
+仅给 runtime 调用的 worker、hook、状态库，以及历史 canary/reset/注册恢复工具继续使用
+内部代号。需要把新显示名交给这些入口时先执行：
+
+```powershell
+python feishu/rename_bot.py resolve --bot desk-sports-camera
+```
+
+使用返回的内部代号，不手工推算 `.env` 键，不批量替换历史文件名。
+`lark-cli` 的已有 profile 与凭据投影继续绑定原应用；文档工具先解析内部代号再选择原 profile。
+
+## 5. 验收边界、失败与恢复
+
+完成回执必须区分：飞书名称已更新、两本名册已同步、原名/新名/历史别名可解析、
+App ID 与凭据映射一致、`.env` 未被工具修改，以及真实消息往返是否执行。
+`verify` 自报 `covers`、`caught` 和 `judge`；解析通过不等于向其他 bot 发过消息。
+无需为普通改名重启生产桥；运行中的进程或旧消息信封可能继续显示固定内部代号，
+当前飞书名称以 API 与名册的 display_name 为准。
+
+第二本名册写入失败或进程中断时，回执保留 before/after 和已执行位置。
+不要手工覆盖整本名册。用该回执只撤回名称字段，然后重新 plan：
+
+```powershell
+python feishu/rename_bot.py rollback --receipt feishu/_state/bot-renames/rename-example-20260914-1010.receipt.json
+```
+
+回滚会比对现场；名称已有后续变更或恢复后冲突就拒绝，不覆盖他人修改。
+它也能恢复“文件写成功但回执尚未来得及确认”的中断；不改飞书线上名称。
+线上需要恢复原名时，也必须通过后台操作与本 SOP 回读。
+重新 plan 后的 apply 可以把已部分同步的现场继续对齐到目标。
+
+跨机器：本机同步完成不代表另一台机器已更新。对端须取得同一舰队名册的新名称字段
+及本次解析代码，再执行只读查找验证；仅改显示名无需同步密钥。
+不要为了改名同步整份 `.env` 或触发未经授权的消息、Git 推送或生产重启。
+
+## 6. 另一个应用或内部代号迁移
+
+本 SOP 的默认流程不改变应用身份。以下是不同任务：
+
+- 明确改内部代号：先列出 owner/session/outbox/HWM/cron/grant/worker 等全部状态依赖，
+  另排有维护窗口的迁移；不能把“重新私聊一次”当成保留旧会话和历史的充分验收。
+- 把旧应用改名让位、同名重建：按
+  [SOP-120 §4.3](SOP-120-feishu-register.md#-43--删掉旧应用用同名重建一只-bot迁移-sop)；
+  新 App ID 必须单独核对凭据、owner、权限和群关系，不能由名称相同推定还是原应用。
+  要保留弃用应用凭据时先安排新的凭据键，避免注册覆盖；该动作不属于普通显示名更新。

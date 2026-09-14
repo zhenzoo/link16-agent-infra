@@ -53,6 +53,8 @@
     "send_key": "`.env` 里的键名片段（小写连字符）。凭据键 = FEISHU_BRIDGE_<SEND_KEY 大写下划线>_APP_ID / _APP_SECRET。多数情况与 name 相同；历史 bot 改过名的会不一致，所以单列一个字段。",
     "open_id": "飞书给这个 bot 的门牌号（ou_ 开头，per-app 固定不变）。**它是标识符不是凭据**——拿到它无法认证、无法调 API，能认证的是 .env 里的 app_secret。注册脚本会自动查填。",
     "at_name": "在群里 @ 它时显示的名字，通常是 @ + 飞书显示名。",
+    "display_name": "可选：经 rename_bot.py 线上回读并同步的当前飞书显示名；内部 name 保持固定。",
+    "aliases": "可选字符串数组：历史显示名；与 name/display_name/at_name/send_key 共用不区分大小写及连字符/下划线的唯一名称解析。",
     "repo": "它分管哪个仓库（仓库目录名）。注册脚本不知道这个，必须人工填。",
     "shared": "该仓是否在 shared_repos 里 —— 决定 /push 后要不要跨机通知。应与 shared_repos 保持一致。",
     "runtime": "claude 或 codex —— 这只 bot 背后跑的是哪个 CLI。",

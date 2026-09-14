@@ -93,6 +93,9 @@ def resolve_bot(explicit=None) -> str:
     names = [name for name, _, _ in roster()]
     if explicit:
         if explicit not in names:
+            from bot_names import local_name
+            explicit = local_name(explicit)
+        if explicit not in names:
             raise SystemExit(f"名册里没有 bot：{explicit}")
         return explicit
     session = os.environ.get(SESSION_ENV, "").strip()

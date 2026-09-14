@@ -100,6 +100,8 @@ def main():
                     help="用户本轮明确要求在线副本时，单次覆盖关闭的全局开关；不修改全局值")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     a = ap.parse_args()
+    from bot_names import local_name
+    a.bot = local_name(a.bot)
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
     if not a.dry:
         try:

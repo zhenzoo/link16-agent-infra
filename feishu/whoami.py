@@ -109,8 +109,11 @@ def main():
     # 三名不一致 → 提示跑 doctor（就是 tb24-note 那种「显示名改了、代号/@名没跟上」）
     dn, at = info.get("feishu_display_name"), (info.get("at_name") or "").lstrip("@")
     if dn and ((at and dn != at) or dn != info["bot"]):
-        print(f"   ⚠️ 三名不一致（代号={info['bot']} / 显示名={dn} / @名={info['at_name']}）"
-              f"→ 跑 `python feishu/bridge_doctor.py --roster` 看全名册")
+        if at == dn:
+            print("   · 显示名称已同步；内部代号保持固定，用于凭据和历史状态。")
+        else:
+            print(f"   ⚠️ 显示名与名册不同（线上={dn} / @名={info['at_name']}）"
+                  "→ 按 SOP-125 运行 rename_bot.py 核对并同步")
 
 
 if __name__ == "__main__":

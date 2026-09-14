@@ -804,7 +804,11 @@ def main():
     cmd = argv[0] if argv else "status"                # 裸跑保持 status（agent / 脚本常这么调·别把它们卡进交互 TUI）
 
     def _opt(flag, default=None):                      # 取 --flag 的值（缺=default）
-        return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else default
+        value = argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else default
+        if flag == "--bot" and value:
+            from bot_names import local_name
+            return local_name(value)
+        return value
 
     if cmd == "run":
         with bridge_process.service('cron', Path(__file__)):

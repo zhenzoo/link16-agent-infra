@@ -1,5 +1,8 @@
 # 机器本地 bot 名册（每台机各管各的·整盘覆盖 committed bridge-bots.json）
 feishu/bridge-bots.local.json
+# 名册原子写入与改名事务的本机进程锁（退出自动解锁，锁文件保留）
+feishu/.bridge-bots.local.json.write.lck
+feishu/bridge-bots.local.rename.lck
 feishu/bridge-cd-bookmarks.local.json
 # 本机 agent profile→runtime/home/launcher 映射；新机由 profile_bootstrap 显式建立。
 feishu/agent-profiles.local.json

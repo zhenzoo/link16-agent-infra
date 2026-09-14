@@ -205,6 +205,9 @@ def main():
     ap.add_argument("--group", nargs="?", const="", metavar="名片段",
                     help="读该 bot 的 a2a【群】(唯一群自动选·多群用名片段筛或改 --chat)；不给则探针默认读 bot 的 DM 会话")
     a = ap.parse_args()
+    if a.bot:
+        from bot_names import local_name
+        a.bot = local_name(a.bot)
     if a.all:
         print(json.dumps(all_recent(a.recent), ensure_ascii=False, indent=2)); return
     if not a.bot:

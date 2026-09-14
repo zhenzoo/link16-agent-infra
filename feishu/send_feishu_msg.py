@@ -45,6 +45,7 @@ sys.path.insert(0, str(ORCH))
 from bridge_env import resolve_env_path, bots_config_path, assert_sender_identity  # noqa: E402
 import bridge_outbound  # noqa: E402
 import turn_delivery_guard  # noqa: E402
+from bot_names import find_entry, local_name, display_name
 
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
@@ -68,7 +69,7 @@ def _env(*keys):
 def _bot_creds(bot):
     cfg = bots_config_path(PROJECT)
     specs = json.loads(cfg.read_text(encoding="utf-8")).get("bots", []) if cfg.exists() else []
-    spec = next((s for s in specs if s.get("name") == bot), None)
+    spec = find_entry(specs, bot)
     if not spec:
         raise SystemExit(f"❌ bot 名册里没有 '{bot}'（{cfg}）")
     ide, sce = spec.get("app_id_env"), spec.get("app_secret_env")
@@ -80,6 +81,7 @@ def _bot_creds(bot):
 
 
 def _session_chat(bot):
+    bot = local_name(bot)
     f = PROJECT / "feishu" / "_state" / f"bridge-session-{bot}.json"
     if f.exists():
         try:
@@ -144,7 +146,7 @@ def _norm(name):
 
 
 def _is_local(name):
-    return any(_norm(s.get("name")) == _norm(name) for s in _roster())
+    return find_entry(_roster(), name) is not None
 
 
 def _env_text():
@@ -162,11 +164,11 @@ def _env_bots():
 def _slug_for(name):
     """智能体名字 → .env 里的 <SLUG>（本机名册按 app_id_env 反推；.env 直查；名册 send_key 兜底=方案B）。"""
     key = _norm(name)
-    for s in _roster():
-        if _norm(s.get("name")) == key:
-            m = re.match(r"FEISHU_BRIDGE_(.+)_APP_ID$", s.get("app_id_env", "") or "")
-            if m:
-                return m.group(1)
+    entry = find_entry(_roster(), name)
+    if entry:
+        m = re.match(r"FEISHU_BRIDGE_(.+)_APP_ID$", entry.get("app_id_env", "") or "")
+        if m:
+            return m.group(1)
     slug = _env_bots().get(key)
     if slug:
         return slug
@@ -184,10 +186,9 @@ def _slug_for(name):
 
 def _creds_for(name):
     """智能体名字 → (app_id, app_secret)。① 本机名册精确名（大小写不敏感）② .env 里按 SLUG（含名册 send_key 兜底·方案B）。找不到→None。"""
-    key = _norm(name)
-    for s in _roster():                       # ① 名册（本机在跑的）
-        if _norm(s.get("name")) == key:
-            return _bot_creds(s["name"])
+    entry = find_entry(_roster(), name)       # ① 稳定代号 / 显示名 / 历史别名
+    if entry:
+        return _bot_creds(entry["name"])
     slug = _slug_for(name)                     # ② .env（含别机同步凭据 + 名册 send_key 兜底·方案B）
     if slug:
         e = _env(f"FEISHU_BRIDGE_{slug}_APP_ID", f"FEISHU_BRIDGE_{slug}_APP_SECRET")
@@ -331,15 +332,20 @@ def main():
     a = ap.parse_args()
 
     if a.list_agents:
-        roster = {_norm(s.get("name")) for s in _roster()}
+        local = _roster()
+        roster = {_norm(s.get("name")) for s in local}
+        for entry in local:
+            print(f"{display_name(entry):26} 本机 · 内部代号={entry['name']}")
         for h in sorted(_env_bots()):
-            print(f"{h:26} {'本机在跑' if h in roster else '别处(凭据已在你 .env)'}")
+            if h not in roster:
+                print(f"{h:26} 别处(凭据已在你 .env)")
         return
 
     if not a.bot:
         raise SystemExit("❌ 需要 --bot <发送方>")
     if not a.text:
         raise SystemExit("❌ 需要 --text <正文>")
+    a.bot = local_name(a.bot)
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
 
     ats = list(a.at) + [resolve_open_id(nm) for nm in a.at_agent]

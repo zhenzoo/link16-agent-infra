@@ -1,6 +1,6 @@
 ---
 name: feishu
-description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文件、媒体、语音和在线文档，注册或排查飞书 bot，查询完整收发历史，执行 a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、飞书智能体、bot 群聊、定时派活、注册回调或桥健康检查时使用。
+description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文件、媒体、语音和在线文档，注册、改名或排查飞书 bot，查询完整收发历史，执行 a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、飞书智能体、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
 ---
 
 # Feishu — Link16 核心工具入口
@@ -14,6 +14,7 @@ description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文
 - `docs/ARCH-160-agent-watchdog.md`：看门狗。
 - `docs/SOP-120-feishu-register.md`：注册通用流程。
 - `docs/SOP-121-codex-bot-register.md`：Codex bot 增量流程。
+- `docs/SOP-125-bot-rename.md`：已有 bot 改名、后台链接、名称同步与恢复。
 
 不要把工具脚本复制进 runtime home，也不要依赖某个用户的私人 skills。
 
@@ -47,8 +48,11 @@ description: Link16 自带的飞书/Lark 工具入口。用于发送消息、文
 | 查看或设置 cron | `python feishu/bridge_cron.py board`；详情读 `docs/ARCH-150-agent-cron.md` |
 | 审计 bot 权限 | `python feishu/bridge_scope_audit.py --all-env` |
 | 注册 bot | 先读 SOP-120/121，再 `register_feishu_app.py ... --dry-run`；用户确认后才去掉 `--dry-run` 并加 `--background` |
+| 已有 bot 改名 / 查后台链接 / 改名后新名不识别 | 先读 SOP-125；`python feishu/rename_bot.py plan --bot <原名或别名> --name <准确新名> --out feishu/_state/bot-renames/<本次操作>.json`，按状态给 console_url、watch 或 apply，最后 verify |
 
 表中没有的操作先读 `TOOLS.md`，不要另造脚本。
+
+改名由 Link16 承担，不在业务仓建脚本。用户已明确指定新名即授权相应本地同步；先 plan，线上名称已经一致则直接 apply 和 verify，需人操作则给后台链接并启动 `watch --background`。普通改名固定内部代号和凭据键，只更新两本名册的显示名与历史别名；不重建应用、不搬会话、不重启桥。转写有歧义只澄清该名称；只有 API 回读和两本名册核验通过才报告完成。运行时专用旧工具需要内部代号时用 `rename_bot.py resolve --bot <显示名>`，不猜变量名。
 
 注册公司租户 bot 时，默认传 `--tenant-kind enterprise`（或给出能由 registry 唯一识别的公司群），让注册器自动附加 `docs-consume`：`sheets:spreadsheet:read`、`docs:document.media:download`、`board:whiteboard:node:read`。注册个人租户 bot 时传 `--tenant-kind personal`，默认不扩这三项；只有该 bot 确实承担在线文档完整解析时才显式加 `--capability docs-consume`。不要按 bot 名、机器名或 Codex/Claude profile 猜飞书租户。
 

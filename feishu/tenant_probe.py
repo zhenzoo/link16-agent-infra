@@ -176,6 +176,9 @@ def main():
                     help="只打印目标群名（给脚本消费·配合 --bot）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+    if args.bot:
+        from bot_names import local_name
+        args.bot = local_name(args.bot)
 
     if args.print_group:
         if not args.bot:
