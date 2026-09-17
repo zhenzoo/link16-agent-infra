@@ -8,7 +8,7 @@
   · `send_feishu_file.py --file <文件>`     → 文件【附件】（对方下载打开）
   · `send_feishu_voice.py --audio <音频>`   → 语音气泡
   · **本工具 → 图/视频/任意媒体嵌进 docx，发【在线查看链接】**——你点链接在飞书里看图/放视频，
-    不点就不下载，**不占手机内存**。要图在线、视频在线、一篇里混排多个媒体，都走它。
+    无需把原文件保存到手机；播放仍会使用网络和临时缓存。混排图片、视频、音频都走它。
 
 为什么单独成工具（2026-06-19 [飞书-explore] 调研确认）：① import 只吃 md/html、吃不下图/视频；
 ② bot 没有个人「我的空间」根目录（root_folder_meta 对 tenant token 返 404）→ 图传不成独立网盘文件拿链接。
@@ -16,15 +16,17 @@
 需 `drive:drive` + `docx:document`(:create) 这组云文档 scope（同 send --doc·创建 docx 必须 docx·见 feishu_docs.CLOUD_DOC_SCOPES）。
 
 用法：
-  python orchestrator/send_feishu_media.py --bot explore --media cover.png
-  python orchestrator/send_feishu_media.py --bot explore --media a.jpg --media demo.mp4 --title "P150 封面+样片" --text "在线看，别存手机"
-  python orchestrator/send_feishu_media.py --bot explore --to oc_群 --media x.pdf --json
+  python feishu/send_feishu_media.py --bot explore --media cover.png
+  python feishu/send_feishu_media.py --bot explore --media a.jpg --media demo.mp4 --title "P150 封面+样片" --publish-only --receipt review.json
+  python feishu/send_feishu_media.py --bot explore --to oc_群 --media x.pdf --json
 """
 import argparse
 import asyncio
 import json
 import re
 import sys
+import subprocess
+from urllib.parse import urlparse
 from pathlib import Path
 
 ORCH = Path(__file__).resolve().parent
@@ -84,8 +86,48 @@ def _send_text(app_id, app_secret, target, text):
     return d.get("code") == 0
 
 
+def document_token(value):
+    if not value:
+        return None
+    if re.fullmatch(r'[A-Za-z0-9]+', value):
+        return value
+    parsed = urlparse(value)
+    host = parsed.hostname or ''
+    match = re.fullmatch(r'/docx/([A-Za-z0-9]+)/?', parsed.path)
+    if (parsed.scheme == 'https' and not parsed.username and not parsed.password
+            and (host == 'feishu.cn' or host.endswith('.feishu.cn')) and match):
+        return match[1]
+    raise ValueError('需要飞书 docx 链接或 document token；wiki 链接先经 docio inspect 解析')
+
+
+def verify_publication(result, paths, out):
+    """Verify every exact media binding on the actual document before delivery."""
+    out.mkdir(parents=True, exist_ok=False)
+    reports = []
+    items = result.get('items') or []
+    if len(items) != len(paths):
+        raise ValueError('发布回执的媒体数量与输入不一致')
+    for i, (item, path) in enumerate(zip(items, paths)):
+        target = out / f'item-{i+1:03d}'
+        proc = subprocess.run([sys.executable, str(ORCH/'verify_media_doc.py'),
+            '--url', result['url'], '--block-id', item['block_id'],
+            '--file-token', item['file_token'], '--media', str(path.resolve()),
+            '--out', str(target), '--mobile'], capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=300)
+        report_path = target/'playback.json'
+        report = json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {}
+        if (proc.returncode != 0 or report.get('pass') is not True
+                or report.get('source_sha256') != item.get('sha256')
+                or report.get('block_id') != item['block_id']
+                or report.get('file_token') != item['file_token']
+                or report.get('url') != result['url']):
+            raise ValueError(f'媒体实际预览未通过；保留文档及证据: {result["url"]}; {target}')
+        reports.append(str(report_path.resolve()))
+    return reports
+
+
 def main():
-    ap = argparse.ArgumentParser(description="图片/视频/任意媒体嵌进飞书在线文档，发链接（在线查看·不占手机内存）")
+    ap = argparse.ArgumentParser(description="图片/视频/任意媒体嵌进飞书在线文档，发链接（在线预览，无需保存原文件）")
     ap.add_argument("--bot", required=True, help="哪个 bot（用它的飞书应用凭据发）")
     ap.add_argument("--media", action="append", required=True, metavar="PATH",
                     help="本地媒体路径（可多次给 → 一篇文档混排多个·图/视频/pdf/任意）")
@@ -99,7 +141,26 @@ def main():
     ap.add_argument("--explicit-online", action="store_true",
                     help="用户本轮明确要求在线副本时，单次覆盖关闭的全局开关；不修改全局值")
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
+    ap.add_argument('--publish-only', action='store_true', help='只建文档并返回链接，验证后由当前会话交付，不另发消息')
+    ap.add_argument('--receipt', type=Path, help='将发布回执保存到新的本地 JSON，重复路径在网络请求前拒绝')
+    ap.add_argument('--document', help='插入已有 docx（URL或token）；省略则新建，已有正文和权限不变')
+    ap.add_argument('--parent-block', help='已有文档内的父块；默认文档根块')
+    ap.add_argument('--index', type=int, help='在父块的第几个子块前插入（从0起）；默认追加')
+    ap.add_argument('--resume-empty-block', help='修复已核查的空文件块；仅单个非图片媒体，不新建块或说明')
+    ap.add_argument('--verify-out', type=Path, help='在新的目录自动逐项验证实际页面预览；失败不发消息')
     a = ap.parse_args()
+    try:
+        doc_id = document_token(a.document)
+    except ValueError as exc:
+        ap.error(str(exc))
+    if a.parent_block and not doc_id:
+        ap.error('--parent-block 需要 --document')
+    if a.index is not None and a.index < 0:
+        ap.error('--index 不能为负数')
+    if a.verify_out and (a.verify_out.exists() or not a.receipt):
+        ap.error('--verify-out 必须是新目录且同时指定 --receipt')
+    if a.receipt and a.receipt.exists():
+        raise SystemExit('发布回执已经存在；先检查其中的文档，不能重复创建')
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
     if not a.dry:
         try:
@@ -120,24 +181,54 @@ def main():
     # 文档授权对象 = 显式 ou_ 目标 > 会话 open_id（bot 建的文档必授权否则你打不开）
     grant_oid = (a.to if (a.to or "").startswith("ou_") else None) or sess.get("open_id")
     app_id, app_secret = _bot_creds(a.bot)
+    insert_args = {'document_id': doc_id, 'parent_block': a.parent_block, 'index': a.index}
+    if a.resume_empty_block:
+        insert_args['resume_empty_block'] = a.resume_empty_block
 
     if a.dry:
         plan = feishu_docs.publish_media_as_doc(app_id, app_secret, [str(p) for p in paths],
                                                 title=a.title, captions=a.caption,
-                                                grant_open_id=grant_oid, perm=a.perm, dry_run=True)
+                                                grant_open_id=grant_oid, perm=a.perm, dry_run=True, **insert_args)
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         sys.exit(0)
 
-    res = asyncio.run(asyncio.to_thread(
-        feishu_docs.publish_media_as_doc, app_id, app_secret, [str(p) for p in paths],
-        title=a.title, captions=a.caption, grant_open_id=grant_oid, perm=a.perm))
+    # Reserve before any document mutation. A transport failure may occur after
+    # Feishu accepted a write; the next run must inspect it, not blindly repeat.
+    if a.receipt:
+        a.receipt.parent.mkdir(parents=True,exist_ok=True)
+        with a.receipt.open('x',encoding='utf-8') as f:
+            json.dump({'bot':a.bot,'sent':False,'delivery_status':'publication_started',
+                'document_id':doc_id,'files':[str(p.resolve()) for p in paths]},f,ensure_ascii=False,indent=2)
+    try:
+        res = asyncio.run(asyncio.to_thread(
+            feishu_docs.publish_media_as_doc, app_id, app_secret, [str(p) for p in paths],
+            title=a.title, captions=a.caption, grant_open_id=grant_oid, perm=a.perm, **insert_args))
+    except Exception as exc:
+        if a.receipt:
+            a.receipt.write_text(json.dumps({'bot':a.bot,'sent':False,'delivery_status':'publication_failed',
+                'document_id':doc_id,'error':str(exc),'partial_write_possible':True},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+        raise
+    if a.receipt:
+        a.receipt.write_text(json.dumps({**res,'bot':a.bot,'sent':False,'delivery_status':'published_not_sent'},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+    if a.verify_out:
+        try:
+            res['verification_reports'] = verify_publication(res, paths, a.verify_out)
+            res['preview_verified'] = True
+        except Exception as exc:
+            a.receipt.write_text(json.dumps({**res, 'bot':a.bot,'sent':False,
+                'preview_verified':False,'delivery_status':'preview_failed','error':str(exc)},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+            raise SystemExit(str(exc)) from exc
+        a.receipt.write_text(json.dumps({**res,'bot':a.bot,'sent':False,'delivery_status':'verified_not_sent'},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+    if a.publish_only:
+        print(json.dumps({**res,'bot':a.bot,'sent':False,'delivery_status':'verified_not_sent' if a.verify_out else 'published_not_sent'},ensure_ascii=False))
+        return
     url = res.get("url")
     title = a.title or paths[0].stem
     kinds = "、".join(sorted({it["kind"] for it in res.get("items", [])})) or "媒体"
     # SPEC-210 固定三行回执：标题行 / URL 行 / 每个媒体文件一行本机绝对路径
     link_line = artifact_delivery.render_artifact_receipt(
         title, url=url, local_paths=paths, icon="🖼",
-        label=f"飞书在线文档·{len(paths)} 个{kinds}·在线看不占手机内存",
+        label=f"飞书在线文档·{len(paths)} 个{kinds}·在线预览，无需保存原文件",
     )
     body = (a.text + "\n\n" + link_line) if a.text else link_line
     sent = _send_text(app_id, app_secret, target, body)
@@ -146,6 +237,8 @@ def main():
            "granted": res.get("granted"), "grant_error": res.get("grant_error"),
            "public": res.get("public"), "public_error": res.get("public_error"),
            "bot": a.bot, "to": target}
+    if a.receipt:
+        a.receipt.write_text(json.dumps({**res,**out,'delivery_status':'sent' if sent else 'send_failed'},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     else:

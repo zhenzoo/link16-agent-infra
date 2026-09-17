@@ -18,6 +18,9 @@ sys.exit（适合被长驻进程/库 import）。不硬编码盘符/用户名/fo
 from __future__ import annotations
 
 import json
+import re
+import hashlib
+import zlib
 import sys
 import time
 import uuid
@@ -278,15 +281,17 @@ def _append_children(token: str, doc_id: str, parent_block: str, child: dict, in
     return d["data"]
 
 
-def _create_image_block(token: str, doc_id: str, parent: str) -> str:
+def _create_image_block(token: str, doc_id: str, parent: str, index=None) -> str:
     """空图片块（image 必须为空 {}·否则 1770001）→ 返回该 block_id。"""
-    data = _append_children(token, doc_id, parent, {"block_type": 27, "image": {}})
+    data = _append_children(token, doc_id, parent, {"block_type": 27, "image": {}}, index=index)
     return data["children"][0]["block_id"]
 
 
-def _create_file_block(token: str, doc_id: str, parent: str) -> str:
-    """空文件块（file 必须为空 {}）→ 飞书生成两层：外 33 View · 内 23 file → 返回内层 23 的 block_id。"""
-    data = _append_children(token, doc_id, parent, {"block_type": 23, "file": {}})
+def _create_file_block(token: str, doc_id: str, parent: str, view_type: int = 1, index=None) -> str:
+    """Create a file under a View; type 2 expands the native media preview."""
+    if view_type not in (1, 2):
+        raise DocImportError('Unsupported file view type')
+    data = _append_children(token, doc_id, parent, {"block_type": 23, "file": {"view_type": view_type}}, index=index)
     outer = data.get("children") or []
     inner = (outer[0].get("children") if outer else None) or []
     if not inner:
@@ -294,13 +299,15 @@ def _create_file_block(token: str, doc_id: str, parent: str) -> str:
     return inner[0]
 
 
-def _create_text_block(token: str, doc_id: str, parent: str, text: str) -> None:
+def _create_text_block(token: str, doc_id: str, parent: str, text: str, index=None) -> None:
     _append_children(token, doc_id, parent,
-                     {"block_type": 2, "text": {"elements": [{"text_run": {"content": text}}]}})
+                     {"block_type": 2, "text": {"elements": [{"text_run": {"content": text}}]}}, index=index)
 
 
 def _upload_to_block(token: str, path: Path, parent_type: str, parent_node: str) -> str:
-    """素材进 block（multipart·标准库·复用绕代理 api）→ file_token。"""
+    """Upload into the actual media block; large media uses server-sized parts."""
+    if path.stat().st_size > _MAX_BYTES:
+        return _upload_parts_to_block(token, path, parent_type, parent_node)
     data = path.read_bytes()
     boundary = f"----{uuid.uuid4().hex}"
     parts = b""
@@ -316,6 +323,55 @@ def _upload_to_block(token: str, path: Path, parent_type: str, parent_node: str)
     if d.get("code") != 0:
         raise DocImportError(f"素材上传失败 {d.get('code')} {d.get('msg')}（{parent_type}）")
     return d["data"]["file_token"]
+
+
+def _upload_parts_to_block(token: str, path: Path, parent_type: str, parent_node: str) -> str:
+    before = path.stat()
+    result = api('POST', f'{BASE}/drive/v1/medias/upload_prepare', token=token,
+                 body={'file_name': path.name, 'parent_type': parent_type,
+                       'parent_node': parent_node, 'size': before.st_size})
+    if result.get('code') != 0:
+        raise DocImportError(f"分片上传预备失败 {result.get('code')} {result.get('msg')}")
+    plan = result.get('data') or {}
+    upload_id, size, count = plan.get('upload_id'), plan.get('block_size'), plan.get('block_num')
+    if (not upload_id or type(size) is not int or not 0 < size <= 64*1024*1024
+            or type(count) is not int or count != (before.st_size + size - 1)//size):
+        raise DocImportError('分片预备返回的数量或大小无效')
+    with path.open('rb') as source:
+        for seq in range(count):
+            chunk = source.read(size)
+            if len(chunk) != min(size, before.st_size-seq*size):
+                raise DocImportError('上传过程中源文件被截短')
+            boundary = '----'+uuid.uuid4().hex
+            fields = {'upload_id': upload_id, 'seq': seq, 'size': len(chunk),
+                      'checksum': str(zlib.adler32(chunk) & 0xffffffff)}
+            body = b''.join((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode()
+                            for key,value in fields.items())
+            body += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="part"\r\n'
+                     'Content-Type: application/octet-stream\r\n\r\n').encode()+chunk+f'\r\n--{boundary}--\r\n'.encode()
+            reply = api('POST', f'{BASE}/drive/v1/medias/upload_part', token=token,
+                        raw_body=body, content_type=f'multipart/form-data; boundary={boundary}')
+            if reply.get('code') != 0:
+                raise DocImportError(f"分片 {seq+1}/{count} 上传失败 {reply.get('code')} {reply.get('msg')}; upload_id={upload_id}")
+        if source.read(1):
+            raise DocImportError('上传过程中源文件变长')
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise DocImportError('上传过程中源文件发生变化')
+    result = api('POST', f'{BASE}/drive/v1/medias/upload_finish', token=token,
+                 body={'upload_id': upload_id, 'block_num': count})
+    file_token = (result.get('data') or {}).get('file_token')
+    if result.get('code') != 0 or not file_token:
+        raise DocImportError(f"分片合并失败 {result.get('code')} {result.get('msg')}")
+    return file_token
+
+
+def _media_file_identity(path: Path) -> dict:
+    digest = hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda: source.read(1024*1024), b''):
+            digest.update(block)
+    return {'bytes': path.stat().st_size, 'sha256': digest.hexdigest()}
 
 
 def _image_dims(path: Path):
@@ -605,50 +661,104 @@ def _set_visibility(token: str, doc_token: str, visibility: str, *, doc_type: st
 def publish_media_as_doc(app_id: str, app_secret: str, files, *,
                          title: str | None = None, captions=None,
                          grant_open_id: str | None = None, perm: str = "view",
-                         public: bool = True, dry_run: bool = False) -> dict:
+                         public: bool = True, dry_run: bool = False,
+                         document_id: str | None = None, parent_block: str | None = None,
+                         index: int | None = None, resume_empty_block: str | None = None) -> dict:
     """本地【图片/视频/任意文件】多个 → 嵌进一篇飞书 docx → (授权 owner) → (设公开链接) → 返回
     {url, token, items, granted, public, public_error}。
     files: 本地路径 list。captions: 与 files 等长的可选说明（嵌在每个媒体前·None 跳过）。
     图片走 image 块（内联显示）· 其他走 file 块（视频/音频/pdf 内联播放/预览）。perm 默认 view（只读够看）。
     public 默认 True = 【拿到链接的任何人都能打开看】（见 set_public_link）。"""
+    # Existing documents keep their title, contents and ACL; this only inserts children.
+    if document_id is not None and not re.fullmatch(r'[A-Za-z0-9]+', document_id):
+        raise DocImportError('document_id must be a docx token, not a URL or wiki token')
+    if parent_block is not None and (not document_id or not re.fullmatch(r'[A-Za-z0-9]+', parent_block)):
+        raise DocImportError('parent_block requires an existing document and a valid block token')
+    if index is not None and (isinstance(index, bool) or not isinstance(index, int) or index < 0):
+        raise DocImportError('index must be a nonnegative child position')
+    if not document_id and index not in (None, 0):
+        raise DocImportError('新建空文档只能从index=0插入')
     paths = [Path(f) for f in files]
+    if resume_empty_block and (not document_id or not re.fullmatch(r'[A-Za-z0-9]+', resume_empty_block)
+            or len(paths) != 1 or paths[0].suffix.lower() in _IMAGE_EXTS or captions or parent_block or index is not None):
+        raise DocImportError('resume_empty_block requires one file, existing document, and no caption/index/parent')
+    if not paths:
+        raise DocImportError('至少需要一个媒体文件')
+    if captions is not None and len(captions) != len(paths):
+        raise DocImportError('caption 数量必须与 media 一一对应')
     for p in paths:
         if not p.is_file():
             raise DocImportError(f"文件不存在: {p}")
-        if p.stat().st_size > _MAX_BYTES:
-            raise DocImportError(f"{p.name} > 20MB（本链路单次上传上限·{p.stat().st_size} 字节）")
+        if not p.stat().st_size:
+            raise DocImportError(f'媒体为空: {p.name}')
     doc_title = title or (paths[0].stem if paths else "媒体在线查看")
     if dry_run:
-        plan = [{"file": p.name, "kind": ("image" if p.suffix.lower() in _IMAGE_EXTS else "file")}
+        plan = [{"file": p.name, "kind": ("image" if p.suffix.lower() in _IMAGE_EXTS else "file"),
+                 'bytes': p.stat().st_size, 'upload': 'upload_parts' if p.stat().st_size > _MAX_BYTES else 'upload_all'}
                 for p in paths]
         return {"dry_run": True, "title": doc_title, "items": plan,
-                "grant_open_id": grant_open_id, "perm": perm, "public": public}
+                "grant_open_id": grant_open_id if not document_id else None,
+                "perm": perm if not document_id else 'unchanged', "public": public if not document_id else 'unchanged',
+                'operation': 'insert' if document_id else 'create', 'document_id': document_id,
+                'parent_block': parent_block or document_id, 'index': index}
     token = _tenant_token(app_id, app_secret)
-    doc_id = _create_docx(token, doc_title)
+    doc_id = document_id or _create_docx(token, doc_title)
+    parent = parent_block or doc_id
+    if document_id:
+        existing = api('GET', f'{_DOCX}/{doc_id}/blocks/{parent}', token=token)
+        block = (existing.get('data') or {}).get('block') or {}
+        if existing.get('code') != 0 or block.get('block_id') != parent:
+            raise DocImportError(f'目标文档/父块不可读，未插入媒体: {doc_id}/{parent}')
+        if index is not None and index > len(block.get('children') or []):
+            raise DocImportError('index exceeds current parent child count')
     items = []
+    def require_empty_resume_block():
+        state = api('GET', f'{_DOCX}/{doc_id}/blocks/{resume_empty_block}', token=token)
+        block = (state.get('data') or {}).get('block') or {}
+        if (state.get('code') != 0 or block.get('block_id') != resume_empty_block
+                or block.get('block_type') != 23 or 'file' not in block or block['file'].get('token')):
+            raise DocImportError('Resume target is not an empty file block; refusing overwrite')
+    if resume_empty_block:
+        require_empty_resume_block()
     for i, p in enumerate(paths):
+        identity = _media_file_identity(p)
         cap = captions[i] if (captions and i < len(captions)) else None
         if cap:
-            _create_text_block(token, doc_id, doc_id, cap)
+            _create_text_block(token, doc_id, parent, cap, index=index)
+            if index is not None: index += 1
         is_image = p.suffix.lower() in _IMAGE_EXTS
         if is_image:
-            bid = _create_image_block(token, doc_id, doc_id)
+            bid = _create_image_block(token, doc_id, parent, index=index)
             ftok = _upload_to_block(token, p, "docx_image", bid)
         else:
-            bid = _create_file_block(token, doc_id, doc_id)
+            native_av = p.suffix.lower() in {'.mp4', '.mov', '.m4v', '.webm', '.mp3', '.m4a', '.wav', '.ogg'}
+            bid = resume_empty_block or _create_file_block(token, doc_id, parent, view_type=2 if native_av else 1, index=index)
             ftok = _upload_to_block(token, p, "docx_file", bid)   # parent_node=内层文件块 block_id（与图片同·非 doc_id）
+        if resume_empty_block:
+            require_empty_resume_block()
         _bind_media(token, doc_id, bid, ftok, is_image,
                     dims=_image_dims(p) if is_image else None)
-        items.append({"file": p.name, "kind": "image" if is_image else "file", "file_token": ftok})
+        bound = api('GET', f'{_DOCX}/{doc_id}/blocks/{bid}', token=token)
+        block = (bound.get('data') or {}).get('block') or {}
+        if bound.get('code') != 0 or (block.get('image' if is_image else 'file') or {}).get('token') != ftok:
+            raise DocImportError(f'媒体绑定回读不一致: {p.name}; doc_id={doc_id}')
+        if identity != _media_file_identity(p):
+            raise DocImportError(f'发布期间本地媒体已变化: {p.name}; doc_id={doc_id}')
+        items.append({"file": p.name, "kind": "image" if is_image else "file", "file_token": ftok,
+                      'block_id': bid, **identity, 'upload': 'upload_parts' if identity['bytes'] > _MAX_BYTES else 'upload_all',
+                      'binding_verified': True, 'playback_verified': False,
+                      'view_type': None if is_image else (2 if native_av else 1)})
+        if index is not None: index += 1
     url = _doc_url(token, doc_id)
     granted, gerr = True, None
-    if grant_open_id:
+    if grant_open_id and not document_id:
         granted, gerr = _grant_member(token, doc_id, grant_open_id, perm)
     pub, perr = None, None
-    if public:
+    if public and not document_id:
         pub, perr = set_public_link(token, doc_id)
     return {"url": url, "token": doc_id, "items": items, "granted": granted, "grant_error": gerr,
-            "public": pub, "public_error": perr}
+            "public": pub, "public_error": perr,
+            'operation': 'insert' if document_id else 'create', 'permissions_preserved': bool(document_id)}
 
 
 if __name__ == "__main__":   # 手动测试：python feishu_docs.py <file> [--dry]（凭据从 .env 取 default bot）
