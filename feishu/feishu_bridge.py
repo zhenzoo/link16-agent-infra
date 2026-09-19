@@ -116,6 +116,7 @@ import bridge_inbox  # noqa: E402
 import bridge_control  # noqa: E402
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
 import artifact_delivery  # noqa: E402  (本机全局在线产物交付策略)
+import session_work  # noqa: E402  (每 bot「📌 项目 · 任务」工作行·钉在每张卡片顶部+摘要)
 from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
 
 
@@ -1684,6 +1685,7 @@ async def card_send(channel, target, text, name):
             rit = "chat_id" if str(target).startswith("oc_") else "open_id"
             payload = {"schema": "2.0", "config": {"streaming_mode": False, "wide_screen_mode": True},
                        "body": {"elements": [{"tag": "markdown", "content": text}]}}
+            session_work.apply_banner(payload, name, STATE_DIR)   # 短回复也带工作行（同一张卡的样子）
             mid = await asyncio.wait_for(
                 channel._ensure_card_snapshot(target, rit, snapshot=payload,
                                               reply_to=None, reply_in_thread=None),
@@ -1754,15 +1756,18 @@ def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None, message
     )
 
 
-def _card_payload(text, at=None, mark=False):
+def _card_payload(text, at=None, mark=False, bot_name=None):
     content = text
     if at:
         content = f"<at id={at}></at> " + content
-    return {
+    payload = {
         "schema": "2.0",
         "config": {"streaming_mode": False, "wide_screen_mode": True},
         "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]},
     }
+    # 工作行（2026-09-19 主人定）：每张卡第一行 `📌 <项目> · <任务>` + 摘要=会话列表预览，
+    # 十几个 bot 并排时不点开、不翻记录也认得出它在做哪个项目。没有 bot_name（外部调用）不加。
+    return session_work.apply_banner(payload, bot_name, STATE_DIR) if bot_name else payload
 
 
 def _send_interactive_message(app_id, app_secret, target, payload, message_uuid=None):
@@ -1862,7 +1867,7 @@ async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, rou
         mid = await asyncio.wait_for(
             asyncio.to_thread(
                 _send_interactive_message, bot["app_id"], bot["app_secret"], target,
-                _card_payload(text, at if kind == "p2a-ext" else None), message_uuid,
+                _card_payload(text, at if kind == "p2a-ext" else None, bot_name=bot_name), message_uuid,
             ), CARD_SEND_TIMEOUT,
         )
         ok = bool(mid)
@@ -2109,6 +2114,7 @@ def _run_bot(bot_name=None):
             # 只暂存目录(current_cwd 读 cwd)·清掉旧会话 runtime 字段(pty/ws/jsonl/daemon_fp)·保留 chat_id/open_id/account
             _merge_session(bot["name"], {"cwd": str(target_dir).replace("\\", "/"),
                                          "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
+            session_work.clear(bot["name"], STATE_DIR)   # 换目录=换项目·旧工作行作废（下条消息起的会话自己再写）
             _acc = agent_runtime.current_account(bot)
             await reply(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
@@ -2146,6 +2152,7 @@ def _run_bot(bot_name=None):
             if cmd == "/clear":
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 控制命令=撤销投递契约→清账（§2.13·防 doctor 误判重投）
+                session_work.clear(bot["name"], STATE_DIR)                 # 上下文没了=旧工作行作废·回 cwd+ai-title 兜底
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可重置（发句话自动起）"); return
                 await asyncio.to_thread(wmux, "send", rec["pty"], "/clear", "--allow-ws", rec["workspace_id"])
@@ -2262,6 +2269,7 @@ def _run_bot(bot_name=None):
             if cmd == "/new":
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /new=全新会话=撤销旧投递契约→清账（§2.13）
+                session_work.clear(bot["name"], STATE_DIR)                 # 全新会话=旧工作行作废
                 # 开一个【全新空会话·不注入任何文本】——与「正常发消息起会话」【同一 spawn 路径】(ensure_session)，
                 #   唯一区别：不缀文本、不注入 → 起好停在就绪 ❯，等你【自己发消息注入】。
                 #   之前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；/new 把「起会话」和「注入内容」拆开：
@@ -2790,7 +2798,7 @@ def _run_bot(bot_name=None):
             # mid already identifies the original DM card. A newer turn's route
             # must not suppress or redirect this resumed card's update.
             try:
-                r = await asyncio.wait_for(ch.update_card(mid, _card_payload(text)), CARD_SEND_TIMEOUT)
+                r = await asyncio.wait_for(ch.update_card(mid, _card_payload(text, bot_name=bname)), CARD_SEND_TIMEOUT)
                 ok = bool(getattr(r, "success", False))
                 receipt(bname, {"tid": "drain", "kind": "edit_card", "delivered": ok, "via": "edit", "len": len(text or "")})
                 code = (getattr(r, "raw", None) or {}).get("code")

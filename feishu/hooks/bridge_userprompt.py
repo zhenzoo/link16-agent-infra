@@ -61,6 +61,44 @@ def main():
         )
     except OSError:
         pass
+    # 工作行提醒（2026-09-19 主人定）：每轮把「当前卡片顶栏是什么 + 什么时候该改」喂给会话。
+    # 只对 Claude（payload 带 transcript_path）用 additionalContext；Codex 的 hook 不认这个输出、不发。
+    if inp.get("transcript_path"):
+        context = _work_context(bot, sd)
+        if context:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit", "additionalContext": context}}, ensure_ascii=False))
+
+
+def _work_context(bot, sd):
+    """当前顶栏 + 规则。规则是 agent 的判断活（不是每条消息都改）：接新任务 / Stage 切换 / 旧任务做完。
+    主人 2026-09-19 定：顶栏必须写清【项目名 · 对象 · 要做的动作 · 交付结果】+ Stage 链；不限一行，先不抠长度。"""
+    try:
+        import session_work
+        if not session_work.enabled():                    # 总开关关了 → 不提醒
+            return ""
+        work = session_work.resolve(bot, sd)
+        line = session_work.banner(bot, sd, markdown=False)
+    except Exception:                                     # noqa: BLE001 — 提醒挂了不能挡住路由
+        return ""
+    cli = (Path(__file__).resolve().parents[1] / "session_work.py").as_posix()
+    source = work.get("source")
+    shown = " ⏎ ".join(line.splitlines()) if line else "空"
+    if source == "agent":
+        state = f"当前卡片顶栏（你写的）：{shown}"
+    elif source == "fallback":
+        state = f"当前卡片顶栏（自动兜底=目录名+会话标题，还没写项目代号）：{shown}"
+    else:
+        state = "当前卡片顶栏：空"
+    return (
+        f"[Link16 工作行] {state}。主人靠它认出你在做哪个项目——十几个 bot 并排、TC101P/TC101S 长得像。"
+        f"不是每条消息都改：接到新任务、PLAN 的 Stage 切换、旧任务做完开新任务时更新；旧任务完成只写新的、不留旧的。"
+        f"内容必须写清：--project 项目代号（可带括号说明是什么仓/什么项目）；--task 对象 + 要做的动作 + 交付结果"
+        f"（点名具体文档/功能/系统，不写「实现+测试」这类抽象类别，例：给 TC101P 的 PRD 补可行性章节，交付改好的 PRD.md）；"
+        f"--progress Stage 链带状态（有 PLAN Markdown 按 PLAN 的 Stage 写，没有就自己概括，例：找素材 ✅ → 写帖子 🔄 → 得出结论 ⏳）。"
+        f"写的是【真实当前情况的大白话】，主人看了就知道你在干嘛；绝不写「项目标签」「对象·动作·交付结果」这类格式词或样例。"
+        f"不限一行，两三行可以，长度先不抠。命令：python \"{cli}\" set --project <代号> --task \"<对象+动作+结果>\" --progress \"<Stage 链>\""
+    )
 
 
 if __name__ == "__main__":
