@@ -19,6 +19,15 @@ last_reviewed: 2026-09-14
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.27.1 — 2026-09-19 · 删除文档表格"全篇 24 格"硬闸，改修真正的根因
+
+- **删除** v0.18.1（2026-08-30 02:07 无人值守 session 自行加的）`_MAX_REAL_TABLE_CELLS_PER_DOC = 24` 及 `cell_budget` 参数：它把任何超过 24 格的 Markdown 表格整表转成 `" | ".join` 纯文本，实测 RESEARCH-010 四张 45/25/25/33 格的表全部降级、回读 `tables fetched 0`。主人从未授权这条闸。
+- 根因一（当年空正文）：docx 块写入限频约 3 次/秒，逐格连写撞 429 空正文 → `api()` 抛 `JSONDecodeError`。现在 `_throttled_write` 节流 ≥0.35s，`_write_cell_chunk` 限频后退避 → `GET` 核实该段是否已落地 → 未落地才重试（最多 4 次），绝不重发已落地内容。
+- 根因二（今天才暴露）：`children` 建表 `row_size`/`column_size` 任一 >9 即 `1770001 invalid param`。现在先建 ≤9×9，再 `PATCH insert_table_row/column` 扩到目标尺寸，`GET` 取回完整 cells 再逐格填（`_grow_table`）。
+- **机械闸**：`_publish_online_doc` 原生链结果只要 `tables_degraded > 0` 就不接受为成功 → 转 import 链；两条都不行整体报错（退出码 1）。`send --doc` 的 JSON/receipt 新增 `tables_real / tables_degraded / table_cells_filled / table_cells_failed`，降级 >0 日志打 ⚠️。不再可能静默把表格当文字交付。
+- **表格列宽默认 taste（主人 2026-09-19 定）**：建表默认每列 100px、三列表只占页宽 1/3。现在总宽按内容定：各列最长格显示长度之和 ×7px ÷1.5 行，夹在 [732, 1040]（732 = 飞书 import 链自身约定；1040 = 主人手动拖到的宽度），内容少的表就是正文宽、内容多的整体拉宽；列宽按 (该列最长格 + 平均格)/2 分配，让各列换行后行数接近；短列下限 90px；>9 列的补列逐列 `update_table_property` 补宽。新增 `retune_table_widths(token, doc_id, markdown)`：已发布文档原位重算列宽（同链接不换），结构不符的表跳过、只 PATCH 变了的列。
+- 验证：`tests/test_feishu_docs_text_publish.py` 20 passed（新增限频核实重试 / 不重发 / 节流 / 9×9 扩表 / 不按尺寸降级 / 降级不算成功 / 列宽按内容 / 补列补宽）；全量 918 passed；真机重发 RESEARCH-010 → 真表格 5 / 降级 0 / 180 格 0 失败，`docio_cli read` 回读 `tables fetched 5`；15×3 扩表后第 10、15 行顺序正确，3×12 补列顺序正确；列宽实测 15×3 → [280,157,295]、13×4 → [90,231,90,321]，总和均 732。
+
 ## v0.27.0 — 2026-09-14 · 无预热启动与飞书桥重启连续性
 
 - **启动**：去掉在官方终端出现前发送模型 READY 任务的前置依赖；由 TUI 自己新建或恢复会话，本机网关核对真实请求响应与观察者绑定后放行。真实 wmux 隔离验收约 4.1 秒就绪，失效后端代理不再阻塞本机终端接入。启动阶段和故障可见，不靠推荐文案或固定最短等待。
