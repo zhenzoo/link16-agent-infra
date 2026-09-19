@@ -3149,12 +3149,19 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
             )
             accessible = bool(result.get("visibility") is True
                               or (grant_open_id and result.get("granted") is True))
-            if result.get("url") and accessible:
+            if result.get("url") and accessible and not result.get("tables_degraded"):
                 return result, "online_doc_native"
-            errors.append(
-                "native=文档已创建但未证实收件人可读"
-                f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
-            )
+            if result.get("tables_degraded"):
+                # 机械闸：表格被写成纯文本不算成功交付（用户规则：禁止把 Markdown 表格当普通文字交付）
+                errors.append(
+                    f"native=文档 {result.get('url')} 已创建但 {result['tables_degraded']} 张表格降级成纯文本"
+                    f"({result.get('table_cells_failed', 0)} 格写失败)·转 import 链重发"
+                )
+            else:
+                errors.append(
+                    "native=文档已创建但未证实收件人可读"
+                    f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
+                )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"native={str(exc)[:220]}")
 
@@ -3288,6 +3295,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
         doc_ok, doc_url, doc_error = None, None, None
         attachment_ok, attachment_error = None, None
         doc_delivery_mode = None
+        doc_tables = {}
         if doc:
             try:
                 res, doc_delivery_mode = await asyncio.to_thread(
@@ -3295,7 +3303,14 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                 )
                 doc_url, doc_ok = res.get("url"), True
                 if doc_delivery_mode == "online_doc_native":
-                    blog(bot_name, "send --doc 已由同 bot 原生 docx 链发布")
+                    blog(bot_name, "send --doc 已由同 bot 原生 docx 链发布"
+                                   f"（真表格 {res.get('tables_real', 0)} / 降级 {res.get('tables_degraded', 0)}）")
+                    if res.get("tables_degraded"):
+                        # 表格被写成纯文本 = 违反「禁止把 Markdown 表格当普通文字交付」，必须显式暴露
+                        blog(bot_name, f"⚠️ send --doc 有 {res['tables_degraded']} 张表格降级成纯文本"
+                                       f"（{res.get('table_cells_failed', 0)} 格写失败）·交付前必须回读核对")
+                doc_tables = {k: res.get(k) for k in ("tables_real", "tables_degraded",
+                                                      "table_cells_filled", "table_cells_failed")}
                 if grant_oid and not res.get("granted", True):
                     blog(bot_name, f"⚠️ send --doc 授权 owner 失败({res.get('grant_error')})·改用链接可见范围")
                 if res.get("public") is False:
@@ -3316,10 +3331,10 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             body = (text + "\n\n" + link_line) if text else link_line
         via = await card_send(ch, target, body, bot_name) if body else None
         return (img_ok, via, doc_ok, doc_url, doc_error,
-                attachment_ok, attachment_error, doc_delivery_mode)
+                attachment_ok, attachment_error, doc_delivery_mode, doc_tables)
 
     (img_ok, via, doc_ok, doc_url, doc_error,
-     attachment_ok, attachment_error, doc_delivery_mode) = asyncio.run(_go())
+     attachment_ok, attachment_error, doc_delivery_mode, doc_tables) = asyncio.run(_go())
     delivered = (((via != "failed") if via is not None else True)
                  and (img_ok is not False) and (doc_ok is not False)
                  and (attachment_ok is not False))
@@ -3341,7 +3356,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                         "attachment": attachment_ok,
                         "attachment_error": attachment_error,
                         "reconcile_queued": reconcile_queued,
-                       "len": len(text), "text_chars": len(text), **doc_stats})
+                       "len": len(text), "text_chars": len(text), **doc_stats, **doc_tables})
     if as_json:
         print(json.dumps({"delivered": delivered, "via": via, "image_ok": img_ok,
                           "doc_ok": doc_ok, "doc_url": doc_url,
@@ -3351,7 +3366,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                           "attachment_error": attachment_error,
                           "reconcile_queued": reconcile_queued,
                           "bot": bot_name, "to": target, "len": len(text),
-                          "text_chars": len(text), **doc_stats}, ensure_ascii=False))
+                          "text_chars": len(text), **doc_stats, **doc_tables}, ensure_ascii=False))
     else:
         artifact = ""
         if (doc_delivery_mode or "").startswith("online_doc"):
