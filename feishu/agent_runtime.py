@@ -264,6 +264,7 @@ class ProfileSpec:
     launcher: str
     label: str = ""
     recommended: bool = False
+    auto_failover: bool = True
     session_search_preferred: bool = False
 
     @property
@@ -338,6 +339,8 @@ def profile_specs(path=None) -> list[ProfileSpec]:
             raise ValueError(f"profile {name} launcher 非法：{launcher!r}")
         if not (home == "~" or home.startswith("~/")):
             raise ValueError(f"profile {name} home 必须是 home-relative：{home!r}")
+        if not isinstance(raw.get("auto_failover", True), bool):
+            raise ValueError(f"profile {name} auto_failover 必须是 boolean")
         result.append(ProfileSpec(
             name=name,
             runtime=runtime,
@@ -345,6 +348,7 @@ def profile_specs(path=None) -> list[ProfileSpec]:
             launcher=launcher,
             label=str(raw.get("label") or ""),
             recommended=bool(raw.get("recommended")),
+            auto_failover=raw.get("auto_failover", True),
             session_search_preferred=name in preferred_set,
         ))
     if not result:
@@ -450,6 +454,7 @@ def profile_public_dict(profile: ProfileSpec) -> dict:
         "launcher": profile.launcher,
         "label": profile.label,
         "recommended": profile.recommended,
+        "auto_failover": profile.auto_failover,
         "session_search_preferred": profile.session_search_preferred,
     }
 

@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-13
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -84,6 +84,7 @@ Kimi 原生 TUI 与独立 Wire observer 合同见 §11；逐机部署证据与�
 6. registry 可以登记本机尚未安装的 profile；实际启动前必须检查目录、launcher 和 CLI 是否可用。
 7. `entry_documents.managed_profiles` 是用户级入口文档的受管 profile 列表；同步工具只能从
    此处发现目标，不另存一套账号名单。
+8. `auto_failover` 是boolean，省略时为true；false只排除自动换号候选，不删除profile，也不禁止显式手动启动或`/account`。本机cx和cc设为false；候选cxp问不到时也不得自动退回cx。
 
 ## 4. 唯一传递变量
 

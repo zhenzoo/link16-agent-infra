@@ -15,133 +15,128 @@ import bridge_scope_audit  # noqa: E402
 import capability_probe  # noqa: E402
 
 
+def table_fixture(rows=8, cols=8, prefix="a"):
+    cells = [f"{prefix}-cell-{i}" for i in range(rows*cols)]
+    blocks = [{"block_id": f"{prefix}-table", "block_type": 31,
+               "table": {"property": {"row_size": rows, "column_size": cols}},
+               "children": cells}]
+    for i, cid in enumerate(cells):
+        text_id = f"{prefix}-text-{i}"
+        blocks.extend([{"block_id": cid, "block_type": 32, "children": [text_id]},
+                       {"block_id": text_id, "block_type": 2,
+                        "text": {"elements": [{"text_run": {"content": f"第{i}格"}}]}}])
+    return blocks
+
+
 class NativeTableSafetyTests(unittest.TestCase):
-    def test_long_cells_are_chunked_without_truncation(self):
-        writes = []
+    def test_unordered_convert_pool_uses_declared_reading_order(self):
+        first, second = table_fixture(2, 3), table_fixture(3, 2, "b")
+        reply = {"code": 0, "data": {"blocks": second + first,
+                 "first_level_block_ids": ["a-table", "b-table"]}}
+        with mock.patch.object(feishu_docs, "api", return_value=reply):
+            blocks, _ = feishu_docs._convert_markdown("token", "tables")
+        self.assertEqual(feishu_docs._native_table_signature(blocks),
+                         feishu_docs._native_table_signature(first + second))
 
-        def api(_method, url, token=None, body=None):
-            if "blocks/doc/children" in url:
-                return {"code": 0, "data": {"children": [{
-                    "table": {"cells": ["cell-1"]},
-                }]}}
-            writes.append(body["children"][0]["text"]["elements"][0]["text_run"]["content"])
-            return {"code": 0}
+    def test_append_must_add_table_even_when_same_table_already_exists(self):
+        old, addition = table_fixture(2, 3), table_fixture(2, 3, "b")
+        with mock.patch.object(feishu_docs, "_read_document_blocks", return_value=old):
+            with self.assertRaises(feishu_docs.NativeTableError):
+                feishu_docs.verify_native_tables("token", "doc", addition, old)
 
-        with mock.patch.object(feishu_docs, "api", side_effect=api):
-            ok, filled, failed = feishu_docs._insert_real_table(
-                "token", "doc", 0, 1, 1, ["x" * 3700],
-            )
+    def test_revision_change_during_readback_fails(self):
+        replies = [{"code": 0, "data": {"document": {"revision_id": 1}}},
+                   {"code": 0, "data": {"items": [], "has_more": False}},
+                   {"code": 0, "data": {"document": {"revision_id": 2}}}]
+        with mock.patch.object(feishu_docs, "api", side_effect=replies):
+            with self.assertRaises(feishu_docs.NativeTableError):
+                feishu_docs._read_document_blocks("token", "doc")
 
-        self.assertTrue(ok)
-        self.assertEqual(filled, 1)
-        self.assertEqual(failed, [])
-        self.assertEqual("".join(writes), "x" * 3700)
-        self.assertEqual([len(value) for value in writes], [1800, 1800, 100])
+    def test_large_native_table_passes_without_cell_budget(self):
+        blocks = table_fixture()
+        with mock.patch.object(feishu_docs, "_read_document_blocks", return_value=blocks):
+            result = feishu_docs.verify_native_tables("token", "doc", blocks)
+        self.assertEqual(result["table_cells_verified"], 64)
+        self.assertEqual(result["tables_degraded"], 0)
 
-    def test_failed_cell_is_reported_instead_of_silent_success(self):
-        call_count = 0
+    def test_text_containing_all_cells_is_not_a_native_table(self):
+        blocks = table_fixture()
+        fake = [{"block_id": "plain", "block_type": 2,
+                 "text": {"elements": [{"text_run": {"content":
+                    " | ".join(f"第{i}格" for i in range(64))}}]}}]
+        with mock.patch.object(feishu_docs, "_read_document_blocks", return_value=fake):
+            with self.assertRaises(feishu_docs.NativeTableError):
+                feishu_docs.verify_native_tables("token", "doc", blocks)
 
-        def api(_method, url, token=None, body=None):
-            nonlocal call_count
-            if "blocks/doc/children" in url:
-                return {"code": 0, "data": {"children": [{
-                    "table": {"cells": ["cell-1", "cell-2"]},
-                }]}}
-            call_count += 1
-            return {"code": 0 if call_count == 1 else 1770001}
+    def test_one_missing_cell_wrong_value_or_wrong_shape_fails(self):
+        expected = table_fixture()
+        for kind in ("value", "cell", "shape"):
+            actual = json.loads(json.dumps(expected))
+            if kind == "value":
+                actual[-1]["text"]["elements"][0]["text_run"]["content"] = "wrong"
+            elif kind == "cell":
+                actual = actual[:-2]
+            else:
+                actual[0]["table"]["property"].update(row_size=4, column_size=16)
+            with self.subTest(kind=kind), mock.patch.object(
+                    feishu_docs, "_read_document_blocks", return_value=actual):
+                with self.assertRaises(feishu_docs.NativeTableError):
+                    feishu_docs.verify_native_tables("token", "doc", expected)
 
-        with mock.patch.object(feishu_docs, "api", side_effect=api):
-            ok, filled, failed = feishu_docs._insert_real_table(
-                "token", "doc", 0, 1, 2, ["first", "second"],
-            )
+    def test_document_total_can_exceed_24_across_multiple_tables(self):
+        blocks = table_fixture(4, 4) + table_fixture(4, 4, "b")
+        with mock.patch.object(feishu_docs, "_read_document_blocks", return_value=blocks):
+            result = feishu_docs.verify_native_tables("token", "doc", blocks)
+        self.assertEqual(result["tables_real"], 2)
+        self.assertEqual(result["table_cells_verified"], 32)
 
-        self.assertTrue(ok)
-        self.assertEqual(filled, 1)
-        self.assertEqual(failed, [1])
+    def test_missing_pagination_status_fails(self):
+        responses = [{"code": 0, "data": {"document": {"revision_id": 3}}},
+                     {"code": 0, "data": {"items": []}}]
+        with mock.patch.object(feishu_docs, "api", side_effect=responses):
+            with self.assertRaises(feishu_docs.NativeTableError):
+                feishu_docs._read_document_blocks("token", "doc")
 
-    def test_empty_response_in_table_cell_enters_plain_text_fallback(self):
-        calls = 0
-
-        def api(_method, url, token=None, body=None):
-            nonlocal calls
-            if "blocks/doc/children" in url:
-                return {"code": 0, "data": {"children": [{
-                    "table": {"cells": ["cell-1"]},
-                }]}}
-            calls += 1
-            raise json.JSONDecodeError("empty response", "", 0)
-
-        with mock.patch.object(feishu_docs, "api", side_effect=api):
-            ok, filled, failed = feishu_docs._insert_real_table(
-                "token", "doc", 0, 1, 1, ["content"],
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(filled, 0)
-        self.assertEqual(failed, [0])
-        self.assertEqual(calls, 1)
-
-    def test_missing_returned_cells_are_reported(self):
-        with mock.patch.object(feishu_docs, "api", return_value={
-            "code": 0, "data": {"children": [{"table": {"cells": ["cell-1"]}}]},
-        }):
-            ok, _filled, failed = feishu_docs._insert_real_table(
-                "token", "doc", 0, 1, 2, ["", "missing"],
-            )
-        self.assertTrue(ok)
-        self.assertEqual(failed, [1])
-
-    def test_plain_text_fallback_no_longer_truncates_at_2000(self):
-        value = "z" * 2500
-        blocks = {"a": {"block_id": "a", "text": {
-            "elements": [{"text_run": {"content": value}}],
-        }}}
-        self.assertEqual(feishu_docs._plain_text_of(blocks, "a"), value)
-
-    def test_native_publish_defaults_to_a_bounded_real_table_budget(self):
-        defaults = feishu_docs.publish_text_as_doc.__kwdefaults__
-        self.assertEqual(defaults["cell_budget"], 24)
-
-    def test_real_table_budget_is_a_hard_cap_not_a_tunable_default(self):
-        self.assertEqual(feishu_docs._bounded_real_table_budget(999), 24)
-        self.assertEqual(feishu_docs._bounded_real_table_budget(12), 12)
-        self.assertEqual(feishu_docs._bounded_real_table_budget(-1), 0)
-
-    def test_failed_table_attempt_does_not_refund_the_document_budget(self):
-        blocks = [
-            {"block_id": "t1", "block_type": 31,
-             "table": {"property": {"row_size": 1, "column_size": 1}},
-             "children": ["c1"]},
-            {"block_id": "c1", "block_type": 32, "children": ["p1"]},
-            {"block_id": "p1", "block_type": 2,
-             "text": {"elements": [{"text_run": {"content": "first"}}]}},
-            {"block_id": "t2", "block_type": 31,
-             "table": {"property": {"row_size": 1, "column_size": 1}},
-             "children": ["c2"]},
-            {"block_id": "c2", "block_type": 32, "children": ["p2"]},
-            {"block_id": "p2", "block_type": 2,
-             "text": {"elements": [{"text_run": {"content": "second"}}]}},
-        ]
-        with mock.patch.object(feishu_docs, "_tenant_token", return_value="token"), \
-                mock.patch.object(feishu_docs, "_create_docx", return_value="doc"), \
-                mock.patch.object(feishu_docs, "_convert_markdown",
-                                  return_value=(blocks, ["t1", "t2"])), \
-                mock.patch.object(feishu_docs, "_insert_real_table",
-                                  return_value=(True, 0, [0])) as insert, \
-                mock.patch.object(feishu_docs, "_create_text_block"), \
-                mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"), \
-                mock.patch.object(feishu_docs, "_set_visibility"):
+    def test_native_publisher_uses_registered_bot_writer_and_verification(self):
+        import docio_cli
+        blocks = table_fixture()
+        completed = types.SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")
+        with mock.patch.object(docio_cli, "resolve_bot", return_value="bot"), \
+             mock.patch.object(docio_cli, "app_id_of", return_value="app"), \
+             mock.patch.object(docio_cli, "run_lark", return_value=completed) as writer, \
+             mock.patch.object(feishu_docs, "_tenant_token", return_value="token"), \
+             mock.patch.object(feishu_docs, "_create_docx", return_value="doc"), \
+             mock.patch.object(feishu_docs, "_convert_markdown", return_value=(blocks, ["a-table"])), \
+             mock.patch.object(feishu_docs, "_read_document_blocks", return_value=blocks), \
+             mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"):
             result = feishu_docs.publish_text_as_doc(
-                "app", "secret", markdown="tables", visibility="none", cell_budget=1,
-            )
+                "app", "secret", markdown="---\ndoc_type: TEST\n---\nsource", bot_name="bot", visibility="none")
+        self.assertTrue(result["tables_verified"])
+        self.assertEqual(result["table_cells_verified"], 64)
+        self.assertEqual(writer.call_args.kwargs["profile"], "bot")
+        self.assertIn("--doc-format", writer.call_args.args[0])
+        self.assertIn("--content=---\ndoc_type: TEST\n---\nsource", writer.call_args.args[0])
 
-        insert.assert_called_once()
-        self.assertEqual(result["table_cell_budget_cap"], 1)
-        self.assertEqual(result["table_cells_attempted"], 1)
-        self.assertEqual(result["tables_degraded"], 2)
+    def test_wrong_bot_identity_fails_before_remote_creation(self):
+        import docio_cli
+        with mock.patch.object(docio_cli, "resolve_bot", return_value="other"), \
+             mock.patch.object(docio_cli, "app_id_of", return_value="other-app"), \
+             mock.patch.object(feishu_docs, "_create_docx") as create:
+            with self.assertRaises(feishu_docs.DocImportError):
+                feishu_docs.publish_text_as_doc("app", "secret", markdown="source")
+        create.assert_not_called()
 
 
 class BridgeOnlineDocFallbackTests(unittest.TestCase):
+    def test_partial_native_doc_is_not_republished_via_import(self):
+        fake = types.SimpleNamespace(
+            publish_file_as_doc=mock.Mock(),
+            publish_text_as_doc=mock.Mock(side_effect=feishu_docs.NativeTableError("doc_id=partial")))
+        with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
+            with self.assertRaisesRegex(feishu_docs.NativeTableError, "doc_id=partial"):
+                feishu_bridge._publish_online_doc({"app_id": "app", "app_secret": "secret"}, "answer.md")
+        fake.publish_file_as_doc.assert_not_called()
+
     def setUp(self):
         self.bot = {"app_id": "app", "app_secret": "secret"}
 

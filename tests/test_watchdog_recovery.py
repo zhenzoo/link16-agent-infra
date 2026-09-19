@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import nullcontext
 
 import pytest
 
@@ -89,6 +90,38 @@ def test_claude_running_footer_is_covered(monkeypatch, tmp_path):
     assert ("esc", 0) in run_scenes(monkeypatch, tmp_path, [{"screen": "Rendering\nesc to interrupt"}])
 
 
+def test_fable_only_limit_reports_model_without_switching_account(monkeypatch, tmp_path):
+    def configure(events):
+        monkeypatch.setattr(w, "_profile_of", lambda *a: "ccp")
+        monkeypatch.setattr(w, "_is_codex", lambda *a: False)
+        monkeypatch.setattr(w.agent_quota, "collect", lambda: [{
+            "profile": "ccp", "status": "ok", "verdict": "够用", "runtime": "claude",
+            "session_percent": 10, "weekly_percent": 72,
+            "active_limits": [{"model": "Fable", "model_scoped": True, "percent": 100}],
+        }])
+        monkeypatch.setattr(w, "failover", lambda *a, **k: events.append(("account_switch", 0)))
+    events = run_scenes(monkeypatch, tmp_path, [{
+        "screen": "You've hit your session limit · resets 5am (Asia/Shanghai)",
+        "silent": 0, "status": "idle",
+    }] * 3, configure=configure)
+    assert any(e[0] == "model_limit" for e in events)
+    assert not any(e[0] in ["account_switch", "nudge", "esc"] for e in events)
+
+
+def test_model_limit_notification_obeys_existing_cooldown(monkeypatch):
+    alerts = {}
+    calls = []
+    monkeypatch.setattr(w, "_alerts_load", lambda: alerts)
+    monkeypatch.setattr(w, "_alerts_save", lambda value: alerts.update(value))
+    monkeypatch.setattr(w, "_alert_target", lambda name: "test-owner")
+    monkeypatch.setattr(w, "log", lambda *a: None)
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k:
+                        calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    assert w.notify("test-bot", "model_limit", "Fable 专项额度受限") is True
+    assert w.notify("test-bot", "model_limit", "Fable 专项额度受限") is False
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("status", ["working", "waiting"])
 def test_wmux_active_states_are_covered(monkeypatch, tmp_path, status):
     assert ("esc", 0) in run_scenes(monkeypatch, tmp_path, [{"status": status}])
@@ -145,6 +178,11 @@ def test_same_failed_turn_does_not_receive_duplicate_retry(monkeypatch, tmp_path
     assert [e for e in events if e[0] == "nudge"] == [("nudge", 0)]
 
 
+def test_unconfirmed_submission_is_not_retyped_next_scan(monkeypatch, tmp_path):
+    events = run_scenes(monkeypatch, tmp_path, [failed_turn(1)] * 8, nudge_ok=False)
+    assert [e for e in events if e[0] == "nudge"] == [("nudge", 0)]
+
+
 @pytest.mark.parametrize("terminal", [{"type": "task_complete"}, {"type": "turn_aborted"}])
 def test_success_or_manual_stop_resets_failure_budget(monkeypatch, tmp_path, terminal):
     scenes = [failed_turn(i) for i in range(4)]
@@ -161,12 +199,12 @@ def test_failed_rpc_exit_is_not_reported_as_escape_success(monkeypatch):
     assert w.interrupt_pane("test-pty") is False
 
 
-def test_failed_paste_does_not_press_enter(monkeypatch):
-    calls = []
-    monkeypatch.setattr(w, "_allow", lambda *a: [])
+def test_failed_paste_does_not_press_enter(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE])
     monkeypatch.setattr(w, "rpc", lambda args: calls.append(args) or "__RPC_FAIL__ denied")
     assert w.nudge_pane("test-pty", "continue") is False
     assert len(calls) == 1
+    assert calls[0][0] == "paste"
 
 
 @pytest.mark.parametrize("elapsed", ["8s", "8m 24s", "29m 59s"])
@@ -175,11 +213,212 @@ def test_old_outbox_does_not_interrupt_fresh_compaction(monkeypatch, tmp_path, e
     assert not run_scenes(monkeypatch, tmp_path, [{"screen": screen, "silent": 286}])
 
 
-
 def test_compaction_stalled_for_thirty_minutes_is_still_recoverable(monkeypatch, tmp_path):
     screen = "• Compacting context (30m 01s • esc to interrupt)\n› Ask Codex to do anything"
     assert ("esc", 0) in run_scenes(monkeypatch, tmp_path, [{"screen": screen}])
 
+
+def test_unconfirmed_stall_submission_never_reports_success(monkeypatch, tmp_path):
+    events = run_scenes(monkeypatch, tmp_path, [{}], nudge_ok=False)
+    assert ("stall_failed", 0) in events
+    assert not [e for e in events if e[0] == "stall_nudged"]
+
+
+def nudge_io(monkeypatch, tmp_path, screens, turns=None, *, pasted=None):
+    """Real nudge path; no terminal, model, messages or production state touched."""
+    calls = []
+    remaining = iter([screens[0], DRAFT if pasted is None else pasted, *screens[1:]])
+    last = {"screen": screens[-1]}
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(w, "_allow", lambda *a: ["--allow-ws", "isolated-workspace"])
+    monkeypatch.setattr(w, "rpc", lambda args: calls.append(tuple(args[:3])) or "{}")
+    def read(*a):
+        last["screen"] = next(remaining, last["screen"])
+        return last["screen"]
+    monkeypatch.setattr(w, "read_pane", read)
+    monkeypatch.setattr(w, "live_bot_by_pty", lambda: {"test-pty": "review-bot"})
+    monkeypatch.setattr(w, "at_picker", lambda screen, bot: bool(screen and "Submit answers" in screen))
+    monkeypatch.setattr(w, "log", lambda *a: None)
+    monkeypatch.setattr(w.time, "sleep", lambda *a: None)
+    monkeypatch.setattr(w.bridge_injection, "injection_lock", lambda *a, **kw: nullcontext())
+    turn_values = iter(turns or [None])
+    last_turn = {"value": None}
+    def turn(*a):
+        last_turn["value"] = next(turn_values, last_turn["value"])
+        return last_turn["value"]
+    monkeypatch.setattr(w, "_nudge_turn", turn)
+    return calls
+
+
+PROMPT = "继续推进并回一条当前进度。"
+DRAFT = f"■ Conversation interrupted\n› {PROMPT}"
+COMPACTING = f"› {PROMPT}\n• Compacting context (1s • esc to interrupt)\n› Ask Codex to do anything"
+
+
+def test_swallowed_enter_retries_key_without_retyping_message(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, DRAFT, COMPACTING],
+                     ["thread:old", "thread:old", "thread:new"])
+    assert w.nudge_pane("test-pty", PROMPT) is True
+    assert [c[0] for c in calls] == ["paste", "key", "key"]
+
+
+def test_compaction_started_is_accepted_without_waiting_for_reply(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, COMPACTING], ["thread:old", "thread:new"])
+    assert w.nudge_pane("test-pty", PROMPT) is True
+    assert [c[0] for c in calls] == ["paste", "key"]
+
+
+def test_rpc_success_with_draft_remaining_is_not_submission(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, DRAFT], ["thread:old"])
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert sum(c[0] == "paste" for c in calls) == 1
+    assert 1 <= sum(c[0] == "key" for c in calls) <= w.NUDGE_VERIFY_TRIES
+
+
+def test_clear_composer_without_new_codex_turn_is_not_success(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, COMPACTING], ["thread:old"])
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert sum(c[0] == "key" for c in calls) == 1
+
+
+@pytest.mark.parametrize("after", [None, "", "redrawing", "Submit answers\n❯ 1. Submit", "› another person's draft"])
+def test_unknown_or_replaced_composer_never_gets_extra_enter(monkeypatch, tmp_path, after):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, after])
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert sum(c[0] == "key" for c in calls) == 1
+
+
+def test_no_turn_probe_requires_message_in_history_and_cleared_composer(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, COMPACTING])
+    assert w.nudge_pane("test-pty", PROMPT) is True
+    assert sum(c[0] == "key" for c in calls) == 1
+
+
+def test_old_prompt_in_scrollback_cannot_prove_a_lost_paste_succeeded(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [COMPACTING, COMPACTING], pasted=COMPACTING)
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert sum(c[0] == "key" for c in calls) == 1
+
+
+def test_busy_draft_does_not_receive_repeated_enter(monkeypatch, tmp_path):
+    screen = f"• Compacting context (2s • esc to interrupt)\n› {PROMPT}"
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, screen], ["thread:old"])
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert sum(c[0] == "key" for c in calls) == 1
+
+
+def test_changed_thread_is_not_acceptance_of_this_prompt(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, COMPACTING], ["thread:old", "other:new"])
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert sum(c[0] == "key" for c in calls) == 1
+
+
+@pytest.mark.parametrize("prefix", ["›", "❯"])
+def test_wrapped_composer_is_distinguished_from_history(prefix):
+    marker = "继续推进并核对这条提示是否真正提交成功。"
+    draft = f"{prefix} 继续推进并核对这条提示\n  是否真正提交成功。"
+    assert w._nudge_composer(draft, marker) == (True, False)
+    assert w._nudge_composer(draft + f"\n{prefix} ⠁Ask Codex to do anything", marker) == (False, True)
+
+
+def test_preflight_unknown_screen_sends_nothing(monkeypatch, tmp_path):
+    calls = nudge_io(monkeypatch, tmp_path, [None])
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert calls == []
+
+
+def test_readonly_preview_respects_fresh_compaction(monkeypatch, capsys):
+    monkeypatch.setattr(w, "live_bot_by_pty", lambda: {"fake-pty": "review-bot"})
+    monkeypatch.setattr(w.bridge_outbox, "silent_minutes", lambda *a: 286)
+    monkeypatch.setattr(w.wmux_session, "pty_agent_status", lambda *a: "running")
+    monkeypatch.setattr(w, "read_pane", lambda *a: COMPACTING)
+    monkeypatch.setattr(w, "at_picker", lambda *a: False)
+    w.cmd_stall_check()
+    assert "会出手" not in capsys.readouterr().out
+
+
+def test_real_picker_contract_in_submission(monkeypatch, tmp_path):
+    real_picker = w.at_picker
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE, COMPACTING], ["thread:old", "thread:new"])
+    monkeypatch.setattr(w, "at_picker", real_picker)
+    seen = []
+    def picker(directory, bot):
+        seen.append((directory, bot))
+        return None
+    monkeypatch.setattr(w, "picker_load", picker)
+    assert w.nudge_pane("test-pty", PROMPT) is True
+    assert seen == [(str(tmp_path), "review-bot")] * 3
+    assert [c[0] for c in calls] == ["paste", "key"]
+
+
+def test_real_structured_picker_blocks_submission(monkeypatch, tmp_path):
+    real_picker = w.at_picker
+    calls = nudge_io(monkeypatch, tmp_path, [IDLE])
+    monkeypatch.setattr(w, "at_picker", real_picker)
+    monkeypatch.setattr(w, "picker_load", lambda directory, bot: {"active": True} if bot == "review-bot" else None)
+    assert w.nudge_pane("test-pty", PROMPT) is False
+    assert calls == []
+
+
+def test_r5_replays_compact_timeout_through_real_submission(monkeypatch, tmp_path):
+    """Real loop -> nudge -> picker; transport and Codex events are isolated."""
+    real_nudge, real_picker, real_turn = w.nudge_pane, w.at_picker, w._nudge_turn
+    calls = []
+    def configure(events):
+        monkeypatch.setattr(w, "nudge_pane", real_nudge)
+        monkeypatch.setattr(w, "at_picker", real_picker)
+        monkeypatch.setattr(w, "_nudge_turn", real_turn)
+        (tmp_path / "bridge-session-review-bot.json").write_text(json.dumps({"pty": "fake-pty"}), encoding="utf-8")
+        rollout = tmp_path / "isolated-rollout.jsonl"
+        rollout.write_text(json.dumps({"type": "event_msg", "payload": failed_turn(1)["turn"]}) + "\n", encoding="utf-8")
+        monkeypatch.setattr(w, "codex_rollout_tail", lambda *args, **kwargs: rollout.read_text(encoding="utf-8"))
+        monkeypatch.setattr(w, "_allow", lambda pty: ["--allow-ws", "fake-workspace"])
+        def rpc(args):
+            calls.append(tuple(args[:3]))
+            if args[0] == "key":
+                with rollout.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "new"}}) + "\n")
+            return "{}"
+        monkeypatch.setattr(w, "rpc", rpc)
+        monkeypatch.setattr(w, "log", lambda message: events.append(("confirmed", 0)) if "confirmed=new_codex_turn" in message else None)
+        # The real picker_load reads the isolated directory, not a mocked predicate.
+        monkeypatch.setattr(w, "read_pane", lambda pty: IDLE if not calls else (
+            f"› {w.POLICY_NUDGE_TEXT}" if len(calls) == 1 else
+            f"› {w.POLICY_NUDGE_TEXT}\n• Compacting context (1s • esc to interrupt)\n› Ask Codex to do anything"))
+    events = run_scenes(monkeypatch, tmp_path, [failed_turn(1)] * 3, configure=configure)
+    assert [c[0] for c in calls] == ["paste", "key"]
+    assert ("policy_nudged", 0) in events
+    assert ("confirmed", 0) in events
+
+
+@pytest.mark.parametrize("scene, expected", [(failed_turn(1), "policy_nudged"), ({}, "stall_failed")])
+def test_submission_exception_is_reported_without_killing_scan(monkeypatch, tmp_path, scene, expected):
+    def configure(events):
+        def broken(*args):
+            raise TypeError("submission contract broken")
+        monkeypatch.setattr(w, "nudge_pane", broken)
+        monkeypatch.setattr(w, "_heartbeat_write", lambda *args: events.append(("heartbeat", None)))
+    events = run_scenes(monkeypatch, tmp_path, [scene], configure=configure)
+    assert (expected, 0) in events
+    assert ("heartbeat", None) in events
+
+
+def test_failed_recovery_stays_visible_until_new_output(monkeypatch, tmp_path):
+    heartbeats, attempts = [], []
+    def configure(events):
+        def broken(*args):
+            attempts.append(1)
+            raise TypeError("submission contract broken")
+        monkeypatch.setattr(w, "nudge_pane", broken)
+        monkeypatch.setattr(w, "_heartbeat_write", lambda panes, acted, checks: heartbeats.append(checks.copy()))
+    # Revisit the same failed turn after the alert cooldown, then observe real progress.
+    stalled = failed_turn(1) | {"step_seconds": 1900}
+    events = run_scenes(monkeypatch, tmp_path, [stalled, stalled, {"silent": 0, "epoch": 20000}], configure=configure)
+    assert len(attempts) == 1  # acceptance is unknown; never replay the text
+    assert ("policy_nudged", 0) in events and ("policy_nudged", 1) in events
+    assert "TypeError" in heartbeats[0]["recovery"]
+    assert "TypeError" in heartbeats[1]["recovery"]
+    assert heartbeats[2]["recovery"] == "ok"
 
 
 @pytest.mark.parametrize("terminal", ["task_complete", "turn_aborted"])
@@ -189,7 +428,6 @@ def test_finished_turn_overrides_stale_working_footer(monkeypatch, tmp_path, ter
     assert not run_scenes(monkeypatch, tmp_path, [scene])
 
 
-
 def test_failed_turn_with_stale_working_uses_r5_without_escape(monkeypatch, tmp_path):
     scene = failed_turn(1) | {"screen": WORKING, "event_time": "1970-01-01T02:46:00Z"}
     events = run_scenes(monkeypatch, tmp_path, [scene])
@@ -197,11 +435,9 @@ def test_failed_turn_with_stale_working_uses_r5_without_escape(monkeypatch, tmp_
     assert not [event for event in events if event[0] == "esc"]
 
 
-
 def test_old_thread_completion_cannot_disable_current_stall_recovery(monkeypatch, tmp_path):
     scene = {"turn": {"type": "task_complete", "completed_at": 1000}}
     assert ("esc", 0) in run_scenes(monkeypatch, tmp_path, [scene])
-
 
 
 def test_readonly_preview_respects_finished_visible_turn(monkeypatch, capsys):
@@ -219,7 +455,6 @@ def test_readonly_preview_respects_finished_visible_turn(monkeypatch, capsys):
     assert "已结束" in output
 
 
-
 @pytest.mark.parametrize("session, started, expect_esc", [
     ("test-thread", 9900, False), ("test-thread", 9990, False), ("new-thread", 9900, False),
     ("new-thread", 8100, True),
@@ -231,7 +466,6 @@ def test_timerless_app_server_uses_current_prompt_binding(monkeypatch, tmp_path,
         json.dumps({"session": session, "started_at": started}), encoding="utf-8")
     events = run_scenes(monkeypatch, tmp_path, [scene])
     assert (("esc", 0) in events) is expect_esc
-
 
 
 @pytest.mark.parametrize("source", ["task_started", "prompt_hook"])
@@ -246,12 +480,10 @@ def test_new_timerless_turn_does_not_inherit_idle_outbox_silence(monkeypatch, tm
     assert not run_scenes(monkeypatch, tmp_path, [scene])
 
 
-
 def test_timerless_turn_really_silent_for_thirty_minutes_is_recovered(monkeypatch, tmp_path):
     scene = {"screen": "• Working…\n› Ask Codex", "silent": 99,
              "event_time": "1970-01-01T02:15:00Z"}  # 8100, now=10000
     assert ("esc", 0) in run_scenes(monkeypatch, tmp_path, [scene])
-
 
 
 @pytest.mark.parametrize("started", [0, -1, 10001, "invalid", None])
@@ -259,7 +491,6 @@ def test_invalid_prompt_times_do_not_disable_stall_recovery(monkeypatch, tmp_pat
     (tmp_path / "bridge-turn-route-review-bot.json").write_text(
         json.dumps({"session": "test-thread", "started_at": started}), encoding="utf-8")
     assert ("esc", 0) in run_scenes(monkeypatch, tmp_path, [{"screen": "• Working…\n› Ask Codex"}])
-
 
 
 def test_prompt_arriving_during_watchdog_scan_uses_fresh_decision_time(monkeypatch, tmp_path):

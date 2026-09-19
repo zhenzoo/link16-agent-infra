@@ -207,8 +207,12 @@ def _claude_quota(home: Path):
     week = data.get("seven_day") or {}
     sev = "normal"
     for lim in (data.get("limits") or []):
-        if lim.get("severity") and lim.get("severity") != "normal":
-            sev = lim["severity"]
+        # A model-specific ceiling does not exhaust the account's shared quota.
+        if _is_model_scoped(lim):
+            continue
+        candidate = lim.get("severity") or "normal"
+        if {"normal": 0, "warning": 1, "critical": 2}.get(candidate, 0) > {"normal": 0, "warning": 1, "critical": 2}.get(sev, 0):
+            sev = candidate
     return {
         "status": "ok",
         "session_percent": float(five.get("utilization") or 0),
@@ -216,9 +220,21 @@ def _claude_quota(home: Path):
         "session_reset": _fmt_reset(five.get("resets_at")),
         "weekly_reset": _fmt_reset(week.get("resets_at")),
         "severity": sev,
+        "active_limits": [
+            {"kind": lim.get("kind") or "", "percent": lim.get("percent"),
+             "reset": _fmt_reset(lim.get("resets_at")),
+             "model": ((lim.get("scope") or {}).get("model") or {}).get("display_name") or "",
+             "model_scoped": _is_model_scoped(lim)}
+            for lim in (data.get("limits") or [])
+            if lim.get("is_active") or lim.get("severity") == "critical"
+        ],
         "route": route,
         "note": f"经{route}" if route else "",
     }
+
+
+def _is_model_scoped(limit):
+    return bool((limit.get("scope") or {}).get("model")) or str(limit.get("kind") or "").endswith("_scoped")
 
 
 def _codex_quota(home: Path):
@@ -285,7 +301,9 @@ def collect(names=None):
             continue
         home = spec.home_path                          # @property，不是方法
         base = {"profile": spec.name, "runtime": spec.runtime,
-                "label": getattr(spec, "label", "") or "", "home": str(home)}
+                "label": getattr(spec, "label", "") or "", "home": str(home),
+                "recommended": bool(getattr(spec, "recommended", False)),
+                "auto_failover": getattr(spec, "auto_failover", True)}
         if not home.is_dir():
             base.update({"status": "no_home", "note": "home 目录不存在"})
         elif spec.runtime == "claude":
@@ -311,17 +329,34 @@ def pick(rows, exclude=(), prefer_runtime=None):
        ① 只考虑 verdict=够用/紧张（问不到的绝不选 —— 宁可不切，也不切到一个不知深浅的号）
        ② 同 runtime 优先（claude→claude 才能续同一份 transcript）
        ③ 余量大的优先（取 5h/周 里较差的那个当分数）
+       ④ 同等余量时 registry 推荐 profile 优先，再按名字稳定排序
        返回 row 或 None。"""
-    ok = [r for r in rows if r["verdict"] in ("够用", "紧张") and r["profile"] not in set(exclude)]
+    ok = [r for r in rows if r["verdict"] in ("够用", "紧张")
+          and r.get("auto_failover", True) and r["profile"] not in set(exclude)]
     if not ok:
         return None
 
     def score(r):
         worst = max(r["session_percent"] or 0, r["weekly_percent"] or 0)
         same = 0 if (prefer_runtime and r["runtime"] == prefer_runtime) else 1
-        return (same, worst)
+        return (same, worst, not r.get("recommended", False), r["profile"])
 
     return sorted(ok, key=score)[0]
+
+
+def quota_summary(row):
+    """Keep independent quota windows and scoped limits visible in alerts."""
+    def percent(value):
+        return "未知" if value is None else f"{float(value):g}%"
+
+    parts = [
+        f"5小时 {percent(row.get('session_percent'))}（{row.get('session_reset') or '—'} 重置）",
+        f"周 {percent(row.get('weekly_percent'))}（{row.get('weekly_reset') or '—'} 重置）",
+    ]
+    for limit in row.get("active_limits") or []:
+        label = limit.get("model") or limit.get("kind") or "其他"
+        parts.append(f"活跃限制 {label} {percent(limit.get('percent'))}（{limit.get('reset') or '—'} 重置）")
+    return "；".join(parts)
 
 
 def _print_table(rows):

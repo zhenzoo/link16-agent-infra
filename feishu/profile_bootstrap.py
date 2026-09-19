@@ -497,7 +497,7 @@ def _profile_target(home: Path, spec) -> Path:
 
 
 def bootstrap(home: Path, *, apply=False, profiles=None, registry_path=None,
-              migrate_legacy_feishu_adapter=False):
+              migrate_legacy_feishu_adapter=False, skills_only=False):
     specs = _selected_specs(profiles, registry_path)
     profile_names = tuple(spec.name for spec in specs)
     wrapper_names = tuple(spec.name for spec in agent_runtime.profile_specs(registry_path))
@@ -505,7 +505,7 @@ def bootstrap(home: Path, *, apply=False, profiles=None, registry_path=None,
     profile_targets = {}
     if migrate_legacy_feishu_adapter:
         rows.append(migrate_legacy_adapter(home) if apply else legacy_adapter_plan(home))
-    for spec in specs:
+    for spec in (() if skills_only else specs):
         name = spec.name
         target = _profile_target(home, spec)
         profile_targets[name] = target
@@ -525,7 +525,7 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
 """)
             rows.append({"kind": "launcher", "name": name, "path": str(launch),
                          "status": "ok" if launch_existed else "missing"})
-    for row in target_plan(home, wrapper_names):
+    for row in ([] if skills_only else target_plan(home, wrapper_names)):
         before = row["status"]
         if apply and before != "ok":
             _atomic_write(row["path"], row["desired"])
@@ -536,7 +536,7 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
             _apply_skill(FEISHU_SKILL_SOURCE, target)
         after = _skill_status(FEISHU_SKILL_SOURCE, target)
         rows.append({**after, "before": before["status"]})
-    for spec in specs:
+    for spec in (() if skills_only else specs):
         if spec.runtime != "codex":
             continue
         codex_home = profile_targets[spec.name]
@@ -554,6 +554,8 @@ def main(argv=None) -> int:
     parser.add_argument("--doctor", action="store_true", help="只检查；任何 missing/drift/conflict 返回非 0")
     parser.add_argument("--home", help="测试/特殊用户目录；默认当前用户 home")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument('--skills-only', action='store_true',
+                        help='只安装/检查所选profile的Feishu skill，不改Shell、hooks或账号入口')
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument("--migrate-registry", action="store_true",
                            help="把 legacy committed registry 无损迁入本机 local registry")
@@ -614,6 +616,7 @@ def main(argv=None) -> int:
         rows = bootstrap(
             home, apply=args.apply, profiles=selected,
             migrate_legacy_feishu_adapter=args.migrate_legacy_feishu_adapter,
+            skills_only=args.skills_only,
         )
     if args.json:
         print(json.dumps({"applied": args.apply, "rows": rows}, ensure_ascii=False, indent=2))

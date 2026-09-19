@@ -39,6 +39,7 @@ PROJECT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 import bridge_process
+import bridge_injection
 import bridge_env          # noqa: E402
 import agent_runtime       # noqa: E402
 import agent_quota         # noqa: E402
@@ -129,6 +130,19 @@ def find_pane_limit(text):
     return None
 
 
+def scoped_limit_notice(pane_text, quota_row):
+    """Report a model ceiling without authorizing an account/workspace switch."""
+    row = quota_row or {}
+    if not find_pane_limit(pane_text) or row.get("verdict") not in ("够用", "紧张"):
+        return None
+    limits = [lim for lim in row.get("active_limits") or [] if lim.get("model_scoped")]
+    if not limits:
+        return None
+    labels = "、".join(lim.get("model") or lim.get("kind") or "模型" for lim in limits)
+    return (f"{labels} 专项额度受限，账号共享额度仍有余量；未关闭工作区或换账号。"
+            "Claude 的额度限制不保证自动降级；可用 `/model opus` 切换后继续。")
+
+
 def is_limited(pane_text, quota_row):
     """**双源判定**：屏答「是哪个面板撞的」，API 答「这个号是不是真满了」，两个都成立才算。
 
@@ -162,6 +176,9 @@ def is_limited(pane_text, quota_row):
         return False, (f"⚠️ 屏命中『{hit[:60]}』，但账号额度**问不到**"
                        f"（{'查不到该 profile' if quota_row is None else '接口答不上来'}）"
                        f" —— 不敢自动换号，需要你看一眼"), True
+    scoped = scoped_limit_notice(pane_text, quota_row)
+    if scoped:
+        return False, scoped, False
     if hit:
         return False, f"屏命中但账号判定={verdict}（大概率是屏上的历史残留文字）", False
     if full:
@@ -281,12 +298,93 @@ def _allow(pty):
     return []
 
 
+NUDGE_VERIFY_TRIES = 6
+
+
+def _nudge_turn(pty):
+    """Optional acceptance evidence, from this pane's bound Codex thread only."""
+    bot = live_bot_by_pty().get(pty)
+    rec = session_record(bot) if bot else {}
+    if rec.get("pty") != pty or not _is_codex(rec):
+        return None
+    thread = codex_thread_id(bot)
+    if not thread:
+        return None
+    event = last_turn_event(codex_rollout_tail(rec, thread, bot_name=bot))
+    return f"{thread}:{event['turn_id']}" if event and event.get("turn_id") else None
+
+
+def _nudge_composer(screen, marker):
+    """(own draft held, own text in history); None means unreadable/unknown."""
+    if not screen:
+        return None, False
+    idx = max(screen.rfind("›"), screen.rfind("❯"))
+    if idx < 0:
+        return None, False
+    normalize = lambda s: re.sub(r"[\s\u2800-\u28ff]", "", s)
+    sig = normalize(marker)[-24:]
+    draft = normalize(screen[idx + 1:])
+    # Do not submit an unidentified collapsed paste; it could belong to the user.
+    if "[Pasted" in draft:
+        return None, False
+    return bool(sig and sig in draft), bool(sig and sig in normalize(screen[:idx]))
+
+
 def nudge_pane(pty, text=None):
-    """往卡住的面板注一句话（默认 NUDGE_TEXT）。返回 True=注了。"""
+    """Paste once; verify acceptance. RPC success alone never means submitted."""
+    marker = text or NUDGE_TEXT
     allow = _allow(pty)
-    if rpc(["send", pty, text or NUDGE_TEXT] + allow).startswith("__RPC_FAIL__"):
+    if len(allow) != 2:
         return False
-    return not rpc(["key", pty, "enter"] + allow).startswith("__RPC_FAIL__")
+    with bridge_injection.injection_lock(STATE_DIR, "tui-inject", allow[1]):
+        bot_name = live_bot_by_pty().get(pty)
+        screen = read_pane(pty)
+        if not screen or at_picker(screen, bot_name):
+            return False
+        before = _nudge_turn(pty)
+        old_history = _nudge_composer(screen, marker)[1]
+        if rpc(["paste", pty, marker] + allow).startswith("__RPC_FAIL__"):
+            return False
+        time.sleep(0.5)  # let bracketed-paste finish before sending a distinct Enter
+        pasted = read_pane(pty)
+        if pasted and at_picker(pasted, bot_name):
+            return False
+        seen_draft = _nudge_composer(pasted, marker)[0] is True
+        if rpc(["key", pty, "enter"] + allow).startswith("__RPC_FAIL__"):
+            return False
+        for attempt in range(NUDGE_VERIFY_TRIES):
+            time.sleep(0.5)
+            screen = read_pane(pty)
+            if not screen or at_picker(screen, bot_name):
+                continue
+            after = _nudge_turn(pty)
+            if before and after and after != before and after.rsplit(":", 1)[0] == before.rsplit(":", 1)[0]:
+                log(f"[submit] {pty} confirmed=new_codex_turn turn={after}")
+                return True  # pre-sampling compaction may run before any user-message/reply
+            held, in_history = _nudge_composer(screen, marker)
+            seen_draft = seen_draft or held is True
+            if before is None and held is False and in_history and (seen_draft or not old_history):
+                log(f"[submit] {pty} confirmed=history_and_clear_composer")
+                return True
+            if held and not working_now(screen) and attempt + 1 < NUDGE_VERIFY_TRIES:
+                # Only retry the key, never the text; never press into a running compact.
+                if rpc(["key", pty, "enter"] + allow).startswith("__RPC_FAIL__"):
+                    return False
+        log(f"[submit] {pty} unconfirmed; prompt not retyped")
+        return False
+
+
+def _try_nudge(pty, st, text=None):
+    """Keep a failed recovery visible without replaying a possibly queued prompt."""
+    try:
+        ok = nudge_pane(pty, text)
+        error = None if ok else "submission_unconfirmed"
+    except Exception as exc:                            # noqa: BLE001
+        ok, error = False, f"{type(exc).__name__}: {exc}"
+        log(f"[submit] {pty} recovery failed: {error}")
+    st["nudge_error"] = error
+    st["nudge_error_at"] = time.time() if error else 0
+    return ok
 
 
 # ---------- R5 · Codex 回合被服务端掐断（含 OpenAI 安全分类器 invalid_prompt）----------
@@ -573,7 +671,7 @@ def _alerts_save(data):
 
 
 # 状态类（会持续成立）→ 冷却；动作类（一次性）→ 必发不吞。
-_STATEFUL_KINDS = {"limit", "policy_stuck", "hwm_corrupt", "stall_stuck"}
+_STATEFUL_KINDS = {"limit", "model_limit", "policy_stuck", "hwm_corrupt", "stall_stuck"}
 
 
 def _alert_target(bot_name):
@@ -1002,7 +1100,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
                                   prefer_runtime=(by.get(cur) or {}).get("runtime"))
     if not chosen:
         notify(bot_name, "no_target",
-               f"🔴 {bot_name} 撞额度上限（{cur}），但**所有号都不可用**，没换。\n"
+               f"🔴 {bot_name} 撞额度上限（{cur}），但**没有可自动切换的可用配置**，没换。\n"
                + "\n".join(f"· {r['profile']} {r['verdict']} 周{r['weekly_percent']}%"
                            for r in rows if r["status"] == "ok"))
         return False
@@ -1018,8 +1116,8 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     if cur_rt and chosen["runtime"] != cur_rt:
         same = [r for r in rows if r["runtime"] == cur_rt and r["profile"] != cur]
         detail = "、".join(f"{r['profile']}({r['verdict']})" for r in same) or "一个都没有"
-        why_cross = (f"\n· **跨 runtime 说明**：同为 {cur_rt} 的其他号都用不了 —— {detail}；"
-                     f"所以切到 {chosen['runtime']} 的 {tgt}。这是预期行为，不是切错。")
+        why_cross = (f"\n· **跨 runtime 说明**：同为 {cur_rt} 的其他配置未查得可用额度 —— {detail}；"
+                     f"因此选择 {chosen['runtime']} 的 {tgt}。问不到不等于额度已耗尽。")
         log(f"跨 runtime：{cur_rt}→{chosen['runtime']}，因为同 runtime 候选 {detail}")
     log(f"选号：{cur}（{curr.get('verdict')}）→ {tgt}（{chosen['verdict']}·周{chosen['weekly_percent']}%"
         f"·{chosen.get('route') and '经' + chosen['route'] or ''}）")
@@ -1044,10 +1142,12 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         print("\n---- 将注入的接手 prompt ----\n" + prompt)
         return True
 
+    trigger = find_pane_limit(pack.get("screen_tail") or "") or reason
     notify(bot_name, "limit",
-           f"🔴 {bot_name} 撞额度上限｜账号 {cur} · 周额度 {curr.get('weekly_percent')}%"
-           f"｜{curr.get('weekly_reset')} 恢复\n"
-           f"→ 正在切到 {tgt}（周 {chosen['weekly_percent']}%），并把原任务交给新会话接手。"
+           f"🔴 {bot_name} 撞额度上限｜账号 {cur}\n"
+           f"· 屏上触发：{trigger}\n"
+           f"· 当前额度：{agent_quota.quota_summary(curr)}\n"
+           f"→ 正在切到 {tgt}（{agent_quota.quota_summary(chosen)}），并把原任务交给新会话接手。"
            f"{why_cross}")
 
     # ④ 写名册
@@ -1110,7 +1210,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
                   f"· 原会话 session {pack.get('session_id')}（账号 {cur}）\n"
                   f"· 它已拿到那份 transcript，正在自己梳理进度并继续推进\n"
                   f"· 上个会话留下 {bgn} 条在途工作线索，已一并交接（要它先判死活）\n"
-                  f"· {cur} 的额度 {curr.get('weekly_reset')} 恢复")
+                  f"· {cur} 的额度：{agent_quota.quota_summary(curr)}")
     # 🩸 告警送没送到，必须体现在最终结论里（tb25-link16 2026-08-20 提出 · 采纳）：
     #   TB25 第一次真实换号时两条 DM 全失败，而最后一行照样打「✅ 换号 + 接手完成」——
     #   **那个 ✅ 和刚干掉的「跑着旧代码却全绿」是同一类假绿灯**：
@@ -1279,6 +1379,9 @@ def cmd_run(auto=True):
                                             "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0,
                                             "dead_turn": None, "dead_streak": 0, "dead_alert_at": 0.0,
                                             "stall_ep": None, "stall_alert_at": 0.0})
+                if (st.get("nudge_error") and bot_name
+                        and bridge_outbox_mtime(bot_name) > st.get("nudge_error_at", 0)):
+                    st["nudge_error"] = None  # actual new output ends the failed-recovery episode
 
                 # ---- R3 · picker → 什么都不做 ----
                 if at_picker(text, bot_name):
@@ -1289,6 +1392,10 @@ def cmd_run(auto=True):
                 prof = _profile_of(bot_name, bots.get(bot_name)) if bot_name else None
                 limited, why, uncertain = (is_limited(text, quota.get(prof)) if prof
                                            else (False, "认不出是哪个 bot", False))
+                scoped = scoped_limit_notice(text, quota.get(prof)) if prof else None
+                if scoped and bot_name:
+                    notify(bot_name, "model_limit", f"🟡 {bot_name} 模型专项额度受限\n· {scoped}\n"
+                           f"· {agent_quota.quota_summary(quota[prof])}")
                 # 「说不准」= 屏上明明写着撞限流、但账号那一路答不上来（额度接口自己被限流等）。
                 # **不敢换号（不知道切到哪安全），但绝不静默** —— 静默正是这套东西要根治的病。
                 # 走状态类告警（30min 冷却），且不进 lim_stuck 计数、不触发 failover。
@@ -1315,7 +1422,11 @@ def cmd_run(auto=True):
                 err = find_pane_error(text)
                 st["err_stuck"] = _bump(st, "err", err)
                 if st["err_stuck"] >= STUCK_CONFIRM and (now - st["last_nudge"]) >= NUDGE_COOLDOWN:
-                    nudge_pane(pty)
+                    if not _try_nudge(pty, st):
+                        st["last_nudge"] = now
+                        if bot_name:
+                            notify(bot_name, "nudge_failed", f"{bot_name} 继续指令未确认提交；未重复注入文字。面板 {ws} / {pty}")
+                        continue
                     st["last_nudge"] = now
                     st["err_stuck"] = 0
                     acted += 1
@@ -1352,14 +1463,15 @@ def cmd_run(auto=True):
                             notify(bot_name, "stall_failed", f"{bot_name} 长静默恢复失败：Esc 未送达，未注入继续指令。面板 {ws} / {pty}")
                             continue
                         time.sleep(3)                          # 给 TUI 一拍把回合真正收掉，再注推进话
-                        if not nudge_pane(pty, STALL_NUDGE_TEXT.format(mins=mins)):
-                            notify(bot_name, "stall_failed", f"{bot_name} Esc 已送达，但继续指令发送失败。面板 {ws} / {pty}")
+                        if not _try_nudge(pty, st, STALL_NUDGE_TEXT.format(mins=mins)):
+                            notify(bot_name, "stall_failed", f"{bot_name} Esc 已送达，但继续指令未确认提交；未重复注入文字。面板 {ws} / {pty}")
                             continue
                         log(f"[R8] {ws}/{bot_name} 屏上在跑但已静默 {mins} 分钟 → 已按 Esc + 注「查原因·继续推进」")
                         notify(bot_name, "stall_nudged",
                                f"⏱️ {bot_name} 已 {mins} 分钟零进展：屏上一直 Working，但没有任何回传、没有进度\n"
-                               f"· 看门狗已替你按了 Esc，并注入「查一下为什么停住 → 继续推进 → 回一条进度」\n"
-                               f"· 面板 {ws} / {pty}｜几分钟内还没回传就去看一眼")
+                               f"· Esc 后已确认提交「查一下为什么停住 → 继续推进 → 回一条进度」\n"
+                               f"· 已提交不等于工作已恢复；若显示 Compacting context，表示仍在压缩上下文\n"
+                               f"· 面板 {ws} / {pty}｜等待新的实际进度")
                         continue
                     elif (now - st.get("stall_alert_at", 0)) >= ALERT_COOLDOWN:
                         st["stall_alert_at"] = now
@@ -1392,20 +1504,25 @@ def cmd_run(auto=True):
                     poked = (st.get("dead_nudged") != dead["turn"]
                              and (now - st["last_nudge"]) >= NUDGE_COOLDOWN)
                     if poked:
-                        poked = nudge_pane(pty, POLICY_NUDGE_TEXT)
-                    if poked:
+                        # An unconfirmed submission may already be queued. Never paste it
+                        # again on the next scan; this call owns the bounded Enter retries.
                         st["dead_nudged"] = dead["turn"]
                         st["last_nudge"] = now
+                        poked = _try_nudge(pty, st, POLICY_NUDGE_TEXT)
+                    if poked:
                         acted += 1
                         log(f"[R5] {ws}/{bot_name} 上一回合{why}（第 {st['dead_streak']} 次）→ 已注「继续推进」")
-                    if fresh:
+                    if fresh or poked or (st.get("nudge_error")
+                                          and now - st.get("dead_alert_at", 0) >= ALERT_COOLDOWN):
                         做了 = (f"我已自动注「继续推进」（第 {st['dead_streak']}/{POLICY_NUDGE_MAX} 次自动重推）"
                               if poked else
-                              "这轮未成功注入，检查发送结果或等待冷却后再试")
-                        notify(bot_name, "policy_nudged",
+                              "这轮未确认提交，或仍在冷却中；请检查面板，未重复注入文字")
+                        delivered = notify(bot_name, "policy_nudged",
                                f"{bot_name} 上一回合{why}，活已经停在那儿了 · {做了}\n"
                                f"· 服务端原话：{dead['error'][:120]}\n"
                                f"· 面板 {ws} / {pty}")
+                        if delivered:
+                            st["dead_alert_at"] = now
                 elif fresh or (now - st.get("dead_alert_at", 0)) >= ALERT_COOLDOWN:
                     st["dead_alert_at"] = now
                     log(f"[R5] {ws}/{bot_name} 连着 {st['dead_streak']} 个回合{why} → 停手，只告警")
@@ -1416,6 +1533,10 @@ def cmd_run(auto=True):
                            f"· 面板 {ws} / {pty}")
 
             checks = {"r6": "ok", "r7": "ok", "r4": "ok"}
+            checks["recovery"] = "; ".join(
+                f"{bot_by_pty.get(p, p)}: {s['nudge_error']}"
+                for p, s in states.items() if p in ptys and s.get("nudge_error")
+            ) or "ok"
             # ---- R6 · 水位书签损坏（每轮扫一遍名册·新增才喊）----
             try:
                 _al = _alerts_load()

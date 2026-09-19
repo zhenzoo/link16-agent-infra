@@ -92,11 +92,15 @@ def auth_url(app_id: str, scopes=CLOUD_DOC_SCOPES) -> str:
 _DOC_EXT = {".md": "md", ".markdown": "markdown", ".mark": "mark",
             ".html": "html", ".txt": "txt", ".doc": "doc", ".docx": "docx"}
 _MAX_BYTES = 20 * 1024 * 1024   # 单次 upload_all 上限 20MB
-_MAX_REAL_TABLE_CELLS_PER_DOC = 24  # 全篇硬上限；调用方传更大也不能突破
 
 
 class DocImportError(RuntimeError):
     pass
+
+
+class NativeTableError(DocImportError):
+    """Preserve the partial document; never retry by publishing another copy."""
+    preserve_document = True
 
 
 def _ext_for(path: Path) -> str:
@@ -415,10 +419,7 @@ def _doc_url(token: str, doc_id: str) -> str:
 # 这里换一条只用 docx 权限的路：建文档 → markdown 转块 → 写入 → 设「组织内凭链接可读」。
 # `tb26-baseball`（无 drive:drive、无任何需审核权限）已用 21KB / 874 块真文档跑通。
 #
-# ⚠️ 普通块按展开后块数动态分批；表格结构不能直接写 descendant，必须先建空表再逐格填。
-#    单元格或普通块写入失败时追加完整纯文本兜底，绝不静默丢内容。
-
-_BLOCK_BATCH_LIMIT = 45
+# 正文写入复用docio/vendor引擎；原生表格独立回读，禁止降级成竖线文字。
 
 
 def _convert_markdown(token: str, markdown: str):
@@ -427,7 +428,29 @@ def _convert_markdown(token: str, markdown: str):
     if d.get("code") != 0:
         raise DocImportError(f"markdown 转换失败 {d.get('code')} {d.get('msg')}")
     data = d.get("data") or {}
-    return data.get("blocks") or [], data.get("first_level_block_ids") or []
+    blocks, roots = data.get("blocks") or [], data.get("first_level_block_ids") or []
+    return _document_order(blocks, roots), roots
+
+
+def _document_order(blocks, roots):
+    """Convert returns an unordered block pool; roots/children define reading order."""
+    by_id = {b["block_id"]: b for b in blocks}
+    ordered, seen = [], set()
+    def visit(bid):
+        if bid in seen:
+            return
+        if bid not in by_id:
+            raise NativeTableError("原生块树缺少被引用的子块")
+        seen.add(bid)
+        block = by_id[bid]
+        ordered.append(block)
+        for child in block.get("children") or []:
+            visit(child)
+    for bid in roots:
+        visit(bid)
+    if len(seen) != len(by_id):
+        raise NativeTableError("原生块池包含未归属正文的块")
+    return ordered
 
 
 def _subtree(blocks_by_id, ids):
@@ -471,146 +494,116 @@ def _text_chunks(text, limit=1800):
     return [value[i:i + limit] for i in range(0, len(value), limit)]
 
 
-def _bounded_real_table_budget(requested) -> int:
-    """真实表格逐格写入的全篇硬预算；调用方只能调低，不能调高。"""
-    return min(max(int(requested), 0), _MAX_REAL_TABLE_CELLS_PER_DOC)
-
-
-def _insert_real_table(token, doc_id, index, rows, cols, texts):
-    """建空表块并逐格填字。回 ``(table_ok, filled, failed_indexes)``。"""
-    try:
-        d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
-                token=token, body={"children": [{"block_type": 31, "table": {"property": {
-                    "row_size": rows, "column_size": cols, "header_row": True}}}], "index": index})
-    except json.JSONDecodeError:  # 飞书偶发 HTTP 空正文；整表走完整纯文本兜底
-        return False, 0, list(range(len(texts)))
-    if d.get("code") != 0:
-        return False, 0, []
-    child = ((d.get("data") or {}).get("children") or [{}])[0]
-    cells = (child.get("table") or {}).get("cells") or []
-    filled = 0
-    failed = list(range(len(cells), len(texts)))
-    for cell_index, (cid, value) in enumerate(zip(cells, texts)):
-        if not value:
+def _native_table_signature(blocks):
+    """Compare native row/column structure and every cell in document order."""
+    pages = [b["block_id"] for b in blocks if b.get("block_type") == 1]
+    if pages:
+        blocks = _document_order(blocks, pages)
+    by_id = {b["block_id"]: b for b in blocks}
+    result = []
+    for block in blocks:
+        if block.get("block_type") != 31:
             continue
-        cell_ok = True
-        for part_index, chunk in enumerate(_text_chunks(value)):
-            try:
-                w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
-                        token=token, body={"children": [{"block_type": 2, "text": {
-                            "elements": [{"text_run": {"content": chunk}}], "style": {}}}],
-                            "index": part_index})
-            except json.JSONDecodeError:  # 同上；不重试非幂等写入，避免正文重复
-                cell_ok = False
-                break
-            if w.get("code") != 0:
-                cell_ok = False
-                break
-        if cell_ok:
-            filled += 1
-        else:
-            failed.append(cell_index)
-    return True, filled, failed
+        prop = (block.get("table") or {}).get("property") or {}
+        rows, cols = prop.get("row_size", 0), prop.get("column_size", 0)
+        cells = (block.get("table") or {}).get("cells") or block.get("children") or []
+        if not rows or not cols or len(cells) != rows * cols:
+            raise NativeTableError("原生表格行列或单元格数量不完整")
+        if any(cid not in by_id for cid in cells):
+            raise NativeTableError("原生表格单元格未读全")
+        values = [re.sub(r"\s+", "", _plain_text_of(by_id, cid)) for cid in cells]
+        result.append({"rows": rows, "columns": cols, "cells": values})
+    return result
+
+
+def _read_document_blocks(token, doc_id):
+    """Read all pages at one fixed revision; fail on partial inventories."""
+    from urllib.parse import urlencode
+    meta = api("GET", f"{_DOCX}/{doc_id}", token=token)
+    if meta.get("code") != 0:
+        raise NativeTableError(f"表格核验无法读取文档版本；doc_id={doc_id}")
+    revision = ((meta.get("data") or {}).get("document") or {}).get("revision_id")
+    if revision is None:
+        raise NativeTableError(f"表格核验缺少固定文档版本；doc_id={doc_id}")
+    blocks, page, seen = [], "", set()
+    while True:
+        query = {"page_size": 500, "document_revision_id": revision}
+        if page:
+            query["page_token"] = page
+        reply = api("GET", f"{_DOCX}/{doc_id}/blocks?{urlencode(query)}", token=token)
+        data = reply.get("data") or {}
+        if (reply.get("code") != 0 or not isinstance(data.get("items"), list)
+                or not isinstance(data.get("has_more"), bool)):
+            raise NativeTableError(f"表格分页读取失败；doc_id={doc_id}")
+        blocks.extend(data["items"])
+        if not data.get("has_more"):
+            break
+        page = data.get("page_token")
+        if not page or page in seen:
+            raise NativeTableError(f"表格分页不完整；doc_id={doc_id}")
+        seen.add(page)
+    after = api("GET", f"{_DOCX}/{doc_id}", token=token)
+    final_revision = ((after.get("data") or {}).get("document") or {}).get("revision_id")
+    if after.get("code") != 0 or final_revision != revision:
+        raise NativeTableError(f"核验期间文档已变化，需重读；doc_id={doc_id}")
+    return blocks
+
+
+def verify_native_tables(token, doc_id, expected_blocks, prefix_blocks=None):
+    expected = _native_table_signature(prefix_blocks or []) + _native_table_signature(expected_blocks)
+    actual = _native_table_signature(_read_document_blocks(token, doc_id))
+    if expected != actual:
+        raise NativeTableError(
+            f"原生表格核验不通过：预期{len(expected)}表，实际{len(actual)}表，"
+            f"行列／单元格内容不一致；保留原文档 doc_id={doc_id}")
+    return {"tables_verified": True, "tables_real": len(actual), "tables_degraded": 0,
+            "table_cells_verified": sum(len(t["cells"]) for t in actual)}
 
 
 def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                         markdown: str = None, title: str = None,
                         grant_open_id: str = None, perm: str = "edit",
-                        visibility: str = "tenant",
-                        cell_budget: int = _MAX_REAL_TABLE_CELLS_PER_DOC,
+                        visibility: str = "tenant", bot_name: str = None,
                         dry_run: bool = False) -> dict:
-    """Markdown → 飞书在线文档，只用 docx 权限（不碰云空间上传/导入）。
+    """Publish native Markdown through the maintained docio/vendor writer.
 
-    2026-08-27 实测（PLAN-980）：
-    - 普通块（标题/段落/列表/引用/代码）可以一次塞 60 个，走 `descendant` 批量写。
-    - **表格无论多小都塞不进 `descendant`**（1x2 的表 9 个块照样 `1770001`）——
-      convert 产出的表格结构与该接口不兼容，和块数无关。
-      正解是「先建空表块（飞书自动生成单元格）→ 逐格填字」，实测 9/9 成功。
-    - 表格代价是 1+行×列 次请求，所以全篇真实表格最多尝试 24 格；`cell_budget` 只能调低，
-      调用方传更大也会被硬截断。失败尝试同样扣预算，绝不通过失败重置预算。
-    - 超预算的表降级成紧凑纯文本；**降级会记进返回值，绝不静默丢内容**。
-
-    visibility: "tenant" 组织内凭链接可读（默认）/ "anyone" 任何已登录飞书的人 / "none" 不动
+    Link16 retains document identity/ACL and independently checks native tables.
+    The former 24-cell budget and pipe-text fallback are retired. A partial
+    write is a failed delivery with a recoverable document ID, not a new import.
     """
+    import docio_cli
     src = Path(file_path) if file_path else None
     if markdown is None:
-        if not src or not src.exists():
+        if not src or not src.is_file():
             raise DocImportError(f"找不到源文件：{file_path}")
-        markdown = src.read_text(encoding="utf-8", errors="replace")
+        markdown = src.read_text(encoding="utf-8")
     doc_title = title or (src.stem if src else "未命名文档")
-    cell_budget = _bounded_real_table_budget(cell_budget)
-    initial_cell_budget = cell_budget
+    selected = docio_cli.resolve_bot(bot_name)
+    if docio_cli.app_id_of(selected) != app_id:
+        raise DocImportError("发布应用与Link16 bot身份不一致，未创建文档")
     if dry_run:
         return {"dry_run": True, "title": doc_title, "chars": len(markdown),
-                "real_table_cell_budget": cell_budget,
-                "chain": ["create_docx", "blocks/convert", "descendant(普通块分批)",
-                          "children(表格逐格填)", f"visibility={visibility}",
-                          "grant_member" if grant_open_id else "skip-grant"]}
-
+                "chain": ["blocks/convert", "create_docx", "docio:docs+update(markdown)",
+                          "verify_native_tables", f"visibility={visibility}"]}
     token = _tenant_token(app_id, app_secret)
+    blocks, _ = _convert_markdown(token, markdown)
+    # Validate expected structure before creating any remote document.
+    _native_table_signature(blocks)
     doc_id = _create_docx(token, doc_title)
-    blocks, first_level = _convert_markdown(token, markdown)
-    by_id = {b["block_id"]: b for b in blocks}
-
-    index = i = 0
-    tables_real = tables_degraded = batches = 0
-    table_cells_attempted = table_cells_filled = table_cells_failed = 0
-    while i < len(first_level):
-        bid = first_level[i]
-        if (by_id.get(bid) or {}).get("block_type") == 31:
-            rows, cols, texts = _table_data(by_id, bid)
-            cell_count = rows * cols
-            if rows and cols and cell_count <= cell_budget:
-                # 先扣再写：空响应/部分失败都不能返还预算，保证整篇尝试量有绝对上界。
-                cell_budget -= cell_count
-                table_cells_attempted += cell_count
-                ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts)
-                table_cells_filled += filled
-                table_cells_failed += len(failed)
-                if ok and not failed:
-                    tables_real += 1
-                    index += 1
-                    i += 1
-                    continue
-                if ok:
-                    # 已创建的部分表格无法原子回滚；紧随其后追加完整逐行文本，保证内容不丢。
-                    index += 1
-            lines = [" | ".join(texts[r * cols:(r + 1) * cols]) for r in range(rows or 0)]
-            # 大表按一段完整纯文本写入，避免逐行/逐格把单篇文档放大成上百次非幂等 API 写入。
-            # 2026-08-30 实测：144 格 PLAN 在第 25/54 次写入收到 HTTP 空正文；24 格预算下成功。
-            table_text = "\n".join(ln for ln in lines if ln.strip())
-            for chunk in _text_chunks(table_text):
-                _create_text_block(token, doc_id, doc_id, chunk)
-                index += 1
-            tables_degraded += 1
-            i += 1
-            continue
-        part = []
-        while i < len(first_level) and (by_id.get(first_level[i]) or {}).get("block_type") != 31:
-            candidate = part + [first_level[i]]
-            if len(_subtree(by_id, candidate)) > _BLOCK_BATCH_LIMIT and part:
-                break
-            part = candidate
-            i += 1
-        if not part:
-            continue
-        try:
-            d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/descendant?document_revision_id=-1",
-                    token=token,
-                    body={"children_id": part, "index": index,
-                          "descendants": _subtree(by_id, part)})
-        except json.JSONDecodeError:  # HTTP 空正文：保留完整纯文本，不让整篇失败
-            d = None
-        if not d or d.get("code") != 0:
-            for bid2 in part:
-                text = _plain_text_of(by_id, bid2)
-                for chunk in _text_chunks(text):
-                    _create_text_block(token, doc_id, doc_id, chunk)
-                    index += 1
-        else:
-            index += len(part)
-            batches += 1
-
+    try:
+        result = docio_cli.run_lark(
+            ["docs", "+update", "--doc", doc_id, "--command", "overwrite",
+             "--doc-format", "markdown", "--content=" + markdown, "--as", "bot"],
+            profile=selected, timeout=300)
+        payload = docio_cli._json_out(result)
+        if result.returncode != 0 or payload.get("ok") is not True:
+            raise NativeTableError(f"原生正文写入失败，保留文档供修复；doc_id={doc_id}")
+        verification = verify_native_tables(token, doc_id, blocks)
+    except Exception as exc:
+        if isinstance(exc, NativeTableError):
+            raise
+        raise NativeTableError(
+            f"原生正文写后核验失败({type(exc).__name__})；保留文档 doc_id={doc_id}") from exc
     granted, grant_error = (None, None)
     if grant_open_id:
         granted, grant_error = _grant_member(token, doc_id, grant_open_id, perm)
@@ -618,12 +611,7 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     if visibility and visibility != "none":
         vis_ok, vis_err = _set_visibility(token, doc_id, visibility)
     return {"url": _doc_url(token, doc_id), "token": doc_id, "type": "docx",
-            "blocks": len(blocks), "batches": batches,
-            "tables_real": tables_real, "tables_degraded": tables_degraded,
-            "table_cell_budget_cap": initial_cell_budget,
-            "table_cells_attempted": table_cells_attempted,
-            "table_cells_filled": table_cells_filled,
-            "table_cells_failed": table_cells_failed,
+            "blocks": len(blocks), **verification,
             "granted": granted, "grant_error": grant_error,
             "visibility": vis_ok, "visibility_error": vis_err}
 

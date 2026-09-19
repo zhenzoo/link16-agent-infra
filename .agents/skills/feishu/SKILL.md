@@ -43,6 +43,7 @@ description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档
 | 读全文、解析wiki链接、表格写回、查文档权限 | `python feishu/docio_cli.py --bot <我> inspect/read/write/doctor ...`；依 SOP-140，媒体插入走上一行 |
 | 发可播放语音 | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"` |
 | 发布飞书在线文档 | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
+| 在正文中写入正式表格 | 新建仍用`send --doc`；原链接用`docio write`的Markdown `overwrite`／`append`，自动回读原生行列与每格内容，见SOP-140；不手拼竖线段落 |
 | 明确发送原文件附件 | `python feishu/send_feishu_file.py --bot <我> --to <oc_群/ou_人> --file <路径>` |
 | 明确把文件正文塞进聊天 | `python feishu/feishu_bridge.py send --bot <我> --file-as-text <路径>`（最后选择；长文可能拆条） |
 | 查某 bot 完整收发历史 | `python feishu/bridge_history.py --bot <bot> --recent 40 --full`（自动与主动出站均含 Feishu message_id） |
@@ -75,6 +76,9 @@ description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档
 - `set-online on|off` 是持久用户偏好，不是一次发送的临时事务。单次在线交付必须用 `--explicit-online`，不得先开全局值再依赖 shell `finally` 恢复；外层执行器超时或被终止会让恢复语句来不及运行。
 - 用户要在线文档就用 `send --doc`；两条在线链都失败时如实报失败与权限/频控原因，**绝不自动发送本地原文件附件**。只有用户明确要“把文件内容发成聊天文字”时才用 `--file-as-text`，不得跨 bot 代发。
 - Markdown/TXT 优先走不依赖 `drive:drive` 的原生 docx；HTML/Office 才优先走 import。在线失败时按需运行权限审计并给修复入口，不擅自降低交付形态。
+- 正文中的表格必须落为飞书原生table／cell块。Markdown可以作为工具输入，但竖线普通文字、图片或代码块不能冒充正式表格；原24格降级预算已退出。新建与原链接覆盖／追加都须逐表核对行列和每格内容；只读回正文或线上已有资源数量不能证明源稿表格被保留。失败保留原文档定位信息，修同一链接，不自动另建或退回附件。
+- 音视频审阅以正文内点播、无需保存原文件为目标；实际播放验证和大小处理依 SOP-141。不得用上传成功冒充播放成功，也不得承诺不使用运行内存或临时缓存。
+- 20MiB 是单次上传通道边界，不是文档视频的统一大小限制；统一媒体工具自动选择分片。720p／小文件是按画质、流量和播放情况选择的审阅规格，不是强制条件。新建和插入均使用同一媒体入口的 `--verify-out`；省略验证只算已上传，不能称为可在线审阅。媒体验证失败保留文档与回执，不能盲目再建一份或退回附件。
 - 只有用户明确说“文件”“附件”或“原文件”时，才使用 `send_feishu_file.py --file`。在线开关、在线 URL 或 `$open-local` 成功都不能外推出附件授权。旧的 `send --file` 已机械拒绝，不能再用。
 - 飞书在线文档和关键网页 URL 必须裸写或写成 `[标签](https://...)`，不得套反引号或代码围栏。
 - 本地路径是默认电脑定位信息；需要手机访问时，用户可以开启全局在线开关或在当前轮明确要求在线稿。

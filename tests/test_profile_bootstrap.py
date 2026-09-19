@@ -16,6 +16,18 @@ import profile_bootstrap as pb  # noqa: E402
 
 
 class ProfileBootstrapTests(unittest.TestCase):
+    def test_skills_only_keeps_shell_hooks_and_other_profiles_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);shell=home/'.bashrc';shell.write_text('owner shell\n')
+            rows=pb.bootstrap(home,apply=True,profiles=('cxp',),skills_only=True)
+            self.assertTrue((home/'.agents/skills/feishu/SKILL.md').is_file())
+            self.assertEqual(shell.read_text(),'owner shell\n')
+            self.assertFalse((home/'.codex-personal').exists())
+            self.assertFalse((home/'.claude-personal').exists())
+            self.assertTrue(all(r['kind']=='skill' for r in rows))
+            again=pb.bootstrap(home,apply=True,profiles=('cxp',),skills_only=True)
+            self.assertTrue(all(r['before']=='ok' for r in again))
+
     def test_apply_creates_three_homes_launcher_and_shell_functions(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

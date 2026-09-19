@@ -24,6 +24,7 @@
       "runtime": "claude",
       "home": "~/.claude",
       "launcher": "direct",
+      "auto_failover": false,
       "label": "Claude Code 默认号"
     },
     "ccp": {
@@ -66,6 +67,7 @@
       "runtime": "codex",
       "home": "~/.codex",
       "launcher": "direct",
+      "auto_failover": false,
       "label": "Codex 默认号"
     },
     "cxp": {

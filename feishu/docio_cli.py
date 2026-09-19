@@ -1043,6 +1043,24 @@ def _write_docx(args, bot, info, patch):
         print("写前拒绝 · str_replace 必须给 pattern")
         return 2
 
+    table_expectation = None
+    if args.apply and body.get("format", "markdown") == "markdown":
+        import feishu_docs
+        try:
+            creds = credential_environment(bot, with_token=True)
+            access = creds["LARKSUITE_CLI_TENANT_ACCESS_TOKEN"]
+            expected_blocks, _ = feishu_docs._convert_markdown(access, content)
+            source_tables = feishu_docs._native_table_signature(expected_blocks)
+            if source_tables and command not in ("overwrite", "append"):
+                print("写前拒绝 · 含表格的局部替换尚不能逐格验收；请用overwrite或append原生Markdown写入")
+                return 2
+            if command in ("overwrite", "append"):
+                prefix = feishu_docs._read_document_blocks(access, token) if command == "append" else []
+                table_expectation = (access, expected_blocks, prefix)
+        except Exception as exc:
+            print(f"写前拒绝 · 无法建立原生表格预期（{type(exc).__name__}），未写入")
+            return 2
+
     before = run_lark(["docs", "+fetch", "--doc", token, "--as", "bot"], profile=bot, timeout=300)
     before_text = ((_json_out(before).get("data") or {}).get("document") or {}).get("content") or ""
     print(f"=== docio write · {bot} · docx · {'apply' if args.apply else 'dry-run（零写入）'} ===")
@@ -1052,7 +1070,7 @@ def _write_docx(args, bot, info, patch):
         print(f"  匹配      {body['pattern'][:60]!r} · 命中 {before_text.count(body['pattern'])} 处")
 
     cmd = ["docs", "+update", "--doc", token, "--command", command,
-           "--doc-format", body.get("format", "markdown"), "--content", content, "--as", "bot"]
+           "--doc-format", body.get("format", "markdown"), "--content=" + content, "--as", "bot"]
     for flag in ("pattern", "block-id", "start-block-id", "end-block-id"):
         value = body.get(flag.replace("-", "_"))
         if value:
@@ -1071,9 +1089,20 @@ def _write_docx(args, bot, info, patch):
         print("  结果      dry-run 通过（未写入）。确认后加 --apply")
         return 0
 
+    # The fetch below can contain every word while a native table is absent.
+    # Compare the source's converted native tables to actual blocks as well.
+    if table_expectation is not None:
+        try:
+            access, expected_blocks, prefix = table_expectation
+            verification = feishu_docs.verify_native_tables(access, token, expected_blocks, prefix)
+        except Exception as exc:
+            print(f"  原生表格  ❌ 核验失败（{type(exc).__name__}）；保留文档 {token}，不视为写成功")
+            return 2
+        print(f"  原生表格  ✅ {verification['tables_real']}表／{verification['table_cells_verified']}格与源稿一致")
+
     after = run_lark(["docs", "+fetch", "--doc", token, "--as", "bot"], profile=bot, timeout=300)
     after_text = ((_json_out(after).get("data") or {}).get("document") or {}).get("content") or ""
-    probe = content.strip().splitlines()[0][:40]
+    probe = re.sub(r"^#{1,6}\s+", "", content.strip().splitlines()[0])[:40]
     if probe and probe not in after_text:
         print(f"  回读核验  ❌ 回读不到写入内容（探针 {probe!r}）；不视为写成功")
         return 2

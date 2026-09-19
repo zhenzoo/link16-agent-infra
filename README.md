@@ -356,6 +356,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 查看 Codex 桥接启动空白与就绪信号整改 | [PLAN-1110：快速启动与真实就绪信号](docs/PLAN-1110-codex-startup-readiness.md) |
 | 理解 Codex 启动为何等待、改后凭什么就绪 | [RESEARCH-080：启动根因与真机验收](docs/RESEARCH-080-codex-startup-readiness.md) |
 | 审查工作中重启飞书桥能否续接原卡和消息 | [RESEARCH-090：原卡续接与持久收件交接](docs/RESEARCH-090-bridge-restart-continuity.md) |
+| 查凌晨更新重启、C 盘持续增长及长期处理方案 | [RESEARCH-100：Windows 更新与系统盘调查](docs/RESEARCH-100-windows-restarts-and-system-disk.md)（方案待审阅） |
 | 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（Codex 版：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
 | 给已有的 bot 改名 | [`docs/SOP-125-bot-rename.md`](docs/SOP-125-bot-rename.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
@@ -364,6 +365,8 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 让智能体互相喊话（a2a） | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) |
 | 给智能体排定时任务 | [`docs/ARCH-150-agent-cron.md`](docs/ARCH-150-agent-cron.md) |
 | 一个账号多个 profile（多号并行） | [`docs/ARCH-120-agent-profile-runtime.md`](docs/ARCH-120-agent-profile-runtime.md) |
+| 查 XHS 自动切到 cxp 后 150 秒未就绪的事故 | [`docs/RESEARCH-020-xhs-cxp-failover-startup.md`](docs/RESEARCH-020-xhs-cxp-failover-startup.md) |
+| 查反复弹出的 node.EXE Terminal 窗口 | [`docs/RESEARCH-030-xhs-preview-terminal-popup.md`](docs/RESEARCH-030-xhs-preview-terminal-popup.md) |
 | **丢一个飞书文档/表格链接给智能体读写** | [`docs/SOP-140-feishu-document-io.md`](docs/SOP-140-feishu-document-io.md)（原理：[`ARCH-130`](docs/ARCH-130-feishu-document-io.md)） |
 | **智能体读不到某份文档，想知道差在哪** | [`docs/SPEC-220-feishu-scope-baseline.md`](docs/SPEC-220-feishu-scope-baseline.md) —— 权限基线、审批判定与协作群 |
 | **找某个工具「有没有现成的」** | [`TOOLS.md`](TOOLS.md) —— 全仓工具索引（SSOT） |

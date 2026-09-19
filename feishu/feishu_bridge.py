@@ -3146,6 +3146,7 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
             result = feishu_docs.publish_text_as_doc(
                 bot["app_id"], bot["app_secret"], path,
                 grant_open_id=grant_open_id, title=name, visibility="tenant",
+                bot_name=bot.get("name"),
             )
             accessible = bool(result.get("visibility") is True
                               or (grant_open_id and result.get("granted") is True))
@@ -3156,6 +3157,8 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
                 f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
             )
         except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "preserve_document", False):
+                raise  # Native write/verification failed: repair the same document.
             errors.append(f"native={str(exc)[:220]}")
 
     try:
@@ -3304,7 +3307,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             except Exception as e:  # noqa: BLE001
                 doc_ok = False
                 doc_error = str(e)[:500]
-                blog(bot_name, f"send --doc 两条在线链均失败: {doc_error}")
+                blog(bot_name, f"send --doc 在线文档未完成: {doc_error}")
                 doc_delivery_mode = "online_doc_failed"
         body = text
         if doc_url:
