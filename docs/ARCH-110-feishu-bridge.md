@@ -339,6 +339,21 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
 - **裸 URL 自动 `_linkify`** 成 `[url](url)` 可点（飞书卡片不自动 linkify 裸网址）。
 - **🔒 机械闸 `_seal_bare_urls`（2026-06-24）**：卡片路径走 `_linkify` 已包链接·**但 `guaranteed_send`(markdown/text 必达兜底/镜像直发) 不经 `_linkify`** → 裸 URL 紧贴 CJK/全角时飞书**原生 autolink 贪婪**把后续中文整段吞进 href（实证：`https://x.com/…872（中文…)` 渲成一整条超链接·href 里 `%EF%BC%88…`）。修：在**最低发送收口 `_send_checked`**（覆盖 guaranteed_send 的 markdown+text）+ `_send_group_text`（a2a 群）对 payload 跑 `_seal_bare_urls`——裸 URL 紧跟非 ASCII 时插一个空格强制 autolink 在 URL 真末尾终止（只在该精确危险态触发·8 例单测过·URL 本身不改·已 `[](){}` 包的靠负 lookbehind 跳过）。软规则（链接单独成行）只是兜底·这道闸才是确定性保证。**改桥代码需重启桥才生效**（别在活会话中途重启）。
 
+### § 2.6.1 · 每张卡片顶部的「工作行」（📌 项目 · 任务 · 2026-09-19 主人定）
+
+> **要解决的事**：十几个 bot 并排在飞书里，翻聊天记录时靠 bot 名认不出它在做哪个项目（TC101P / TC101S 长得太像，主人把消息发反过）。飞书应用名是平台级静态属性，开放 API（`PATCH application/v6/applications/:app_id`）只能改分组/回调，改名只能后台发版；所以不改名，把「当前项目 + 当前任务」焊进**每张卡片的第一行**。
+
+- **样子（主人 2026-09-19 二次定：对象、项目名、要做的动作都要写清，不限一行，先不抠长度；2026-09-20 改成真·标题条，正文里的两行文字主人看不出变化）**：
+  · 卡片 `header`（飞书标题组件，带颜色底）：左侧 carmine 色项目 pill `TC101P` + 标题 `📌 TC101P · 给 TC101P 的 PRD 补可行性章节，交付改好的 PRD.md`（项目 · 对象 + 动作 + 交付结果；plain_text 自动折行）。颜色跟进度走：Stage 链里有 🔴 → red，全 ✅ → green，其余 → blue。
+  · 正文首行 `找素材 ✅ → 写帖子 🔄 → 得出结论 ⏳`（Stage 链带状态；飞书副标题只给一行所以不放 header），下面一条分割线，再是原正文。
+  · `config.summary.content`（飞书客户端**会话列表预览行 / 推送通知**用的就是它）= `📌 TC101P · <对象> ｜ <正文第一句>`，进度链不塞预览。
+  进度卡、答案卡、桥的短回复（`card_send`）三条卡片路都过同一个 `session_work.apply_banner`；已有 `header` 的卡不重复加；a2a 群纯文字不加（peer 协议不动）。
+- **真源**：`feishu/_state/session-work-<bot>.json`（`project` ≤40 字、`task` / `progress` 各 ≤300 字可多行、`source`、`updated`），由 agent 自己在会话里跑 `python feishu/session_work.py set --project <代号> --task "<对象+动作+结果>" --progress "<Stage 链>"` 写；`show` 看、`clear` 清；bot 名取 `FEISHU_BRIDGE_SESSION`，过 `assert_sender_identity` 身份闸，不能改别的 bot 的行。
+- **什么时候改、写什么（agent 的判断活·不是每条消息）**：接到新任务、PLAN 的 Stage 切换、旧任务做完开新任务时改；旧任务完成只写新的、不留旧的。`task` 必须点名具体文档/功能/系统 + 要做的动作 + 交付结果，不写「实现+测试」「调研」这类抽象类别（同 Stage 标题规则）；`progress` 有 PLAN Markdown 就按 PLAN 的 Stage 写，没有就自己概括。规则由 `hooks/bridge_userprompt.py` 每轮以 `additionalContext` 喂给 Claude 会话（附当前顶栏是什么、来源是谁写的），Codex 的 hook 不认这个输出、暂只靠兜底。
+- **兜底**：没写过或已清 → `project` = 会话 cwd 目录名（`bridge-session-<bot>.json`）、`task` = Claude transcript 最后一条 `ai-title`（Claude Code 给终端起的标题，桥本来就 pin 着这份 jsonl）；Codex 没 ai-title → 只剩项目名；连 cwd 都不知道 → 不加顶栏。
+- **清理**：`/new`、`/clear`、`/cd` 都清掉工作行（上下文没了 / 换目录 = 旧行作废），下一个会话自己再写。
+- **容量**：标题 ≤400 字且不占正文预算；正文首行的 Stage 链按 `CARD_HARD 2980 − 正文` 只裁自己尾巴、正文一字不动，所以叠在 `CARD_BUDGET 2800` 上仍在飞书单卡 ~3000 之内；不动分片规则（分片 ID / ACK 不变）。长度还没打磨，先把内容写清再收。
+
 ---
 
 ## § 2.7 · 怎么监控 / 出问题去哪查（每道闸都有痕迹）

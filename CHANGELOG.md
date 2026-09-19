@@ -19,6 +19,15 @@ last_reviewed: 2026-09-14
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.28.0 — 2026-09-20 · 每张飞书卡片带「工作行」标题条：项目 · 对象 · 动作 + Stage 链
+
+- **为什么**：十几个 bot 并排在飞书里，主人翻记录时靠 bot 名认不出它在做哪个项目（TC101P / TC101S 长得像，消息发反过）。飞书应用名是平台级静态属性——开放 API `PATCH application/v6/applications/:app_id` 只能改分组/回调，改名只能后台发版；注册脚本的 `--name` 也只是预填网页。所以不改名，把「当前项目 + 当前任务」焊进每张卡片。
+- **feat `feishu/session_work.py`**：每 bot 一份 `feishu/_state/session-work-<bot>.json`（`project` ≤40 字、`task`/`progress` 各 ≤300 字可多行）。agent 在会话里 `set --project … --task … --progress …` 自己写；`show` / `clear`；bot 名取 `FEISHU_BRIDGE_SESSION`，过 `assert_sender_identity` 身份闸。没写就兜底：project = 会话 cwd 目录名，task = Claude transcript 最后一条 `ai-title`（Codex 没有 → 只剩目录名）。
+- **feat 桥接入（`feishu_bridge.py`）**：`_card_payload` / `card_send` / `_edit_card` 三条发卡路都过 `session_work.apply_banner`：卡片 `header` = carmine 色项目 pill + 标题 `📌 <项目> · <对象+动作+交付结果>`（颜色跟进度：有 🔴 红 / 全 ✅ 绿 / 其余蓝），正文首行 = Stage 链 + 分割线，`config.summary` = 会话列表预览行 `📌 项目 · 对象 ｜ 正文第一句`。a2a 群纯文字不加。`/new` `/clear` `/cd` 清掉工作行。进度链按 `CARD_HARD 2980 − 正文` 只裁自己，正文一字不动，分片规则不变。
+- **feat hook 提醒（`hooks/bridge_userprompt.py`）**：Claude 会话每轮以 `additionalContext` 收到当前顶栏 + 规则：接新任务 / Stage 切换 / 旧任务做完时才改，写真实当前情况的大白话，点名具体对象与动作，不写格式词或样例。Codex 的规则走 `$agent-profile-governance` 的 Codex 模板（已渲染进 cx/cxp 的 AGENTS.md）。
+- **一键关 / 删（主人 2026-09-20 要求零耦合）**：总开关 `session_work.enabled()`——环境变量 `LINK16_WORK_LINE=off` 或 `DEFAULT_ENABLED=False`，关掉后卡片和会话回到没这功能之前的样子；彻底删 = 删 `session_work.py` + 测试 + `feishu_bridge.py` 5 处单行调用 + hook 的 `_work_context` 段。
+- 验证：`tests/test_session_work.py` 17 passed（状态/兜底/标题条/颜色/预算/幂等/身份闸/hook 上下文/总开关）；全量 921 passed；真机 tb25-link16 桥重启三次，owner DM 收到带标题条的进度卡、答案卡、演示卡。机制文档 ARCH-110 §2.6.1，工具登记 TOOLS.md。
+
 ## v0.27.1 — 2026-09-19 · 删除文档表格"全篇 24 格"硬闸，改修真正的根因
 
 - **删除** v0.18.1（2026-08-30 02:07 无人值守 session 自行加的）`_MAX_REAL_TABLE_CELLS_PER_DOC = 24` 及 `cell_budget` 参数：它把任何超过 24 格的 Markdown 表格整表转成 `" | ".join` 纯文本，实测 RESEARCH-010 四张 45/25/25/33 格的表全部降级、回读 `tables fetched 0`。主人从未授权这条闸。
