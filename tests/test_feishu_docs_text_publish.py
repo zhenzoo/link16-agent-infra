@@ -198,6 +198,18 @@ class NativeTableSafetyTests(unittest.TestCase):
         self.assertEqual(gets, 1)
         self.assertEqual(posts, [f"c{i}" for i in range(45)])
 
+    def test_many_narrow_columns_never_get_negative_or_sub_minimum_widths(self):
+        """tb24 2026-09-19 真机：3×12 短文本表，原算法给第 1 列 -258px → 飞书 1770006 → 整表降级成纯文本。"""
+        for cols in (9, 12, 20):
+            with self.subTest(cols=cols):
+                widths = feishu_docs._fill_widths(cols, [f"a{i}" for i in range(cols * 3)])
+                self.assertEqual(len(widths), cols)
+                self.assertGreaterEqual(min(widths), feishu_docs._TABLE_MIN_COL_WIDTH)
+        skewed = feishu_docs._fill_widths(12, ["一段很长很长的中文内容用来测试权重严重不均"] + ["a"] * 35)
+        self.assertGreaterEqual(min(skewed), feishu_docs._TABLE_MIN_COL_WIDTH)
+        self.assertGreater(skewed[0], feishu_docs._TABLE_MIN_COL_WIDTH)  # 长格的列仍按内容加宽
+        self.assertEqual(feishu_docs._fill_widths(12, None), [feishu_docs._TABLE_MIN_COL_WIDTH] * 12)
+
     def test_column_widths_fill_the_page_in_proportion_to_content(self):
         """默认 taste：表铺满正文宽（732），列宽 ∝ 该列最长内容 → 各列换行后行数接近；短列有下限。"""
         texts = ["#", "步骤", "依据",

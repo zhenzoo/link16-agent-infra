@@ -561,11 +561,22 @@ def _fill_widths(cols: int, texts=None) -> list:
             weights[c] = max(1.0, (max(lens) + sum(lens) / len(lens)) / 2) if lens else 1.0
         need = int(sum(longest) * _PX_PER_UNIT / _TARGET_LINES)
         total_width = min(_TABLE_MAX_WIDTH, max(_TABLE_FILL_WIDTH, need))
+    if cols * _TABLE_MIN_COL_WIDTH > total_width:
+        # 列数多到 cols×下限 > 总宽（12 列短文本 = 1080 > 732）时，732～1040 的总宽 taste 装不下：
+        # 原逻辑把每列抬到 90 再从最宽列扣差额，会扣出负宽度 → 飞书 1770006 schema mismatch，
+        # 整表降级成纯文本（tb24 2026-09-19 真机 3×12 实测）。宽表改为每列独立按内容定宽
+        # （不低于下限、长格约 1.5 行放得下），表比页宽横向滚动，比列窄到读不了强。
+        if not texts:
+            return [_TABLE_MIN_COL_WIDTH] * cols
+        return [max(_TABLE_MIN_COL_WIDTH, int(n * _PX_PER_UNIT / _TARGET_LINES)) for n in longest]
     total = float(sum(weights)) or 1.0
     widths = [max(_TABLE_MIN_COL_WIDTH, int(total_width * w / total)) for w in weights]
     # 修正下限抬高/取整造成的偏差：多退少补，只动最宽的列，保证总和精确
     diff = total_width - sum(widths)
     widths[widths.index(max(widths))] += diff
+    if min(widths) < _TABLE_MIN_COL_WIDTH:   # 兜底：极端权重下仍不让任何列低于下限
+        base = max(_TABLE_MIN_COL_WIDTH, total_width // cols)
+        widths = [base] * cols
     return widths
 
 
