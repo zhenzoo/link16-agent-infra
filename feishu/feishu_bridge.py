@@ -86,10 +86,6 @@ CARD_SEND_TIMEOUT = 15
 # (典型撞 auto-compact·上下文满时提交被压缩吃掉) → doctor 必达重投+通知。取 120s：远超正常轮（含纯思考），
 # 又远早于"用户干等到放弃"。doctor 每 30s 巡一次 → 实际恢复在 ~timeout+30s 内。
 PENDING_TIMEOUT_SEC = 120
-# 静默升级闸（2026-08-29 定）：结构闸判「还在跑·不重投」是对的，但它没有尽头 —— 回传通道死掉时
-# agentStatus 照样 running，桥会一直打「判长任务」直到天荒地老（实证：codex 观察者断线，连打 8 小时）。
-# 「还在跑」证明不了「回得来」→ 零回传超过这么久就当故障喊一次人（远超正常长任务，又不至于让人干等一夜）。
-SILENT_ALERT_MIN = 30
 # ⚠️ 这里**故意没有**「单 bot 回退默认」。曾经有过一个 DEFAULT_BOT，写死
 # FEISHU_BRIDGE_APP_ID + @tb24-xhs-autopilot —— 而 .env 是跨机同步的，于是任何一台
 # 没配名册的机器一起桥就去连【别人机器的】飞书应用。2026-08-17 实证：tuf19 首次起桥
@@ -105,6 +101,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from jsonl_reply_extract import extract  # noqa: E402  (find_ask_picker 退役·答题侧改结构化 bridge-picker 状态·ARCH-101 §2.10)
 import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
+import bridge_activity
 import bridge_outbound  # noqa: E402 (统一自动/主动出站历史)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
 import bridge_process
@@ -2796,21 +2793,17 @@ def _run_bot(bot_name=None):
             blog(bname, msg)
 
         _silent_alerted = {"at": 0.0}                      # 上次喊人的时刻·同一场静默只喊一次
+        _silence = bridge_activity.SilenceClock()
 
         async def _silent_escalate(why):
-            """结构闸判「不重投」之后的**时间闸**：回程静默久到不正常，就说一声。
-
-            picker/agentStatus 只能证明【会话没死】，证明不了【回程还通】—— 回传通道断掉时
-            agentStatus 依然 running，于是「判长任务·不误报重投」这行会无限打下去，主人只会以为
-            它在认真想（2026-08-29 事故：整整 8 小时零回传，没有任何一处喊过人）。
-
-            判据取 **outbox 最后一次被写的时间**，不取这条 pending 的注入时间：定时任务每 5 分钟
-            注一条就会把 pending 的计时刷新一次，用它当判据永远够不到阈值 —— 今天的事故恰好是
-            这个形状（cron 每 5 分钟唤醒一次）。回程静没静，只有 outbox 说了算。
-            """
+            """与看门狗共用状态和一小时计时；等待不算回传故障。"""
+            if bridge_outbox.picker_load(ad, bname) is not None:
+                _silence.reset(bname)
+                return
             now = time.time()
-            mins = bridge_outbox.silent_minutes(ad, bname, now=now)
-            if mins is None or mins < SILENT_ALERT_MIN or now - _silent_alerted["at"] < 3600:
+            activity = await asyncio.to_thread(_silence.sample, ad, bname)
+            mins = activity["minutes"]
+            if mins is None or mins < bridge_activity.SILENT_MINUTES or now - _silent_alerted["at"] < 3600:
                 return
             _silent_alerted["at"] = now
             mins = int(mins)
