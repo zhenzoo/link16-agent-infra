@@ -120,6 +120,26 @@ class LoopbackTransportTests(unittest.TestCase):
         self.assertIn("proxy", captured)
         self.assertIsNone(captured["proxy"])
 
+    def test_tui_and_app_server_env_exempts_loopback_from_proxy(self):
+        """面板 `codex --remote ws://127.0.0.1` 照单全收 HTTPS_PROXY（2026-09-20 tb26-baseball 被 xray 掐线）；
+        环境只补 NO_PROXY 例外名单，HTTPS_PROXY 本身不动（模型调用照旧走代理）。"""
+        import os
+        cases = (
+            {"HTTPS_PROXY": "http://127.0.0.1:7897"},
+            {"HTTPS_PROXY": "http://127.0.0.1:7897", "NO_PROXY": "example.com, localhost"},
+        )
+        for inherited in cases:
+            with self.subTest(inherited=inherited), mock.patch.dict(os.environ, inherited, clear=True):
+                env = worker.worker_environment("test", "/selected/home", "/business/state")
+            for key in ("NO_PROXY", "no_proxy"):
+                hosts = env[key].split(",")
+                self.assertEqual(len(hosts), len(set(hosts)), env[key])
+                for host in worker.LOOPBACK_NO_PROXY:
+                    self.assertIn(host, hosts)
+            if "NO_PROXY" in inherited:
+                self.assertTrue(env["NO_PROXY"].startswith("example.com,localhost"))
+            self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:7897")
+
 
 class ObserverSlotTests(unittest.TestCase):
     """速记员席位 = 硬闸。两个速记员同时抄同一条 thread → 同一条 final 写两遍 outbox →

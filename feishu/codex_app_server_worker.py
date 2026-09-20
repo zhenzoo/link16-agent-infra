@@ -32,6 +32,23 @@ WARMUP_TIMEOUT_SEC = 120
 RECONNECT_MAX_BACKOFF = 30      # 秒·重连退避上限
 RECONNECT_ALERT_AFTER = 120     # 秒·重连这么久还挂不回去 → 告诉主人一声（走 outbox·飞书看得见）
 EXIT_SLOT_TAKEN = 3             # 退出码·席位已被别的速记员占着（调用方据此别重试）
+LOOPBACK_NO_PROXY = ("127.0.0.1", "localhost", "::1")   # 本机内线永远不经代理
+
+
+def _with_loopback_no_proxy(env):
+    """把本机地址补进 NO_PROXY 例外名单；HTTP(S)_PROXY 本身一个字不动。
+
+    面板 `codex --remote ws://127.0.0.1:<port>` 会照单全收 HTTP(S)_PROXY，把本该 loopback 直连的
+    「面板↔app-server」内线塞给 xray 转发。代理隧道按自己的闲置策略掐线：2026-09-20 tb26-baseball
+    14:56:19 / 15:06:19 两次被掐 → 面板打出「Reconnected. No input was resent…」→ 之后注入的消息
+    卡在面板里、app-server 零 Submission。08-29 只修了下面速记员自己的 websocket（proxy=None），
+    面板这一跳漏了。判据仍是机械信号：面板进程 established 对端端口 == app-server 端口才算直连。
+    """
+    for key in ("NO_PROXY", "no_proxy"):
+        existing = [item.strip() for item in env.get(key, "").split(",") if item.strip()]
+        env[key] = ",".join(existing + [host for host in LOOPBACK_NO_PROXY if host not in existing])
+    return env
+
 
 def worker_environment(bot, codex_home, state_dir):
     env = os.environ.copy()
@@ -40,7 +57,7 @@ def worker_environment(bot, codex_home, state_dir):
     env["FEISHU_BRIDGE_SESSION"] = bot
     env["FEISHU_BRIDGE_OUTBOX_DIR"] = str(state_dir)
     env["FEISHU_CODEX_EVENT_STREAM"] = "1"
-    return env
+    return _with_loopback_no_proxy(env)
 
 
 def _free_port() -> int:
