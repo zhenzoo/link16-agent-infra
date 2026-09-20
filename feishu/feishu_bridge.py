@@ -82,6 +82,10 @@ SEND_RETRY_BACKOFF = (0, 2, 5)    # channel.send 失败重试等待秒（retryab
 # ~150s 检出重启才解冻（=「这一轮没回·下一轮才补」）。给发卡 await 包 asyncio.wait_for 把冻结上限钉到此值
 # → drainer 自己 15s 内解冻、走既有 fallback、根本用不到 doctor 出手。取 15s：覆盖正常+偶发慢发，远早于自愈介入。
 CARD_SEND_TIMEOUT = 15
+# 建卡抛异常（超时/网络）时的重试次数与间隔（2026-09-20 主人定：试满 3 次才降纯文本，别一次超时就发 Markdown 源码）。
+# 只对答案/追问生效、进度卡仍单发；最坏 3×15s+2×2s≈49s 才降级，仍远早于 doctor ~150s 的自愈介入。
+CARD_SEND_ATTEMPTS = 3
+CARD_SEND_RETRY_WAIT = 2
 # 投递保证（§2.13）：注入一条消息后，该 bot outbox 这么久仍零活动(无 progress/无 answer) → 判那一轮被吃/卡
 # (典型撞 auto-compact·上下文满时提交被压缩吃掉) → doctor 必达重投+通知。取 120s：远超正常轮（含纯思考），
 # 又远早于"用户干等到放弃"。doctor 每 30s 巡一次 → 实际恢复在 ~timeout+30s 内。
@@ -1906,29 +1910,41 @@ async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, rou
                                "err": str(exc)[:120], "len": len(text or "")})
             return {"ok": False, "message_id": None}
 
-    try:
-        mid = await asyncio.wait_for(
-            asyncio.to_thread(
-                _send_interactive_message, bot["app_id"], bot["app_secret"], target,
-                _card_payload(text, at if kind == "p2a-ext" else None), message_uuid,
-            ), CARD_SEND_TIMEOUT,
-        )
+    # 建卡抛异常（超时/网络抖动）才重试，且只重试答案/追问；进度卡照旧一发即过，别拖慢实时进度。
+    # 几次尝试共用同一个 uuid：万一第一次其实已送达只是回包超时，飞书按 uuid 去重，不会双发。
+    attempts = CARD_SEND_ATTEMPTS if purpose != "progress" else 1
+    if attempts > 1 and not message_uuid:
+        message_uuid = str(uuid.uuid4())
+    for attempt in range(1, attempts + 1):
+        try:
+            mid = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _send_interactive_message, bot["app_id"], bot["app_secret"], target,
+                    _card_payload(text, at if kind == "p2a-ext" else None), message_uuid,
+                ), CARD_SEND_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc)[:80] or type(exc).__name__
+            if attempt < attempts:
+                blog(bot_name, f"🃏 new_card 第{attempt}次失败({err})·{CARD_SEND_RETRY_WAIT}s 后重试")
+                await asyncio.sleep(CARD_SEND_RETRY_WAIT)
+                continue
+            blog(bot_name, f"🃏 new_card 失败({err})·已试 {attempts} 次 → 降纯文本")
+            receipt(bot_name, {**base, "kind": "new_card", "requested": "interactive",
+                               "delivered": False, "via": None, "fallback": "text",
+                               "attempts": attempt,
+                               "err": str(exc)[:120] or type(exc).__name__, "len": len(text or "")})
+            return {"ok": False, "message_id": None}
         ok = bool(mid)
         history_recorded = bool(mid) and _record_automatic_outbound(
             bot_name, effective, target, text, mid, fragment,
         )
         receipt(bot_name, {**base, "kind": "new_card", "requested": "interactive",
                            "delivered": ok, "via": "card" if ok else None, "mid": mid,
-                           "history_recorded": history_recorded,
+                           "history_recorded": history_recorded, "attempts": attempt,
                            "fallback": None if ok else "text",
                            "err": None if ok else "empty_message_id", "len": len(text or "")})
         return {"ok": ok, "message_id": mid}
-    except Exception as exc:  # noqa: BLE001
-        blog(bot_name, f"🃏 new_card 失败({str(exc)[:80] or type(exc).__name__})")
-        receipt(bot_name, {**base, "kind": "new_card", "requested": "interactive",
-                           "delivered": False, "via": None, "fallback": "text",
-                           "err": str(exc)[:120] or type(exc).__name__, "len": len(text or "")})
-        return {"ok": False, "message_id": None}
 
 
 async def _deliver_routed_plain(bot, bot_name, text, route, purpose, fragment, route_to_dest):

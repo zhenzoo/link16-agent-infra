@@ -333,6 +333,63 @@ class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(row.get("fallback") == "text" for row in self.receipts))
         self.assertTrue(any(row.get("degraded") is True for row in self.receipts))
 
+    async def test_card_timeout_retries_with_same_uuid_before_giving_up(self):
+        """建卡超时/网络异常 → 同一 uuid 重试到 CARD_SEND_ATTEMPTS 次；第 2 次成功就不降级、不双发。"""
+        calls = []
+
+        def flaky(_aid, _secret, _target, _payload, message_uuid=None):
+            calls.append(message_uuid)
+            if len(calls) == 1:
+                raise TimeoutError()
+            return "om_card"
+
+        with mock.patch.object(feishu_bridge, "_send_interactive_message", side_effect=flaky), \
+             mock.patch.object(feishu_bridge, "CARD_SEND_RETRY_WAIT", 0), \
+             mock.patch.object(feishu_bridge, "receipt", side_effect=lambda _bot, row: self.receipts.append(row)), \
+             mock.patch.object(feishu_bridge, "blog"):
+            result = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "答案", {"kind": "p2a", "dest": "oc_dm"},
+                "answer", None, self.route_to_dest,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(len(calls[0]), 36)
+        self.assertEqual([row["kind"] for row in self.receipts], ["new_card"])
+        self.assertEqual(self.receipts[0]["attempts"], 2)
+        self.assertIsNone(self.receipts[0]["fallback"])
+
+    async def test_card_gives_up_after_all_attempts_and_progress_never_retries(self):
+        answer_calls, progress_calls = [], []
+
+        def always_timeout(bucket):
+            def _send(*_args, **_kwargs):
+                bucket.append(1)
+                raise TimeoutError()
+            return _send
+
+        with mock.patch.object(feishu_bridge, "_send_interactive_message", side_effect=always_timeout(answer_calls)), \
+             mock.patch.object(feishu_bridge, "CARD_SEND_RETRY_WAIT", 0), \
+             mock.patch.object(feishu_bridge, "receipt", side_effect=lambda _bot, row: self.receipts.append(row)), \
+             mock.patch.object(feishu_bridge, "blog"):
+            answer = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "答案", {"kind": "p2a", "dest": "oc_dm"},
+                "answer", None, self.route_to_dest,
+            )
+        with mock.patch.object(feishu_bridge, "_send_interactive_message", side_effect=always_timeout(progress_calls)), \
+             mock.patch.object(feishu_bridge, "receipt", side_effect=lambda _bot, row: self.receipts.append(row)), \
+             mock.patch.object(feishu_bridge, "blog"):
+            progress = await feishu_bridge._deliver_routed_new(
+                self.bot, "bot", "进度", {"kind": "p2a", "dest": "oc_dm"},
+                "progress", None, self.route_to_dest,
+            )
+        self.assertFalse(answer["ok"])
+        self.assertFalse(progress["ok"])
+        self.assertEqual(len(answer_calls), feishu_bridge.CARD_SEND_ATTEMPTS)
+        self.assertEqual(len(progress_calls), 1)
+        self.assertEqual([row["fallback"] for row in self.receipts], ["text", "text"])
+        self.assertEqual([row["attempts"] for row in self.receipts], [feishu_bridge.CARD_SEND_ATTEMPTS, 1])
+
 
 class DocumentReconciliationTests(unittest.IsolatedAsyncioTestCase):
     async def drain(self, records, state, fake):
