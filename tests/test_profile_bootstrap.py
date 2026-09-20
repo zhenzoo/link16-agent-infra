@@ -154,8 +154,8 @@ class ProfileBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             target = home / ".agents" / "skills" / "feishu"
-            target.mkdir(parents=True)
-            shutil.copy2(pb.FEISHU_SKILL_SOURCE / "SKILL.md", target / "SKILL.md")
+            # 技能目录现在不止 SKILL.md（还有 references/），同 hash 的判据是整棵树，整目录拷贝才算「同内容」。
+            shutil.copytree(pb.FEISHU_SKILL_SOURCE, target)
             rows = pb.bootstrap(home, apply=True, profiles=("cxp",))
             self.assertEqual(next(row for row in rows if row["kind"] == "skill")["status"], "ok")
             self.assertTrue((target / pb.SKILL_MANIFEST).is_file())
