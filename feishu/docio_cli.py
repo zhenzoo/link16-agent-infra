@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bridge_scope_audit as audit  # noqa: E402
 import feishu_rest as rest  # noqa: E402
 from bridge_env import bots_config_path  # noqa: E402
+from doc_xml_structure import xml_contract, verify_xml
+from doc_structure import DocStructureError
 
 PROJECT = Path(__file__).resolve().parent.parent
 SESSION_ENV = "FEISHU_BRIDGE_SESSION"
@@ -1046,16 +1048,43 @@ def _write_docx(args, bot, info, patch):
         print("写前拒绝 · str_replace 必须给 pattern")
         return 2
 
-    before = run_lark(["docs", "+fetch", "--doc", token, "--as", "bot"], profile=bot, timeout=300)
-    before_text = ((_json_out(before).get("data") or {}).get("document") or {}).get("content") or ""
+    if body.get("format") != "xml":
+        print("写前拒绝 · 在线文档更新必须提供原生 XML；本地 Markdown 创建走 send --doc 编译路径")
+        return 2
+    try:
+        xml_contract(content)
+    except DocStructureError as exc:
+        print(f"写前拒绝 · {exc}")
+        return 2
+
+    before = run_lark(["docs", "+fetch", "--doc", token, "--detail", "full", "--as", "bot"], profile=bot, timeout=300)
+    before_payload = _json_out(before)
+    before_doc = (before_payload.get("data") or {}).get("document") or {}
+    before_text = before_doc.get("content") or ""
+    revision = before_doc.get("revision_id")
+    if before.returncode != 0 or before_payload.get("ok") is not True or revision is None:
+        print("写前拒绝 · 未完整读到当前文档与 revision，不能绑定此次修改")
+        return 2
+    if body.get("revision_id") is not None and str(body["revision_id"]) != str(revision):
+        print("写前拒绝 · 文档版本已变化，请重读并合并用户改动")
+        return 2
+    expected = content if command == "overwrite" else (before_text + content if command == "append" else body.get("expected_document"))
+    try:
+        xml_contract(expected or '')
+    except DocStructureError as exc:
+        print(f"写前拒绝 · 局部修改须提供完整 expected_document XML：{exc}")
+        return 2
     print(f"=== docio write · {bot} · docx · {'apply' if args.apply else 'dry-run（零写入）'} ===")
     print(f"  文档      {info.get('title') or token}（当前 {len(before_text)} 字符）")
     print(f"  命令      {command} · 写入 {len(content)} 字符")
     if command == "str_replace":
         print(f"  匹配      {body['pattern'][:60]!r} · 命中 {before_text.count(body['pattern'])} 处")
 
+    content_path = Path(args.patch).resolve().with_name(
+        Path(args.patch).stem + '.' + hashlib.sha256(content.encode('utf-8')).hexdigest()[:12] + '.xml')
+    content_path.write_text(content, encoding='utf-8')
     cmd = ["docs", "+update", "--doc", token, "--command", command,
-           "--doc-format", body.get("format", "markdown"), "--content", content, "--as", "bot"]
+           "--doc-format", "xml", "--content", '@' + str(content_path), "--revision-id", str(revision), "--as", "bot"]
     for flag in ("pattern", "block-id", "start-block-id", "end-block-id"):
         value = body.get(flag.replace("-", "_"))
         if value:
@@ -1064,23 +1093,38 @@ def _write_docx(args, bot, info, patch):
         cmd.append("--dry-run")
     result = run_lark(cmd, profile=bot, timeout=300)
     payload = _json_out(result)
-    if result.returncode != 0 or payload.get("ok") is not True:
+    if (result.returncode != 0 or payload.get("ok") is not True
+            or (payload.get('data') or {}).get('result', 'success') not in ('success', 'dry_run')):
         verdict = classify_failure((result.stdout or "") + (result.stderr or ""), bot)
         print(f"  结果      ❌ {verdict['verdict']}")
         if verdict.get("hint"):
             print(f"            {verdict['hint']}")
         return 2
     if not args.apply:
-        print("  结果      dry-run 通过（未写入）。确认后加 --apply")
+        print("  结果      dry-run 通过（未写入）；已获写入授权时使用 --apply")
         return 0
 
-    after = run_lark(["docs", "+fetch", "--doc", token, "--as", "bot"], profile=bot, timeout=300)
-    after_text = ((_json_out(after).get("data") or {}).get("document") or {}).get("content") or ""
-    probe = content.strip().splitlines()[0][:40]
-    if probe and probe not in after_text:
-        print(f"  回读核验  ❌ 回读不到写入内容（探针 {probe!r}）；不视为写成功")
+    after = run_lark(["docs", "+fetch", "--doc", token, "--detail", "full", "--as", "bot"], profile=bot, timeout=300)
+    after_payload = _json_out(after)
+    after_text = ((after_payload.get("data") or {}).get("document") or {}).get("content") or ""
+    try:
+        if after.returncode != 0 or after_payload.get("ok") is not True:
+            raise DocStructureError('无法完整回读')
+        verified = verify_xml(expected, after_text)
+        after_revision = ((after_payload.get('data') or {}).get('document') or {}).get('revision_id')
+        if after_revision is None or int(after_revision) <= int(revision):
+            raise DocStructureError('回读版本未前进，不能证明此次修改已生效')
+    except DocStructureError as exc:
+        print(f"  回读核验  ❌ {exc}；文档可能部分写入，禁止作为成功交付")
         return 2
-    print(f"  回读核验  ✅ 内容已在正文中（{len(before_text)} → {len(after_text)} 字符）")
+    receipt = {**verified, 'document': token, 'before_revision': revision,
+               'after_revision': ((after_payload.get('data') or {}).get('document') or {}).get('revision_id'),
+               'covers': 'Full native XML body, ordered links, structures, styles and resource identities',
+               'caught': 'Matching first line with a missing later section is rejected by test_docio_xml_structure.py',
+               'judge': 'Mechanical structure/content; visual readability remains human review'}
+    receipt_path = Path(args.patch).with_name(Path(args.patch).stem + '.docx-receipt.json')
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f"  回读核验  ✅ 全文、链接、样式、原生结构与资源一致；回执 {receipt_path}")
     return 0
 
 
@@ -1251,6 +1295,101 @@ def cmd_share(args):
     return 0
 
 
+def owner_open_id(bot):
+    """The human this bot answers to, as the bridge persisted it (`bridge-owner-<bot>.json`).
+
+    open_id is per-app, so only the creating bot's own owner file names the right
+    person for a document that bot created. No file → None; never guess a person.
+    """
+    state = os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR")
+    base = Path(state) if state and os.path.isdir(state) else Path(__file__).resolve().parent / "_state"
+    f = base / f"bridge-owner-{bot}.json"
+    try:
+        rec = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return rec.get("open_id") if isinstance(rec, dict) else None
+
+
+def _doc_owner_id(bot, token, kind):
+    """Read back the document's owner via drive metas (empty string when unreadable)."""
+    try:
+        import send_feishu_msg as sfm
+        creds = sfm._creds_for(bot)  # noqa: SLF001 — same resolver the bridge uses
+    except Exception:  # noqa: BLE001
+        creds = None
+    if not creds:
+        return ""
+    try:
+        tok = rest.tenant_token(*creds)
+        d = rest.api("POST", "https://open.feishu.cn/open-apis/drive/v1/metas/batch_query?user_id_type=open_id",
+                     token=tok,
+                     body={"request_docs": [{"doc_token": token, "doc_type": kind}], "with_url": False})
+        metas = (d.get("data") or {}).get("metas") or []
+        return (metas[0].get("owner_id") or "") if metas else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def cmd_transfer_owner(args):
+    """把 bot 建的文档所有权交给主人（bot 保留 full_access）。默认 dry-run。
+
+    Documents a bot creates through the tenant token are owned by the app, so a
+    human's permission request goes to nobody. Handing ownership to the bot's
+    owner puts the share panel and requests in the human's hands; keeping the
+    old owner at full_access leaves every Link16 update path intact. Nothing
+    else on the document changes (no extra collaborators, no share settings).
+    """
+    bot = resolve_bot(args.bot)
+    target = args.to or owner_open_id(bot)
+    if not target:
+        raise SystemExit(f"{bot} 还没有 owner 文件（主人私聊它一次即认主），也没给 --to <open_id>；不猜人")
+    info = inspect_url(args.url, bot)
+    if not info.get("ok"):
+        print(f"移交中止 · {info['verdict']}")
+        if info.get("hint"):
+            print(f"  {info['hint']}")
+        return 2
+    kind, token = (info.get("type") or "docx"), info.get("token")
+    print(f"=== docio transfer-owner · {bot} · {'apply' if args.apply else 'dry-run（零写入）'} ===")
+    print(f"  资源      {kind} · {info.get('title') or token}")
+    print(f"  新所有者  {target}{'（--to 指定）' if args.to else '（本 bot 的主人）'}")
+    print(f"  原所有者  保留 {args.old_owner_perm}，不通知")
+    current = _doc_owner_id(bot, token, kind)
+    if current and current == target:
+        print("  现状      所有者已经是目标人（无需移交）")
+        transfer_needed = False
+    else:
+        print(f"  现状      当前所有者 {current or '（读不到）'}")
+        transfer_needed = True
+    if not args.apply:
+        print("  结果      dry-run（未改动）。确认后加 --apply")
+        return 0
+
+    if transfer_needed:
+        # Ownership transfer is a high-risk write in the vendor CLI; --apply is
+        # the explicit human decision that authorises --yes for this resource.
+        result = run_lark(["drive", "permission.members", "transfer_owner",
+                           "--token", token, "--type", kind,
+                           "--data", json.dumps({"member_type": "openid", "member_id": target}),
+                           "--old-owner-perm", args.old_owner_perm,
+                           "--params", json.dumps({"need_notification": False}),
+                           "--as", "bot", "--yes"], profile=bot, timeout=300)
+        payload = _json_out(result)
+        if result.returncode != 0 or payload.get("ok") is not True:
+            verdict = classify_failure((result.stdout or "") + (result.stderr or ""), bot)
+            print(f"  结果      ❌ 移交失败 · {verdict['verdict']}")
+            if verdict.get("hint"):
+                print(f"            {verdict['hint']}")
+            return 2
+        after = _doc_owner_id(bot, token, kind)
+        if after != target:
+            print(f"  结果      ❌ 接口返回成功但回读所有者仍是 {after or '（读不到）'}；不报成功")
+            return 2
+        print("  结果      ✅ 所有者已回读为目标人；本 bot 保留 " + args.old_owner_perm)
+    return 0
+
+
 def cmd_coverage(args):
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
     if manifest.get("schema") != MANIFEST_SCHEMA:
@@ -1298,6 +1437,15 @@ def main(argv=None):
     p_share.add_argument("--perm", default="edit", choices=("view", "edit", "full_access"))
     p_share.add_argument("--apply", action="store_true", help="真正挂上（缺省只预览）")
     p_share.set_defaults(func=cmd_share)
+
+    p_own = sub.add_parser("transfer-owner",
+                           help="把 bot 建的文档所有权交给主人，bot 保留可管理（默认 dry-run）")
+    p_own.add_argument("url")
+    p_own.add_argument("--to", help="新所有者 open_id（本 app 视角）；缺省 = 本 bot 的主人（owner 文件）")
+    p_own.add_argument("--old-owner-perm", default="full_access", choices=("view", "edit", "full_access"),
+                       help="移交后 bot 自己保留的权限（默认 full_access）")
+    p_own.add_argument("--apply", action="store_true", help="真正移交（缺省只预览）")
+    p_own.set_defaults(func=cmd_transfer_owner)
 
     p_cov = sub.add_parser("coverage", help="按 manifest 机械判定是否读全")
     p_cov.add_argument("manifest")

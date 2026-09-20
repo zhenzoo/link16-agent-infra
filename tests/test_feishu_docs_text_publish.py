@@ -59,7 +59,7 @@ class NativeTableSafetyTests(unittest.TestCase):
         self.assertEqual(filled, 1)
         self.assertEqual(failed, [1])
 
-    def test_empty_response_in_table_cell_enters_plain_text_fallback(self):
+    def test_empty_response_in_table_cell_reports_failure_without_retry(self):
         calls = 0
 
         def api(_method, url, token=None, body=None):
@@ -107,7 +107,7 @@ class NativeTableSafetyTests(unittest.TestCase):
         self.assertEqual(feishu_docs._bounded_real_table_budget(12), 12)
         self.assertEqual(feishu_docs._bounded_real_table_budget(-1), 0)
 
-    def test_failed_table_attempt_does_not_refund_the_document_budget(self):
+    def test_native_budget_failure_happens_before_document_creation(self):
         blocks = [
             {"block_id": "t1", "block_type": 31,
              "table": {"property": {"row_size": 1, "column_size": 1}},
@@ -123,7 +123,7 @@ class NativeTableSafetyTests(unittest.TestCase):
              "text": {"elements": [{"text_run": {"content": "second"}}]}},
         ]
         with mock.patch.object(feishu_docs, "_tenant_token", return_value="token"), \
-                mock.patch.object(feishu_docs, "_create_docx", return_value="doc"), \
+                mock.patch.object(feishu_docs, "_create_docx", return_value="doc") as create, \
                 mock.patch.object(feishu_docs, "_convert_markdown",
                                   return_value=(blocks, ["t1", "t2"])), \
                 mock.patch.object(feishu_docs, "_insert_real_table",
@@ -131,14 +131,13 @@ class NativeTableSafetyTests(unittest.TestCase):
                 mock.patch.object(feishu_docs, "_create_text_block"), \
                 mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"), \
                 mock.patch.object(feishu_docs, "_set_visibility"):
-            result = feishu_docs.publish_text_as_doc(
-                "app", "secret", markdown="tables", visibility="none", cell_budget=1,
-            )
-
-        insert.assert_called_once()
-        self.assertEqual(result["table_cell_budget_cap"], 1)
-        self.assertEqual(result["table_cells_attempted"], 1)
-        self.assertEqual(result["tables_degraded"], 2)
+            with self.assertRaisesRegex(feishu_docs.DocStructureError, 'exceed'):
+                feishu_docs.publish_text_as_doc(
+                    "app", "secret", markdown="tables", visibility="none", cell_budget=1,
+                    table_layout="native",
+                )
+        create.assert_not_called()
+        insert.assert_not_called()
 
 
 class BridgeOnlineDocFallbackTests(unittest.TestCase):
@@ -150,6 +149,7 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
             publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
             publish_text_as_doc=mock.Mock(return_value={
                 "url": "https://doc/native", "visibility": True, "granted": False,
+                "structure_verified": True,
             }),
         )
         with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
@@ -160,20 +160,19 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
         self.assertEqual(mode, "online_doc_native")
         fake.publish_file_as_doc.assert_not_called()
 
-    def test_import_recovers_native_failure(self):
+    def test_native_failure_cannot_bypass_gate_via_import(self):
         fake = types.SimpleNamespace(
             publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
             publish_text_as_doc=mock.Mock(side_effect=RuntimeError("native denied")),
         )
         with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
-            result, mode = feishu_bridge._publish_online_doc(
-                self.bot, "answer.md", grant_open_id="ou_owner", name="Answer",
-            )
-        self.assertEqual(result["url"], "https://doc/import")
-        self.assertEqual(mode, "online_doc_import")
-        fake.publish_file_as_doc.assert_called_once()
+            with self.assertRaisesRegex(RuntimeError, 'native denied'):
+                feishu_bridge._publish_online_doc(
+                    self.bot, "answer.md", grant_open_id="ou_owner", name="Answer",
+                )
+        fake.publish_file_as_doc.assert_not_called()
 
-    def test_missing_native_url_enters_import_fallback(self):
+    def test_missing_native_url_fails_without_import(self):
         fake = types.SimpleNamespace(
             publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
             publish_text_as_doc=mock.Mock(return_value={
@@ -181,8 +180,9 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
             }),
         )
         with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
-            result, mode = feishu_bridge._publish_online_doc(self.bot, "answer.md")
-        self.assertEqual((result["url"], mode), ("https://doc/import", "online_doc_import"))
+            with self.assertRaisesRegex(RuntimeError, '禁止'):
+                feishu_bridge._publish_online_doc(self.bot, "answer.md")
+        fake.publish_file_as_doc.assert_not_called()
 
     def test_unreadable_native_doc_is_not_reported_as_delivered(self):
         fake = types.SimpleNamespace(
@@ -206,6 +206,17 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "import denied"):
                 feishu_bridge._publish_online_doc(self.bot, "answer.docx")
         fake.publish_text_as_doc.assert_not_called()
+
+    def test_readable_url_without_verified_structure_is_rejected(self):
+        fake = types.SimpleNamespace(
+            publish_file_as_doc=mock.Mock(),
+            publish_text_as_doc=mock.Mock(return_value={
+                'url': 'https://doc/readable', 'visibility': True,
+            }))
+        with mock.patch.dict(sys.modules, {'feishu_docs': fake}):
+            with self.assertRaisesRegex(RuntimeError, '结构完整'):
+                feishu_bridge._publish_online_doc(self.bot, 'answer.md')
+        fake.publish_file_as_doc.assert_not_called()
 
 
 class PermissionProbeSafetyTests(unittest.TestCase):

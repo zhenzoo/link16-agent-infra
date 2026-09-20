@@ -28,6 +28,8 @@ _ORCH = Path(__file__).resolve().parent
 if str(_ORCH) not in sys.path:
     sys.path.insert(0, str(_ORCH))
 from feishu_rest import api  # noqa: E402
+from doc_structure import (DocStructureError, source_body, compile_blocks,
+                           table_cells, verify as verify_structure)
 
 BASE = "https://open.feishu.cn/open-apis"
 
@@ -360,7 +362,7 @@ def _doc_url(token: str, doc_id: str) -> str:
 # `tb26-baseball`（无 drive:drive、无任何需审核权限）已用 21KB / 874 块真文档跑通。
 #
 # ⚠️ 普通块按展开后块数动态分批；表格结构不能直接写 descendant，必须先建空表再逐格填。
-#    单元格或普通块写入失败时追加完整纯文本兜底，绝不静默丢内容。
+#    先编译及校验结构，写入失败即停止；完整回读通过后才返回成功 URL。
 
 _BLOCK_BATCH_LIMIT = 45
 
@@ -420,13 +422,13 @@ def _bounded_real_table_budget(requested) -> int:
     return min(max(int(requested), 0), _MAX_REAL_TABLE_CELLS_PER_DOC)
 
 
-def _insert_real_table(token, doc_id, index, rows, cols, texts):
+def _insert_real_table(token, doc_id, index, rows, cols, texts, cell_elements=None):
     """建空表块并逐格填字。回 ``(table_ok, filled, failed_indexes)``。"""
     try:
         d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
                 token=token, body={"children": [{"block_type": 31, "table": {"property": {
                     "row_size": rows, "column_size": cols, "header_row": True}}}], "index": index})
-    except json.JSONDecodeError:  # 飞书偶发 HTTP 空正文；整表走完整纯文本兜底
+    except json.JSONDecodeError:  # 非幂等写入不盲重试，调用方必须报未完成
         return False, 0, list(range(len(texts)))
     if d.get("code") != 0:
         return False, 0, []
@@ -435,14 +437,21 @@ def _insert_real_table(token, doc_id, index, rows, cols, texts):
     filled = 0
     failed = list(range(len(cells), len(texts)))
     for cell_index, (cid, value) in enumerate(zip(cells, texts)):
-        if not value:
+        runs = cell_elements[cell_index] if cell_elements is not None else [
+            {"text_run": {"content": value}}]
+        if not value and not runs:
             continue
         cell_ok = True
-        for part_index, chunk in enumerate(_text_chunks(value)):
+        chunks = []
+        for element in runs:
+            run = element["text_run"]
+            for chunk in _text_chunks(run.get("content", "")):
+                chunks.append({"text_run": {**run, "content": chunk}})
+        for part_index, element in enumerate(chunks):
             try:
                 w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
                         token=token, body={"children": [{"block_type": 2, "text": {
-                            "elements": [{"text_run": {"content": chunk}}], "style": {}}}],
+                            "elements": [element], "style": {}}}],
                             "index": part_index})
             except json.JSONDecodeError:  # 同上；不重试非幂等写入，避免正文重复
                 cell_ok = False
@@ -462,6 +471,7 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                         grant_open_id: str = None, perm: str = "edit",
                         visibility: str = "tenant",
                         cell_budget: int = _MAX_REAL_TABLE_CELLS_PER_DOC,
+                        table_layout: str = "auto",
                         dry_run: bool = False) -> dict:
     """Markdown → 飞书在线文档，只用 docx 权限（不碰云空间上传/导入）。
 
@@ -472,7 +482,9 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
       正解是「先建空表块（飞书自动生成单元格）→ 逐格填字」，实测 9/9 成功。
     - 表格代价是 1+行×列 次请求，所以全篇真实表格最多尝试 24 格；`cell_budget` 只能调低，
       调用方传更大也会被硬截断。失败尝试同样扣预算，绝不通过失败重置预算。
-    - 超预算的表降级成紧凑纯文本；**降级会记进返回值，绝不静默丢内容**。
+    - 非PRD默认将表格编译为带字段名的原生纵向列表；PRD保留原生表格。
+    - 原生表超过预算或遇到不支持的资源时，建文档前报错并提示专用路径。
+    - 禁止纯文本降级；写入后分页回读，核对正文、链接与结构才返回成功。
 
     visibility: "tenant" 组织内凭链接可读（默认）/ "anyone" 任何已登录飞书的人 / "none" 不动
     """
@@ -482,19 +494,22 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
             raise DocImportError(f"找不到源文件：{file_path}")
         markdown = src.read_text(encoding="utf-8", errors="replace")
     doc_title = title or (src.stem if src else "未命名文档")
+    markdown, layout = source_body(markdown, table_layout)
     cell_budget = _bounded_real_table_budget(cell_budget)
     initial_cell_budget = cell_budget
     if dry_run:
         return {"dry_run": True, "title": doc_title, "chars": len(markdown),
                 "real_table_cell_budget": cell_budget,
-                "chain": ["create_docx", "blocks/convert", "descendant(普通块分批)",
-                          "children(表格逐格填)", f"visibility={visibility}",
+                "table_layout": layout,
+                "chain": ["blocks/convert", "compile/preflight", "create_docx", "descendant(普通块分批)",
+                          "children(表格逐格填)", "readback/verify", f"visibility={visibility}",
                           "grant_member" if grant_open_id else "skip-grant"]}
 
     token = _tenant_token(app_id, app_secret)
-    doc_id = _create_docx(token, doc_title)
     blocks, first_level = _convert_markdown(token, markdown)
+    blocks, first_level, tables_vertical = compile_blocks(blocks, first_level, layout, cell_budget)
     by_id = {b["block_id"]: b for b in blocks}
+    doc_id = _create_docx(token, doc_title)
 
     index = i = 0
     tables_real = tables_degraded = batches = 0
@@ -502,13 +517,14 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     while i < len(first_level):
         bid = first_level[i]
         if (by_id.get(bid) or {}).get("block_type") == 31:
-            rows, cols, texts = _table_data(by_id, bid)
+            rows, cols, runs = table_cells(by_id, by_id[bid])
+            texts = ["".join(el["text_run"].get("content", "") for el in cell) for cell in runs]
             cell_count = rows * cols
             if rows and cols and cell_count <= cell_budget:
                 # 先扣再写：空响应/部分失败都不能返还预算，保证整篇尝试量有绝对上界。
                 cell_budget -= cell_count
                 table_cells_attempted += cell_count
-                ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts)
+                ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts, runs)
                 table_cells_filled += filled
                 table_cells_failed += len(failed)
                 if ok and not failed:
@@ -516,19 +532,7 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                     index += 1
                     i += 1
                     continue
-                if ok:
-                    # 已创建的部分表格无法原子回滚；紧随其后追加完整逐行文本，保证内容不丢。
-                    index += 1
-            lines = [" | ".join(texts[r * cols:(r + 1) * cols]) for r in range(rows or 0)]
-            # 大表按一段完整纯文本写入，避免逐行/逐格把单篇文档放大成上百次非幂等 API 写入。
-            # 2026-08-30 实测：144 格 PLAN 在第 25/54 次写入收到 HTTP 空正文；24 格预算下成功。
-            table_text = "\n".join(ln for ln in lines if ln.strip())
-            for chunk in _text_chunks(table_text):
-                _create_text_block(token, doc_id, doc_id, chunk)
-                index += 1
-            tables_degraded += 1
-            i += 1
-            continue
+            raise DocStructureError(f"表格写入未完成，文档 {doc_id} 未通过交付检查；禁止竖线降级")
         part = []
         while i < len(first_level) and (by_id.get(first_level[i]) or {}).get("block_type") != 31:
             candidate = part + [first_level[i]]
@@ -543,18 +547,16 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                     token=token,
                     body={"children_id": part, "index": index,
                           "descendants": _subtree(by_id, part)})
-        except json.JSONDecodeError:  # HTTP 空正文：保留完整纯文本，不让整篇失败
+        except json.JSONDecodeError:  # 不重试非幂等请求，也不把未知结果当成功
             d = None
         if not d or d.get("code") != 0:
-            for bid2 in part:
-                text = _plain_text_of(by_id, bid2)
-                for chunk in _text_chunks(text):
-                    _create_text_block(token, doc_id, doc_id, chunk)
-                    index += 1
+            raise DocStructureError(f"原生块写入未完成，文档 {doc_id} 未通过交付检查；禁止纯文本降级")
         else:
             index += len(part)
             batches += 1
 
+    actual, roots = _read_doc_blocks(token, doc_id)
+    verification = verify_structure(blocks, first_level, actual, roots)
     granted, grant_error = (None, None)
     if grant_open_id:
         granted, grant_error = _grant_member(token, doc_id, grant_open_id, perm)
@@ -564,12 +566,38 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     return {"url": _doc_url(token, doc_id), "token": doc_id, "type": "docx",
             "blocks": len(blocks), "batches": batches,
             "tables_real": tables_real, "tables_degraded": tables_degraded,
+            "tables_vertical": tables_vertical, "table_layout": layout, **verification,
             "table_cell_budget_cap": initial_cell_budget,
             "table_cells_attempted": table_cells_attempted,
             "table_cells_filled": table_cells_filled,
             "table_cells_failed": table_cells_failed,
             "granted": granted, "grant_error": grant_error,
             "visibility": vis_ok, "visibility_error": vis_err}
+
+
+def _read_doc_blocks(token, doc_id):
+    """Read all blocks, detecting incomplete pagination before verification."""
+    from urllib.parse import quote
+    blocks, cursor, seen = [], None, set()
+    while True:
+        url = f"{_DOCX}/{doc_id}/blocks?page_size=500"
+        if cursor:
+            url += "&page_token=" + quote(cursor, safe="")
+        response = api("GET", url, token=token)
+        if response.get("code") != 0:
+            raise DocStructureError(f"文档回读失败 {response.get('code')} {response.get('msg')}")
+        data = response.get("data") or {}
+        blocks.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            break
+        cursor = data.get("page_token")
+        if not cursor or cursor in seen:
+            raise DocStructureError("文档回读分页不完整")
+        seen.add(cursor)
+    root = next((b for b in blocks if b.get("block_id") == doc_id and b.get("block_type") == 1), None)
+    if root is None:
+        raise DocStructureError("文档回读缺根节点，无法验证顺序")
+    return blocks, root.get("children") or []
 
 
 def _plain_text_of(blocks_by_id, bid) -> str:

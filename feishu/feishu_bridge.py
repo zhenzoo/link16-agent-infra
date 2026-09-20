@@ -3139,7 +3139,7 @@ def _read_send_text(*, text=None, file_as_text=None, legacy_file=None):
 
 
 def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
-    """Publish text natively; use import for HTML/Office and as text fallback.
+    """Publish verified text natively; use import only for HTML/Office.
 
     The native path is the no-``drive:drive`` production path discovered in
     PLAN-980.  A returned URL is accepted only when the document was made
@@ -3156,14 +3156,18 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
             )
             accessible = bool(result.get("visibility") is True
                               or (grant_open_id and result.get("granted") is True))
-            if result.get("url") and accessible:
+            if (result.get("url") and accessible
+                    and result.get("structure_verified") is True
+                    and result.get("tables_degraded", 0) == 0):
                 return result, "online_doc_native"
             errors.append(
-                "native=文档已创建但未证实收件人可读"
+                "native=文档已创建但未证实收件人可读或结构完整"
                 f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"native={str(exc)[:220]}")
+        # Import would bypass the checked layout and reproduce silent flattening.
+        raise RuntimeError("；".join(errors) + "；文字文档禁止未经结构核验的 import 兜底，请使用 lark-doc 专用路径")
 
     try:
         result = feishu_docs.publish_file_as_doc(
