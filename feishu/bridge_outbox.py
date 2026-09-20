@@ -161,6 +161,7 @@ def load_progress_state(state_dir, bot):
         "v2_turn": raw.get("turn"),
         "v2_steps": raw.get("steps") or [],
         "v2_mid": mid,
+        "v2_mid_opened_at": raw.get("mid_opened_at") if mid else None,
         "v2_card_ids": raw.get("card_ids") or [],
         "v2_acked": raw.get("acked") or {},
         "v2_route": raw.get("route"),
@@ -176,6 +177,7 @@ def save_progress_state(state_dir, bot, state):
         "turn": state.get("v2_turn"),
         "steps": state.get("v2_steps") or [],
         "mid": state.get("v2_mid"),
+        "mid_opened_at": state.get("v2_mid_opened_at"),
         "card_ids": state.get("v2_card_ids") or [],
         "acked": state.get("v2_acked") or {},
         "route": state.get("v2_route"),
@@ -619,6 +621,10 @@ def _artifact_receipt(title, url, local_path):
 
 # ---------- 处理一批记录（纯逻辑·可单测）----------
 CARD_BUDGET = 2800   # final 硬上限（飞书卡约 3000；这里本就留了 provider 余量）
+# 进度卡最长在原位编辑多久（秒）。飞书原地 edit 不会把卡顶到会话底部、也不推送，主人手机上看不到
+# 「新消息」；agent 明明每几分钟都在写进度，主人却以为它几个小时没汇报（2026-09-11 tb26-baseball
+# 4h31m 回合：676 次 edit、只有 4 张新卡）。到时限就像卡满一样封旧卡、把未送达的增量发成新卡。
+PROGRESS_CARD_MAX_AGE_SEC = 60 * 60
 ANSWER_GUARD_CHARS = 10
 ANSWER_TARGET_BUDGET = CARD_BUDGET - ANSWER_GUARD_CHARS
 ANSWER_SPLIT_POLICY_LEGACY = "answer-v1-hard2800"
@@ -926,7 +932,14 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         if not isinstance(mid, str) or not mid.strip() or mid == "skip-progress":
             mid = None
             state["v2_mid"] = None
-        if mid and len(text) <= CARD_BUDGET:
+        previous_mid = mid
+        opened_at = state.get("v2_mid_opened_at")
+        if mid and not isinstance(opened_at, (int, float)):
+            # Card predates the age rule (upgrade / legacy state): start its clock now.
+            opened_at = clock()
+            state["v2_mid_opened_at"] = opened_at
+        card_aged = bool(mid) and (clock() - opened_at) >= PROGRESS_CARD_MAX_AGE_SEC
+        if mid and not card_aged and len(text) <= CARD_BUDGET:
             ok = await edit_card(mid, text)
             n += 1
             if ok:
@@ -938,11 +951,15 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             # message must contain only the dirty delta, never that snapshot.
             mid, card_ids = await _v2_new_cards(dirty)
         elif mid:
-            # Current card is full: seal it and continue from unseen changes.
+            # Current card is full, or has been edited in place for
+            # PROGRESS_CARD_MAX_AGE_SEC: seal it and continue from unseen
+            # changes so the owner gets a fresh message at the bottom.
             mid, card_ids = await _v2_new_cards(dirty)
         else:
             mid, card_ids = await _v2_new_cards(card_steps)
         state["v2_mid"] = mid
+        if mid != previous_mid:
+            state["v2_mid_opened_at"] = clock() if mid else None
         state["v2_card_ids"] = card_ids
         _v2_ack(dirty)
         state["last_flush"] = clock()
