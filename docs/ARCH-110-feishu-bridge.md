@@ -816,7 +816,7 @@ armed → oauth_waiting → registered → permissions_review → manual_pending
 - **回复管线（v8）**：**Stop hook 写 outbox（答案）+ PostToolUse hook 写 outbox（进度）→ `outbox_drainer` 唯一发送引擎读 outbox 发**（§2.5）+ **飞书互动卡片**（§2.6）+ **必达四级降级**（§2.6）+ **`doctor_loop` 机械自愈**（§3）+ trace id 日志（§2.7）。覆盖首轮 / 长 turn / autopilot 永不结束 / **background-shell 唤醒轮** / 补发不淹没（旧轮询全挂的 5 场景·v8 测试台实证）。
 - **新增文件**：`feishu/hooks/{bridge_stop,bridge_posttool}.py` · `feishu/bridge_outbox.py`（drainer）· `feishu/bridge_doctor.py`（自愈）· `feishu/bridge_feishu_probe.py`（验真送达 tool）· `jsonl_reply_extract.last_turn_reply()`。运行时生成 `_autopilot/bridge-hooks.json`。
 - **消息串行锁** + **owner 自动信任**（§7）。
-- **多媒体通道（§2.9 · 2026-06-16）**：入站 `on_message` 用 SDK `download_resource_to_file`（带 `message_id` 走 message-resource 端点）真下载你发的图/文件到 `_autopilot/inbox/<bot>/<日期>/` → 注入【本地路径】（修「`!` 占位触发 bash 模式」bug）；出站 `send --image` 用 `OutboundImage` 把本地图直达手机 DM（实测 delivered/image_ok 双绿）。全 SDK 原生 API。
+- **多媒体通道（§2.9 · 2026-09-18）**：入站 `on_message` 的图片沿用 SDK；文件、音频和视频统一按官方 `type=file`，通过 message-resource 端点以 8 MiB `Range` 分片下载（逐片核对 `Content-Range`，先写 `.part`，完成后原子改名），因此不再受完整 GET 的 100 MB 限制。附件落到 `feishu/_state/inbox/<bot>/<日期>/` 后只向 agent 注入【本地路径】；出站路径不变。
 - **配套**：喇叭瘦身（`scripts/notify.py` 只发告警+里程碑）+ 看门狗 v0.10（ARCH-310）+ SOP-005（起总控流程不再手写 supervisor.pty）。
 
 ---

@@ -1612,6 +1612,9 @@ def _forwarded_card_text(msg):
 # SDK 把图片/文件渲成 content_text 的 `![image](key)` / `<file key=.. name=../>` 占位（key=飞书资源 key·非路径）。
 # 必须 ① 真下载字节 ② 注入【本地路径】而非占位（占位以 `!` 开头 → Claude TUI 当 bash 模式跑 `[image](..)` 报错·2026-06-16 实证）。
 _MEDIA_MARKUP_RE = re.compile(r'!\[image\]\([^)]*\)|<(?:file|audio|video|media)\b[^>]*/?>')
+_RESOURCE_CHUNK_BYTES = 8 * 1024 * 1024
+_RESOURCE_MAX_CHUNK_BYTES = 32 * 1024 * 1024
+_CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+)$", re.IGNORECASE)
 
 
 def _strip_media_markup(text):
@@ -1624,6 +1627,96 @@ def _inbox_dir(bot_name):
     d = INBOX_ROOT / bot_name / time.strftime("%Y%m%d")
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _message_resource_type(resource_type):
+    """Map SDK media names to the two values accepted by Feishu's resource API."""
+    return "image" if str(resource_type or "").lower() == "image" else "file"
+
+
+def _download_message_resource(app_id, app_secret, message_id, file_key, *,
+                               resource_type="file", dest_dir, file_name=None,
+                               chunk_size=_RESOURCE_CHUNK_BYTES, urlopen=None):
+    """Download one IM message resource with Feishu's required Range requests.
+
+    Feishu rejects a whole-file GET for files >=100 MB.  A one-byte probe returns
+    the total size, then bounded chunks are checked and streamed into a temporary
+    file before one atomic rename exposes the completed attachment.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    if not 0 < chunk_size <= _RESOURCE_MAX_CHUNK_BYTES:
+        raise ValueError("chunk_size must be between 1 and 32 MiB")
+    api_type = _message_resource_type(resource_type)
+    if api_type != "file":
+        raise ValueError("Range downloader is only for file/audio/video resources")
+    opener = urlopen or urllib.request.urlopen
+    token = _tenant_token(app_id, app_secret)
+    url = (
+        "https://open.feishu.cn/open-apis/im/v1/messages/"
+        f"{urllib.parse.quote(str(message_id), safe='')}/resources/"
+        f"{urllib.parse.quote(str(file_key), safe='')}?"
+        + urllib.parse.urlencode({"type": api_type})
+    )
+
+    def fetch(start, end):
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Range": f"bytes={start}-{end}",
+        })
+        try:
+            with opener(req, timeout=30) as response:
+                status = getattr(response, "status", None) or response.getcode()
+                content_range = response.headers.get("Content-Range", "")
+                data = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            raise RuntimeError(f"飞书附件分片下载失败 HTTP {exc.code}: {detail}") from exc
+        match = _CONTENT_RANGE_RE.fullmatch(content_range.strip())
+        if status != 206 or not match:
+            raise RuntimeError(
+                f"飞书附件分片响应无效: HTTP {status}, Content-Range={content_range!r}"
+            )
+        got_start, got_end, total = map(int, match.groups())
+        if got_start != start or got_end != end or len(data) != end - start + 1:
+            raise RuntimeError(
+                f"飞书附件分片不完整: 请求={start}-{end}, "
+                f"返回={got_start}-{got_end}, 字节={len(data)}"
+            )
+        return data, total
+
+    first, total = fetch(0, 0)
+    if total < 1:
+        raise RuntimeError(f"飞书附件大小无效: {total}")
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(str(file_name or "")).name.strip()
+    if not safe_name or safe_name in (".", ".."):
+        safe_name = Path(str(file_key)).name or "attachment.bin"
+    final_path = dest / safe_name
+    part_path = final_path.with_name(final_path.name + ".part")
+    try:
+        with open(part_path, "wb") as handle:
+            handle.write(first)
+            offset = 1
+            while offset < total:
+                end = min(offset + chunk_size - 1, total - 1)
+                block, block_total = fetch(offset, end)
+                if block_total != total:
+                    raise RuntimeError(
+                        f"飞书附件总大小在下载中变化: {total} -> {block_total}"
+                    )
+                handle.write(block)
+                offset = end + 1
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(part_path, final_path)
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        raise
+    return final_path
 
 
 async def card_send(channel, target, text, name):
@@ -2545,10 +2638,19 @@ def _run_bot(bot_name=None):
                         saved = []
                         for r in resources:
                             try:
-                                p = await channel.download_resource_to_file(
-                                    r.file_key, resource_type=(getattr(r, "type", None) or "file"),
-                                    message_id=msg.id, dest_dir=inbox,
-                                    file_name=(getattr(r, "file_name", None) or None))
+                                raw_type = getattr(r, "type", None) or "file"
+                                if _message_resource_type(raw_type) == "image":
+                                    p = await channel.download_resource_to_file(
+                                        r.file_key, resource_type="image", message_id=msg.id,
+                                        dest_dir=inbox,
+                                        file_name=(getattr(r, "file_name", None) or None))
+                                else:
+                                    p = await asyncio.to_thread(
+                                        _download_message_resource,
+                                        bot["app_id"], bot["app_secret"], msg.id, r.file_key,
+                                        resource_type=raw_type, dest_dir=inbox,
+                                        file_name=(getattr(r, "file_name", None) or None),
+                                    )
                                 saved.append(str(p))
                                 blog(bot["name"], f"[{tid}] 📎 收下 {getattr(r, 'type', '?')} → {p}")
                             except Exception as de:  # noqa: BLE001 — 单个附件下载失败不致命
