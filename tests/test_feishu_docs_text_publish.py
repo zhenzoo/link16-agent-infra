@@ -68,10 +68,12 @@ class NativeTableSafetyTests(unittest.TestCase):
                 return {"code": 0, "data": {"children": [{
                     "table": {"cells": ["cell-1"]},
                 }]}}
+            if _method == "GET":
+                raise json.JSONDecodeError("empty response", "", 0)
             calls += 1
             raise json.JSONDecodeError("empty response", "", 0)
 
-        with mock.patch.object(feishu_docs, "api", side_effect=api):
+        with mock.patch.object(feishu_docs, "api", side_effect=api),                 mock.patch.object(feishu_docs, "_sleep"):
             ok, filled, failed = feishu_docs._insert_real_table(
                 "token", "doc", 0, 1, 1, ["content"],
             )
@@ -79,7 +81,8 @@ class NativeTableSafetyTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(filled, 0)
         self.assertEqual(failed, [0])
-        self.assertEqual(calls, 1)
+        # 首发 + _WRITE_RETRIES 次重试全是空正文，核实(GET)也都拿不到 → 才判失败
+        self.assertEqual(calls, 1 + feishu_docs._WRITE_RETRIES)
 
     def test_missing_returned_cells_are_reported(self):
         with mock.patch.object(feishu_docs, "api", return_value={
@@ -98,46 +101,215 @@ class NativeTableSafetyTests(unittest.TestCase):
         }}}
         self.assertEqual(feishu_docs._plain_text_of(blocks, "a"), value)
 
-    def test_native_publish_defaults_to_a_bounded_real_table_budget(self):
-        defaults = feishu_docs.publish_text_as_doc.__kwdefaults__
-        self.assertEqual(defaults["cell_budget"], 24)
+    def test_rate_limited_write_is_verified_before_retry_and_not_duplicated(self):
+        """限频空正文 → 核实未落地 → 重试一次成功；内容写入总共 2 次请求、落地 1 段，无重复。"""
+        posts, gets = [], 0
 
-    def test_real_table_budget_is_a_hard_cap_not_a_tunable_default(self):
-        self.assertEqual(feishu_docs._bounded_real_table_budget(999), 24)
-        self.assertEqual(feishu_docs._bounded_real_table_budget(12), 12)
-        self.assertEqual(feishu_docs._bounded_real_table_budget(-1), 0)
+        def api(method, url, token=None, body=None):
+            nonlocal gets
+            if method == "GET":
+                gets += 1
+                return {"code": 0, "data": {"items": []}}   # 核实：什么都没写进去
+            if "blocks/doc/children" in url:
+                return {"code": 0, "data": {"children": [{"table": {"cells": ["cell-1"]}}]}}
+            posts.append(body["children"][0]["text"]["elements"][0]["text_run"]["content"])
+            if len(posts) == 1:
+                raise json.JSONDecodeError("empty response", "", 0)   # 429 空正文
+            return {"code": 0}
 
-    def test_native_budget_failure_happens_before_document_creation(self):
+        with mock.patch.object(feishu_docs, "api", side_effect=api),                 mock.patch.object(feishu_docs, "_sleep"):
+            ok, filled, failed = feishu_docs._insert_real_table(
+                "token", "doc", 0, 1, 1, ["content"],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual((filled, failed), (1, []))
+        self.assertEqual(posts, ["content", "content"])
+        self.assertEqual(gets, 1)
+
+    def test_landed_write_with_empty_response_is_not_resent(self):
+        """空正文但核实发现那段已经在格子里 → 视为成功，绝不重发（否则正文重复）。"""
+        posts = []
+
+        def api(method, url, token=None, body=None):
+            if method == "GET":
+                return {"code": 0, "data": {"items": [
+                    {"text": {"elements": [{"text_run": {"content": "content"}}]}},
+                ]}}
+            if "blocks/doc/children" in url:
+                return {"code": 0, "data": {"children": [{"table": {"cells": ["cell-1"]}}]}}
+            posts.append(1)
+            raise json.JSONDecodeError("empty response", "", 0)
+
+        with mock.patch.object(feishu_docs, "api", side_effect=api),                 mock.patch.object(feishu_docs, "_sleep"):
+            ok, filled, failed = feishu_docs._insert_real_table(
+                "token", "doc", 0, 1, 1, ["content"],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual((filled, failed), (1, []))
+        self.assertEqual(len(posts), 1)
+
+    def test_cell_writes_are_throttled_to_about_three_per_second(self):
+        sleeps = []
+
+        def api(_method, url, token=None, body=None):
+            if "blocks/doc/children" in url:
+                return {"code": 0, "data": {"children": [{"table": {"cells": ["c1", "c2", "c3"]}}]}}
+            return {"code": 0}
+
+        with mock.patch.object(feishu_docs, "api", side_effect=api),                 mock.patch.object(feishu_docs, "_sleep", side_effect=sleeps.append),                 mock.patch.object(feishu_docs, "_last_write_at", 0.0):
+            feishu_docs._insert_real_table("token", "doc", 0, 1, 3, ["a", "b", "c"])
+
+        # 建表 + 3 格 = 4 次写；第一次不用等，后面每次都被节流到 ≥ _WRITE_MIN_INTERVAL 间隔
+        self.assertEqual(len(sleeps), 3)
+        self.assertTrue(all(0 < s <= feishu_docs._WRITE_MIN_INTERVAL for s in sleeps))
+
+    def test_tables_wider_or_taller_than_nine_are_created_then_grown(self):
+        """飞书 children 建表上限 9×9：15×3 先建 9×3，再 PATCH 插 6 行，再 GET 取回 45 格逐格填。"""
+        posts, patches, gets = [], [], 0
+
+        def api(method, url, token=None, body=None):
+            nonlocal gets
+            if method == "GET":
+                gets += 1
+                return {"code": 0, "data": {"block": {"table": {
+                    "cells": [f"c{i}" for i in range(45)]}}}}
+            if method == "PATCH":
+                patches.append(body)
+                return {"code": 0}
+            if "blocks/doc/children" in url:
+                prop = body["children"][0]["table"]["property"]
+                self.assertEqual((prop["row_size"], prop["column_size"]), (9, 3))
+                self.assertEqual(sum(prop["column_width"]), feishu_docs._TABLE_FILL_WIDTH)
+                return {"code": 0, "data": {"children": [{"block_id": "tbl", "table": {
+                    "cells": [f"c{i}" for i in range(27)]}}]}}
+            posts.append(url.split("/blocks/")[1].split("/")[0])
+            return {"code": 0}
+
+        with mock.patch.object(feishu_docs, "api", side_effect=api),                 mock.patch.object(feishu_docs, "_sleep"):
+            ok, filled, failed = feishu_docs._insert_real_table(
+                "token", "doc", 0, 15, 3, [f"v{i}" for i in range(45)],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual((filled, failed), (45, []))
+        self.assertEqual(patches, [{"insert_table_row": {"row_index": -1}}] * 6)
+        self.assertEqual(gets, 1)
+        self.assertEqual(posts, [f"c{i}" for i in range(45)])
+
+    def test_many_narrow_columns_never_get_negative_or_sub_minimum_widths(self):
+        """tb24 2026-09-19 真机：3×12 短文本表，原算法给第 1 列 -258px → 飞书 1770006 → 整表降级成纯文本。"""
+        for cols in (9, 12, 20):
+            with self.subTest(cols=cols):
+                widths = feishu_docs._fill_widths(cols, [f"a{i}" for i in range(cols * 3)])
+                self.assertEqual(len(widths), cols)
+                self.assertGreaterEqual(min(widths), feishu_docs._TABLE_MIN_COL_WIDTH)
+        skewed = feishu_docs._fill_widths(12, ["一段很长很长的中文内容用来测试权重严重不均"] + ["a"] * 35)
+        self.assertGreaterEqual(min(skewed), feishu_docs._TABLE_MIN_COL_WIDTH)
+        self.assertGreater(skewed[0], feishu_docs._TABLE_MIN_COL_WIDTH)  # 长格的列仍按内容加宽
+        self.assertEqual(feishu_docs._fill_widths(12, None), [feishu_docs._TABLE_MIN_COL_WIDTH] * 12)
+
+    def test_column_widths_fill_the_page_in_proportion_to_content(self):
+        """默认 taste：表铺满正文宽（732），列宽 ∝ 该列最长内容 → 各列换行后行数接近；短列有下限。"""
+        texts = ["#", "步骤", "依据",
+                 "1", "单机位转播视频", "README 原文：" + "很长的引用" * 20,
+                 "2", "计算机视觉逐帧识别球员和球", "PRIMER"]
+        widths = feishu_docs._fill_widths(3, texts)
+        # 内容多 → 总宽从 732 往上拉，但不超过页宽上限
+        self.assertGreater(sum(widths), feishu_docs._TABLE_FILL_WIDTH)
+        self.assertLessEqual(sum(widths), feishu_docs._TABLE_MAX_WIDTH)
+        self.assertEqual(widths[0], feishu_docs._TABLE_MIN_COL_WIDTH)   # "#" 列压到下限
+        self.assertGreater(widths[2], widths[1] * 2)                     # 依据列内容最长 → 最宽
+        # 内容少的表保持正文宽 732
+        small = feishu_docs._fill_widths(3, ["a", "b", "c", "1", "2", "3"])
+        self.assertEqual(sum(small), feishu_docs._TABLE_FILL_WIDTH)
+        self.assertEqual(feishu_docs._fill_widths(3), [244, 244, 244])   # 无内容信息时等分（= 飞书 import 约定）
+        self.assertEqual(feishu_docs._fill_widths(0), [])
+
+    def test_retune_patches_only_changed_columns_of_matching_live_tables(self):
+        """已发布文档原位重算列宽：按顺序对应 markdown 表；结构不符的表跳过；只 PATCH 变了的列。"""
         blocks = [
             {"block_id": "t1", "block_type": 31,
-             "table": {"property": {"row_size": 1, "column_size": 1}},
-             "children": ["c1"]},
+             "table": {"property": {"row_size": 1, "column_size": 2}}, "children": ["c1", "c2"]},
             {"block_id": "c1", "block_type": 32, "children": ["p1"]},
-            {"block_id": "p1", "block_type": 2,
-             "text": {"elements": [{"text_run": {"content": "first"}}]}},
-            {"block_id": "t2", "block_type": 31,
-             "table": {"property": {"row_size": 1, "column_size": 1}},
-             "children": ["c2"]},
+            {"block_id": "p1", "block_type": 2, "text": {"elements": [{"text_run": {"content": "短"}}]}},
             {"block_id": "c2", "block_type": 32, "children": ["p2"]},
-            {"block_id": "p2", "block_type": 2,
-             "text": {"elements": [{"text_run": {"content": "second"}}]}},
+            {"block_id": "p2", "block_type": 2, "text": {"elements": [{"text_run": {"content": "很长" * 30}}]}},
         ]
-        with mock.patch.object(feishu_docs, "_tenant_token", return_value="token"), \
-                mock.patch.object(feishu_docs, "_create_docx", return_value="doc") as create, \
-                mock.patch.object(feishu_docs, "_convert_markdown",
-                                  return_value=(blocks, ["t1", "t2"])), \
-                mock.patch.object(feishu_docs, "_insert_real_table",
-                                  return_value=(True, 0, [0])) as insert, \
-                mock.patch.object(feishu_docs, "_create_text_block"), \
-                mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"), \
-                mock.patch.object(feishu_docs, "_set_visibility"):
-            with self.assertRaisesRegex(feishu_docs.DocStructureError, 'exceed'):
-                feishu_docs.publish_text_as_doc(
-                    "app", "secret", markdown="tables", visibility="none", cell_budget=1,
-                    table_layout="native",
-                )
-        create.assert_not_called()
-        insert.assert_not_called()
+        live = [{"block_id": "L1", "block_type": 31, "table": {"property": {
+                    "row_size": 1, "column_size": 2, "column_width": [90, 100]}}},
+                {"block_id": "L2", "block_type": 31, "table": {"property": {
+                    "row_size": 3, "column_size": 3, "column_width": [100, 100, 100]}}}]
+        patches = []
+
+        def api(method, url, token=None, body=None):
+            if method == "GET":
+                return {"code": 0, "data": {"items": live, "has_more": False}}
+            patches.append((url.split("/blocks/")[1].split("?")[0], body["update_table_property"]))
+            return {"code": 0}
+
+        with mock.patch.object(feishu_docs, "api", side_effect=api),                 mock.patch.object(feishu_docs, "_convert_markdown", return_value=(blocks, ["t1"])),                 mock.patch.object(feishu_docs, "_sleep"):
+            done = feishu_docs.retune_table_widths("token", "doc", "md")
+
+        self.assertEqual(len(done), 1)
+        self.assertTrue(all(tid == "L1" for tid, _ in patches))          # 结构不符的 L2 没被碰
+        self.assertEqual([p["column_index"] for _, p in patches], [1])   # 第 0 列已是 90 → 不重写
+
+    def test_columns_beyond_nine_get_their_width_patched_after_growth(self):
+        patches = []
+
+        def api(method, url, token=None, body=None):
+            if method == "GET":
+                return {"code": 0, "data": {"block": {"table": {"cells": [f"c{i}" for i in range(12)]}}}}
+            if method == "PATCH":
+                patches.append(body)
+                return {"code": 0}
+            if "blocks/doc/children" in url:
+                self.assertEqual(len(body["children"][0]["table"]["property"]["column_width"]), 9)
+                return {"code": 0, "data": {"children": [{"block_id": "tbl", "table": {
+                    "cells": [f"c{i}" for i in range(9)]}}]}}
+            return {"code": 0}
+
+        with mock.patch.object(feishu_docs, "api", side_effect=api),                 mock.patch.object(feishu_docs, "_sleep"):
+            ok, filled, failed = feishu_docs._insert_real_table(
+                "token", "doc", 0, 1, 12, [f"v{i}" for i in range(12)],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual((filled, failed), (12, []))
+        self.assertEqual(patches[:3], [{"insert_table_column": {"column_index": -1}}] * 3)
+        self.assertEqual([p["update_table_property"]["column_index"] for p in patches[3:]], [9, 10, 11])
+        self.assertTrue(all("column_width" in p["update_table_property"] for p in patches[3:]))
+
+    def test_every_table_is_attempted_as_a_real_table_regardless_of_size(self):
+        """2026-08-30 的"全篇 24 格"硬闸已删：45 格和 1 格的表一律先真表写入，不按尺寸降级。"""
+        def table(tid, cid, pid, rows, cols):
+            # 结构闸会核对 rows×cols 与真实单元格数一致，所以每格都要有块。
+            cells = [f"{cid}-{n}" for n in range(rows * cols)]
+            out = [{"block_id": tid, "block_type": 31,
+                    "table": {"property": {"row_size": rows, "column_size": cols}},
+                    "children": cells}]
+            for n, cell in enumerate(cells):
+                out += [{"block_id": cell, "block_type": 32, "children": [f"{pid}-{n}"]},
+                        {"block_id": f"{pid}-{n}", "block_type": 2,
+                         "text": {"elements": [{"text_run": {"content": "x"}}]}}]
+            return out
+        blocks = table("t1", "c1", "p1", 15, 3) + table("t2", "c2", "p2", 1, 1)
+        with mock.patch.object(feishu_docs, "_tenant_token", return_value="token"),                 mock.patch.object(feishu_docs, "_create_docx", return_value="doc"),                 mock.patch.object(feishu_docs, "_convert_markdown",
+                                  return_value=(blocks, ["t1", "t2"])),                 mock.patch.object(feishu_docs, "_insert_real_table",
+                                  return_value=(True, 1, [])) as insert,                 mock.patch.object(feishu_docs, "_create_text_block") as text_block,                 mock.patch.object(feishu_docs, "_read_doc_blocks", return_value=([], [])),                 mock.patch.object(feishu_docs, "verify_structure",
+                                  return_value={"structure_verified": True}),                 mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"),                 mock.patch.object(feishu_docs, "_set_visibility"):
+            result = feishu_docs.publish_text_as_doc(
+                "app", "secret", markdown="tables", visibility="none", table_layout="native",
+            )
+
+        self.assertEqual(insert.call_count, 2)
+        self.assertEqual(result["tables_real"], 2)
+        self.assertEqual(result["tables_degraded"], 0)
+        self.assertEqual(result["table_cells_attempted"], 46)
+        text_block.assert_not_called()
+        self.assertNotIn("table_cell_budget_cap", result)
 
 
 class BridgeOnlineDocFallbackTests(unittest.TestCase):
@@ -170,6 +342,18 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
                 feishu_bridge._publish_online_doc(
                     self.bot, "answer.md", grant_open_id="ou_owner", name="Answer",
                 )
+        fake.publish_file_as_doc.assert_not_called()
+
+    def test_degraded_tables_are_never_accepted_as_native_success(self):
+        """原生链哪怕拿到 URL，只要有表格没按原生表格落地就不算成功；也不许转 import 绕过结构闸。"""
+        fake = types.SimpleNamespace(
+            publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
+            publish_text_as_doc=mock.Mock(return_value={
+                "url": "https://doc/native", "visibility": True, "structure_verified": True,
+                "tables_real": 1, "tables_degraded": 2, "table_cells_failed": 3}),
+        )
+        with mock.patch.dict(sys.modules, {"feishu_docs": fake}),                 self.assertRaisesRegex(RuntimeError, "2 张表格"):
+            feishu_bridge._publish_online_doc(self.bot, "answer.md", name="Answer")
         fake.publish_file_as_doc.assert_not_called()
 
     def test_missing_native_url_fails_without_import(self):

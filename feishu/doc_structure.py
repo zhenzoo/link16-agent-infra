@@ -93,7 +93,7 @@ def table_cells(by_id, table):
     return rows, cols, cells
 
 
-def compile_blocks(blocks, roots, layout, cell_budget):
+def compile_blocks(blocks, roots, layout, cell_budget=None):
     by_id = {b['block_id']: deepcopy(b) for b in blocks}
     sequence = list(walk(by_id, roots))
     if not sequence:
@@ -113,7 +113,10 @@ def compile_blocks(blocks, roots, layout, cell_budget):
             plain_lines.append('')
     reject_pipe_tables(plain_lines)
     tables = {tid: table_cells(by_id, by_id[tid]) for tid in table_ids}
-    if layout == 'native' and sum(r * c for r, c, _ in tables.values()) > cell_budget:
+    # No document-wide cell cap: the 24-cell gate of 2026-08-30 was removed on 2026-09-19 (owner decision);
+    # the throttled, verified cell writer in feishu_docs lands tables of any size. `cell_budget` stays optional
+    # for callers that want a local ceiling.
+    if layout == 'native' and cell_budget is not None and sum(r * c for r, c, _ in tables.values()) > cell_budget:
         raise DocStructureError(f'Native tables exceed {cell_budget} cells; use vertical layout or lark-doc native tables')
     new_roots = []
     serial = 0

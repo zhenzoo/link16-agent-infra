@@ -94,6 +94,8 @@ def rpc(args, timeout=25):
         r = subprocess.run(["node", str(_wmux_rpc())] + args, capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            timeout=timeout, cwd=str(PROJECT), creationflags=NO_WINDOW)
+        if r.returncode != 0:
+            return f"__RPC_FAIL__ exit={r.returncode}: {r.stderr or r.stdout}"
         return r.stdout or ""
     except Exception as e:                             # noqa: BLE001
         return f"__RPC_FAIL__ {type(e).__name__}: {e}"
@@ -278,9 +280,9 @@ def _allow(pty):
 def nudge_pane(pty, text=None):
     """往卡住的面板注一句话（默认 NUDGE_TEXT）。返回 True=注了。"""
     allow = _allow(pty)
-    rpc(["send", pty, text or NUDGE_TEXT] + allow)
-    rpc(["key", pty, "enter"] + allow)
-    return True
+    if rpc(["send", pty, text or NUDGE_TEXT] + allow).startswith("__RPC_FAIL__"):
+        return False
+    return not rpc(["key", pty, "enter"] + allow).startswith("__RPC_FAIL__")
 
 
 # ---------- R5 · Codex 回合被服务端掐断（含 OpenAI 安全分类器 invalid_prompt）----------
@@ -313,25 +315,27 @@ ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
 _ROLLOUT_CACHE = {}          # {(bot, thread): Path} —— sessions/ 递归 glob 不便宜，解析一次就存住
 
 
-def find_dead_turn(tail_text):
-    """Codex rollout 的尾巴 → 「最后一个回合是不是以错误收尾、且没有新回合接上」。纯函数。
-
-    返回 {"turn", "error", "policy"} 或 None。**四种情况一律返回 None、绝不动手**：
-      · 最后一个回合事件是 task_started  → 它正在跑
-      · 最后一个是 turn_aborted          → 主人自己按了中断，不是故障
-      · task_complete 但 error 是空的    → 正常收尾
-      · error 命中限流签名               → 那是 R2 的活（双源判定 + 换号），别抢
-    """
+def last_turn_event(tail_text, with_timestamp=False):
+    """Return the latest structured turn event, including running and manual stop."""
     last = None
     for line in (tail_text or "").splitlines():
         if not any(k in line for k in _TURN_EVENTS):
             continue                      # 便宜的预筛（rollout 绝大多数行是 reasoning / tool 输出）
         try:
-            payload = json.loads(line).get("payload") or {}
+            event = json.loads(line)
+            payload = event.get("payload") or {}
         except Exception:                 # noqa: BLE001
             continue                      # 尾部截断出来的半行 → 跳过
         if payload.get("type") in _TURN_EVENTS:
             last = payload
+            if with_timestamp:
+                last = dict(payload, _event_timestamp=event.get("timestamp"))
+    return last
+
+
+def find_dead_turn(tail_text):
+    """Return an unhandled failed turn; running, manual stop, success and quota are excluded."""
+    last = last_turn_event(tail_text)
     if not last or last.get("type") != "task_complete":
         return None
     err = str(((last.get("error") or {}).get("message") or "")).strip()
@@ -390,22 +394,25 @@ def _is_codex(bot_obj):
 def codex_dead_turn(bot_name, bot_obj):
     """R5 的对外入口：这个 bot 是不是「最后一个回合被掐断、现在谁都不会再踢它」。
 
-    返回 (结果, 认不认得出这个 bot 的 thread)。第二个值不是装饰 ——
-    **认不出来要能被看见**（进心跳行），否则又是一条「尺子坏了但输出正常」。
+    返回 (错误结果, 最后回合事件)。读不到事件返回 None，进心跳的失明计数。
+    保留事件类型，才能区分「正在重试」和「已成功/手动停止」，正确维护连续失败次数。
     """
     if not _is_codex(bot_obj):
-        return None, False
+        return None, None
     thread = codex_thread_id(bot_name)
     if not thread:
-        return None, False
+        return None, None
     tail = codex_rollout_tail(bot_obj, thread, bot_name=bot_name)
     if tail is None:
-        return None, False
+        return None, None
     if not any(k in tail for k in _TURN_EVENTS):
         # 尾巴里一条回合事件都没有（单个回合的输出超过 ROLLOUT_TAIL_BYTES 时会这样）——
         # 这把尺子**对它没有读数**，绝不能返回「一切正常」：那就又是一条「尺子坏了但输出正常」。
-        return None, False
-    return find_dead_turn(tail), True
+        return None, None
+    last = last_turn_event(tail, with_timestamp=True)
+    if last:
+        last["_thread_id"] = thread
+    return find_dead_turn(tail), last
 
 
 # ---------- R8 · 回合进行中静默：屏上在跑、但很久没有任何回传（请求发出去了、响应永不回来）----------
@@ -1213,6 +1220,10 @@ def cmd_run(auto=True):
                                f"🔧 {bot_name} 卡在『{err[:60]}』（API/网络错·没在自己重试）· 已自动注「继续」\n"
                                f"面板 {ws} / {pty}｜还卡就去看一眼")
 
+                bot_obj = bots.get(bot_name) if bot_name else None
+                dead, last_turn = codex_dead_turn(bot_name, bot_obj) if bot_name else (None, None)
+                now = time.time()  # a new prompt may arrive while the pane/rollout scan runs
+
                 # ---- R8 · 回合进行中静默 ≥ STALL_MIN → 按 Esc + 注「查原因·继续推进」+ DM ----
                 activity = silence.sample(STATE_DIR, bot_name) if bot_name else {}
                 sm = activity.get("minutes")
@@ -1264,14 +1275,14 @@ def cmd_run(auto=True):
                 # ---- R5 · Codex 回合被服务端掐断 → 告警 + 注「继续」（连 3 轮被掐就停手）----
                 # 判据读 Codex 自己的 rollout（结构化），**不读屏** —— 理由见文件上半部 R5 那节的长注释。
                 # 只在「最后一个回合已经收尾」时动手 ⇒ 结构上不可能打断正在跑的活。
-                bot_obj = bots.get(bot_name) if bot_name else None
-                dead, resolved = codex_dead_turn(bot_name, bot_obj) if bot_name else (None, False)
                 if bot_name and _is_codex(bot_obj):
                     r5_seen += 1
-                    if not resolved:
+                    if not last_turn:
                         r5_blind += 1
                 if not dead:
-                    st["dead_turn"], st["dead_streak"] = None, 0
+                    if last_turn and (last_turn.get("type") == "turn_aborted"
+                                      or (last_turn.get("type") == "task_complete" and not last_turn.get("error"))):
+                        st["dead_turn"], st["dead_streak"], st["dead_nudged"] = None, 0, None
                     continue
                 fresh = dead["turn"] != st.get("dead_turn")
                 if fresh:
@@ -1281,16 +1292,19 @@ def cmd_run(auto=True):
                 if st["dead_streak"] <= POLICY_NUDGE_MAX:
                     # 注入受 10min 冷却节流，但**告警不跟着一起哑** —— 冷却期内换个说法照实说，
                     # 绝不发一条「我已自动注『继续推进』」而其实这轮压根没注（那就是自己造假绿灯）。
-                    poked = (now - st["last_nudge"]) >= NUDGE_COOLDOWN
+                    poked = (st.get("dead_nudged") != dead["turn"]
+                             and (now - st["last_nudge"]) >= NUDGE_COOLDOWN)
                     if poked:
-                        nudge_pane(pty, POLICY_NUDGE_TEXT)
+                        poked = nudge_pane(pty, POLICY_NUDGE_TEXT)
+                    if poked:
+                        st["dead_nudged"] = dead["turn"]
                         st["last_nudge"] = now
                         acted += 1
                         log(f"[R5] {ws}/{bot_name} 上一回合{why}（第 {st['dead_streak']} 次）→ 已注「继续推进」")
                     if fresh:
                         做了 = (f"我已自动注「继续推进」（第 {st['dead_streak']}/{POLICY_NUDGE_MAX} 次自动重推）"
                               if poked else
-                              f"这轮**没注** —— 距上次注入不到 {NUDGE_COOLDOWN // 60} 分钟，等冷却过了再推")
+                              "这轮未成功注入，检查发送结果或等待冷却后再试")
                         notify(bot_name, "policy_nudged",
                                f"{bot_name} 上一回合{why}，活已经停在那儿了 · {做了}\n"
                                f"· 服务端原话：{dead['error'][:120]}\n"
@@ -1301,8 +1315,7 @@ def cmd_run(auto=True):
                     notify(bot_name, "policy_stuck",
                            f"{bot_name} 连着 {st['dead_streak']} 个回合{why} —— 我不再自动重推了（重推也是白撞）\n"
                            f"· 服务端原话：{dead['error'][:120]}\n"
-                           f"· 这多半是 OpenAI 服务端分类器误伤，不是你的活有问题\n"
-                           f"· 能救的两招：给这个 bot 发 /handoff 换全新 context；或者过一阵再试\n"
+                           f"· 原会话已保留，请检查上面的具体错误后再继续\n"
                            f"· 面板 {ws} / {pty}")
 
             checks = {"r6": "ok", "r7": "ok", "r4": "ok",

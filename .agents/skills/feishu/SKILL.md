@@ -1,6 +1,6 @@
 ---
 name: feishu
-description: Link16 自带的飞书/Lark 工具入口。用于消息、媒体和在线文档交付，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，注册、改名或排查飞书 bot，查询收发历史，执行 a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
+description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档、在已有文档插入/嵌入图片音频视频、大文件在线审阅、发送消息和语音，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，以及 bot 注册、改名、历史、a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
 ---
 
 # Feishu — Link16 核心工具入口
@@ -15,6 +15,8 @@ description: Link16 自带的飞书/Lark 工具入口。用于消息、媒体和
 - `docs/SOP-120-feishu-register.md`：注册通用流程。
 - `docs/SOP-121-codex-bot-register.md`：Codex bot 增量流程。
 - `docs/SOP-125-bot-rename.md`：已有 bot 改名、后台链接、名称同步与恢复。
+- `docs/SOP-140-feishu-document-io.md`：正文与原生表格的读写、逐格核验和失败处理。
+- `docs/SOP-141-native-media-review.md`：图片、音频、视频放进正文后实际点播的发布与验收流程；包括超过20MB的分片上传。
 
 不要把工具脚本复制进 runtime home，也不要依赖某个用户的私人 skills。
 
@@ -37,6 +39,9 @@ description: Link16 自带的飞书/Lark 工具入口。用于消息、媒体和
 | 给另一只 bot 派活、回结果或续轮 | `python feishu/send_feishu_msg.py --bot <我> --to-agent <对方> --text "…"` |
 | 查看可发送的 agent | `python feishu/send_feishu_msg.py --list-agents` |
 | 发图片、视频或媒体 | `python feishu/send_feishu_media.py --bot <我> --media <路径> --title "…"` |
+| 新建媒体审阅文档并验证真实预览 | 上述入口加 `--publish-only --receipt <新的JSON> --verify-out <新目录>`；自动逐项检查真实页面，见 SOP-141 |
+| 往已有文档插入图片／音频／视频 | 同一 `send_feishu_media.py` 加 `--document <docx链接或token>`；默认末尾，指定位置加 `--parent-block <父块> --index <从0起的位置>`；保留原正文和权限，仍加 `--verify-out` |
+| 读全文、解析wiki链接、表格写回、查文档权限 | `python feishu/docio_cli.py --bot <我> inspect/read/write/doctor ...`；依 SOP-140，媒体插入走上一行 |
 | 发可播放语音 | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"` |
 | 发布飞书在线文档 | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
 | 将已有 HTML、视频交互或三维查看器发布为妙搭应用链接 | 读 [HTML→妙搭流程](references/SOP-010-html-to-miaoda.md)，复用 `lark-apps`，保留已有应用入口；资源清单和发布核验用 `python feishu/miaoda_delivery.py --help` |

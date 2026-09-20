@@ -18,6 +18,9 @@ sys.exit（适合被长驻进程/库 import）。不硬编码盘符/用户名/fo
 from __future__ import annotations
 
 import json
+import re
+import hashlib
+import zlib
 import sys
 import time
 import uuid
@@ -91,7 +94,14 @@ def auth_url(app_id: str, scopes=CLOUD_DOC_SCOPES) -> str:
 _DOC_EXT = {".md": "md", ".markdown": "markdown", ".mark": "mark",
             ".html": "html", ".txt": "txt", ".doc": "doc", ".docx": "docx"}
 _MAX_BYTES = 20 * 1024 * 1024   # 单次 upload_all 上限 20MB
-_MAX_REAL_TABLE_CELLS_PER_DOC = 24  # 全篇硬上限；调用方传更大也不能突破
+# docx 块写接口限频约 3 次/秒（ARCH-110 §2.11b）。逐格填表是连续小写入，不节流就会在第 20~30
+# 次撞到限频：飞书返回 429 且正文为空 → api() 的 json.loads 抛 JSONDecodeError（2026-08-30 那次
+# "144 格 PLAN 在第 25/54 次写入收到空正文" 就是这个）。正解是节流 + 核实后重试，不是限制表格大小。
+_WRITE_MIN_INTERVAL = 0.35      # 相邻两次 docx 写入的最小间隔（秒）≈ 3 次/秒
+_WRITE_RETRIES = 4              # 限频/空正文后的最多重试次数
+_RATE_LIMIT_CODES = {99991400, 99991661, 429}
+_sleep = time.sleep             # 测试可替换
+_last_write_at = 0.0
 
 
 class DocImportError(RuntimeError):
@@ -280,15 +290,17 @@ def _append_children(token: str, doc_id: str, parent_block: str, child: dict, in
     return d["data"]
 
 
-def _create_image_block(token: str, doc_id: str, parent: str) -> str:
+def _create_image_block(token: str, doc_id: str, parent: str, index=None) -> str:
     """空图片块（image 必须为空 {}·否则 1770001）→ 返回该 block_id。"""
-    data = _append_children(token, doc_id, parent, {"block_type": 27, "image": {}})
+    data = _append_children(token, doc_id, parent, {"block_type": 27, "image": {}}, index=index)
     return data["children"][0]["block_id"]
 
 
-def _create_file_block(token: str, doc_id: str, parent: str) -> str:
-    """空文件块（file 必须为空 {}）→ 飞书生成两层：外 33 View · 内 23 file → 返回内层 23 的 block_id。"""
-    data = _append_children(token, doc_id, parent, {"block_type": 23, "file": {}})
+def _create_file_block(token: str, doc_id: str, parent: str, view_type: int = 1, index=None) -> str:
+    """Create a file under a View; type 2 expands the native media preview."""
+    if view_type not in (1, 2):
+        raise DocImportError('Unsupported file view type')
+    data = _append_children(token, doc_id, parent, {"block_type": 23, "file": {"view_type": view_type}}, index=index)
     outer = data.get("children") or []
     inner = (outer[0].get("children") if outer else None) or []
     if not inner:
@@ -296,13 +308,15 @@ def _create_file_block(token: str, doc_id: str, parent: str) -> str:
     return inner[0]
 
 
-def _create_text_block(token: str, doc_id: str, parent: str, text: str) -> None:
+def _create_text_block(token: str, doc_id: str, parent: str, text: str, index=None) -> None:
     _append_children(token, doc_id, parent,
-                     {"block_type": 2, "text": {"elements": [{"text_run": {"content": text}}]}})
+                     {"block_type": 2, "text": {"elements": [{"text_run": {"content": text}}]}}, index=index)
 
 
 def _upload_to_block(token: str, path: Path, parent_type: str, parent_node: str) -> str:
-    """素材进 block（multipart·标准库·复用绕代理 api）→ file_token。"""
+    """Upload into the actual media block; large media uses server-sized parts."""
+    if path.stat().st_size > _MAX_BYTES:
+        return _upload_parts_to_block(token, path, parent_type, parent_node)
     data = path.read_bytes()
     boundary = f"----{uuid.uuid4().hex}"
     parts = b""
@@ -318,6 +332,55 @@ def _upload_to_block(token: str, path: Path, parent_type: str, parent_node: str)
     if d.get("code") != 0:
         raise DocImportError(f"素材上传失败 {d.get('code')} {d.get('msg')}（{parent_type}）")
     return d["data"]["file_token"]
+
+
+def _upload_parts_to_block(token: str, path: Path, parent_type: str, parent_node: str) -> str:
+    before = path.stat()
+    result = api('POST', f'{BASE}/drive/v1/medias/upload_prepare', token=token,
+                 body={'file_name': path.name, 'parent_type': parent_type,
+                       'parent_node': parent_node, 'size': before.st_size})
+    if result.get('code') != 0:
+        raise DocImportError(f"分片上传预备失败 {result.get('code')} {result.get('msg')}")
+    plan = result.get('data') or {}
+    upload_id, size, count = plan.get('upload_id'), plan.get('block_size'), plan.get('block_num')
+    if (not upload_id or type(size) is not int or not 0 < size <= 64*1024*1024
+            or type(count) is not int or count != (before.st_size + size - 1)//size):
+        raise DocImportError('分片预备返回的数量或大小无效')
+    with path.open('rb') as source:
+        for seq in range(count):
+            chunk = source.read(size)
+            if len(chunk) != min(size, before.st_size-seq*size):
+                raise DocImportError('上传过程中源文件被截短')
+            boundary = '----'+uuid.uuid4().hex
+            fields = {'upload_id': upload_id, 'seq': seq, 'size': len(chunk),
+                      'checksum': str(zlib.adler32(chunk) & 0xffffffff)}
+            body = b''.join((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode()
+                            for key,value in fields.items())
+            body += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="part"\r\n'
+                     'Content-Type: application/octet-stream\r\n\r\n').encode()+chunk+f'\r\n--{boundary}--\r\n'.encode()
+            reply = api('POST', f'{BASE}/drive/v1/medias/upload_part', token=token,
+                        raw_body=body, content_type=f'multipart/form-data; boundary={boundary}')
+            if reply.get('code') != 0:
+                raise DocImportError(f"分片 {seq+1}/{count} 上传失败 {reply.get('code')} {reply.get('msg')}; upload_id={upload_id}")
+        if source.read(1):
+            raise DocImportError('上传过程中源文件变长')
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise DocImportError('上传过程中源文件发生变化')
+    result = api('POST', f'{BASE}/drive/v1/medias/upload_finish', token=token,
+                 body={'upload_id': upload_id, 'block_num': count})
+    file_token = (result.get('data') or {}).get('file_token')
+    if result.get('code') != 0 or not file_token:
+        raise DocImportError(f"分片合并失败 {result.get('code')} {result.get('msg')}")
+    return file_token
+
+
+def _media_file_identity(path: Path) -> dict:
+    digest = hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda: source.read(1024*1024), b''):
+            digest.update(block)
+    return {'bytes': path.stat().st_size, 'sha256': digest.hexdigest()}
 
 
 def _image_dims(path: Path):
@@ -417,23 +480,186 @@ def _text_chunks(text, limit=1800):
     return [value[i:i + limit] for i in range(0, len(value), limit)]
 
 
-def _bounded_real_table_budget(requested) -> int:
-    """真实表格逐格写入的全篇硬预算；调用方只能调低，不能调高。"""
-    return min(max(int(requested), 0), _MAX_REAL_TABLE_CELLS_PER_DOC)
+def _throttled_write(method, url, token, body):
+    """节流后的 docx 写入：保证相邻写入间隔 ≥ _WRITE_MIN_INTERVAL。"""
+    global _last_write_at
+    wait = _WRITE_MIN_INTERVAL - (time.monotonic() - _last_write_at)
+    if wait > 0:
+        _sleep(wait)
+    try:
+        return api(method, url, token=token, body=body)
+    finally:
+        _last_write_at = time.monotonic()
+
+
+def _cell_chunk_landed(token, doc_id, cid, part_index, chunk) -> bool:
+    """核实某格第 part_index 段是否已经写进去（限频/空正文后不能盲目重发，否则正文重复）。"""
+    try:
+        d = api("GET", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1", token=token)
+    except json.JSONDecodeError:
+        return False
+    items = ((d.get("data") or {}).get("items") or []) if d.get("code") == 0 else []
+    if part_index >= len(items):
+        return False
+    elements = ((items[part_index].get("text") or {}).get("elements") or [])
+    return "".join((el.get("text_run") or {}).get("content", "") for el in elements) == chunk
+
+
+def _write_cell_chunk(token, doc_id, cid, part_index, chunk) -> bool:
+    """往单元格追加一段文字。限频/空正文 → 退避 → 核实是否已落地 → 未落地才重试。
+
+    ``chunk`` 是纯文本，或一个带链接/样式的 ``{"text_run": {...}}`` 元素（保留原文链接）。"""
+    element = chunk if isinstance(chunk, dict) else {"text_run": {"content": chunk}}
+    chunk = element["text_run"].get("content", "")
+    url = f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1"
+    body = {"children": [{"block_type": 2, "text": {
+        "elements": [element], "style": {}}}], "index": part_index}
+    for attempt in range(_WRITE_RETRIES + 1):
+        try:
+            w = _throttled_write("POST", url, token, body)
+            if w.get("code") == 0:
+                return True
+            if w.get("code") not in _RATE_LIMIT_CODES:
+                return False          # 真正的业务错误，不重试
+        except json.JSONDecodeError:  # 429 空正文
+            pass
+        if attempt == _WRITE_RETRIES:
+            break
+        _sleep(0.5 * (2 ** attempt))
+        if _cell_chunk_landed(token, doc_id, cid, part_index, chunk):
+            return True               # 上一次其实写进去了，绝不重发
+    return False
+
+
+_TABLE_INIT_MAX = 9   # 2026-09-19 实测：children 建表 row_size/column_size 任一 >9 即 1770001 invalid param
+# 建表默认每列 100px，三列表只占页面 1/3 宽（主人 2026-09-19 反馈"每列窄窄的没意义"）。
+# 飞书自己的 import 链把表铺满正文宽度：总宽 732px（实测 3 列 244×3、5 列 146×5）。这里对齐它，
+# 但不是等分：按各列内容长度分配，让每列换行后的行数接近（"步骤"长就宽、"依据"短就窄），
+# 主人 2026-09-19 定为默认 taste。
+_TABLE_FILL_WIDTH = 732         # 正文默认宽（= 飞书 import 链约定）；内容少的表就这么宽
+_TABLE_MAX_WIDTH = 1040         # 内容多的表允许整体拉宽到这里（主人 2026-09-19 手动拖到 1023~1035 的宽度）
+_TABLE_MIN_COL_WIDTH = 90       # 短列下限 ≈ 6 个汉字一行；再窄就没法读了
+_PX_PER_UNIT = 7                # 14px 字号下一个半角单位 ≈ 7px（汉字 14px = 2 单位）
+_TARGET_LINES = 1.5             # 总宽以"各列最长格控制在约 1.5 行内"为目标，超过页宽上限才截（2 行偏挤，主人 2026-09-19 反馈）
+
+
+def _display_len(text: str) -> int:
+    """CJK 一个字占两格，ASCII 占一格；用来估每格渲染后的宽度。"""
+    return sum(2 if ord(ch) > 0x2E7F else 1 for ch in str(text or ""))
+
+
+def _fill_widths(cols: int, texts=None) -> list:
+    """按内容给表定总宽、再把总宽分给各列（主人 2026-09-19 定的默认 taste）：
+    - 总宽 = 各列最长格显示长度之和 × 7px ÷ 2 行，夹在 [732, 1040]：内容少的表就是正文宽，
+      内容多的表整体拉宽，让每列最长的格大约两行放得下；
+    - 列宽 ∝ (该列最长格 + 平均格) / 2 —— 让各列换行后的行数接近；只看最长会被一个超长格带偏，
+      只看平均会让最长格叠十几行；
+    - 短列不低于 _TABLE_MIN_COL_WIDTH；总和精确等于总宽。texts 为空则 732 等分。"""
+    if cols <= 0:
+        return []
+    weights, total_width = [1.0] * cols, _TABLE_FILL_WIDTH
+    if texts:
+        rows = max(1, (len(texts) + cols - 1) // cols)
+        longest = []
+        for c in range(cols):
+            lens = [_display_len(texts[r * cols + c]) for r in range(rows) if r * cols + c < len(texts)]
+            longest.append(max(lens) if lens else 1)
+            weights[c] = max(1.0, (max(lens) + sum(lens) / len(lens)) / 2) if lens else 1.0
+        need = int(sum(longest) * _PX_PER_UNIT / _TARGET_LINES)
+        total_width = min(_TABLE_MAX_WIDTH, max(_TABLE_FILL_WIDTH, need))
+    if cols * _TABLE_MIN_COL_WIDTH > total_width:
+        # 列数多到 cols×下限 > 总宽（12 列短文本 = 1080 > 732）时，732～1040 的总宽 taste 装不下：
+        # 原逻辑把每列抬到 90 再从最宽列扣差额，会扣出负宽度 → 飞书 1770006 schema mismatch，
+        # 整表降级成纯文本（tb24 2026-09-19 真机 3×12 实测）。宽表改为每列独立按内容定宽
+        # （不低于下限、长格约 1.5 行放得下），表比页宽横向滚动，比列窄到读不了强。
+        if not texts:
+            return [_TABLE_MIN_COL_WIDTH] * cols
+        return [max(_TABLE_MIN_COL_WIDTH, int(n * _PX_PER_UNIT / _TARGET_LINES)) for n in longest]
+    total = float(sum(weights)) or 1.0
+    widths = [max(_TABLE_MIN_COL_WIDTH, int(total_width * w / total)) for w in weights]
+    # 修正下限抬高/取整造成的偏差：多退少补，只动最宽的列，保证总和精确
+    diff = total_width - sum(widths)
+    widths[widths.index(max(widths))] += diff
+    if min(widths) < _TABLE_MIN_COL_WIDTH:   # 兜底：极端权重下仍不让任何列低于下限
+        base = max(_TABLE_MIN_COL_WIDTH, total_width // cols)
+        widths = [base] * cols
+    return widths
+
+
+def retune_table_widths(token: str, doc_id: str, markdown: str) -> list:
+    """给【已发布】文档的表格按当前 taste 重算列宽并原位 PATCH（不新建文档、不动内容）。
+    表格按出现顺序与 markdown 里的表一一对应；回 [(rows, cols, new_widths), ...]。"""
+    blocks, first_level = _convert_markdown(token, markdown)
+    by_id = {b["block_id"]: b for b in blocks}
+    wanted = [_table_data(by_id, bid) for bid in first_level
+              if (by_id.get(bid) or {}).get("block_type") == 31]
+    live, page = [], None
+    while True:
+        q = "?document_revision_id=-1&page_size=500" + (f"&page_token={page}" if page else "")
+        g = api("GET", f"{_DOCX}/{doc_id}/blocks{q}", token=token)
+        data = g.get("data") or {}
+        live += [b for b in data.get("items") or [] if b.get("block_type") == 31]
+        page = data.get("page_token")
+        if not data.get("has_more"):
+            break
+    done = []
+    for block, (rows, cols, texts) in zip(live, wanted):
+        prop = (block.get("table") or {}).get("property") or {}
+        if (prop.get("row_size"), prop.get("column_size")) != (rows, cols):
+            continue                                  # 结构对不上就跳过，绝不改错表
+        widths = _fill_widths(cols, texts)
+        for i, w in enumerate(widths):
+            if (prop.get("column_width") or [None] * cols)[i] != w:
+                _throttled_write("PATCH", f"{_DOCX}/{doc_id}/blocks/{block['block_id']}?document_revision_id=-1",
+                                 token, {"update_table_property": {"column_index": i, "column_width": w}})
+        done.append((rows, cols, widths))
+    return done
+
+
+def _grow_table(token, doc_id, tid, rows, cols, init_rows, init_cols, widths) -> list:
+    """建表只能 ≤9×9；更多行列用 PATCH insert_table_row/column 逐个补，再取回完整单元格列表。
+    补出来的列是默认 100px，随后逐列 PATCH 成按内容分配的宽度。"""
+    ops = ([{"insert_table_row": {"row_index": -1}}] * (rows - init_rows)
+           + [{"insert_table_column": {"column_index": -1}}] * (cols - init_cols)
+           + [{"update_table_property": {"column_index": i, "column_width": widths[i]}}
+              for i in range(init_cols, cols)])
+    for op in ops:
+        try:
+            r = _throttled_write("PATCH", f"{_DOCX}/{doc_id}/blocks/{tid}?document_revision_id=-1", token, op)
+        except json.JSONDecodeError:
+            r = {}
+        if r.get("code") != 0:
+            break                     # 少插的行列体现在 cells 数量上，缺格按失败处理并降级兜底
+    try:
+        g = api("GET", f"{_DOCX}/{doc_id}/blocks/{tid}?document_revision_id=-1", token=token)
+    except json.JSONDecodeError:
+        return []
+    return (((g.get("data") or {}).get("block") or {}).get("table") or {}).get("cells") or []
 
 
 def _insert_real_table(token, doc_id, index, rows, cols, texts, cell_elements=None):
-    """建空表块并逐格填字。回 ``(table_ok, filled, failed_indexes)``。"""
+    """建空表块并逐格填字。回 ``(table_ok, filled, failed_indexes)``。
+
+    表格不限大小：≤9×9 一次建好，更大的先建 9×9 再逐行/逐列扩；写入节流到约 3 次/秒，
+    限频或空正文时核实后重试，所以 15×3、144 格这类表也能整表落地。
+    ``cell_elements`` 给出每格的原始 text_run 元素（链接/样式随之保留）；缺省按纯文本写。
+    """
+    init_rows, init_cols = min(rows, _TABLE_INIT_MAX), min(cols, _TABLE_INIT_MAX)
+    widths = _fill_widths(cols, texts)
     try:
-        d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
-                token=token, body={"children": [{"block_type": 31, "table": {"property": {
-                    "row_size": rows, "column_size": cols, "header_row": True}}}], "index": index})
-    except json.JSONDecodeError:  # 非幂等写入不盲重试，调用方必须报未完成
+        d = _throttled_write("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children?document_revision_id=-1",
+                             token, {"children": [{"block_type": 31, "table": {"property": {
+                                 "row_size": init_rows, "column_size": init_cols, "header_row": True,
+                                 "column_width": widths[:init_cols]}}}],
+                                     "index": index})
+    except json.JSONDecodeError:  # 建表本身撞空正文：整表走完整纯文本兜底
         return False, 0, list(range(len(texts)))
     if d.get("code") != 0:
         return False, 0, []
     child = ((d.get("data") or {}).get("children") or [{}])[0]
     cells = (child.get("table") or {}).get("cells") or []
+    if (rows > init_rows or cols > init_cols) and child.get("block_id"):
+        cells = _grow_table(token, doc_id, child["block_id"], rows, cols, init_rows, init_cols, widths)
     filled = 0
     failed = list(range(len(cells), len(texts)))
     for cell_index, (cid, value) in enumerate(zip(cells, texts)):
@@ -441,24 +667,13 @@ def _insert_real_table(token, doc_id, index, rows, cols, texts, cell_elements=No
             {"text_run": {"content": value}}]
         if not value and not runs:
             continue
-        cell_ok = True
         chunks = []
         for element in runs:
             run = element["text_run"]
             for chunk in _text_chunks(run.get("content", "")):
                 chunks.append({"text_run": {**run, "content": chunk}})
-        for part_index, element in enumerate(chunks):
-            try:
-                w = api("POST", f"{_DOCX}/{doc_id}/blocks/{cid}/children?document_revision_id=-1",
-                        token=token, body={"children": [{"block_type": 2, "text": {
-                            "elements": [element], "style": {}}}],
-                            "index": part_index})
-            except json.JSONDecodeError:  # 同上；不重试非幂等写入，避免正文重复
-                cell_ok = False
-                break
-            if w.get("code") != 0:
-                cell_ok = False
-                break
+        cell_ok = all(_write_cell_chunk(token, doc_id, cid, part_index, element)
+                      for part_index, element in enumerate(chunks))
         if cell_ok:
             filled += 1
         else:
@@ -470,7 +685,6 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                         markdown: str = None, title: str = None,
                         grant_open_id: str = None, perm: str = "edit",
                         visibility: str = "tenant",
-                        cell_budget: int = _MAX_REAL_TABLE_CELLS_PER_DOC,
                         table_layout: str = "auto",
                         dry_run: bool = False) -> dict:
     """Markdown → 飞书在线文档，只用 docx 权限（不碰云空间上传/导入）。
@@ -480,11 +694,12 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     - **表格无论多小都塞不进 `descendant`**（1x2 的表 9 个块照样 `1770001`）——
       convert 产出的表格结构与该接口不兼容，和块数无关。
       正解是「先建空表块（飞书自动生成单元格）→ 逐格填字」，实测 9/9 成功。
-    - 表格代价是 1+行×列 次请求，所以全篇真实表格最多尝试 24 格；`cell_budget` 只能调低，
-      调用方传更大也会被硬截断。失败尝试同样扣预算，绝不通过失败重置预算。
-    - 非PRD默认将表格编译为带字段名的原生纵向列表；PRD保留原生表格。
-    - 原生表超过预算或遇到不支持的资源时，建文档前报错并提示专用路径。
-    - 禁止纯文本降级；写入后分页回读，核对正文、链接与结构才返回成功。
+    - 表格代价是 1+行×列 次请求；写入节流 + 限频核实重试（见 `_write_cell_chunk`），
+      **不限制表格大小**——2026-08-30 曾加过"全篇 24 格"硬闸，把所有正常尺寸的表都降成纯文本，
+      2026-09-19 按主人要求删除。
+    - 非PRD默认将表格编译为带字段名的原生纵向列表；PRD保留原生表格（单元格链接随 text_run 保留）。
+    - 遇到不支持的资源时，建文档前报错并提示专用路径。
+    - 禁止纯文本降级：表格或普通块写入未完成直接报错；写入后分页回读，核对正文、链接与结构才返回成功。
 
     visibility: "tenant" 组织内凭链接可读（默认）/ "anyone" 任何已登录飞书的人 / "none" 不动
     """
@@ -495,19 +710,16 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
         markdown = src.read_text(encoding="utf-8", errors="replace")
     doc_title = title or (src.stem if src else "未命名文档")
     markdown, layout = source_body(markdown, table_layout)
-    cell_budget = _bounded_real_table_budget(cell_budget)
-    initial_cell_budget = cell_budget
     if dry_run:
         return {"dry_run": True, "title": doc_title, "chars": len(markdown),
-                "real_table_cell_budget": cell_budget,
                 "table_layout": layout,
                 "chain": ["blocks/convert", "compile/preflight", "create_docx", "descendant(普通块分批)",
-                          "children(表格逐格填)", "readback/verify", f"visibility={visibility}",
+                          "children(表格逐格填·节流·9×9 扩表)", "readback/verify", f"visibility={visibility}",
                           "grant_member" if grant_open_id else "skip-grant"]}
 
     token = _tenant_token(app_id, app_secret)
     blocks, first_level = _convert_markdown(token, markdown)
-    blocks, first_level, tables_vertical = compile_blocks(blocks, first_level, layout, cell_budget)
+    blocks, first_level, tables_vertical = compile_blocks(blocks, first_level, layout)
     by_id = {b["block_id"]: b for b in blocks}
     doc_id = _create_docx(token, doc_title)
 
@@ -519,11 +731,8 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
         if (by_id.get(bid) or {}).get("block_type") == 31:
             rows, cols, runs = table_cells(by_id, by_id[bid])
             texts = ["".join(el["text_run"].get("content", "") for el in cell) for cell in runs]
-            cell_count = rows * cols
-            if rows and cols and cell_count <= cell_budget:
-                # 先扣再写：空响应/部分失败都不能返还预算，保证整篇尝试量有绝对上界。
-                cell_budget -= cell_count
-                table_cells_attempted += cell_count
+            if rows and cols:
+                table_cells_attempted += rows * cols
                 ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts, runs)
                 table_cells_filled += filled
                 table_cells_failed += len(failed)
@@ -567,7 +776,6 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
             "blocks": len(blocks), "batches": batches,
             "tables_real": tables_real, "tables_degraded": tables_degraded,
             "tables_vertical": tables_vertical, "table_layout": layout, **verification,
-            "table_cell_budget_cap": initial_cell_budget,
             "table_cells_attempted": table_cells_attempted,
             "table_cells_filled": table_cells_filled,
             "table_cells_failed": table_cells_failed,
@@ -633,50 +841,104 @@ def _set_visibility(token: str, doc_token: str, visibility: str, *, doc_type: st
 def publish_media_as_doc(app_id: str, app_secret: str, files, *,
                          title: str | None = None, captions=None,
                          grant_open_id: str | None = None, perm: str = "view",
-                         public: bool = True, dry_run: bool = False) -> dict:
+                         public: bool = True, dry_run: bool = False,
+                         document_id: str | None = None, parent_block: str | None = None,
+                         index: int | None = None, resume_empty_block: str | None = None) -> dict:
     """本地【图片/视频/任意文件】多个 → 嵌进一篇飞书 docx → (授权 owner) → (设公开链接) → 返回
     {url, token, items, granted, public, public_error}。
     files: 本地路径 list。captions: 与 files 等长的可选说明（嵌在每个媒体前·None 跳过）。
     图片走 image 块（内联显示）· 其他走 file 块（视频/音频/pdf 内联播放/预览）。perm 默认 view（只读够看）。
     public 默认 True = 【拿到链接的任何人都能打开看】（见 set_public_link）。"""
+    # Existing documents keep their title, contents and ACL; this only inserts children.
+    if document_id is not None and not re.fullmatch(r'[A-Za-z0-9]+', document_id):
+        raise DocImportError('document_id must be a docx token, not a URL or wiki token')
+    if parent_block is not None and (not document_id or not re.fullmatch(r'[A-Za-z0-9]+', parent_block)):
+        raise DocImportError('parent_block requires an existing document and a valid block token')
+    if index is not None and (isinstance(index, bool) or not isinstance(index, int) or index < 0):
+        raise DocImportError('index must be a nonnegative child position')
+    if not document_id and index not in (None, 0):
+        raise DocImportError('新建空文档只能从index=0插入')
     paths = [Path(f) for f in files]
+    if resume_empty_block and (not document_id or not re.fullmatch(r'[A-Za-z0-9]+', resume_empty_block)
+            or len(paths) != 1 or paths[0].suffix.lower() in _IMAGE_EXTS or captions or parent_block or index is not None):
+        raise DocImportError('resume_empty_block requires one file, existing document, and no caption/index/parent')
+    if not paths:
+        raise DocImportError('至少需要一个媒体文件')
+    if captions is not None and len(captions) != len(paths):
+        raise DocImportError('caption 数量必须与 media 一一对应')
     for p in paths:
         if not p.is_file():
             raise DocImportError(f"文件不存在: {p}")
-        if p.stat().st_size > _MAX_BYTES:
-            raise DocImportError(f"{p.name} > 20MB（本链路单次上传上限·{p.stat().st_size} 字节）")
+        if not p.stat().st_size:
+            raise DocImportError(f'媒体为空: {p.name}')
     doc_title = title or (paths[0].stem if paths else "媒体在线查看")
     if dry_run:
-        plan = [{"file": p.name, "kind": ("image" if p.suffix.lower() in _IMAGE_EXTS else "file")}
+        plan = [{"file": p.name, "kind": ("image" if p.suffix.lower() in _IMAGE_EXTS else "file"),
+                 'bytes': p.stat().st_size, 'upload': 'upload_parts' if p.stat().st_size > _MAX_BYTES else 'upload_all'}
                 for p in paths]
         return {"dry_run": True, "title": doc_title, "items": plan,
-                "grant_open_id": grant_open_id, "perm": perm, "public": public}
+                "grant_open_id": grant_open_id if not document_id else None,
+                "perm": perm if not document_id else 'unchanged', "public": public if not document_id else 'unchanged',
+                'operation': 'insert' if document_id else 'create', 'document_id': document_id,
+                'parent_block': parent_block or document_id, 'index': index}
     token = _tenant_token(app_id, app_secret)
-    doc_id = _create_docx(token, doc_title)
+    doc_id = document_id or _create_docx(token, doc_title)
+    parent = parent_block or doc_id
+    if document_id:
+        existing = api('GET', f'{_DOCX}/{doc_id}/blocks/{parent}', token=token)
+        block = (existing.get('data') or {}).get('block') or {}
+        if existing.get('code') != 0 or block.get('block_id') != parent:
+            raise DocImportError(f'目标文档/父块不可读，未插入媒体: {doc_id}/{parent}')
+        if index is not None and index > len(block.get('children') or []):
+            raise DocImportError('index exceeds current parent child count')
     items = []
+    def require_empty_resume_block():
+        state = api('GET', f'{_DOCX}/{doc_id}/blocks/{resume_empty_block}', token=token)
+        block = (state.get('data') or {}).get('block') or {}
+        if (state.get('code') != 0 or block.get('block_id') != resume_empty_block
+                or block.get('block_type') != 23 or 'file' not in block or block['file'].get('token')):
+            raise DocImportError('Resume target is not an empty file block; refusing overwrite')
+    if resume_empty_block:
+        require_empty_resume_block()
     for i, p in enumerate(paths):
+        identity = _media_file_identity(p)
         cap = captions[i] if (captions and i < len(captions)) else None
         if cap:
-            _create_text_block(token, doc_id, doc_id, cap)
+            _create_text_block(token, doc_id, parent, cap, index=index)
+            if index is not None: index += 1
         is_image = p.suffix.lower() in _IMAGE_EXTS
         if is_image:
-            bid = _create_image_block(token, doc_id, doc_id)
+            bid = _create_image_block(token, doc_id, parent, index=index)
             ftok = _upload_to_block(token, p, "docx_image", bid)
         else:
-            bid = _create_file_block(token, doc_id, doc_id)
+            native_av = p.suffix.lower() in {'.mp4', '.mov', '.m4v', '.webm', '.mp3', '.m4a', '.wav', '.ogg'}
+            bid = resume_empty_block or _create_file_block(token, doc_id, parent, view_type=2 if native_av else 1, index=index)
             ftok = _upload_to_block(token, p, "docx_file", bid)   # parent_node=内层文件块 block_id（与图片同·非 doc_id）
+        if resume_empty_block:
+            require_empty_resume_block()
         _bind_media(token, doc_id, bid, ftok, is_image,
                     dims=_image_dims(p) if is_image else None)
-        items.append({"file": p.name, "kind": "image" if is_image else "file", "file_token": ftok})
+        bound = api('GET', f'{_DOCX}/{doc_id}/blocks/{bid}', token=token)
+        block = (bound.get('data') or {}).get('block') or {}
+        if bound.get('code') != 0 or (block.get('image' if is_image else 'file') or {}).get('token') != ftok:
+            raise DocImportError(f'媒体绑定回读不一致: {p.name}; doc_id={doc_id}')
+        if identity != _media_file_identity(p):
+            raise DocImportError(f'发布期间本地媒体已变化: {p.name}; doc_id={doc_id}')
+        items.append({"file": p.name, "kind": "image" if is_image else "file", "file_token": ftok,
+                      'block_id': bid, **identity, 'upload': 'upload_parts' if identity['bytes'] > _MAX_BYTES else 'upload_all',
+                      'binding_verified': True, 'playback_verified': False,
+                      'view_type': None if is_image else (2 if native_av else 1)})
+        if index is not None: index += 1
     url = _doc_url(token, doc_id)
     granted, gerr = True, None
-    if grant_open_id:
+    if grant_open_id and not document_id:
         granted, gerr = _grant_member(token, doc_id, grant_open_id, perm)
     pub, perr = None, None
-    if public:
+    if public and not document_id:
         pub, perr = set_public_link(token, doc_id)
     return {"url": url, "token": doc_id, "items": items, "granted": granted, "grant_error": gerr,
-            "public": pub, "public_error": perr}
+            "public": pub, "public_error": perr,
+            'operation': 'insert' if document_id else 'create', 'permissions_preserved': bool(document_id)}
 
 
 if __name__ == "__main__":   # 手动测试：python feishu_docs.py <file> [--dry]（凭据从 .env 取 default bot）

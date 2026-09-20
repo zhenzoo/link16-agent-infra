@@ -40,6 +40,43 @@ last_reviewed: 2026-09-14
 - 未纳入其他 session 尚未提交的文档发布、妙搭、进度卡及用户配置改动；公开仓不包含真实名册、环境文件或认证数据。
 - 远端 v0.27.0 的 TB24 启动、重启续传和看门狗修复已单独审查；它新增 `tomlkit` 依赖，且桥文件与本机其他工作线重叠。本次保留在隔离目录核验，未将其应用到当前运行目录。
 
+### 合并远端 main（v0.27.0 → v0.28.0）的取舍（2026-09-21）
+
+- 看门狗 R8（长静默按 Esc）保留本分支的 `bridge_activity` 共享活动时钟版（只有后台确认执行中才计时；起因是本机 Codex 屏幕挂着 Working 但回合已结束的误判）；远端"屏幕 Working + 本轮起点"版的判定函数与其测试不并入，`tests/test_watchdog_recovery.py` 改按活动时钟改写，远端的 R5 重试预算与 RPC 失败诚实性测试原样保留。
+- 在线文档表格引擎采用远端版：删"全篇 24 格"硬闸、写入节流约 3 次/秒、限频核实后重试、≤9×9 建表再扩、列宽按内容铺满；叠加本分支的结构编译/写后回读闸与单元格链接保留（`_write_cell_chunk` 接受 text_run 元素）。写失败一律报错，不再往文档追加纯文本兜底，也不转 import 绕过结构闸。
+- 入站附件：远端的持久收件箱缓存 + 本分支的 8 MiB Range 分片下载并存（图片走 SDK 通道，文件/音视频走分片）；卡片发送保留 3 次重试并带上工作行标题条参数；进度卡"满 1 小时换新卡"与远端的 `edit_card` 结构化返回叠加。
+- 新依赖 `tomlkit`（远端 Codex 启动修复引入，已在 `feishu/requirements.txt`）。合并后全量 980 passed。
+
+## v0.28.0 — 2026-09-20 · 每张飞书卡片带「工作行」标题条：项目 · 对象 · 动作 + Stage 链
+
+- **为什么**：十几个 bot 并排在飞书里，主人翻记录时靠 bot 名认不出它在做哪个项目（TC101P / TC101S 长得像，消息发反过）。飞书应用名是平台级静态属性——开放 API `PATCH application/v6/applications/:app_id` 只能改分组/回调，改名只能后台发版；注册脚本的 `--name` 也只是预填网页。所以不改名，把「当前项目 + 当前任务」焊进每张卡片。
+- **feat `feishu/session_work.py`**：每 bot 一份 `feishu/_state/session-work-<bot>.json`（`project` ≤40 字、`task`/`progress` 各 ≤300 字可多行）。agent 在会话里 `set --project … --task … --progress …` 自己写；`show` / `clear`；bot 名取 `FEISHU_BRIDGE_SESSION`，过 `assert_sender_identity` 身份闸。没写就兜底：project = 会话 cwd 目录名，task = Claude transcript 最后一条 `ai-title`（Codex 没有 → 只剩目录名）。
+- **feat 桥接入（`feishu_bridge.py`）**：`_card_payload` / `card_send` / `_edit_card` 三条发卡路都过 `session_work.apply_banner`：卡片 `header` = carmine 色项目 pill + 标题 `📌 <项目> · <对象+动作+交付结果>`（颜色跟进度：有 🔴 红 / 全 ✅ 绿 / 其余蓝），正文首行 = Stage 链 + 分割线，`config.summary` = 会话列表预览行 `📌 项目 · 对象 ｜ 正文第一句`。a2a 群纯文字不加。`/new` `/clear` `/cd` 清掉工作行。进度链按 `CARD_HARD 2980 − 正文` 只裁自己，正文一字不动，分片规则不变。
+- **feat hook 提醒（`hooks/bridge_userprompt.py`）**：Claude 会话每轮以 `additionalContext` 收到当前顶栏 + 规则：接新任务 / Stage 切换 / 旧任务做完时才改，写真实当前情况的大白话，点名具体对象与动作，不写格式词或样例。Codex 的规则走 `$agent-profile-governance` 的 Codex 模板（已渲染进 cx/cxp 的 AGENTS.md）。
+- **一键关 / 删（主人 2026-09-20 要求零耦合）**：总开关 `session_work.enabled()`——环境变量 `LINK16_WORK_LINE=off` 或 `DEFAULT_ENABLED=False`，关掉后卡片和会话回到没这功能之前的样子；彻底删 = 删 `session_work.py` + 测试 + `feishu_bridge.py` 5 处单行调用 + hook 的 `_work_context` 段。
+- 验证：`tests/test_session_work.py` 17 passed（状态/兜底/标题条/颜色/预算/幂等/身份闸/hook 上下文/总开关）；全量 921 passed；真机 tb25-link16 桥重启三次，owner DM 收到带标题条的进度卡、答案卡、演示卡。机制文档 ARCH-110 §2.6.1，工具登记 TOOLS.md。
+
+## v0.27.1 — 2026-09-19 · 删除文档表格"全篇 24 格"硬闸，改修真正的根因
+
+- **删除** v0.18.1（2026-08-30 02:07 无人值守 session 自行加的）`_MAX_REAL_TABLE_CELLS_PER_DOC = 24` 及 `cell_budget` 参数：它把任何超过 24 格的 Markdown 表格整表转成 `" | ".join` 纯文本，实测 RESEARCH-010 四张 45/25/25/33 格的表全部降级、回读 `tables fetched 0`。主人从未授权这条闸。
+- 根因一（当年空正文）：docx 块写入限频约 3 次/秒，逐格连写撞 429 空正文 → `api()` 抛 `JSONDecodeError`。现在 `_throttled_write` 节流 ≥0.35s，`_write_cell_chunk` 限频后退避 → `GET` 核实该段是否已落地 → 未落地才重试（最多 4 次），绝不重发已落地内容。
+- 根因二（今天才暴露）：`children` 建表 `row_size`/`column_size` 任一 >9 即 `1770001 invalid param`。现在先建 ≤9×9，再 `PATCH insert_table_row/column` 扩到目标尺寸，`GET` 取回完整 cells 再逐格填（`_grow_table`）。
+- **机械闸**：`_publish_online_doc` 原生链结果只要 `tables_degraded > 0` 就不接受为成功 → 转 import 链；两条都不行整体报错（退出码 1）。`send --doc` 的 JSON/receipt 新增 `tables_real / tables_degraded / table_cells_filled / table_cells_failed`，降级 >0 日志打 ⚠️。不再可能静默把表格当文字交付。
+- **表格列宽默认 taste（主人 2026-09-19 定）**：建表默认每列 100px、三列表只占页宽 1/3。现在总宽按内容定：各列最长格显示长度之和 ×7px ÷1.5 行，夹在 [732, 1040]（732 = 飞书 import 链自身约定；1040 = 主人手动拖到的宽度），内容少的表就是正文宽、内容多的整体拉宽；列宽按 (该列最长格 + 平均格)/2 分配，让各列换行后行数接近；短列下限 90px；>9 列的补列逐列 `update_table_property` 补宽。新增 `retune_table_widths(token, doc_id, markdown)`：已发布文档原位重算列宽（同链接不换），结构不符的表跳过、只 PATCH 变了的列。
+- 验证：`tests/test_feishu_docs_text_publish.py` 20 passed（新增限频核实重试 / 不重发 / 节流 / 9×9 扩表 / 不按尺寸降级 / 降级不算成功 / 列宽按内容 / 补列补宽）；全量 918 passed；真机重发 RESEARCH-010 → 真表格 5 / 降级 0 / 180 格 0 失败，`docio_cli read` 回读 `tables fetched 5`；15×3 扩表后第 10、15 行顺序正确，3×12 补列顺序正确；列宽实测 15×3 → [280,157,295]、13×4 → [90,231,90,321]，总和均 732。
+
+## v0.27.0 — 2026-09-14 · 无预热启动与飞书桥重启连续性
+
+- **启动**：去掉在官方终端出现前发送模型 READY 任务的前置依赖；由 TUI 自己新建或恢复会话，本机网关核对真实请求响应与观察者绑定后放行。真实 wmux 隔离验收约 4.1 秒就绪，失效后端代理不再阻塞本机终端接入。启动阶段和故障可见，不靠推荐文案或固定最短等待。
+- **进度续接**：新卡先持久保存发送意图和稳定请求 ID，逐片确认；重启续接原卡，临时 PATCH 失败继续更新原卡。交互答案只封口卡片，相同回合的新进度仍可发送，已确认快照不重发。voiceover 生产桥恢复了缺失的两张进度卡，随后正常原位更新，原工作会话未重跑。
+- **入站交接**：SQLite 收件箱在平台确认前落盘，按消息 ID 恢复待办、附件和处理状态；真实输入 hook 确认精确提示，结果不明时不重复粘贴。受控重启等待当前交接结束，保存余下待办，再确认新桥连接就绪。
+- **看门狗**：以当前 prompt/turn 开始时间约束静默时长，修复新任务开始约 4 秒却被此前 99 分钟空闲误触发 Esc；已结束回合保护与真正长静默恢复同时保留，扫描期间到达的新任务使用刷新后的时钟判断。
+- **基础修复**：保留 Codex 配置中的显式信任决定和注释，并发更新不丢目录；Windows 就绪文件读写共用锁；恢复动作不把 RPC 失败误报为成功，连续错误重试保留次数边界。
+- **发布范围**：从远端 v0.26.0 的干净历史迁入代码，不合入本机公开清理前的旧历史，不覆盖同名旧标签。未纳入其他会话的额度切换改动。现有生产进程不会自动热加载；本机指定 voiceover 桥及看门狗已按原任务完成加载，其他 bot 随各自正常维护更新。
+- **验证边界**：独立进程与实际 SDK 帧覆盖发送确认丢失、磁盘失败、受控停止和后到输入确认；原生 Codex 验证新建、恢复与观察者重连。不能承诺磁盘损坏、整个 worker 崩溃、任意强杀或超过平台请求去重窗口时无条件恰好一次。
+- **提交版验证**：在不带本机名册的独立工作副本运行完整 pytest，865 passed、3 skipped、99 subtests passed；公开仓检查通过。修正了远端基线中的 7 处示例身份占位及一项测试对本机名册的隐式依赖，未放宽检查规则。
+- 长期合同与本次证据：ARCH-110、ARCH-160、SPEC-210、PLAN-1110/1120、RESEARCH-080/090。
+
 ## v0.26.0 — 飞书产物回执固定三行块 + 看门狗 R8 长静默自动按 Esc（2026-09-11）
 
 **病根**：主人在飞书 DM 里收到的产物回执一直漂——有时只有本地路径、有时只有在线链接、有时链接带标题，三种形态随机出现，对不上「哪份产物在哪个文件」。根因是 SPEC-210 / feishu skill / 用户级 CLAUDE.md 只规定「有哪几行」，四个交付动作各自独立，没有任何一处把三行绑成一块，也没规定缺行怎么写；而「📄 标题 + URL」两行是 `send --doc` 自己发的一张卡，与 agent 最终答复是两条消息。本版把三行块升为合同并由唯一渲染器机械保证。

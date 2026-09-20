@@ -1015,19 +1015,20 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
 
 
 def ensure_codex_trust(bot, cwd) -> None:
-    """Pre-seed Codex's project trust so a first launch in a new directory never
-    parks on the interactive "Do you trust the contents of this directory?"
-    prompt. The screen-scraping auto-Enter (needs_trust_confirmation) fires too
-    late for the app-server transport: the worker's warmup thread/start is
-    already blocked upstream of the TUI. Codex persists project keys lowercase
-    on Windows and its lookup is case-insensitive (verified 2026-08-25 with a
-    throwaway dir: mixed-case -C input matched the lowercase stored key), so we
-    write exactly that form. No-op for other runtimes — Claude's prompt is
-    already auto-accepted by the ready wait."""
+    """Seed the exact resolved cwd read by Codex's remote TUI.
+
+    The backend can start with a lowercase Windows key while the remote TUI
+    still asks for trust. Preserve existing decisions (including legacy keys)
+    and unrelated TOML instead of treating a case-insensitive match as ready.
+    """
     if runtime_spec(bot).name != "codex":
         return
+    import tomlkit
+    from bridge_injection import ProcessFileLock
+
     profile = resolve_profile(bot, required=True)
     config = profile.home_path / "config.toml"
+    project = Path(cwd).expanduser().resolve()
     # With an isolated CODEX_HOME, Codex otherwise treats ~/.codex (another
     # account's home) as project configuration when launched from ~. Project
     # layers beat the selected profile's saved model/effort and MCP settings.
@@ -1035,36 +1036,43 @@ def ensure_codex_trust(bot, cwd) -> None:
     # defaults and /model persistence work without injecting a fixed model.
     user_home = Path.home().resolve()
     account_collision = (
-        Path(cwd).expanduser().resolve() == user_home
+        project == user_home
         and profile.home_path.resolve() != user_home / ".codex"
         and (user_home / ".codex" / "config.toml").is_file()
     )
-    trust_level = "untrusted" if account_collision else "trusted"
-    key = str(cwd).replace("/", "\\").lower()
-    header = f"[projects.'{key}']"
-    try:
+    key = str(project)
+    with ProcessFileLock(config.with_name(".config.toml.link16.lck")):
         text = config.read_text(encoding="utf-8") if config.is_file() else ""
-    except OSError:
-        return
-    if header.lower() in text.lower():
-        if account_collision:
-            stanza = re.compile(rf"(?ims)^{re.escape(header)}\r?\n.*?(?=^\[|\Z)")
-            updated = stanza.sub(
-                lambda match: re.sub(
-                    r'(?m)^trust_level\s*=\s*"trusted"[ \t]*$',
-                    'trust_level = "untrusted"', match.group(0),
-                ), text, count=1,
-            )
-            if updated != text:
-                config.write_text(updated, encoding="utf-8")
-        return
-    try:
-        with config.open("a", encoding="utf-8") as fh:
-            if text and not text.endswith("\n"):
-                fh.write("\n")
-            fh.write(f'\n{header}\ntrust_level = "{trust_level}"\n')
-    except OSError:
-        pass
+        document = tomlkit.parse(text)
+        projects = document.setdefault("projects", tomlkit.table())
+        aliases = [k for k in projects if os.path.normcase(k) == os.path.normcase(key)]
+        # An explicit rejection must also survive migration from a lowercase
+        # key. The isolated-home exclusion applies to every spelling.
+        denied = account_collision or any(
+            projects[k].get("trust_level") == "untrusted" for k in aliases
+        )
+        trust_level = "untrusted" if denied else "trusted"
+        targets = set(aliases + [key]) if denied else {key}
+        for target in targets:
+            projects.setdefault(target, tomlkit.table())["trust_level"] = trust_level
+        updated = tomlkit.dumps(document)
+        if updated != text:
+            # Keep concurrent bridge launches from losing each other's keys;
+            # readers see either the old complete file or the new complete file.
+            tmp = config.with_name(f".config.toml.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(updated, encoding="utf-8")
+            os.replace(tmp, config)
+        if tomlkit.parse(config.read_text(encoding="utf-8"))["projects"][key]["trust_level"] != trust_level:
+            raise RuntimeError("Codex project trust did not persist")
+
+
+def codex_composer_visible(screen: str) -> bool:
+    """A composer after the last modal footer; numbered menu choices do not count."""
+    footer = (screen or "").rfind("Press enter to continue")
+    return any(
+        match.start() > footer
+        for match in re.finditer(r"(?m)^›(?![ \t]*\d+[.)][ \t])[^\r\n]*$", screen or "")
+    )
 
 
 def needs_trust_confirmation(bot, screen: str) -> bool:
@@ -1082,7 +1090,8 @@ def needs_trust_confirmation(bot, screen: str) -> bool:
                 or _CLAUDE_TRUST_MENU_RE.search(screen) is not None)
     if spec.name != "codex":
         return False
-    return CODEX_TRUST_TEXT in screen and "Press enter to continue" in screen
+    return (CODEX_TRUST_TEXT in screen and "Press enter to continue" in screen
+            and not codex_composer_visible(screen))
 
 
 def is_ready(bot, screen: str) -> bool:
@@ -1094,6 +1103,8 @@ def is_ready(bot, screen: str) -> bool:
         return CLAUDE_READY_MARK in screen
     if spec.name == "codex":
         if needs_trust_confirmation(bot, screen):
+            return False
+        if "Press enter to continue" in screen and not codex_composer_visible(screen):
             return False
         composer_ready = (
             "› Use /skills" in screen
@@ -1107,7 +1118,9 @@ def is_ready(bot, screen: str) -> bool:
             # warmup answer is therefore the stable second readiness signal;
             # unlike accepting any ``› text`` line, it cannot mistake a real
             # draft for an idle composer.
-            return composer_ready or CODEX_APP_SERVER_READY_MARK in screen
+            return composer_ready or (
+                CODEX_APP_SERVER_READY_MARK in screen and codex_composer_visible(screen)
+            )
         return (
             "OpenAI Codex" in screen
             and (

@@ -28,3 +28,4 @@ lark_oapi>=1.7.3            # 飞书官方 SDK · 1.7.3+ 支持 register_app(app
 lark-channel-sdk>=1.0.0     # 飞书 CardKit / WebSocket channel · feishu_bridge.py 收发消息(import lark_channel)
                             # （requests-toolbelt 由 lark_oapi 自动带入·无需单列）
 tzdata>=2024.1; platform_system == "Windows"  # zoneinfo("Asia/Shanghai") 在 Windows 没系统 IANA 库
+tomlkit>=0.13              # Preserve Codex config comments and quoted project keys when seeding trust

@@ -15,6 +15,7 @@ import hashlib
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 
 PROGRESS_TAIL = 20          # 合并进度卡最多显示最近 N 步（旧·已不用）
@@ -165,12 +166,14 @@ def load_progress_state(state_dir, bot):
         "v2_card_ids": raw.get("card_ids") or [],
         "v2_acked": raw.get("acked") or {},
         "v2_route": raw.get("route"),
+        "v2_pending": raw.get("pending"),
+        "v2_completed": raw.get("completed") or [],
     }
 
 
 def save_progress_state(state_dir, bot, state):
     if not state.get("v2_turn"):
-        return
+        return True
     target = progress_state_path(state_dir, bot)
     payload = {
         "contract": "milestone-v1",
@@ -181,14 +184,22 @@ def save_progress_state(state_dir, bot, state):
         "card_ids": state.get("v2_card_ids") or [],
         "acked": state.get("v2_acked") or {},
         "route": state.get("v2_route"),
+        "pending": state.get("v2_pending"),
+        "completed": state.get("v2_completed") or [],
     }
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
+        from bridge_injection import ProcessFileLock
+        with ProcessFileLock(target.with_name(f".{target.name}.write.lck")):
+            tmp = target.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, target)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def load_hwm(state_dir, bot):
@@ -639,7 +650,7 @@ def _has_pending(state):
         for step in (state.get("v2_steps") or [])
         if step.get("event_id")
     )
-    return legacy or milestone
+    return legacy or milestone or bool(state.get("v2_pending"))
 
 
 def _header(full, usage):
@@ -793,12 +804,16 @@ def _ans_chunks(text, budget=CARD_BUDGET):
 
 
 class RetrySend(Exception):
-    """answer/ask 送达失败(网络/DNS 等可重试错) → outbox_drainer 不推 HWM·下轮重发。
-    progress 不抛(临时进度·可丢)。配 state['partial'] 记已发块数 → 重发不重复。"""
+    """Delivery unconfirmed: retain the cursor and retry the existing operation.
+
+    Milestone progress preserves its card ID/create intent; answer fragments
+    preserve durable ACKs. Legacy ask chunks keep their process-local cursor.
+    """
 
 
 async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_sec, clock,
-                      force_flush=False, on_ask=None, on_resume=None, persist_answer=None):
+                      force_flush=False, on_ask=None, on_resume=None, persist_answer=None,
+                      persist_progress=None):
     """统一卡片流：progress 当前卡 edit_card 原地长大 → 满 CARD_BUDGET 或 edit 失败 → 冻结开新卡接着写(不截断)；
     answer 拆 ≤BUDGET 连续多卡(new_card·失败退 send_plain)·发前先把进度卡刷到最新·保序。
     deps（均 coroutine）：new_card(text)->mid|{ok,message_id}|None · edit_card(mid,text)->bool · send_plain(text)。
@@ -872,6 +887,39 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             if event_id:
                 acked[event_id] = int(step.get("revision") or 1)
 
+    def _checkpoint_progress():
+        if persist_progress and not persist_progress(state):
+            raise OSError("progress state is not durable yet")
+
+    async def _resume_progress_send():
+        """Finish the frozen create operation before accepting newer snapshots.
+
+        A provider-accepted request with a lost local ACK reuses its saved UUID.
+        Each confirmed chunk/card ID is saved before the next request begins.
+        """
+        nonlocal n
+        pending = state.get("v2_pending")
+        if not pending:
+            return
+        _checkpoint_progress()  # A previous persistence failure must block I/O.
+        for item in pending["chunks"]:
+            if item.get("acked"):
+                continue
+            result = await new_card(item["text"], route=pending["route"], purpose="progress",
+                                    fragment={"fragment_id": item["id"]})
+            ok, mid = _result(result)
+            if result != "skip-progress" and not ok:
+                raise RetrySend()
+            item["acked"] = True
+            state["v2_mid"] = mid
+            state["v2_card_ids"] = item["card_ids"]
+            n += 1
+            _checkpoint_progress()
+        _v2_ack(pending["steps"])
+        state["v2_pending"] = None
+        state["last_flush"] = clock()
+        _checkpoint_progress()
+
     async def _v2_new_cards(steps):
         """Send only unseen/changed milestone blocks; return (last_mid,last_ids)."""
         nonlocal n
@@ -888,25 +936,22 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 current = trial
         if current:
             groups.append(current)
-        last_mid, last_ids = None, []
+        chunks_to_send = []
         for group in groups:
             text = _v2_text(group, snapshot)
             chunks = _ans_chunks(text)
             for chunk in chunks:
-                result = await new_card(
-                    chunk, route=state.get("v2_route"), purpose="progress"
-                )
-                ok, mid = _result(result)
-                # Group progress is intentionally suppressed.  Failed progress
-                # is also best-effort and must never leave a dict/sentinel in
-                # state where the next flush would pass it as a message ID.
-                last_mid = mid if ok else None
-                n += 1
-            last_ids = [str(step.get("event_id")) for step in group if step.get("event_id")]
-        return last_mid, last_ids
+                chunks_to_send.append({"id": hashlib.sha256(("progress:" + uuid.uuid4().hex).encode()).hexdigest(),
+                                       "text": chunk, "acked": False,
+                                       "card_ids": [str(step["event_id"]) for step in group if step.get("event_id")]})
+        state["v2_pending"] = {"chunks": chunks_to_send, "steps": steps, "route": state.get("v2_route")}
+        _checkpoint_progress()
+        await _resume_progress_send()
+        return state.get("v2_mid"), state.get("v2_card_ids") or []
 
     async def _flush_v2():
         nonlocal n
+        await _resume_progress_send()
         dirty = _v2_dirty()
         if not dirty:
             return
@@ -940,13 +985,19 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["v2_mid_opened_at"] = opened_at
         card_aged = bool(mid) and (clock() - opened_at) >= PROGRESS_CARD_MAX_AGE_SEC
         if mid and not card_aged and len(text) <= CARD_BUDGET:
-            ok = await edit_card(mid, text)
+            result = await edit_card(mid, text)
+            ok = result.get("ok", False) if isinstance(result, dict) else result
             n += 1
             if ok:
                 state["v2_card_ids"] = card_ids
                 _v2_ack(dirty)
                 state["last_flush"] = clock()
+                _checkpoint_progress()
                 return
+            if not (isinstance(result, dict) and result.get("replace")):
+                # Timeout/disconnect is not evidence that the old card is dead.
+                # Preserve its ID and pending revision; retry the same PATCH.
+                raise RetrySend()
             # The old card already contains every acked event.  A replacement
             # message must contain only the dirty delta, never that snapshot.
             mid, card_ids = await _v2_new_cards(dirty)
@@ -978,7 +1029,8 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 mid = None
                 state["cur_mid"] = None
             if mid:
-                ok = await edit_card(mid, text)
+                result = await edit_card(mid, text)
+                ok = result.get("ok", False) if isinstance(result, dict) else result
                 n += 1
                 if not ok:                                # edit 失败(撞上限?) → 当轮换：弃旧卡开新卡
                     pending_start = max(state.get("flushed", 0), state["seg_start"])
@@ -1140,6 +1192,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         if len(completed) > SENT_CAP:
             _persist_answers()
 
+    await _resume_progress_send()
     for r in recs:
         kind = r.get("kind")
         state["_active_record_kind"] = kind
@@ -1160,6 +1213,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 if _route_key(doc.get("route")) == _route_key(route)
             ]
             text = _answer_with_docs(text, matched_docs)
+            already = (state.get("answer_delivery", {}).get("answers", {}).get(_answer_id(r, text, route)) or {})
+            if already.get("completed_at") is not None:
+                continue  # A replayed old final must not close the current turn's card.
             await _flush_v2()
             await _flush_progress()                       # 进度卡刷到最新·保序
             full = state.get("steps") or []
@@ -1169,6 +1225,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
             await _deliver_answer(r, text, route)          # 每片成功即落盘；重启只补缺片
+            if state.get("v2_turn"):
+                completed = state.setdefault("v2_completed", [])
+                if state["v2_turn"] not in completed:
+                    completed.append(state["v2_turn"])
+                state["v2_completed"] = completed[-SENT_CAP:]
+                _checkpoint_progress()
             if matched_docs:
                 matched_ids = {id(doc) for doc in matched_docs}
                 state["pending_docs"] = [
@@ -1198,6 +1260,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         elif kind == "progress":
             if r.get("contract") == "milestone-v1":
                 turn = r.get("root_turn") or r.get("turn")
+                # An answer seals a card, not the active turn's future events:
+                # Codex can ask for input and continue under the same turn ID.
+                # Its saved event/revision ACKs suppress replay while admitting
+                # new progress. Only a retired *other* turn is ignored here.
+                if turn != state.get("v2_turn") and turn in (state.get("v2_completed") or []):
+                    continue
                 if turn != state.get("v2_turn"):
                     state["v2_turn"] = turn
                     state["v2_mid"] = None
@@ -1245,13 +1313,14 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
     path = outbox_path(state_dir, bot)
     offset = hwm_load()
     state = {"turn": None, "steps": [], "usage": {}, "seg_start": 0, "cur_mid": None,
-             "flushed": 0, "last_flush": clock(), "sent": set(), "picker_active": False,
+             "flushed": 0, "last_flush": clock() - coalesce_sec, "sent": set(), "picker_active": False,
              "pending_docs": load_delivery_state(state_dir, bot),
              "answer_delivery": load_answer_state(state_dir, bot),
              **load_progress_state(state_dir, bot)}
     deps = dict(
         new_card=new_card, edit_card=edit_card, send_plain=send_plain,
         persist_answer=lambda delivery: save_answer_state(state_dir, bot, delivery),
+        persist_progress=lambda value: save_progress_state(state_dir, bot, value),
     )
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
     on_ask = lambda qs, key, sess: picker_write(state_dir, bot, qs, session=sess, key=key)   # noqa: E731
@@ -1281,7 +1350,8 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                     docs_saved = save_delivery_state(state_dir, bot, state.get("pending_docs") or [])
                     if state.get("pending_docs") and not docs_saved:
                         raise OSError("pending doc delivery state is not durable yet")
-                    save_progress_state(state_dir, bot, state)
+                    if not save_progress_state(state_dir, bot, state):
+                        raise OSError("progress state is not durable yet")
                     offset = new_off
                     hwm_save(offset)
                     last_error_signature = None
@@ -1299,6 +1369,7 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
                 "answer split policy conflict",
                 "answer fragment manifest conflict",
                 "pending doc delivery state is not durable yet",
+                "progress state is not durable yet",
             }
             error = (raw_error if raw_error in safe_internal_errors
                      else f"internal error digest={error_digest}")

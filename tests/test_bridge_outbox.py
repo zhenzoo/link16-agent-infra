@@ -190,7 +190,7 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([mid for mid, _text in cards.edits], ["m1"])
         self.assertEqual(len(cards.new), 1)
 
-    async def test_milestone_edit_failure_sends_dirty_event_only(self):
+    async def test_milestone_uneditable_card_replaces_only_dirty_event(self):
         state, cards = fresh_state(), FakeCards()
         first = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
             {"event_id": "c1", "revision": 1, "kind": "commentary", "label": "OLD COMMENTARY"}
@@ -200,7 +200,7 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
             {"event_id": "c2", "revision": 1, "kind": "commentary", "label": "NEW COMMENTARY"},
         ]}
         await self.drain([first], state, cards)
-        cards.edit_ok = False
+        cards.edit_ok = {"ok": False, "replace": True}
         await self.drain([second], state, cards)
         replacement = cards.new[-1][0]
         self.assertIn("NEW COMMENTARY", replacement)
@@ -260,7 +260,7 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("🟡 🟡", text)
         self.assertNotIn("🟡 🔴", text)
 
-    async def test_edit_failure_keeps_full_snapshot_header_but_dirty_body_only(self):
+    async def test_uneditable_card_keeps_full_snapshot_header_but_dirty_body_only(self):
         state, cards = fresh_state(), FakeCards()
         first = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
             {"event_id": "plan:t", "revision": 1, "kind": "plan", "label": "OLD PLAN",
@@ -272,7 +272,7 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
             {"event_id": "tools:b", "revision": 3, "kind": "tool", "tool_count": 3, "label": "NEW TOOL"},
         ]}
         await self.drain([first], state, cards)
-        cards.edit_ok = False
+        cards.edit_ok = {"ok": False, "replace": True}
         await self.drain([second], state, cards)
         replacement = cards.new[-1][0]
         self.assertIn("计划 1/2 · 工具 4 次", replacement)

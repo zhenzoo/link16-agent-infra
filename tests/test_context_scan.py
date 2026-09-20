@@ -185,7 +185,7 @@ class BotNamingTests(unittest.TestCase):
         self.assertEqual(bots[0]["bot"], "tb26-obsbot-2")
 
     def test_hostname_fallback_prefix(self):
-        with mock.patch.object(cs.socket, "gethostname", return_value="DESKTOP-EXAMPLE1"), \
+        with mock.patch.object(cs.socket, "gethostname", return_value="DESKTOP-EXAMPLE"), \
              mock.patch.dict(sys.modules, {"machine_identity": None}):
             row = cs.machine_prefix()
         self.assertEqual(row["prefix"], "desktopexamp")

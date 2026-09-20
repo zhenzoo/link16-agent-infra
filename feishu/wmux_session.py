@@ -222,6 +222,8 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
     def send_line(text, gate=True, echoed_hint=None):
         _wmux("send", pty, text, "--allow-ws", ws_id)
         _wmux("enter", pty, "--allow-ws", ws_id)
+        if not gate:
+            return  # The caller observes the actual worker/session receipt.
         if gate and _wait_shell_ready(pty, echoed_hint):
             time.sleep(SEND_SETTLE_SEC)
         else:

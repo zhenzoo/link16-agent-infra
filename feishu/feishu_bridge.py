@@ -31,6 +31,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+import shlex
 
 # 让本目录可 import 兄弟模块（bridge_env 等）· 直跑脚本时 sys.path[0] 已是本目录·此行兜底子进程/再入场景
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,6 +41,7 @@ from bridge_env import (  # noqa: E402
     resolve_env_path,
     resolve_wmux_rpc,
 )
+import codex_startup
 
 # ---------- 路径 / 常量 ----------
 ENV_PATH = resolve_env_path()                             # 跨机解析(VIBECODING_ROOT / 上溯找 .env / legacy 兜底)·不写死盘符
@@ -54,7 +56,7 @@ INBOX_ROOT = STATE_DIR / "inbox"   # 入站附件落地（你发飞书的图/文
 REPLY_POLL_SEC = 2
 READY_TIMEOUT_SEC = 30            # legacy Codex/custom 的默认启动窗口
 CLAUDE_READY_TIMEOUT_SEC = 90     # Claude Code 2.1.240 新机冷启实测约 42s；30s 会误判并把启动命令重复塞进 TUI
-CODEX_APP_SERVER_READY_TIMEOUT_SEC = 150  # worker fresh thread 合法 warm-up=120s，再留 remote TUI 启动余量
+CODEX_APP_SERVER_READY_TIMEOUT_SEC = codex_startup.STARTUP_TIMEOUT_SEC
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
 STARTUP_FAILURE_MAX_AGE_SEC = 24 * 60 * 60  # /screen 可回看最近一次已关闭失败 pane 的现场
 HANDOFF_RETRY_MAX_AGE_SEC = 6 * 60 * 60     # 已快照但未完成的手动 handoff 可在无活会话时重试
@@ -111,8 +113,11 @@ import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·�
 import bridge_process
 import bridge_injection  # noqa: E402  (桥/cron/watchdog/注册监督器跨进程共享注入锁)
 import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持久化)
+import bridge_inbox  # noqa: E402
+import bridge_control  # noqa: E402
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
 import artifact_delivery  # noqa: E402  (本机全局在线产物交付策略)
+import session_work  # noqa: E402  (每 bot「📌 项目 · 任务」工作行·钉在每张卡片顶部+摘要)
 from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
 
 
@@ -886,7 +891,7 @@ def wmux(*cmd_args):
 
 
 def read_screen(pty, tail=30):
-    raw = wmux("read", pty, str(tail))
+    raw = wmux("read", pty, *([] if tail is None else [str(tail)]))
     try:
         return json.loads(raw).get("text", raw)
     except json.JSONDecodeError:
@@ -896,15 +901,17 @@ def read_screen(pty, tail=30):
 def _app_server_ready_signal(bot, since):
     if not agent_runtime.uses_app_server(bot):
         return False
-    path = STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json"
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-        return (
-            int(record.get("worker_pid") or 0) > 0
-            and float(record.get("ts") or 0) >= since
-        )
-    except (OSError, ValueError, TypeError, AttributeError, KeyError):
-        return False
+    record = codex_startup.read_state(codex_startup.state_path(STATE_DIR, bot["name"], "ready"))
+    return codex_startup.ready(record, bot=bot["name"], startup_id=bot.get("_startup_id"), since=since)
+
+
+def _codex_startup_record(bot, since=0):
+    if not agent_runtime.uses_app_server(bot):
+        return {}
+    record = codex_startup.read_state(codex_startup.state_path(STATE_DIR, bot["name"]))
+    if codex_startup.matches(record, bot=bot["name"], startup_id=bot.get("_startup_id"), since=since):
+        return record
+    return {}
 
 
 def _kimi_ready_signal(bot, since):
@@ -952,23 +959,29 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
     deadline = time.time() + timeout
     trust_sent = False
     while time.time() < deadline:
+        if agent_runtime.uses_app_server(bot):
+            # The TUI's own correlated RPC response and the independent observer
+            # prove readiness. Screen wording and historical markers prove none.
+            record = _codex_startup_record(bot, wait_started)
+            if record.get("stage") == "failed":
+                return False
+            if _app_server_ready_signal(bot, wait_started):
+                return True
+            if record.get("worker_pid") and not codex_startup.process_alive(record["worker_pid"]):
+                return False
+            time.sleep(min(.15, max(0, deadline - time.time())))
+            continue
         try:
-            scr = read_screen(pty)
-            if agent_runtime.needs_trust_confirmation(bot, scr) and workspace_id and not trust_sent:
-                wmux("enter", pty, "--allow-ws", workspace_id)
-                trust_sent = True
-                time.sleep(0.5)
+            # A startup modal can be at the top of a tall terminal, above the
+            # normal 30-line tail. Use the existing uncapped screen read here.
+            scr = read_screen(pty, tail=None)
+            if agent_runtime.needs_trust_confirmation(bot, scr):
+                if workspace_id and not trust_sent:
+                    wmux("enter", pty, "--allow-ws", workspace_id)
+                    trust_sent = True
+                time.sleep(READY_POLL_SEC)
                 continue
             if agent_runtime.is_ready(bot, scr):
-                return True
-            # A resumed app-server thread does not run the warmup turn again,
-            # and Codex rotates the grey composer suggestion. Use the fresh
-            # worker handshake plus a visible TUI composer as the stable
-            # process-level readiness signal.
-            if (
-                _app_server_ready_signal(bot, wait_started)
-                and re.search(r"(?m)^›(?:\s+.*)?$", scr) is not None
-            ):
                 return True
             # Kimi: same two-part rule. The handshake proves this spawn's worker
             # attached the right session; the composer box proves the terminal
@@ -1020,6 +1033,19 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd):
     if _wait_agent_ready(bot, pty, workspace_id):
         _clear_startup_failure(bot["name"])
         return True
+
+    if agent_runtime.uses_app_server(bot):
+        record = _codex_startup_record(bot)
+        detail = record.get("detail") or "启动命令已提交，但 worker 未确认开始执行"
+        if record.get("stage") != "failed":
+            detail += "；未取得终端会话响应和同线程回传确认"
+        try:
+            screen = read_screen(pty, 100)
+        except RuntimeError:
+            screen = ""
+        _record_startup_failure(bot, workspace_id=workspace_id, pty=pty, cwd=cwd,
+                                stage=record.get("stage") or "worker-not-started", reason=detail, screen=screen)
+        return False
 
     try:
         screen = read_screen(pty, 100)
@@ -1131,7 +1157,10 @@ def _resolve_jsonl(bot, marker, pinned, inject_wall, pre=None):
 # ---------- 会话生命周期 ----------
 def _worker_cmd(bot, cwd=None):
     """起 worker 的命令。CLI/runtime 差异集中在 agent_runtime.py，桥只关心 outbox 合约。"""
-    return agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd)
+    command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd)
+    if agent_runtime.uses_app_server(bot) and bot.get("_startup_id"):
+        command += " --startup-id " + shlex.quote(bot["_startup_id"])
+    return command
 
 
 def _reuse_check(bot, rec):
@@ -1208,10 +1237,23 @@ def _ensure_session_unlocked(bot):
         )
     before = {str(p) for p, _ in _project_jsonls(bot)}
     cwd = current_cwd(bot)  # 沿用【当前所在目录】：/cd 过则自愈重生仍回那个目录（与账号自愈对称）·/close 清过或没 /cd 过则回名册默认
-    agent_runtime.ensure_codex_trust(bot, cwd)  # Codex 首启 trust 弹窗会在 app-server warmup 上游就把会话挡死 → spawn 前预写目录信任（Claude 侧由就绪等待自动回车，无需预写）
-    r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)  # cwd 交给 spawn 单独发 cd + 探就绪(分行不合并)
+    agent_runtime.ensure_codex_trust(bot, cwd)  # Backend readiness does not bypass the remote TUI's directory trust.
+    startup_bot = bot
+    if agent_runtime.uses_app_server(bot):
+        startup_bot = {**bot, "_startup_id": uuid.uuid4().hex}
+        # One shell invocation works from either PowerShell or Git Bash. The
+        # script itself confirms cd and then runs the worker; no prompt scraping
+        # or staged bash/cd/launcher injection is needed for this transport.
+        launcher = STATE_DIR / f"codex-launch-{startup_bot['_startup_id']}.sh"
+        launcher.write_text("#!/usr/bin/env bash\n" +
+                            "cd -- " + shlex.quote(str(cwd).replace("\\", "/")) + " || exit $?\n" +
+                            _worker_cmd(startup_bot, cwd) + "\n", encoding="utf-8")
+        r = wmux_session.spawn(f"bot-{bot['name']}", cmd=f'bash "{launcher.as_posix()}"',
+                               cwd=None, shell_init=None)
+    else:
+        r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)
     ws, pty = r["workspace_id"], r["pty"]
-    if not _finish_worker_startup(bot, ws, pty, cwd):
+    if not _finish_worker_startup(startup_bot, ws, pty, cwd):
         try:
             wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
         except Exception:  # noqa: BLE001
@@ -1225,7 +1267,8 @@ def _ensure_session_unlocked(bot):
         except Exception:  # noqa: BLE001 — 归因失败绝不吞掉原始报错
             drift = None
         raise RuntimeError(
-            f"{agent_runtime.display_name(bot)} 在 {_ready_timeout(bot):g} 秒启动窗口内未就绪。"
+            f"{agent_runtime.display_name(bot)} 启动未完成："
+            + ((_load_startup_failure(bot["name"]) or {}).get("reason") or "未取得就绪信号") + "。"
             "失败现场已保存，请发 /screen 查看；桥没有向仍在启动的 TUI 重复塞命令。"
             + (f" 可能原因：{drift}" if drift else "")
         )
@@ -1736,6 +1779,7 @@ async def card_send(channel, target, text, name):
             rit = "chat_id" if str(target).startswith("oc_") else "open_id"
             payload = {"schema": "2.0", "config": {"streaming_mode": False, "wide_screen_mode": True},
                        "body": {"elements": [{"tag": "markdown", "content": text}]}}
+            session_work.apply_banner(payload, name, STATE_DIR)   # 短回复也带工作行（同一张卡的样子）
             mid = await asyncio.wait_for(
                 channel._ensure_card_snapshot(target, rit, snapshot=payload,
                                               reply_to=None, reply_in_thread=None),
@@ -1806,15 +1850,18 @@ def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None, message
     )
 
 
-def _card_payload(text, at=None, mark=False):
+def _card_payload(text, at=None, mark=False, bot_name=None):
     content = text
     if at:
         content = f"<at id={at}></at> " + content
-    return {
+    payload = {
         "schema": "2.0",
         "config": {"streaming_mode": False, "wide_screen_mode": True},
         "body": {"elements": [{"tag": "markdown", "content": _linkify(content)}]},
     }
+    # 工作行（2026-09-19 主人定）：每张卡第一行 `📌 <项目> · <任务>` + 摘要=会话列表预览，
+    # 十几个 bot 并排时不点开、不翻记录也认得出它在做哪个项目。没有 bot_name（外部调用）不加。
+    return session_work.apply_banner(payload, bot_name, STATE_DIR) if bot_name else payload
 
 
 def _send_interactive_message(app_id, app_secret, target, payload, message_uuid=None):
@@ -1920,7 +1967,7 @@ async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, rou
             mid = await asyncio.wait_for(
                 asyncio.to_thread(
                     _send_interactive_message, bot["app_id"], bot["app_secret"], target,
-                    _card_payload(text, at if kind == "p2a-ext" else None), message_uuid,
+                    _card_payload(text, at if kind == "p2a-ext" else None, bot_name=bot_name), message_uuid,
                 ), CARD_SEND_TIMEOUT,
             )
         except Exception as exc:  # noqa: BLE001
@@ -2091,6 +2138,25 @@ def run(bot_name=None):
         lease.release()
 
 
+async def _startup_heartbeat(bot, chat_id, started, reply, interval=5):
+    """Report real stages using the handler's explicitly supplied reply callback."""
+    import asyncio
+    try:
+        previous = None
+        last_report = started
+        while True:
+            await asyncio.sleep(interval)
+            waited = int(time.time() - started)
+            record = _codex_startup_record(bot, started)
+            stage = record.get("stage")
+            if stage != previous or time.time() - last_report >= 15:
+                detail = record.get("detail") or "正在创建工作区并提交启动命令"
+                await reply(chat_id, f"⏳ {detail}（已用 {waited} 秒）")
+                previous, last_report = stage, time.time()
+    except asyncio.CancelledError:
+        pass
+
+
 def _run_bot(bot_name=None):
     bots = load_bots()
     if bot_name:
@@ -2107,27 +2173,21 @@ def _run_bot(bot_name=None):
 
     try:
         import asyncio
-        from lark_channel import FeishuChannel, SafetyConfig, TextBatchConfig, ChatQueueConfig
+        from bridge_inbox_channel import DurableFeishuChannel
     except ImportError:
         print("❌ 缺依赖: pip install lark-channel-sdk", file=sys.stderr)
         sys.exit(2)
 
     msg_lock = asyncio.Lock()   # 本 bot 进程内消息串行（防并发注入交错 / ensure_session race · 见 on_message）
+    durable_inbox = bridge_inbox.Inbox(STATE_DIR, bot['name'])
+    imported = durable_inbox.import_legacy(lambda: bridge_inbound.read_records(STATE_DIR, bot['name'], strict=True))
+    if imported:
+        blog(bot['name'], f'迁移 {imported} 个历史接收 ID，仅用于旧事件去重，不假定旧任务完成或重新执行。')
+    control = bridge_control.Control(STATE_DIR, bot['name'])
     # 冷启动窗口 [start, end]：/close 若在这个窗口内【到达】（哪怕被 msg_lock 排到注入之后才执行），先要确认再关。
     # 2026-09-08 机器 3050：用户在冷启动第 129 秒发 /close，排队到注入后 2 秒执行，把正要回答的会话关了。
     startup_window = {"start": 0.0, "end": 0.0}
     close_confirm = {"at": 0.0}
-    STARTUP_HEARTBEAT_SEC = 30
-
-    async def _startup_heartbeat(chat_id, started):
-        """冷启动期间每 30 秒报一次「还在起」，直到 ensure_session 返回被取消。"""
-        try:
-            while True:
-                await asyncio.sleep(STARTUP_HEARTBEAT_SEC)
-                waited = int(time.time() - started)
-                await reply(chat_id, f"⏳ 还在启动（已等 {waited} 秒，冷启动通常 1～2 分钟）·别发 /close，它会把正要回答的会话关掉")
-        except asyncio.CancelledError:
-            pass
 
     def make_handler(bot, channel):
         account_default = agent_runtime.account_snapshot(bot)   # 名册默认账号快照（/account 临时切·/close 切回这个）
@@ -2160,10 +2220,11 @@ def _run_bot(bot_name=None):
             # 只暂存目录(current_cwd 读 cwd)·清掉旧会话 runtime 字段(pty/ws/jsonl/daemon_fp)·保留 chat_id/open_id/account
             _merge_session(bot["name"], {"cwd": str(target_dir).replace("\\", "/"),
                                          "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
+            session_work.clear(bot["name"], STATE_DIR)   # 换目录=换项目·旧工作行作废（下条消息起的会话自己再写）
             _acc = agent_runtime.current_account(bot)
             await reply(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
-        async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None):
+        async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None, inbound_id=None):
             cmd = text.split()[0].lower()
             arg = text[len(cmd):].strip()
             # 🚧 破坏性命令授权闸（PLAN-930 · 2026-08-03）。
@@ -2195,7 +2256,9 @@ def _run_bot(bot_name=None):
                 shot = await asyncio.to_thread(read_screen, rec["pty"], 40)
                 await reply(chat_id, md="```\n" + shot[-1500:] + "\n```"); return
             if cmd == "/clear":
+                durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 控制命令=撤销投递契约→清账（§2.13·防 doctor 误判重投）
+                session_work.clear(bot["name"], STATE_DIR)                 # 上下文没了=旧工作行作废·回 cwd+ai-title 兜底
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可重置（发句话自动起）"); return
                 await asyncio.to_thread(wmux, "send", rec["pty"], "/clear", "--allow-ws", rec["workspace_id"])
@@ -2203,7 +2266,8 @@ def _run_bot(bot_name=None):
                 await reply(chat_id, "🧹 已重置会话上下文（/clear）"); return
             if cmd == "/stop":
                 _pend = bridge_outbox.pending_load(str(STATE_DIR), bot["name"]) or {}   # B6: 先拿被打断消息原文(给清框检测)·再清账
-                _pmark = _pend.get("text") or ""
+                _pmark = durable_inbox.last_prompt() or _pend.get("text") or ""
+                durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # B1: /stop=撤销投递契约→清账（防 doctor 误判重投·§2.13·根治「/stop 后又乱重投」）
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可打断"); return
@@ -2229,6 +2293,7 @@ def _run_bot(bot_name=None):
                     await reply(chat_id, "🚧 会话正在冷启动/刚就绪，现在关会丢掉正要生成的回答。确认要关：2 分钟内再发一次 /close；想看现场发 /screen，想打断发 /stop。")
                     return
                 close_confirm["at"] = 0.0
+                durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /close=结束会话=撤销投递契约→清账（§2.13）
                 agent_runtime.reset_account(bot, account_default)         # /close = 结束本会话 = 账号切回名册默认
                 if alive:
@@ -2272,6 +2337,7 @@ def _run_bot(bot_name=None):
                 else:
                     await reply(chat_id, "🔄 正在交接：快照上一轮 → 关会话 → 起全新 context → 让它先读懂历史……")
                     pack = await asyncio.to_thread(bw.snapshot_handoff, bot["name"], "主人手动 /handoff")
+                    durable_inbox.cancel_before(inbound_id)
                     bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
                     keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
                     await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
@@ -2307,7 +2373,9 @@ def _run_bot(bot_name=None):
                     + ("· ⚠️ prompt 卡在输入框没提交，去面板按一下回车" if not ok else
                        "\n读完它会回你一份「原任务 / 已完成 / 停在哪 / 哪些还没定」，然后你再提新需求。"))); return
             if cmd == "/new":
+                durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /new=全新会话=撤销旧投递契约→清账（§2.13）
+                session_work.clear(bot["name"], STATE_DIR)                 # 全新会话=旧工作行作废
                 # 开一个【全新空会话·不注入任何文本】——与「正常发消息起会话」【同一 spawn 路径】(ensure_session)，
                 #   唯一区别：不缀文本、不注入 → 起好停在就绪 ❯，等你【自己发消息注入】。
                 #   之前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；/new 把「起会话」和「注入内容」拆开：
@@ -2601,17 +2669,20 @@ def _run_bot(bot_name=None):
 
             # 🔒 串行化：同一 bot 同时收到多条消息时一条一条处理，防「并发注入交错 + ensure_session race」
             # （Zara 式「运行中的消息排队下一轮」· 2026-06-15 实证：连发两条，第二条的回复被冲掉没发回）。
-            arrived_at = time.time()          # 到达时刻（拿锁之前）：/close 是否落在冷启动窗口按这个判
+            arrived_at = getattr(msg, 'link16_received', time.time())
             async with msg_lock:
                 text = _unmangle_slash(text)      # 修 Git-Bash 把 /close 改写成 C:/Program Files/Git/close
                 if text.startswith("/"):
-                    await handle_slash(msg.chat_id, text, sender=sender, from_group=is_group, arrived=arrived_at)
+                    durable_inbox.boundary(msg.id)
+                    await handle_slash(msg.chat_id, text, sender=sender, from_group=is_group,
+                                       arrived=arrived_at, inbound_id=msg.id)
                     return
                 # /cd 编号待选：上条 `/cd` 列了编号清单 → 本条若是纯数字就切目录；非数字=改主意，清掉待选照常处理
                 _cdp = await asyncio.to_thread(load_cd_pending, bot["name"])
                 if _cdp:
                     _m = re.fullmatch(r"\s*(\d{1,3})\s*", text)
                     if _m:
+                        durable_inbox.boundary(msg.id)
                         await asyncio.to_thread(clear_cd_pending, bot["name"])
                         _idx = int(_m.group(1))
                         if 1 <= _idx <= len(_cdp):
@@ -2631,14 +2702,14 @@ def _run_bot(bot_name=None):
                         _dir = await asyncio.to_thread(current_cwd, bot)
                         _acc_lbl, _dir_lbl = runtime_labels(_dir)
                         await reply(msg.chat_id,
-                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}…冷启动约 1～2 分钟，每 30 秒报一次进度，别发 /close"
+                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}，会按实际启动阶段报告进度。"
                                      if ws_present else
-                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}…冷启动约 1～2 分钟，每 30 秒报一次进度，别发 /close"))
+                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}，会按实际启动阶段报告进度。"))
                     _hb = None
                     if not reusable:
                         startup_window["start"] = time.time()
                         startup_window["end"] = float("inf")
-                        _hb = asyncio.create_task(_startup_heartbeat(msg.chat_id, startup_window["start"]))
+                        _hb = asyncio.create_task(_startup_heartbeat(bot, msg.chat_id, startup_window["start"], reply))
                     try:
                         ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
                     finally:
@@ -2654,23 +2725,29 @@ def _run_bot(bot_name=None):
                         saved = []
                         for r in resources:
                             try:
-                                raw_type = getattr(r, "type", None) or "file"
-                                if _message_resource_type(raw_type) == "image":
-                                    p = await channel.download_resource_to_file(
-                                        r.file_key, resource_type="image", message_id=msg.id,
-                                        dest_dir=inbox,
-                                        file_name=(getattr(r, "file_name", None) or None))
-                                else:
-                                    p = await asyncio.to_thread(
-                                        _download_message_resource,
-                                        bot["app_id"], bot["app_secret"], msg.id, r.file_key,
-                                        resource_type=raw_type, dest_dir=inbox,
-                                        file_name=(getattr(r, "file_name", None) or None),
-                                    )
+                                p = durable_inbox.resource(msg.id, r.file_key)
+                                if not p:
+                                    raw_type = getattr(r, "type", None) or "file"
+                                    dest = durable_inbox.resource_dir(inbox, msg.id, r.file_key)
+                                    if _message_resource_type(raw_type) == "image":
+                                        p = await channel.download_resource_to_file(
+                                            r.file_key, resource_type="image", message_id=msg.id,
+                                            dest_dir=dest,
+                                            file_name=(getattr(r, "file_name", None) or None))
+                                    else:
+                                        # Files/audio/video go through the Range-chunked downloader
+                                        # (Feishu refuses whole-file GET at >=100 MB).
+                                        p = await asyncio.to_thread(
+                                            _download_message_resource,
+                                            bot["app_id"], bot["app_secret"], msg.id, r.file_key,
+                                            resource_type=raw_type, dest_dir=dest,
+                                            file_name=(getattr(r, "file_name", None) or None),
+                                        )
+                                    durable_inbox.resource(msg.id, r.file_key, p)
                                 saved.append(str(p))
                                 blog(bot["name"], f"[{tid}] 📎 收下 {getattr(r, 'type', '?')} → {p}")
                             except Exception as de:  # noqa: BLE001 — 单个附件下载失败不致命
-                                blog(bot["name"], f"[{tid}] ⚠️ 附件下载失败 {str(r.file_key)[:16]}…: {str(de)[:120]}")
+                                raise RuntimeError(f"附件尚未下载完成，消息保留待办：{type(de).__name__}") from de
                         if saved:
                             block = "📎 收到 %d 个附件（已存本地·可直接 Read·按需移到目标资产目录）：\n%s" % (
                                 len(saved), "\n".join(f"· {s}" for s in saved))
@@ -2697,6 +2774,7 @@ def _run_bot(bot_name=None):
                             await reply(msg.chat_id, "🅰️ " + perr)
                             return
                         # _drive_picker 现在【闭环校验提交】：True=确认屏消失(已真提交)·False=重按多次仍卡确认屏。
+                        durable_inbox.boundary(msg.id)
                         _ok = await asyncio.to_thread(_drive_picker, pty, ws, answers, _pk)
                         blog(bot["name"], f"[{tid}] 🅰️ picker 驱动 {'✓提交校验通过' if _ok else '✗仍卡确认屏'} · {answers}")
                         if _ok:
@@ -2722,17 +2800,14 @@ def _run_bot(bot_name=None):
                         _why = "超长·内联会撑爆命令行上限" if _over else "含制表符 TAB·内联会损坏"
                         try:
                             STATE_DIR.mkdir(exist_ok=True)
-                            inbox = STATE_DIR / f"bridge-inbox-{bot['name']}-{tid}.txt"
+                            inbox = STATE_DIR / f"bridge-inbox-{bot['name']}-{bridge_inbox.prompt_digest(msg.id)[:24]}.txt"
                             inbox.write_text(text, encoding="utf-8")
                             _hint = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")[:50]
                             blog(bot["name"], f"[{tid}] 📄 {_why} 落盘转 Read {inbox.name}（{_cmdline_units(text)} 单元）")
                             text = (f"[桥转交·{_why}] 已 byte-exact 存到：{inbox.as_posix()} "
                                     f"——请 Read 它拿完整原文（约 {len(text)} 字）。首行：{_hint}…")
-                        except Exception as _e:  # noqa: BLE001 — 落盘失败退回直接注入(至少别更糟)
-                            blog(bot["name"], f"[{tid}] ⚠️ 落盘失败(退直接注入)：{str(_e)[:120]}")
-                            if _over:   # 超长那类退不回「直接注入」——原样注入必再炸 206、消息又全丢 → 硬截断保底送达
-                                text = text[:SEND_MAX_CHARS // 2] + f"\n\n[⚠️ 桥：原文超长且落盘失败({str(_e)[:60]})·此处已截断·请让主人重发或分段发]"
-                                blog(bot["name"], f"[{tid}] ✂️ 超长+落盘失败 → 硬截断注入（保底送达·已在正文标明截断）")
+                        except Exception as _e:  # noqa: BLE001
+                            raise RuntimeError('完整原文尚未保存，消息保留待办；没有截断提交') from _e
                     # 标记 = 结构化元数据信封（2026-06-29 重构·把「回址」焊进消息本体，根治会过期的旁路便签）。
                     #   人读：from=<谁> to=<本bot> via=<DM|群>  ·  机器路由：route=<p2a|a2a>[ dest=<chat_id> at=<open_id>]
                     # hook(bridge_userprompt) 直接从【本条消息】解析 route → 每条消息自带回址、按消息原子化，
@@ -2757,30 +2832,29 @@ def _run_bot(bot_name=None):
                             env_route = f"route=p2a-ext dest={_gid} at={sender}"
                     else:
                         from_disp, via_disp = "host", "DM"
-                    marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route}]"
+                    marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route} mid={msg.id}]"
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
-                    pre = {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)}
+                    pre = ({} if agent_runtime.runtime_name(bot) == 'codex' else
+                           {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)})
                     inject_wall = time.time()
+                    durable_inbox.boundary(msg.id, prompt=marker)
                     inject_ok = await asyncio.to_thread(_inject, pty, ws, marker)
                     if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
                         blog(bot["name"], f"[{tid}] ⚠️ 注入后校验：重按{INJECT_VERIFY_TRIES}次仍卡输入框(没提交) → 已喊主人")
                         try:
-                            await reply(msg.chat_id, "⚠️ 你上一条消息注入我的终端后【没提交成功】（重试多次仍卡在输入框，我可能没收到）——请重发一次，或 @我 发 /screen 看现场。")
+                            await reply(msg.chat_id, "⚠️ 这条消息的终端交接尚未确认，原消息已保存在桥中；请用 /screen 查看现场，先不要重复发送。")
                         except Exception:  # noqa: BLE001 — 告警失败不致命
                             pass
-                    # 投递保证：记 pending（撞 auto-compact 被吃 → 零 outbox 活动+超时 → doctor 重投/通知·§2.13）
-                    try:
-                        _obx = bridge_outbox.outbox_path(str(STATE_DIR), bot["name"])
-                        _sz0 = os.path.getsize(_obx) if os.path.exists(_obx) else 0
-                        bridge_outbox.pending_write(str(STATE_DIR), bot["name"], text=marker, size0=_sz0)
-                    except Exception:  # noqa: BLE001 — 记账失败不致命
-                        pass
+                    # Durable inbox owns delivery now. Absence of outbox output
+                    # cannot prove non-delivery and must never trigger a replay.
+                    if not inject_ok:
+                        raise RuntimeError('终端交接结果不明；保留原记录，不自动重贴')
                     blog(bot["name"], f"[{tid}] 已注入 pty={pty} pinned={'有' if pinned else '无(将探测)'}")
 
                     # v8：on_message 只「注入」；回复由 worker 会话的 hook→outbox→drainer 发（见 runner）。
                     # ⚠️ jsonl 钉定在 v8 outbound 已不需要（drainer 读 outbox 不读 jsonl）→ 下面 re-pin 循环为 vestigial，
                     #    现仅供 /screen 与 cmd_doctor 显示「钉没钉」·下一轮清理可整段删（保守：首轮先留）。
-                    if not pinned:
+                    if not pinned and agent_runtime.runtime_name(bot) != 'codex':
                         for _ in range(10):
                             jl = await asyncio.to_thread(_resolve_jsonl, bot, marker, None, inject_wall, pre)
                             if jl:
@@ -2793,26 +2867,16 @@ def _run_bot(bot_name=None):
                 except Exception as e:  # noqa: BLE001
                     err = str(e)
                     blog(bot["name"], f"❌ 处理 {sender} 出错: {err[:300]}")
-                    if "no transport" in err or "guard DENIED" in err:
-                        await reply(msg.chat_id, "🛌 wmux 没开（没法给你起会话）——打开 wmux 再 @ 我即可")
-                    else:
-                        await reply(msg.chat_id, f"❌ bridge 错误: {err[:500]}")
+                    raise  # durable consumer retains preparation / submission state
         return on_message
 
-    # 关掉 SDK 的「文字防抖合并」(2026-06-28)：lark_channel 默认 text_batch.delay_ms=600 +
-    # chat_queue.merge_while_busy=True，会把同一会话短时间内/忙时进来的多条 merge 成一条；而它的
-    # merge_batch() 重建消息时漏填 content_text/safe_content_text → 桥读到空 → 误判「未知类型」、
-    # 把对端真·回复整条丢掉（bot↔bot 又快又多、群里多 bot 同刷最常踩）。我们本就不需要合并(注入已由
-    # msg_lock 串行；且它按 chat_id 合并会把不同发送方的消息也并一起=语义错)。设成「一条一派发、永不合并」：
-    # 每批恒为 1 → merge_batch 走 len==1 原样返回 → content_text 不再丢。仍保留 chat_queue 串行(防竞态)。
-    ch = FeishuChannel(
+    # The durable per-bot consumer owns ordering and replay. The SDK supplies
+    # event decoding, policy evaluation and normalization, without RAM batching.
+    ch = DurableFeishuChannel(
+        inbox=durable_inbox, allow_dm=lambda sender: is_allowed(bot, sender),
         app_id=bot["app_id"], app_secret=bot["app_secret"],
-        safety=SafetyConfig(
-            text_batch=TextBatchConfig(delay_ms=0, max_messages=1, max_chars=10**9),
-            chat_queue=ChatQueueConfig(enabled=True, merge_while_busy=False),
-        ),
     )
-    ch.on("message", make_handler(bot, ch))
+    inbound_handler = make_handler(bot, ch)
 
     async def runner():
         # v8：hook→outbox→drainer 取代 mirror_tailer 轮询。drainer=唯一发送引擎 + doctor=机械自愈。
@@ -2849,17 +2913,17 @@ def _run_bot(bot_name=None):
             )
 
         async def _edit_card(mid, text):                  # 原地改卡（update_card=patch_message·非流式·True=成功）
-            turn_route = _load_turn_route(bname) or {"kind": "p2a"}
-            if turn_route.get("kind") in {"p2a-ext", "a2a"}:
-                return True   # 群进度策略：不在群里刷中间态
+            # mid already identifies the original DM card. A newer turn's route
+            # must not suppress or redirect this resumed card's update.
             try:
-                r = await asyncio.wait_for(ch.update_card(mid, _card_payload(text)), CARD_SEND_TIMEOUT)
+                r = await asyncio.wait_for(ch.update_card(mid, _card_payload(text, bot_name=bname)), CARD_SEND_TIMEOUT)
                 ok = bool(getattr(r, "success", False))
                 receipt(bname, {"tid": "drain", "kind": "edit_card", "delivered": ok, "via": "edit", "len": len(text or "")})
-                return ok
+                code = (getattr(r, "raw", None) or {}).get("code")
+                return {"ok": ok, "replace": code in {230011, 230072}}  # recalled / edit count exhausted
             except Exception as e:  # noqa: BLE001（含超时·当失败·drainer 改开新卡）
                 receipt(bname, {"tid": "drain", "kind": "edit_card", "delivered": False, "via": "edit-fail", "err": (str(e)[:120] or type(e).__name__)})
-                return False
+                return {"ok": False, "replace": False}
 
         async def _send_plain(text, route=None, purpose="answer", fragment=None):
             return await _deliver_routed_plain(
@@ -2939,6 +3003,11 @@ def _run_bot(bot_name=None):
             if st == "active":                                 # turn 发生/进行中 → 信任 drainer 回传 → 清账
                 bridge_outbox.pending_clear(ad, bname)
                 return
+            if agent_runtime.uses_app_server(bot):
+                # Legacy / cron pending files are not proof of non-delivery.
+                # The typed runtime must never re-submit merely for silence.
+                await _silent_escalate('旧 pending 未取得回传确认；没有自动重投')
+                return
             # st == "stuck"：outbox 零活动 + 超时。但「零 outbox」≠「真卡」——长思考开场 / 纯文字回答 /
             # 等你答题 都零 outbox 却在跑（用户最烦的误报：「明明还在 run 却说撞 compact·已重投」·2026-06-18/19 实证）。
             # 重投前用【结构信号】确认真没在处理，否则一律不报（桥本就该知道 Claude 状态·这两个信号它一直有没用上）：
@@ -2982,8 +3051,34 @@ def _run_bot(bot_name=None):
             ad, lambda: [bname], asleep=asyncio.sleep, interval=30, stale_sec=120,
             remediate=_remediate, notify=_notify, recover_pending=_recover_pending))
 
-        await ch.connect()          # 单 channel · 前台阻塞 · lark_channel 单 WS 模式（已验证）
-        await asyncio.Event().wait()
+        wake = asyncio.Event()
+        ch.bind_inbox(wake)
+        await ch.start_background(timeout=30)
+        control.publish('ready', inbox=durable_inbox.counts())
+        blog(bname, '持久收件已就绪：落盘后确认接收；重启会等待当前交接完成。')
+        async def _dispatch(payload, received):
+            control.publish('handling', message_id=payload['message']['message_id'])
+            try:
+                await ch.dispatch_saved(payload, received, inbound_handler)
+            except Exception:
+                row = durable_inbox.get(payload['message']['message_id']) or {}
+                if row.get('attempts') == 1 and row.get('state') != 'done':
+                    detail = ('交给终端前的准备尚未完成，我会从保存的待办继续重试。'
+                              if row.get('state') == 'processing' else
+                              '终端交接结果暂未确认，我会保留记录等待实际接收信号，不重复提交。')
+                    try:
+                        await card_send(ch, payload['message']['chat_id'],
+                                        '⏳ 消息已收下并保存。' + detail, bname)
+                    except Exception:
+                        pass  # diagnostics cannot consume or invalidate input
+                raise
+            finally:
+                control.publish('ready', inbox=durable_inbox.counts())
+        await bridge_inbox.consume(durable_inbox, _dispatch, wake, control.stopping,
+                                   lambda message: blog(bname, message))
+        control.publish('draining', inbox=durable_inbox.counts())
+        await ch.disconnect()
+        control.publish('stopped', inbox=durable_inbox.counts())
 
     print(f"[{bot['name']}] 连接中…", flush=True)
     try:
@@ -3012,7 +3107,7 @@ def _start_locked(bot_filter=None):
             sys.exit(2)
     # Query before any stop/spawn; failed observation leaves the fleet untouched.
     pids = bridge_process.require_known(_bridge_pids(bot=bot_filter))
-    _kill(pids)
+    bridge_control.stop_bridges(STATE_DIR, pids, _kill)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     script = str(Path(__file__).resolve())
     detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
@@ -3046,7 +3141,11 @@ def _start_locked(bot_filter=None):
         for name, child in list(children):
             if child.poll() is not None:
                 raise bridge_process.ProcessControlError(f'{name} 启动失败 exit={child.returncode}，请看桥日志')
-            if bridge_process.ready_pid('bridge:' + name) == child.pid:
+            state = bridge_control.read_state(bridge_control.control_path(STATE_DIR, child.pid))
+            if (bridge_process.ready_pid('bridge:' + name) == child.pid
+                    and state.get('pid') == child.pid and state.get('bot') == name
+                    and state.get('contract') == bridge_control.CONTRACT
+                    and state.get('state') in ('ready', 'handling')):
                 children.remove((name, child))
         if not children:
             break
@@ -3089,7 +3188,7 @@ def cmd_stop(bot_filter=None):
         guardians = [] if bot_filter else [
             (name, bridge_process.select_pids(rows, Path(__file__).parent / name))
             for name in ('bridge_cron.py', 'bridge_watchdog.py')]
-        _kill(pids)
+        bridge_control.stop_bridges(STATE_DIR, pids, _kill)
         print(f'桥已确认停止 PID={pids}')
         for name, ids in guardians:
             identity = 'cron' if name == 'bridge_cron.py' else 'watchdog'
@@ -3174,12 +3273,19 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
                               or (grant_open_id and result.get("granted") is True))
             if (result.get("url") and accessible
                     and result.get("structure_verified") is True
-                    and result.get("tables_degraded", 0) == 0):
+                    and not result.get("tables_degraded")):
                 return result, "online_doc_native"
-            errors.append(
-                "native=文档已创建但未证实收件人可读或结构完整"
-                f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
-            )
+            if result.get("tables_degraded"):
+                # 机械闸：表格被写成纯文本不算成功交付（用户规则：禁止把 Markdown 表格当普通文字交付）
+                errors.append(
+                    f"native=文档 {result.get('url')} 已创建但 {result['tables_degraded']} 张表格未按原生表格落地"
+                    f"({result.get('table_cells_failed', 0)} 格写失败)"
+                )
+            else:
+                errors.append(
+                    "native=文档已创建但未证实收件人可读或结构完整"
+                    f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
+                )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"native={str(exc)[:220]}")
         # Import would bypass the checked layout and reproduce silent flattening.
@@ -3315,6 +3421,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
         doc_ok, doc_url, doc_error = None, None, None
         attachment_ok, attachment_error = None, None
         doc_delivery_mode = None
+        doc_tables = {}
         if doc:
             try:
                 res, doc_delivery_mode = await asyncio.to_thread(
@@ -3322,7 +3429,14 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                 )
                 doc_url, doc_ok = res.get("url"), True
                 if doc_delivery_mode == "online_doc_native":
-                    blog(bot_name, "send --doc 已由同 bot 原生 docx 链发布")
+                    blog(bot_name, "send --doc 已由同 bot 原生 docx 链发布"
+                                   f"（真表格 {res.get('tables_real', 0)} / 降级 {res.get('tables_degraded', 0)}）")
+                    if res.get("tables_degraded"):
+                        # 表格被写成纯文本 = 违反「禁止把 Markdown 表格当普通文字交付」，必须显式暴露
+                        blog(bot_name, f"⚠️ send --doc 有 {res['tables_degraded']} 张表格降级成纯文本"
+                                       f"（{res.get('table_cells_failed', 0)} 格写失败）·交付前必须回读核对")
+                doc_tables = {k: res.get(k) for k in ("tables_real", "tables_degraded",
+                                                      "table_cells_filled", "table_cells_failed")}
                 if grant_oid and not res.get("granted", True):
                     blog(bot_name, f"⚠️ send --doc 授权 owner 失败({res.get('grant_error')})·改用链接可见范围")
                 if res.get("public") is False:
@@ -3343,10 +3457,10 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             body = (text + "\n\n" + link_line) if text else link_line
         via = await card_send(ch, target, body, bot_name) if body else None
         return (img_ok, via, doc_ok, doc_url, doc_error,
-                attachment_ok, attachment_error, doc_delivery_mode)
+                attachment_ok, attachment_error, doc_delivery_mode, doc_tables)
 
     (img_ok, via, doc_ok, doc_url, doc_error,
-     attachment_ok, attachment_error, doc_delivery_mode) = asyncio.run(_go())
+     attachment_ok, attachment_error, doc_delivery_mode, doc_tables) = asyncio.run(_go())
     delivered = (((via != "failed") if via is not None else True)
                  and (img_ok is not False) and (doc_ok is not False)
                  and (attachment_ok is not False))
@@ -3368,7 +3482,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                         "attachment": attachment_ok,
                         "attachment_error": attachment_error,
                         "reconcile_queued": reconcile_queued,
-                       "len": len(text), "text_chars": len(text), **doc_stats})
+                       "len": len(text), "text_chars": len(text), **doc_stats, **doc_tables})
     if as_json:
         print(json.dumps({"delivered": delivered, "via": via, "image_ok": img_ok,
                           "doc_ok": doc_ok, "doc_url": doc_url,
@@ -3378,7 +3492,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                           "attachment_error": attachment_error,
                           "reconcile_queued": reconcile_queued,
                           "bot": bot_name, "to": target, "len": len(text),
-                          "text_chars": len(text), **doc_stats}, ensure_ascii=False))
+                          "text_chars": len(text), **doc_stats, **doc_tables}, ensure_ascii=False))
     else:
         artifact = ""
         if (doc_delivery_mode or "").startswith("online_doc"):
