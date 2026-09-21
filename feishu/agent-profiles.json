@@ -5,7 +5,13 @@
     "codex": "cxp"
   },
   "session_search": {
-    "preferred_profiles": ["cc", "ccp", "ccp2", "cxp", "cx"]
+    "preferred_profiles": [
+      "cc",
+      "ccp",
+      "ccp2",
+      "cxp",
+      "cx"
+    ]
   },
   "entry_documents": {
     "_note": "managed_profiles = 【入口文档治理范围】（哪些 profile 的 home 要被渲染 CLAUDE.md / AGENTS.md），不是【shell wrapper 范围】——wrapper 走 `agent_profile_cli.py list --names`，永远取 profiles 的全部键。所以这里比 profiles 少几个（ccw/ccw2/ccw3 不接受入口文档治理）是有意的，别当成漏补去『补齐』。见 PLAN-923 · S2.3。",
@@ -16,7 +22,8 @@
       "ccp2",
       "cck",
       "cx",
-      "cxp"
+      "cxp",
+      "cxp2"
     ]
   },
   "profiles": {
@@ -74,6 +81,12 @@
       "launcher": "direct",
       "label": "Codex Personal（生产推荐）",
       "recommended": true
+    },
+    "cxp2": {
+      "runtime": "codex",
+      "home": "~/.codex-personal2",
+      "launcher": "direct",
+      "label": "Codex Personal 2"
     }
   }
 }
