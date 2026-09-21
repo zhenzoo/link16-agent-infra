@@ -884,6 +884,9 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         chosen = by.get(target)
         if not chosen:
             log(f"❌ 指定的目标号 {target} 不在 profile 表"); return False
+        if chosen.get("verdict") not in {"够用", "紧张"}:
+            log(f"❌ 指定的目标号 {target} 当前不可切：{chosen.get('verdict')}")
+            return False
     else:
         chosen = agent_quota.pick(rows, exclude=[cur],
                                   prefer_runtime=(by.get(cur) or {}).get("runtime"))
