@@ -111,6 +111,8 @@ Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要�
 全新 Windows 用户按默认安装时，三种 CLI 都使用上述官方脚本，不通过 WinGet/npm/uv 安装，
 也不传自定义程序安装目录。官方默认程序入口如下（未设置官方安装目录覆盖变量时）：
 
+后续更新也只走各提供方的原生自动更新、CLI 内置更新命令或同一官方安装脚本；不得再用 npm、uv/pip 或第三方包管理器覆盖这三个入口。更新后重新核对实际命令路径和签名，不能只凭版本号判断来源。
+
 | CLI | 官方默认程序入口 | 官方说明 |
 |---|---|---|
 | Claude Code | `%USERPROFILE%/.local/bin/claude.exe` | [安装与更新](https://code.claude.com/docs/en/setup) |

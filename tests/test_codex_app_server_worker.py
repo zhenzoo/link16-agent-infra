@@ -25,6 +25,23 @@ class _FakeRpc:
             self.notifications.put(message)
 
 
+class CodexExecutablePriorityTests(unittest.TestCase):
+    def test_official_standalone_wins_while_legacy_npm_binary_still_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            official = home / "AppData/Local/Programs/OpenAI/Codex/bin/codex.exe"
+            legacy = home / (
+                "AppData/Roaming/npm/node_modules/@openai/codex/node_modules/"
+                "@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+            )
+            official.parent.mkdir(parents=True)
+            legacy.parent.mkdir(parents=True)
+            official.touch()
+            legacy.touch()
+            with mock.patch.object(worker.Path, "home", return_value=home):
+                self.assertEqual(worker._codex_native_default(), official)
+
+
 class AppServerFinalDeliveryTests(unittest.TestCase):
     def test_app_server_child_gets_root_even_with_missing_or_stale_parent_variable(self):
         import os

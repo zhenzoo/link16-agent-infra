@@ -316,8 +316,17 @@ class ProfileBootstrapTests(unittest.TestCase):
             new_python = local / "Programs" / "Python" / "Python313" / "python.exe"
             old_python.parent.mkdir(parents=True)
             new_python.parent.mkdir(parents=True)
-            shutil.copy2(sys.executable, old_python)
-            shutil.copy2(sys.executable, new_python)
+            # Python's official install manager uses a launcher plus a
+            # ``.__target__`` sidecar.  Copy both when present; copying only
+            # the launcher creates a fake interpreter that cannot start and
+            # makes the resolver appear to prefer PATH by mistake.
+            launcher = Path(shutil.which("python") or sys.executable)
+            shutil.copy2(launcher, old_python)
+            shutil.copy2(launcher, new_python)
+            launcher_target = launcher.with_name(launcher.name + ".__target__")
+            if launcher_target.is_file():
+                shutil.copy2(launcher_target, old_python.with_name(old_python.name + ".__target__"))
+                shutil.copy2(launcher_target, new_python.with_name(new_python.name + ".__target__"))
             pb.bootstrap(home, apply=True)
             rc = (home / ".bashrc").as_posix()
             done = subprocess.run(
