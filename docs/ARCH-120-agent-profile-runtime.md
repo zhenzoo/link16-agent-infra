@@ -16,12 +16,12 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-09-06
+last_reviewed: 2026-09-22
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
 > **状态**：v1 目标契约 · 2026-07-31 Publisher 拍板
-> **范围**：Link16 启动的 Claude/Codex 主 session、手工启动的主 session、以及它们在 wmux 新 pane 中启动的独立 worker。
+> **范围**：Link16 启动的 Claude/Codex/Kimi 主 session、手工启动的主 session、以及它们在 wmux 新 pane 中启动的独立 worker。
 > **不包含**：Claude Agent tool / Codex `spawn_agent` 这类同一 harness 内的原生子线程；它们不重新运行 CLI，不走本契约的二次选号。
 
 ## 1. 要解决的问题
@@ -308,7 +308,7 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 ## 8. 用户级与仓库级入口文档
 
 两种 scope 使用同一语义治理模型：先把内容分为公共规则、Claude runtime 适配、
-Codex runtime 适配、最小目标特例和不可复制的派生/私密状态，再分别编辑源文件。
+Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状态，再分别编辑源文件。
 禁止用文件名决定覆盖方向，也禁止整份机械互拷。
 
 用户级账号入口必须是本机可独立读取的实体文件；语义审计完成后，renderer 才负责
@@ -318,9 +318,11 @@ Codex runtime 适配、最小目标特例和不可复制的派生/私密状态�
 - Claude 受管副本：`~/.claude/CLAUDE.md`、`~/.claude-personal2/CLAUDE.md`、
   `~/.claude-kimi/CLAUDE.md`；
 - Codex runtime source：`$agent-profile-governance/references/AGENTS.codex.template.md`；
-- Codex 受管实体：`~/.codex/AGENTS.md`、`~/.codex-personal/AGENTS.md`。
+- Codex 受管实体：`~/.codex/AGENTS.md`、`~/.codex-personal/AGENTS.md`；
+- Kimi runtime source：`$agent-profile-governance/references/AGENTS.kimi.template.md`；
+- Kimi 受管实体：registry 中每个 Kimi home 的 `AGENTS.md`，本机当前包括 `~/.kimi-personal/AGENTS.md`。
 
-两套 runtime source 都受治理：公共用户规则必须语义一致，provider 专属工具机制各留
+三套 runtime source 都受治理：公共用户规则必须语义一致，provider 专属工具机制各留
 适配段。实体文件顶部写生成来源、profile 和内容摘要；renderer dry-run 只报告部署
 状态。发现 drift 时先审阅并上收其中有价值的规则，审完才 `--apply`。profile 特有差异
 进入模板变量/override，禁止在生成文件里手改形成暗叉。
@@ -402,3 +404,19 @@ Codex runtime 适配、最小目标特例和不可复制的派生/私密状态�
 选路实证：0.38.0 的 ACP session 接续原生 TUI 时会出现工具 runtime 不存在；ACP 的部分 failed 也映射成 end_turn，因此没有采用 ACP 创建或执行路径。版本升级需重跑原生会话/真实工具/计划/失败/取消/恢复验收；本机隔离通过不等于生产 bot 或其他电脑已部署。
 
 参考：[Wire 合同](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/docs/wire-manifest.d.ts)、[循环事件](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core/src/loop/events.ts)、[目录隔离](https://moonshotai.github.io/kimi-code/en/configuration/data-locations.html)、[ACP 事件映射](https://github.com/MoonshotAI/kimi-code/blob/main/packages/acp-server/src/events-map.ts)。
+
+## 12. 新 runtime adapter 的最小接入合同
+
+`agent_runtime.py` 的 `RuntimeSpec` 是 Link16 运行侧的小型 adapter 目录表。每个可进入 profile registry 的 runtime 必须显式声明：入口文档文件名、skill 安装 scope、飞书公开事件来源、bootstrap hook installer，以及已有的启动、就绪、登录和凭据检查实现。`_PROFILE_RUNTIMES` 只从这张表派生；仅在 JSON 里写一个新字符串不能启用 runtime。未知值在 registry、入口文档 renderer、账号生命周期、standalone launcher 和 hook bootstrap 任一层都必须 fail closed，禁止落入最后一个 `else` 后伪装成 Codex 或 Kimi。
+
+用户级 `$agent-profile-governance` 有与之对应的 `RuntimeDocumentSpec`：声明该 runtime 的实体入口文件与 provider 模板。共享沟通块仍只从审核过的 Claude 母版抽取一次，再注入每个模板；provider 专属命令、hook 机制和系统提示留在模板自己的 adapter 段。`context_import.py` 从 `RuntimeSpec.entry_document` 选目标，所以 Kimi 写 `AGENTS.md`，不再误写一个无人读取的 `CLAUDE.md`。飞书发送层不读取这些文档，只消费各 runtime adapter 产生的统一 `milestone-v1`。
+
+新增独立 CLI runtime 的验收顺序固定为：
+
+1. 在用户治理层登记 `RuntimeDocumentSpec` 并增加模板，证明共享沟通块逐字注入且二次渲染 writes=0；
+2. 在 Link16 登记 `RuntimeSpec`，实现显式 launcher、home/env、登录、就绪信号、hook/event adapter 与版本漂移检查；
+3. adapter 只把公开 commentary、plan、工具安全摘要和 final 投影成 `milestone-v1`，为私有 reasoning/think、工具参数/结果和错误正文建立负例；
+4. bootstrap/doctor、context import、session recovery 与真实 owner DM 都给出该 runtime 的机械证据；
+5. 最后才允许 profile registry 接受该 runtime。缺任何一项都保持拒绝，而不是复用“最像”的现有 driver。
+
+千问有两种情况：若只是把 Qwen 模型接到现有 Claude/Codex 兼容后端，它仍是原 runtime，不新增 adapter；若接入独立 Qwen Code CLI，则以其用户级 `QWEN.md`、`~/.qwen/skills`、原生 hooks/Todo 事件和 JSON 事件流分别实现 document、skill、progress 与 final adapter。GLM 同理：作为 Anthropic/OpenAI 兼容模型后端时只新增 profile 启动配置；独立 ZCode CLI 才新增 runtime，以 `~/.zcode/AGENTS.md`、skills/plugins、SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop hooks 和原生 session event/protocol 完成上述五步。两者在真正实现并通过黄金测试与 DM 验收前，都不加入 `_PROFILE_RUNTIMES`。

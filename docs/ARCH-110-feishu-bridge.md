@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-22
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -155,6 +155,8 @@ LINK16_AGENT_PROFILE=ccp FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR="
 | 回传格式 | `_autopilot/bridge-outbox-<bot>.jsonl` | `answer/progress/ask` 记录是跨 CLI 合约；飞书发送层不关心来源 |
 | Claude hook | `_autopilot/bridge-hooks.json` + `feishu/hooks/bridge_*.py` | Claude 支持 per-session `--settings`，所以桥 spawn 时临时挂 hook |
 | Codex hook | `CODEX_HOME/hooks.json` + `feishu/hooks/codex_bridge_*.py` | Codex 从 CODEX_HOME / project `.codex` 发现 hook；用 `install_codex_bridge_hooks.py --write` 合并安装 |
+| Kimi hook | `KIMI_CODE_HOME/config.toml` + `feishu/hooks/bridge_userprompt.py` | `profile_bootstrap.py` 合并安装一条原生 `UserPromptSubmit`；只在桥 env 命中时确认输入、钉路由并注入当前工作行 |
+| Kimi 进度与终答 | Kimi native Wire 1.5 + `kimi_native_worker.py` / `kimi_events.py` | observer 只发布 main agent 的公开 text、todo、工具白名单摘要和 final；`think`、工具参数/结果与错误原文不进入 outbox |
 
 **Codex 启动命令**（由 `agent_runtime.py` 生成，不手写到多处）：
 
@@ -174,6 +176,12 @@ python feishu/install_codex_bridge_hooks.py --write
 ```
 
 该脚本合并到 `CODEX_HOME/hooks.json`，按 command 去重并保留已有 hook（例如个人 Stop 声音提醒）。Codex hook 脚本自身仍用 `FEISHU_BRIDGE_SESSION` 守门，所以即使全局安装，也只对桥 spawn 的 Codex 会话写 outbox；普通 Codex 会话 env 不命中即 no-op。
+
+**Kimi 原生 hook 与 Wire observer**：`profile_bootstrap.py --profile <kimi-profile> --apply` 用 `install_kimi_bridge_hooks.py` 把一条 `UserPromptSubmit` 合并进该 profile 的 `config.toml`，保留已有 `[[hooks]]`，重复执行不增副本；`service_doctor.py` 同时检查 hook、worker 和 reducer。Kimi 0.41 的 `prompt` 是 `ContentPart[]`，`bridge_userprompt.py` 只拼接其中的 text part 来确认 inbox 与解析最末路由信封，图片等 part 不落状态。hook 以 exit-0 stdout 注入当前工作行；普通 Kimi 会话没有 `FEISHU_BRIDGE_SESSION` 时立即 no-op。
+
+Kimi 可能在 composer 前弹出可选升级菜单。ready loop 只在同时看到 `Kimi Code Update Available`、两个选项和 `Esc continue` 时发送一次 Escape，选择继续当前已验证版本；不使用 `Down+Enter`，避免丢键后误触升级，也不把 worker 已启动误判成 composer 可注入。
+
+hook 不承担“读取思维链”。桥会话里的 Kimi 把可公开的当前动作写成 Wire `content.part(type=text)`；同一步随后发生工具调用时，observer 把这段 text 当 commentary，再附安全工具摘要。原生 `content.part(type=think)`、工具参数、工具结果和错误正文全部丢弃。`turn.ended` 只把未归入工具步骤的公开 text 组成 final。这样用户能看到“现在在做什么”和阶段发现，但看不到模型私有推理。
 
 **当前边界**：AskUserQuestion 结构化检测仍是 Claude PreToolUse 路径；Codex 的交互问题样式需等真实 payload 后再补 adapter。桥的 `/screen`、`/stop`、`/close`、`/cd`、附件下载、飞书发送路径已 runtime-neutral。
 
@@ -250,7 +258,7 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
 
 ## § 2.5 · 回复怎么回到你飞书（v8 · hook→outbox→drainer · 2026-06-16 回传重构）
 
-> 一句话：**不再轮询 jsonl 猜「这轮答完没」**，改成用 **Claude Code 自己的 hook 主动 push**——worker 会话每结束一轮（Stop hook）、每调一个实质工具（PostToolUse hook），就把内容写进该 bot 的 **outbox 文件**；桥的 **drainer** 读 outbox 发飞书。事件驱动、不堵塞、不挑触发源。
+> 一句话：**不再由发送层轮询 transcript 猜「这轮答完没」**。Claude 用 Stop/PostToolUse hook，Codex 用 app-server typed event，Kimi 用原生 Wire observer；三者都投影成同一个 milestone/answer outbox，再由 **drainer** 发飞书。
 
 - **为什么换掉旧轮询**（v7 的 `mirror_tailer` 轮询已退役·实证根因见 `_autopilot/_BRIDGE-HARDENING-LOG.md`）：旧法靠后台 tailer 轮询钉死的 jsonl + 等「带文字的 end_turn」+ **单线程发送**，三个结构性病：① 单发送引擎被一个长 turn **队头阻塞**（`REPLY_TIMEOUT=24h`）② 流式进度卡飞书侧 ~10min 强关后**不再刷** ③ 持续运行的 autopilot turn **永不干净 end_turn** → 永远等不到。且**只认 `promptSource=typed` 的真人键入当锚点** → **background-shell 完成唤醒的那一轮**（系统注入·非 typed）**结构上必丢**。
 - **v8 怎么做（4 件）**：
@@ -258,7 +266,7 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
   2. **Stop hook**（`feishu/hooks/bridge_stop.py`）：一轮结束 → 读 transcript，**只取 anchor(末条真用户消息)之后【终结态消息】(`stop_reason ∈ {end_turn, max_tokens, stop_sequence, refusal}`)的 assistant 文本拼接**（结构上排除 `tool_use`/`pause_turn` 的过渡话）→ 追 `{"kind":"answer",…}` 到 `_autopilot/bridge-outbox-<bot>.jsonl`。⚠️ **竞态防护（2026-06-18 · 详见 `_BRIDGE-HARDENING-LOG.md §9`）**：hook 开火与「最终答案落盘」几乎同刻，为防读在写前、抓到上一块过渡文本（实证：tb25-speech 把调工具前的「Now let me publish…」当答案发），**在 15s timeout 内短轮询（~200ms/次）直到终结态文本出现再写**；到点仍空 → 不发（宁缺勿错）。**每轮都触发**：首轮 / autopilot 每轮 / **background-shell 唤醒轮** —— 全覆盖（旧轮询漏掉的就是这些）。
      - **🔒 turn cursor（2026-08-16 加 · 结构性防「整段历史重发」）**：Stop 每次只看 `行号 > cursor` 的记录，`cursor` = 上一次 Stop **真正取走正文的最后一行**（写在 `_state/bridge-stop-cursor-<bot>.json`·和 outbox 同目录·原子落盘·换 session 自动作废）。**anchor 只是「turn 从哪开始」的启发式，会随 Claude Code 记录形状变化失灵；cursor 是硬保证——上一次 Stop 扫过的正文，下一次结构上再也够不着。** 竞态超时（没等到终结态）那条路**不推进** cursor → 晚落盘的 wrap-up 下轮照样补发（自愈不破）。
      - **turn 边界判据（`_is_real_user_message`）只把「带 `sourceToolUseID` 的注入」排除在外**：`/loop` 定时开火与 a2a 注入（`isMeta:true` + `promptSource:"system"` + `queuePriority`，**无** `sourceToolUseID`）**是**真 turn 起点，必须推进 anchor；技能/工具注入（`Base directory for this skill:` 等·带 `sourceToolUseID`）不是。⚠️ 2026-06-21 那版写成「isMeta 一律不算边界」，把定时/a2a 两类真 turn 一起挡了 → anchor 冻在几十轮以前 → Stop 把这期间**所有** `end_turn` 收尾拼成一张越滚越大的卡、**每轮把全部历史重发一遍**（实证 tb24-voiceover 08-16 22:00 前后：anchor 冻在 L1210，收尾卡 1099 → 21176 字、连发 21 轮；主人只发了一句话，收到的是整条链的全量回放）。
-  3. **PostToolUse / typed milestone producer**：Claude 保留 `bridge_posttool.py` transcript race-guard；普通 Codex 保留 compact PostToolUse。PLAN-915/916 canary 改由 app-server typed observer 写 `milestone-v1`，commentary 原文 + plan/collab 状态 + 相邻工具安全摘要；raw reasoning/command/output 只在内存中短暂出现并在写 ledger/outbox 前完成 allowlist 投影。
+  3. **PostToolUse / typed / Wire milestone producer**：Claude 保留 `bridge_posttool.py` transcript race-guard；Codex app-server typed observer 写 `milestone-v1`；Kimi 的 session-pinned Wire observer 写相同合同。公开 commentary、plan/todo 与相邻工具安全摘要可进入 outbox；raw reasoning/think、command、tool input/output 在写 ledger/outbox 前丢弃或完成 allowlist 投影。
   4. **drainer**（`bridge_outbox.outbox_drainer`·桥进程后台 task·**唯一发送引擎**）：byte-offset HWM 增量读 outbox → answer 按 route 立即发 interactive/text、progress 限流合并。answer 使用稳定 fragment ID + durable ACK，全部片段确认后才推进 HWM；长答案按半开区间切分。新 answer 正常只用 2790 字符，2800 是硬上限，中间 10 字符只作异常 guard。首次发网前把无正文分片 manifest 落 answer-state，重启按 manifest 原样补片，不重新猜边界。`milestone-v1` 另持久化 message id、当前卡 event ids、acked revision 与 route。edit 失败/卡满时只从 dirty event 续，不复制旧 snapshot。**不再等 turn、不被任何长 turn 阻塞**。
 - **SSOT / 隔离**：hook 只写 outbox 文件（**不碰飞书凭据**）；唯一持飞书 WS + 凭据的是桥进程；outbox **单写（hook）单读（drainer）**。
 - **⚠️ 过渡铁律**：hook 只在会话 **spawn 那一刻**（`--settings`）挂上 → **重启桥不会给已在跑的旧会话补 hook**。新会话自动带 v8；已在跑的会话（旧桥裸 ccp 起的）要 **respawn**（`/close`+re-@ 或自然重启）才获 v8 auto-mirror（总控下次巡航自动获得）。
@@ -281,7 +289,7 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
 - answer 先生成稳定 `answer_id`，再按安全容量切成稳定 `fragment_id` 与 `part/total`。每片确认后落 durable ACK，进程重启只补未确认片；超时不得推进 HWM 冒充成功。
 - 自动与主动成功发送都写 `bridge-outbound-<bot>.jsonl`，携带真实 message_id；history 只按非空 message_id 合并，正文相同但 message_id 不同仍保留。
 - `send_feishu_msg.py` 在网络前检查 active route；向本轮自动回址重复投递默认拒绝，真正额外通知必须显式 `--proactive`。
-- **编码合同**：Claude/Codex hook 的 stdin 是 UTF-8 JSON 字节流；所有读取 hook 必须从 `sys.stdin.buffer` 明确按 UTF-8（容忍 BOM）解码，不能交给中文 Windows 的 CP936 text wrapper。用户级 `PYTHONUTF8=1` 仍由装机脚本和 preflight 负责，但只是全进程防御层，路由正确性不依赖系统 locale。
+- **编码与 prompt 合同**：Claude/Codex/Kimi hook 的 stdin 都是 UTF-8 JSON 字节流；所有读取 hook 必须从 `sys.stdin.buffer` 明确按 UTF-8（容忍 BOM）解码，不能交给中文 Windows 的 CP936 text wrapper。Claude/Codex 的 `prompt` 是 string，Kimi 0.41 是 `ContentPart[]`；路由层只消费 Kimi 的 text part。用户级 `PYTHONUTF8=1` 仍由装机脚本和 preflight 负责，但只是全进程防御层，路由正确性不依赖系统 locale。
 - **根因（实证 2026-06-29）**：旧机制把「回哪」写在**单独的 `bridge-next-route-<bot>.json` 便签**（per-bot 旁路文件），靠「下一轮 hook 消费即删」。但群消息那轮若没干净跑 hook（回信失败 / 会话冷重启 / env 丢），**便签不被消费就成地雷**——一张 23:18 tb25-ccp 在群 @arch 写的便签躺了 ~21h，被次日 20:46 主人的「注册 bot」DM 踩中 → arch 的 DM 回复漏进群 + @错 bot（哨兵挡住没成回环）。信封把回址跟消息绑死 → **按消息原子化，跨会话 / 交错 / 冷重启都不串、不过期**。
 - **防 spoof = 取【最末】（2026-06-30 · TB25-link16 review 复现）**：必须 `re.findall(...)[-1]` 取最末、不能 `re.search` 取最左。否则正文里**先**出现的假信封（如智能体之间**转引 / 讨论这套协议**时写的 `route=a2a dest=oc_X`）会盖过末尾真信封、**劫持路由**（实测：正文塞假 a2a + 末尾真 p2a → 旧码回错地方）。a2a bot 本就会互相转引此格式 → **无意碰撞也中招，非必恶意**。
 - **没信封 → 安全默认 p2a**：terminal 直敲 / 末尾信封被截断 → 解析为空 → 回 owner DM。**旧 `bridge-next-route` 便签 + `_write_next_route` 已连根删**（不再「盖住地雷」而是拔掉·避免截断回退时旧 bug 复活）。隔离测试 8 场景全过（含两个 spoof：假信封被忽略、取末真信封 / 旧便签存在也不再被读）。
@@ -335,14 +343,17 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
 > **当前铁律**：呈现由 route 决定，而不是由目标 ID 的 `oc_` 前缀决定。真人的 `p2a`/`p2a-ext` final 用互动卡片；peer 的 a2a 用纯文字。单卡满约 2800 字时无损拆成 1～N 张有序卡；卡片发送失败降级文字并在 receipt 标明原因。下方较早版本记录只用于解释演进，不得覆盖本段与 `SPEC-210`。
 
 - **进度卡（原地长大 + 满则轮换）**：PostToolUse/typed event 把【当前轮结构化 steps】写 outbox；drainer 持久化当前卡 message_id、已确认事件版本及冻结 route，重启后继续 `update_card` **原地刷新同一张卡**。正文只展示 commentary/plan 的进展、下一份交付和 agent 写出的绝对完成点，header 保留计划完成度与实际工具总数；工具 label 不铺正文。卡满 ~2800 字或 provider 明确确认旧卡已撤回／达到编辑上限时才轮换；临时网络失败保留原卡等待同一次更新成功。每次新卡先保存创建意图与请求 ID，再调用网络，逐片确认，状态保存失败不推进发送位置；具体合同见 SPEC-210 §2.1。**`update_card` = `im.message.patch` 普通消息编辑，不需要在桥重启时重建流式连接**；卡数随信息量有界增长。
-- **计划不是 prose 推断（PLAN-1000）**：`📋 当前计划` 只在收到真实 `kind=plan` / `turn/plan/updated` 后出现；renderer 不从“计划已更新”之类 commentary 反向合成。Codex 长任务必须调用 `update_plan`，Claude 长任务必须更新其 task/todo surface；否则本地 ledger、progress state 和飞书卡都不会凭空得到计划。
-- **Claude 计划适配（PLAN-1000 S10）**：PostToolUse 重放 transcript 中成功的 TodoWrite/TaskCreate/TaskUpdate，恢复同 session 的历史任务 ID，再把当前轮公开正文与计划输出为 `milestone-v1`。它与 Codex 共用编号、缩进、状态和 outbox 修订逻辑；正文不再经过旧 140 字单行预览。失败或尚未返回的任务调用不会改变计划，隐藏 thinking 和 final 不进入该进度投影。
-- **计划卡格式与有效心跳（PLAN-1000）**：plan adapter 把所有顶层 Stage 机械渲染为 `1. / 2. / 3.` 有序列表，状态固定为 `✅ / 🔄 / ⏳`，并把当前 Stage 文本中的 `1.1 / 1.2` Step 保持缩进；agent 负责提供明确对象、实际时间/绝对 ETA。连续执行 10 分钟无其他事件时，agent 的心跳必须给出当前 Stage/Step、比 Step 更细的具体动作、已用有效执行时间、绝对 ETA 和下一个可验证结果。工具事件不是心跳；milestone 卡在只有工具变化时保留最近的 plan/commentary 上下文，没有任何用户可见上下文时不发“思考中”占位卡。
+- **计划不是 prose 推断（PLAN-1000）**：`📋 当前计划` 只在收到真实 `kind=plan` / `turn/plan/updated` 后出现；renderer 不从“计划已更新”之类 commentary 反向合成。Codex 长任务必须调用 `update_plan`，Claude 长任务必须更新其 task/todo surface，Kimi 长任务必须更新其 `todo` store；否则本地 ledger、progress state 和飞书卡都不会凭空得到计划。
+- **Claude 计划适配（PLAN-1000 S10）**：PostToolUse 重放 transcript 中成功的 TodoWrite/TaskCreate/TaskUpdate，恢复同 session 的历史任务 ID，再把当前轮公开正文与计划输出为 `milestone-v1`。它与 Codex、Kimi 共用 Stage/Step、缩进、状态和 outbox 修订逻辑；正文不再经过旧 140 字单行预览。失败或尚未返回的任务调用不会改变计划，隐藏 thinking 和 final 不进入该进度投影。
+- **Kimi 进度适配（Wire 1.5）**：`tools.update_store(key=todo)` 映射为 plan；同一步中先出现的公开 text 在后续 tool.call 到达后映射为 commentary；tool.call 只保留类别、固定显示名与工作区内安全路径；`turn.ended` 产生 final。`part.type=think`、子 agent journal、工具参数/结果、错误正文与 hook 注入文本都不进入卡片。没有公开 commentary/plan、只有工具变化时，不新建“思考中”占位卡。
+- **计划卡格式与有效心跳（PLAN-1001）**：plan adapter 不再在 Stage 外追加 Markdown `1. / 2. / 3.`。顶层逐行呈现 `✅ Stage 1｜…`、`🔄 Stage 2｜…`、`⏳ Stage 3｜…`；Step 逐行呈现全角缩进的 `　2.1 …`。计划块内部只有单换行，和随后 commentary 之间保留一个空行。adapter 在迁移期可去掉旧输入自带的 `1.`，并把没有 Stage 身份的裸 item 补成所在位置的 `Stage N｜`，但不编造对象、状态、时间或 ETA。连续执行 10 分钟无其他事件时，agent 的心跳必须给出当前 Stage/Step、比 Step 更细的具体动作、已用有效执行时间、绝对 ETA 和下一个可验证结果。工具事件不是心跳；milestone 卡在只有工具变化时保留最近的 plan/commentary 上下文，没有任何用户可见上下文时不发“思考中”占位卡。
+- **原生计划能力以实际工具面为准（2026-09-22 真机验收）**：`tb26-ccp` 的 Kimi 0.41.0 真实暴露 TodoList，Wire 输出已在 owner DM 通过三项 Stage/时间/ETA、两次 commentary、工作行标题、原位编辑与 final 闭环。同次冷启动的 Claude 2.1.278 未暴露 TodoWrite，Codex 0.155.1 独立 TUI 未暴露 `update_plan`；它们的标题、公开进度、只读工具和 final 均可送达，但没有结构化 plan 事件时 renderer 不会从 prose 伪造一份。这是 provider/harness 当前能力边界，不是通过增加第二套解析器来“修复”的桥 bug；支持 TaskCreate/TaskUpdate 的 Claude 面与支持 `update_plan` 的 Codex harness 仍走现有 adapter。
+- **两个 renderer 的边界（PLAN-1001）**：用户口语里的“统一 renderer”是一条治理链，但代码上有两个窄职责。`$agent-profile-governance` 是配置 renderer，只把审核过的共享沟通块和 provider adapter 物化进 `CLAUDE.md` / `AGENTS.md`；`bridge_events.py` + `bridge_outbox.py` 是飞书 renderer，只把三种 native 公开事件投影成同一张卡。前者不改卡片，后者不改用户入口、skills 或系统提示。二者以共享沟通合同和跨 runtime 黄金测试对齐，不能互相覆盖职责。
 - **思考、里程碑、交付三层分开（PLAN-1000）**：普通 commentary 原样显示且保持无色；agent 显式发出的 `🟡`（方向锁定/阶段结论）、`🟢`（已验证 Step 或产物完成）、`🔴`（blocker/验收失败/紧急风险）原样保留。renderer 不自动补色，也不猜绿/红。产生可审阅产物的 Step 由 agent 在同轮更新 plan 并发带入口的结果回执；桥只传递、原位增量和交付，不把思考伪造成产物。
 - **本地打开属于 Step 交付，不属于桥（PLAN-1000）**：agent 在当前渠道完成本地路径与按策略存在的在线 URL 回执后，若是有人直接参与的本机会话，或 route 是 owner `p2a`，则立即用系统默认应用打开已核对的那一份产物，再进入下一 Step；禁止把多份打开动作攒到 final。owner `p2a` 的默认打开来自用户 standing instruction，不用“是否在桌前”推断，也不要求每轮重复授权；本轮明确说“后台/无人值守/不要打开”时跳过。`p2a-ext`、cron 与 a2a 默认不打开，除非 owner 当前任务明确授权。bridge/drainer 不启动 GUI，也不把“已发链接”伪装成“本地已打开”。
 - **在线产物开关只认 Link16 本机策略（PLAN-1000 S7）**：`feishu/artifact-delivery.local.json` 是这台机器所有 profile/bot 共用的唯一可变值，缺失即 off；committed 样例只定义 schema。`artifact_delivery.py status/set-online/decide` 是查询与切换入口。`send --doc` 和 `send_feishu_media.py` 在任何飞书网络请求前过闸；全局 off 时退出，用户本轮明确要求在线稿才允许 `--explicit-online` 单次覆盖。`set-online` 是持久偏好，不用于“临时 on → shell finally 恢复”的单次事务：外层执行器超时会跳过恢复；单次交付始终走不改配置的 override。profile registry、Skill、CLAUDE/AGENTS 只负责路由到该策略，不复制开关值。
-- **四级绝对 ETA 不加协议字段（PLAN-1000）**：总计划/当前全部 P0、当前 P0、当前 Stage、当前 Step 的绝对完成点，以及下一 Step 的绝对时间段，都由 Claude/Codex 按用户级 `align`/`living-plan` 规则写进 commentary。用户可见文字使用 `ETA HH:mm（预计 HH:mm 完成）`，时长范围只能括号补充。每个 runtime plan Step 自身也携带 `实际完成 HH:mm` 或 `预计 HH:mm 完成`；桥只原样保存，不从中文 label 反向解析时间，也不替 agent 读钟、计算或猜测。
-- **Codex milestone 工具摘要（PLAN-916/1000）**：commentary 保持原样；每个相邻工具段仍聚合实际调用次数、类别和安全仓库相对路径，供本地 ledger 与排障使用。卡片正文过滤 tool label，只在 header 累计 `tool_count`。完整命令、参数、输出、tool-derived 绝对路径和 reasoning 不进入卡片。
+- **四级绝对 ETA 不加协议字段（PLAN-1000）**：总计划/当前全部 P0、当前 P0、当前 Stage、当前 Step 的绝对完成点，以及下一 Step 的绝对时间段，都由 Claude/Codex/Kimi 按共享沟通规则写进 commentary。用户可见文字使用 `ETA HH:mm（预计 HH:mm 完成）`，时长范围只能括号补充。每个 runtime plan Step 自身也携带 `实际完成 HH:mm` 或 `预计 HH:mm 完成`；桥只原样保存，不从中文 label 反向解析时间，也不替 agent 读钟、计算或猜测。
+- **跨 runtime 工具摘要（PLAN-916/1000）**：commentary 保持原样；每个相邻工具段仍聚合实际调用次数、类别和安全仓库相对路径，供本地 ledger 与排障使用。卡片正文过滤 tool label，只在 header 累计 `tool_count`。完整命令、参数、输出、tool-derived 绝对路径和 reasoning/think 不进入卡片。
 - **答案卡（同款·超长拆连续多卡）**：Stop/typed final 把该轮最终回复写 outbox；新 answer 超过正常 target `2790` 即无损拆成带 part/total 的连续多卡。`回复 i/N` 标题计入 target；`2800` hard limit 前的 10 字符不分给正文，只容纳 splitter 的小幅异常并强制留 `guard_chars` 回执。首次发送前持久化 fragment manifest，重启只补 manifest 中未 ACK 的片；旧 state 无 manifest 时按 legacy 2800 规则回填。不附隐藏推理或工具流水账。
 - **逐级降级（始终同一个目标）**：interactive 创建失败或返回空 message_id 时降级为同目标 text；text 仍失败则保留 outbox/HWM 等待重试，**不退群 webhook**。
   > **2026-08-30 主人拍板：兜底通道整条拆除**（`_webhook_fallback` / `notify.py` / 看门狗 `notify_webhook` 全部删除）。理由：兜底给失败开了条特殊通道，让「没送到」长得像「送到了」——taoci-7 刷群 767 条、洪水时医生朝着被关键词校验拒收 748 次的群喇叭喊「需人工」，主人 42 分钟一无所知。发不到主人自己会察觉，届时直接找 link16 或上机器看。
@@ -361,8 +372,9 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
   · `config.summary.content`（飞书客户端**会话列表预览行 / 推送通知**用的就是它）= `📌 TC101P · <对象> ｜ <正文第一句>`，进度链不塞预览。
   进度卡、答案卡、桥的短回复（`card_send`）三条卡片路都过同一个 `session_work.apply_banner`；已有 `header` 的卡不重复加；a2a 群纯文字不加（peer 协议不动）。
 - **真源**：`feishu/_state/session-work-<bot>.json`（`project` ≤40 字、`task` / `progress` 各 ≤300 字可多行、`source`、`updated`），由 agent 自己在会话里跑 `python feishu/session_work.py set --project <代号> --task "<对象+动作+结果>" --progress "<Stage 链>"` 写；`show` 看、`clear` 清；bot 名取 `FEISHU_BRIDGE_SESSION`，过 `assert_sender_identity` 身份闸，不能改别的 bot 的行。
-- **什么时候改、写什么（agent 的判断活·不是每条消息）**：接到新任务、PLAN 的 Stage 切换、旧任务做完开新任务时改；旧任务完成只写新的、不留旧的。`task` 必须点名具体文档/功能/系统 + 要做的动作 + 交付结果，不写「实现+测试」「调研」这类抽象类别（同 Stage 标题规则）；`progress` 有 PLAN Markdown 就按 PLAN 的 Stage 写，没有就自己概括。规则由 `hooks/bridge_userprompt.py` 每轮以 `additionalContext` 喂给 Claude 会话（附当前顶栏是什么、来源是谁写的），Codex 的 hook 不认这个输出、暂只靠兜底。
-- **兜底**：没写过或已清 → `project` = 会话 cwd 目录名（`bridge-session-<bot>.json`）、`task` = Claude transcript 最后一条 `ai-title`（Claude Code 给终端起的标题，桥本来就 pin 着这份 jsonl）；Codex 没 ai-title → 只剩项目名；连 cwd 都不知道 → 不加顶栏。
+- **什么时候改、写什么（agent 的判断活·不是每条消息）**：接到新任务、PLAN 的 Stage 切换、旧任务做完开新任务时改；旧任务完成只写新的、不留旧的。`task` 必须点名具体文档/功能/系统 + 要做的动作 + 交付结果，不写「实现+测试」「调研」这类抽象类别（同 Stage 标题规则）；`progress` 有 PLAN Markdown 就按 PLAN 的 Stage 写，没有就自己概括。这条规则只维护在 `$agent-profile-governance` 抽取的共享沟通块，由 renderer 同时注入 Claude `CLAUDE.md`、Codex/Kimi `AGENTS.md`，不再在某个 runtime 模板里复制第二份。
+- **动态提醒**：`hooks/bridge_userprompt.py` 每轮附当前顶栏与更新命令。Claude 用 `additionalContext` JSON；Kimi 原生 hook 用 exit-0 stdout；Codex 当前从共享 `AGENTS.md` 执行同一规则，不消费 provider-specific context 输出。三者最终都只写同一份 `session-work-<bot>.json`，卡片 header/body/summary 仍统一由 `session_work.apply_banner` 注入。
+- **兜底**：没写过或已清 → `project` = 会话 cwd 目录名（`bridge-session-<bot>.json`）；Claude 可再取 transcript 最后一条 `ai-title` 作 `task`。Codex/Kimi 没有这项 Claude 元数据时只剩项目名；连 cwd 都不知道 → 不加顶栏。
 - **清理**：`/new`、`/clear`、`/cd` 都清掉工作行（上下文没了 / 换目录 = 旧行作废），下一个会话自己再写。
 - **容量**：标题 ≤400 字且不占正文预算；正文首行的 Stage 链按 `CARD_HARD 2980 − 正文` 只裁自己尾巴、正文一字不动，所以叠在 `CARD_BUDGET 2800` 上仍在飞书单卡 ~3000 之内；不动分片规则（分片 ID / ACK 不变）。长度还没打磨，先把内容写清再收。
 
@@ -846,6 +858,7 @@ armed → oauth_waiting → registered → permissions_review → manual_pending
 - **T2 自动重生**：T1 通后，手动 `workspace.close` 那个 bot 的 workspace → 再 @它 → 自动重建 + 回话。
 - **T3 桥重启**：kill 桥 python → `start` → @它 → 仍能用（复用或重生会话）。
 - **T4 多 bot 隔离**：两个 bot 各自独立会话，同群分别 @ 各下指令，互不串台。
+- **T5 Kimi 原生回传**：把测试 bot 切到 Kimi profile 后从 owner DM 发一个“公开当前动作 → 只读工具 → final”任务；验收 `config.toml` 原生 hook 被加载、Wire observer 产出 commentary/tool/final、互动卡标题取当前 `session_work`，且 outbox/卡片不含 `think` 与工具原文。
 
 ---
 
@@ -857,6 +870,7 @@ armed → oauth_waiting → registered → permissions_review → manual_pending
 - **已删旧物**：`supervisor.pty` 单指针 / `register_supervisor.py` / 认领 / wsid8 全删；`bridge-bots.json` 去 pty_file 加 cwd。**v8 又删**：`mirror_tailer`/`_deliver_turn`/`_drive_turn`/进度卡渲染 + 5 常量（−190 行·feishu_bridge.py 1132→942）。
 - **斜杠命令**：桥自己认 `/clear /cd /screen /stop /close /help`；**其余 `/xxx` verbatim 透传进 ccp**（`/resume`/`/rename`/`/model`…·不缀 `[飞书]` 标记）。普通消息的 `[飞书-<bot>]` 标记移到**末尾**（不挡 slash·v8 回传不依赖它·仅人读 + 总控 notify 抑制 + vestigial pin 子串匹配）。
 - **回复管线（v8）**：**Stop hook 写 outbox（答案）+ PostToolUse hook 写 outbox（进度）→ `outbox_drainer` 唯一发送引擎读 outbox 发**（§2.5）+ **飞书互动卡片**（§2.6）+ **必达四级降级**（§2.6）+ **`doctor_loop` 机械自愈**（§3）+ trace id 日志（§2.7）。覆盖首轮 / 长 turn / autopilot 永不结束 / **background-shell 唤醒轮** / 补发不淹没（旧轮询全挂的 5 场景·v8 测试台实证）。
+- **Kimi 原生回传（2026-09-21）**：`KIMI_CODE_HOME/config.toml` 的 `UserPromptSubmit` 负责输入确认、路由和工作行上下文；session-pinned Wire observer 把公开 text/todo/tool/final 投影到同一 milestone/answer outbox。Kimi 0.41 真实 CLI、真实 Wire、可选升级菜单消除与完整 owner DM T5 均已验证：`tb26-ccp` 使用 `kp` 在 session `session_4ac972b0-2169-46bc-ac97-9ba40110c2d1` 产生两段公开 commentary、Todo 0/3→3/3、安全工具摘要与 final；进度卡 `om_x100b6420ca5cd4b0b1d57789fb24344` 创建后原地编辑 4 次，终答卡 `om_x100b6420c95c80a4b4aaee428b64d21` 送达 owner DM。安全表面未出现 `think`、工具入参/结果、命令正文或工作目录输出，工作行标题在首卡创建前已切成当前验收任务。
 - **新增文件**：`feishu/hooks/{bridge_stop,bridge_posttool}.py` · `feishu/bridge_outbox.py`（drainer）· `feishu/bridge_doctor.py`（自愈）· `feishu/bridge_feishu_probe.py`（验真送达 tool）· `jsonl_reply_extract.last_turn_reply()`。运行时生成 `_autopilot/bridge-hooks.json`。
 - **消息串行锁** + **owner 自动信任**（§7）。
 - **多媒体通道（§2.9 · 2026-09-18）**：入站 `on_message` 的图片沿用 SDK；文件、音频和视频统一按官方 `type=file`，通过 message-resource 端点以 8 MiB `Range` 分片下载（逐片核对 `Content-Range`，先写 `.part`，完成后原子改名），因此不再受完整 GET 的 100 MB 限制。附件落到 `feishu/_state/inbox/<bot>/<日期>/` 后只向 agent 注入【本地路径】；出站路径不变。

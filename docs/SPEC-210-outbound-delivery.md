@@ -16,7 +16,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-09-13
+last_reviewed: 2026-09-22
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -33,15 +33,15 @@ last_reviewed: 2026-09-13
 
 `purpose=progress` 与 `purpose=answer` 是显式字段。群 progress 的产品策略只依据 purpose，不得根据正文前缀猜测；以 `🤖` 等符号开头的 final 仍必须投递。隐藏推理、命令全文、tool input/output 和 secret 不得进入 final 或 progress 持久层。工具事件派生的路径仍只允许安全的仓库相对路径；唯一的绝对路径例外是 agent 在 owner `p2a` 正文中明确交付的、已核对存在的本地中间产物。该例外不得扩到 `p2a-ext`、`a2a` 或工具摘要。
 
-进行中卡的正文以 commentary/plan 的用户可见进展为主；`kind=tool` 的 label 不铺在卡片正文，只把实际工具总数保留在 header，本地 ledger 继续保存既有安全摘要供排障。`📋 当前计划` 只能来自真实 `kind=plan` / runtime plan event；renderer 禁止从 prose 猜计划。Codex 长任务使用 `update_plan`，Claude 长任务使用其 task/todo surface。
+进行中卡的正文以 commentary/plan 的用户可见进展为主；`kind=tool` 的 label 不铺在卡片正文，只把实际工具总数保留在 header，本地 ledger 继续保存既有安全摘要供排障。`📋 当前计划` 只能来自真实 `kind=plan` / runtime plan event；renderer 禁止从 prose 猜计划。Codex 长任务使用 `update_plan`，Claude 长任务使用其 task/todo surface，Kimi 长任务使用原生 todo store。
 
-Claude PostToolUse 从 transcript 重放已成功返回的 `TodoWrite`、`TaskCreate`、`TaskUpdate`，输出 `runtime=claude` 的 `milestone-v1`。任务 ID 只取结构化创建结果或明确成功回执，失败/未返回的工具不改变计划；历史轮只用于恢复已知任务，当前轮才产生可见事件。同一轮计划修订保持一个 event ID。公开 commentary 保留完整换行和缩进，final 与隐藏 thinking 不重复进入进度。两种 runtime 共用计划 renderer：标题后空行、Stage 有序编号、四空格缩进、三态图标由适配器保真处理；ETA 仍由 agent 提供，不自动编造。
+Claude PostToolUse 从 transcript 重放已成功返回的 `TodoWrite`、`TaskCreate`、`TaskUpdate`，输出 `runtime=claude` 的 `milestone-v1`。任务 ID 只取结构化创建结果或明确成功回执，失败/未返回的工具不改变计划；历史轮只用于恢复已知任务，当前轮才产生可见事件。同一轮计划修订保持一个 event ID。公开 commentary 保留完整换行和缩进，final 与隐藏 thinking 不重复进入进度。Claude、Codex、Kimi 共用计划 renderer：三态图标与 agent 给出的实际时间/ETA 保真；renderer 不读取或展示私有 reasoning/think。
 
 普通 intent/investigation/rationale commentary 原样显示且不着色。Agent 显式给出的 `🟡` 只表示方向锁定或有证据的阶段结论，`🟢` 只表示通过所需验证的 Step/产物完成，`🔴` 表示真实 blocker、验收失败或紧急风险；renderer 原样保留，不自动补色或猜状态。Step 状态变化时 agent 先更新 runtime plan，再发结果回执；可审阅产物回执必须写明产物、验收状态和访问入口。只有思考与纯时长预估的消息不算 Step 更新或产物交付。
 
 “本地已打开”是 agent 执行结果，不是 outbound renderer 能推断的状态。有人直接参与的本机会话，以及 owner `p2a`，都默认获得在这台配对电脑上逐份打开可审阅产物的 standing instruction；agent 必须在发出每份产物的回执后立即用系统默认应用打开已核对的目标文件，再进入下一 Step，不要求 owner 每轮重复说“请打开”，也不得在最终阶段批量补。本轮明确说“后台/无人值守/不要打开”时只交付 URL/路径。`p2a-ext`、cron 与 a2a 默认不启动 GUI，除非 owner 在当前任务明确授权。
 
-总计划或当前全部 P0、当前 P0、当前 Stage、当前 Step 四级绝对 ETA 由 agent 以自然语言 commentary 提供，renderer 不反向解析、不新增 schema。用户可见格式先写 `ETA HH:mm（预计 HH:mm 完成）`；“约 8–12 分钟”只能括号补充，禁止只写纯时长。runtime plan 使用渐进展开：全部 Stage 必须成为真正的 `1. / 2. / 3.` 有序列表项；PLAN 既有 `S1 / S2 / S3` 只作为 Stage 名称保留在序号后。每项使用 `✅` 已完成、`🔄` 正在进行、`⏳` 等待执行，写明对象、短目标/主要产物和 `实际完成 HH:mm` 或 `预计 HH:mm 完成`；只有当前 Stage 在其文本内按 `1.1 / 1.2` 缩进列出短 Step 及逐项时间，未来/已完成 Stage 不复制长 Step 正文。每一项必须脱离相邻文本也能说明“在改什么、交付什么”，不得只给 `resolver`、`清洁清单`、`白盒复盘` 等孤立内部名词。跨天写 `MM-DD HH:mm`。Agent 切换 Step、产出可审阅成果或重算 ETA 时发新 commentary；连续执行 10 分钟没有其他可见事件时，心跳必须写出当前 Stage、当前 Step、比 Step 更细的正在处理对象/动作、本 Step 已用有效执行时间、当前 Step 绝对 ETA 和下一个可验证结果。“思考中”、工具次数、计划计数或重复 Step 标题不构成心跳。桥只负责原位增量更新，不替 agent 编造这些语义。
+总计划或当前全部 P0、当前 P0、当前 Stage、当前 Step 四级绝对 ETA 由 agent 以自然语言 commentary 提供，renderer 不反向解析、不新增 schema。用户可见格式先写 `ETA HH:mm（预计 HH:mm 完成）`；“约 8–12 分钟”只能括号补充，禁止只写纯时长。runtime plan 使用共享沟通真源的明确身份：顶层为 `✅ Stage 1｜…` / `🔄 Stage 2｜…` / `⏳ Stage 3｜…`，不得再套一层 Markdown `1. / 2. / 3.`；Step 为全角缩进的 `　✅ 2.1 …`。计划块内部不留空白行，和相邻 commentary/receipt 之间恰有一个空行。已完成 Stage 在公开计划中折叠为一行；当前和所有待执行 Stage 展开已有 Step，不能只展开当前 Stage。每项写明对象、短目标/主要产物和 `实际 HH:mm` 或 `ETA HH:mm`；每一项必须脱离相邻文本也能说明“在改什么、交付什么”，不得只给 `resolver`、`清洁清单`、`白盒复盘` 等孤立内部名词。跨天写日期。迁移期 renderer 可去掉 agent 输入里旧的外层 `1.`，也可给裸 item 补所在位置的 `Stage N｜`；不得改写已有 Stage 编号、Step 编号、对象、时间或状态。Agent 切换 Step、产出可审阅成果或重算 ETA 时发新 commentary；连续执行 10 分钟没有其他可见事件时，心跳必须写出当前 Stage、当前 Step、比 Step 更细的正在处理对象/动作、本 Step 已用有效执行时间、当前 Step 绝对 ETA 和下一个可验证结果。“思考中”、工具次数、计划计数或重复 Step 标题不构成心跳。桥只负责原位增量更新，不替 agent 编造这些语义。
 
 本地路径、在线副本、原文件附件和本地 GUI 打开是四个独立动作，但它们在用户可见回执里合成同一块。可审阅产物回执固定为一块三行：第一行 `📄 <中文标题>（飞书在线文档·登录飞书查看）：`，第二行真实 https URL，第三行本机绝对路径；三行连写、顺序固定、任何一行都不得省略。没有在线副本时第二行写括号原因（全局 off 时 `（本机在线开关 off，本轮未建在线副本）`，创建失败时 `（在线副本创建失败：<原因>）`）；本机没有对应文件时第三行写 `（本地无此文件，仅在线文档）`。唯一渲染器是 `feishu/artifact_delivery.py` 的 `render_artifact_receipt`（CLI `receipt`），`send --doc` 卡片、在线媒体卡片和 drainer 的 final 对账块都必须调用它；agent 自己写回执时同样只写这一块，不得只发“路径”“URL”或“标题 + URL”两行。路径行始终是普通可复制的本机绝对路径。是否创建在线副本只认 `feishu/artifact-delivery.local.json` 的本机全局值：文件缺失与 `online_artifacts=false` 都是 off；on 才允许 `send --doc` / 在线媒体链，用户本轮明确要求在线稿时可用 `--explicit-online` 单次覆盖但不得修改全局值。两个在线入口必须在网络请求前执行该闸。在线失败时如实返回，禁止自动把本地 HTML、Markdown、图片、视频、音频或其他原文件发进聊天。只有用户明确要求“附件”或“原文件”时，agent 才调用专用附件工具；在线 URL 成功、本地默认应用已打开，都不能外推出附件授权。
 
