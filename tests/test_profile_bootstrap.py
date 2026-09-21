@@ -28,7 +28,9 @@ class ProfileBootstrapTests(unittest.TestCase):
             hooks = json.loads((home / ".codex-personal" / "hooks.json").read_text(encoding="utf-8"))
             self.assertEqual(set(hooks["hooks"]), {"Stop", "PostToolUse", "UserPromptSubmit"})
             bashrc = (home / ".bashrc").read_text(encoding="utf-8")
-            self.assertIn("cc ccp ccp2 cck ccw ccw2 ccw3 cx cxp", bashrc)
+            self.assertIn("agent_profile_cli.py", bashrc)
+            self.assertIn("list --names", bashrc)
+            self.assertNotIn("cc ccp ccp2", bashrc)
             self.assertIn("__link16_run_profile", bashrc)
             self.assertNotIn("alias ccp", bashrc)
             ps5 = home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
@@ -236,7 +238,9 @@ class ProfileBootstrapTests(unittest.TestCase):
             self.assertFalse((home / ".kimi-work" / "hooks.json").exists())
             self.assertFalse((home / ".kimi-code").exists())
             self.assertEqual(list(home.rglob("auth.json")), [])
-            self.assertIn("kimi-work", (home / ".bashrc").read_text(encoding="utf-8"))
+            bashrc = (home / ".bashrc").read_text(encoding="utf-8")
+            self.assertIn("list --names", bashrc)
+            self.assertNotIn("kimi-work", bashrc)
             checked = pb.bootstrap(home, profiles=("kimi-work",), registry_path=registry)
             self.assertTrue(all(row["status"] == "ok" for row in checked))
 
@@ -334,14 +338,14 @@ class ProfileBootstrapTests(unittest.TestCase):
     def test_powershell_wrapper_forwards_provider_flags_without_binding_them(self):
         # Exercise PowerShell's actual argument binder, without launching an agent.
         block = pb._powershell_block(["cxp"])
-        begin = block.index("function Invoke-Link16Profile")
-        end = block.index("Remove-Variable profileName")
+        begin = block.index("function Invoke-Link16AgentProfile")
+        end = block.index("\ntry {", begin)
         harness = (
-            "function Resolve-Link16Root { '.' }; "
+            "function Resolve-Link16AgentProfileCli { 'agent_profile_cli.py' }; "
             "function Resolve-Link16Python { 'Capture-Arguments' }; "
             "function Capture-Arguments { ConvertTo-Json -Compress -InputObject @($args) }; "
             + block[begin:end]
-            + "\ncxp --model sample-model -c model_reasoning_effort=low --version -p /model"
+            + "\nInvoke-Link16AgentProfile cxp --model sample-model -c model_reasoning_effort=low --version -p /model"
         )
         done = subprocess.run([shutil.which("powershell.exe"), "-NoProfile", "-Command", harness],
                               capture_output=True, text=True, encoding="utf-8", timeout=15)

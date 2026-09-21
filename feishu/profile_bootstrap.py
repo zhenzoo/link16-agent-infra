@@ -17,9 +17,10 @@ from pathlib import Path
 
 import agent_runtime
 import install_codex_bridge_hooks
+import profile_wrappers
 
-BASH_BEGIN = "# >>> link16 agent profiles (managed) >>>"
-BASH_END = "# <<< link16 agent profiles (managed) <<<"
+BASH_BEGIN = profile_wrappers.MARKER_BEGIN
+BASH_END = profile_wrappers.MARKER_END
 PS_BEGIN = BASH_BEGIN
 PS_END = BASH_END
 DEFAULT_PROFILES = ("ccp", "ccp2", "cxp")
@@ -33,15 +34,6 @@ LEGACY_ADAPTER_MARKER = "<!-- link16-codex-compat-adapter -->"
 
 def _normalized(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
-
-
-def _replace_block(current: str, block: str) -> str:
-    current = _normalized(current) if current else ""
-    pattern = re.compile(rf"(?ms)^{re.escape(BASH_BEGIN)}\n.*?^{re.escape(BASH_END)}\n?")
-    block = _normalized(block)
-    if pattern.search(current):
-        return _normalized(pattern.sub(lambda _match: block, current, count=1))
-    return _normalized((current.rstrip() + "\n\n" if current.strip() else "") + block)
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -77,116 +69,17 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
 
 
 def _bash_block(profiles=DEFAULT_PROFILES) -> str:
-    names = " ".join(profiles)
-    return f'''{BASH_BEGIN}
-__link16_user_env() {{
-  powershell.exe -NoProfile -Command "[Environment]::GetEnvironmentVariable('$1', 'User')" 2>/dev/null | tr -d '\\r\\n'
-}}
-__link16_root() {{
-  local root="${{LINK16_AGENT_INFRA_ROOT:-}}"
-  [ -n "$root" ] || root="$(__link16_user_env LINK16_AGENT_INFRA_ROOT)"
-  [ -n "$root" ] || {{ local vibe="${{VIBECODING_ROOT:-$(__link16_user_env VIBECODING_ROOT)}}"; root="$vibe/Post/link16-agent-infra"; }}
-  command -v cygpath >/dev/null 2>&1 && root="$(cygpath -u "$root")"
-  [ -f "$root/feishu/agent_profile_cli.py" ] || {{ printf '%s\n' 'Link16 profile CLI not found; set LINK16_AGENT_INFRA_ROOT.' >&2; return 2; }}
-  printf '%s\n' "$root"
-}}
-__link16_python() {{
-  local base="${{LOCALAPPDATA:-}}" found="" candidate
-  command -v cygpath >/dev/null 2>&1 && base="$(cygpath -u "$base")"
-  while IFS= read -r candidate; do
-    [ -x "$candidate" ] || continue
-    "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && found="$candidate"
-  done < <(printf '%s\n' "$base"/Programs/Python/Python*/python.exe | sort -V)
-  [ -n "$found" ] && {{ printf '%s\n' "$found"; return; }}
-  candidate="$(command -v python 2>/dev/null)" || return 1
-  # 2026-08-30 主人拍板放宽：上面仍【优先】挑 LOCALAPPDATA 里的 3.12+；这里的 PATH 兜底
-  # 不再硬卡版本 —— tb24 这台老机只有 Python 3.10.10，硬卡会让 ccp/cxp 等启动器全起不来。
-  # 3.12+ 仍是建议档（见 preflight.py 的 WARN），但不该成为老机不能开工的硬闸。
-  printf '%s\n' "$candidate"
-}}
-__link16_run_profile() {{
-  local profile="$1" root py; shift
-  root="$(__link16_root)" || return $?; py="$(__link16_python)" || return $?
-  "$py" "$root/feishu/agent_profile_cli.py" run --profile "$profile" --cwd "$PWD" -- "$@"
-}}
-for __link16_name in {names}; do
-  unalias "$__link16_name" 2>/dev/null || true
-  eval "$__link16_name() {{ __link16_run_profile '$__link16_name' \"\\$@\"; }}"
-done
-unset __link16_name
-{BASH_END}
-'''
+    # ``profiles`` remains accepted for backward-compatible imports; the
+    # canonical wrapper always discovers registered names from the registry.
+    return profile_wrappers.bash_block()
 
 
 def _powershell_block(profiles=DEFAULT_PROFILES) -> str:
-    quoted = ", ".join(f"'{name}'" for name in profiles)
-    return rf'''{PS_BEGIN}
-function Resolve-Link16Python {{
-    $command = Get-Command python.exe -ErrorAction SilentlyContinue
-    if ($command -and $command.Source -notlike '*\Microsoft\WindowsApps\*') {{
-        & $command.Source -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
-        if ($LASTEXITCODE -eq 0) {{ return $command.Source }}
-    }}
-    $root = Join-Path $env:LOCALAPPDATA 'Programs\Python'
-    $candidate = Get-ChildItem -LiteralPath $root -Directory -Filter 'Python*' -ErrorAction SilentlyContinue |
-        Sort-Object @{{ Expression = {{
-            if ($_.Name -match '^Python(\d)(\d+)$') {{ [version]("$($Matches[1]).$($Matches[2])") }}
-            else {{ [version]'0.0' }}
-        }}; Descending = $true }} |
-        ForEach-Object {{ Join-Path $_.FullName 'python.exe' }} |
-        Where-Object {{
-            if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) {{ return $false }}
-            & $_ -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
-            $LASTEXITCODE -eq 0
-        }} | Select-Object -First 1
-    if ($candidate) {{ return $candidate }}
-    # 放宽（2026-08-30）：没有 3.12+ 就用 PATH 上的 python，别让老机（如 tb24 的 3.10.10）直接 throw。
-    if ($command) {{ return $command.Source }}
-    throw 'No usable python found. Install Python 3.12+ and reopen the terminal.'
-}}
-function Resolve-Link16Root {{
-    $root = $env:LINK16_AGENT_INFRA_ROOT
-    if (-not $root) {{ $root = [Environment]::GetEnvironmentVariable('LINK16_AGENT_INFRA_ROOT', 'User') }}
-    if (-not $root) {{
-        $vibe = $env:VIBECODING_ROOT
-        if (-not $vibe) {{ $vibe = [Environment]::GetEnvironmentVariable('VIBECODING_ROOT', 'User') }}
-        if ($vibe) {{ $root = Join-Path $vibe 'Post\link16-agent-infra' }}
-    }}
-    if (-not $root -or -not (Test-Path -LiteralPath (Join-Path $root 'feishu\agent_profile_cli.py'))) {{
-        throw 'Link16 profile CLI not found. Set LINK16_AGENT_INFRA_ROOT.'
-    }}
-    return $root
-}}
-function Invoke-Link16Profile {{
-    # No named parameters: even -p is a provider flag, not a Profile abbreviation.
-    if ($args.Count -eq 0 -or -not $args[0]) {{ throw 'Link16 profile is required.' }}
-    $link16Profile = [string]$args[0]
-    $providerArgs = @($args | Select-Object -Skip 1)
-    $root = Resolve-Link16Root; $python = Resolve-Link16Python
-    & $python (Join-Path $root 'feishu\agent_profile_cli.py') run --profile $link16Profile --cwd (Get-Location).Path -- @providerArgs
-}}
-foreach ($profileName in @({quoted})) {{
-    $body = [scriptblock]::Create("Invoke-Link16Profile '$profileName' @args")
-    Set-Item -Path "Function:global:$profileName" -Value $body
-}}
-Remove-Variable profileName, body -ErrorAction SilentlyContinue
-{PS_END}
-'''
+    return profile_wrappers.powershell_block()
 
 
 def target_plan(home: Path, profiles=DEFAULT_PROFILES):
-    targets = (
-        (home / ".bashrc", _bash_block(profiles)),
-        (home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1", _powershell_block(profiles)),
-        (home / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1", _powershell_block(profiles)),
-    )
-    rows = []
-    for path, block in targets:
-        current = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
-        desired = _replace_block(current, block)
-        rows.append({"path": path, "desired": desired,
-                     "status": "ok" if current and _normalized(current) == desired else ("drift" if current else "missing")})
-    return rows
+    return profile_wrappers.target_plan(home)
 
 
 def _skill_name(path: Path) -> str | None:
@@ -500,7 +393,6 @@ def bootstrap(home: Path, *, apply=False, profiles=None, registry_path=None,
               migrate_legacy_feishu_adapter=False):
     specs = _selected_specs(profiles, registry_path)
     profile_names = tuple(spec.name for spec in specs)
-    wrapper_names = tuple(spec.name for spec in agent_runtime.profile_specs(registry_path))
     rows = []
     profile_targets = {}
     if migrate_legacy_feishu_adapter:
@@ -513,7 +405,8 @@ def bootstrap(home: Path, *, apply=False, profiles=None, registry_path=None,
         if apply:
             target.mkdir(parents=True, exist_ok=True)
         rows.append({"kind": "profile-home", "name": name, "path": str(target),
-                     "status": "ok" if existed else "missing"})
+                     "status": "ok" if target.is_dir() else "missing",
+                     "before": "ok" if existed else "missing"})
         if spec.launcher == "launch-sh":
             launch = target / "launch.sh"
             launch_existed = launch.is_file()
@@ -524,12 +417,17 @@ unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_CHIL
 export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
 """)
             rows.append({"kind": "launcher", "name": name, "path": str(launch),
-                         "status": "ok" if launch_existed else "missing"})
-    for row in target_plan(home, wrapper_names):
+                         "status": "ok" if launch.is_file() else "missing",
+                         "before": "ok" if launch_existed else "missing"})
+    for row in target_plan(home):
         before = row["status"]
         if apply and before != "ok":
             _atomic_write(row["path"], row["desired"])
-        rows.append({"kind": "shell-function", "path": str(row["path"]), "status": before})
+        after = "ok" if row["path"].is_file() and _normalized(
+            row["path"].read_text(encoding="utf-8", errors="replace")
+        ) == _normalized(row["desired"]) else before
+        rows.append({"kind": "shell-function", "path": str(row["path"]),
+                     "status": after, "before": before})
     for target in _skill_targets(home, profile_names, registry_path=registry_path):
         before = _skill_status(FEISHU_SKILL_SOURCE, target)
         if apply and before["status"] in {"missing", "adoptable", "outdated"}:
@@ -620,8 +518,21 @@ def main(argv=None) -> int:
     else:
         action = "已应用" if args.apply else ("体检" if args.doctor else "只预览")
         print(f"{action}：Link16 profiles / Shell 函数 / feishu skill")
+        status_text = {
+            "ok": "✅ 已对齐",
+            "missing": "⏳ 缺失",
+            "outdated": "⚠️ 版本旧",
+            "drift": "⚠️ 与真源不一致",
+            "manifest-drift": "⚠️ 清单不一致",
+            "conflict": "🔴 冲突",
+            "name-conflict": "🔴 同名冲突",
+            "planned": "⏳ 待应用",
+            "ready-to-migrate": "⏳ 可迁移",
+            "adoptable": "⏳ 可纳管",
+        }
         for row in rows:
-            print(f"  {row['status']:<16} {row['kind']:<24} {row['path']}")
+            label = status_text.get(row["status"], row["status"])
+            print(f"  {label:<18} {row['kind']:<24} {row['path']}")
         if not (args.migrate_registry or args.init_registry or args.register_profile):
             print("下一步：重开 Git Bash，用所选 profile 函数启动并在各自浏览器页面登录。")
     bad = {"missing", "outdated", "conflict", "drift", "manifest-drift", "name-conflict", "planned", "ready-to-migrate"}
