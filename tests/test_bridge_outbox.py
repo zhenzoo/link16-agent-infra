@@ -222,6 +222,7 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("🤖 **进行中** · 计划 2/3 · 工具 8 次", text)
         self.assertIn("📋 current plan", text)
         self.assertIn("checkpoint", text)
+        self.assertIn("📋 current plan\n\n💬 checkpoint", text)
         self.assertNotIn("🟡 checkpoint", text)
         self.assertNotIn("类型：搜索 rg ×2", text)
         self.assertNotIn("修改：无", text)

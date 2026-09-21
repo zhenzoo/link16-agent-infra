@@ -26,6 +26,7 @@ import bridge_doctor  # noqa: E402
 import bridge_env  # noqa: E402
 import bridge_inbound  # noqa: E402
 import install_codex_bridge_hooks  # noqa: E402
+import install_kimi_bridge_hooks  # noqa: E402
 import profile_bootstrap  # noqa: E402
 import service_installer  # noqa: E402
 
@@ -147,16 +148,21 @@ def _profile_snapshot(roster: dict) -> dict:
                 hooks.append({"profile": name, "runtime": "claude", "ok": ok,
                               "evidence": str(settings)})
             elif spec.runtime == "kimi":
-                # Kimi uses its native TUI and Wire observer, not Codex hooks.
                 required = [HERE / "kimi_native_worker.py", HERE / "kimi_events.py"]
                 missing = [str(path) for path in required if not path.is_file()]
+                hook_row, _desired = install_kimi_bridge_hooks.hooks_plan(
+                    spec.home_path, REPO,
+                )
                 hooks.append({
-                    "profile": name, "runtime": "kimi", "ok": not missing,
-                    "evidence": "; ".join(
-                        f"{path} ({'ok' if path.is_file() else 'missing'})" for path in required
-                    ),
-                    "status": "missing" if missing else "ok",
-                    "error": "missing Kimi transport: " + ", ".join(missing) if missing else "",
+                    "profile": name, "runtime": "kimi",
+                    "ok": not missing and hook_row["status"] == "ok",
+                    "evidence": "; ".join([
+                        *(f"{path} ({'ok' if path.is_file() else 'missing'})" for path in required),
+                        f"hook={hook_row['path']} ({hook_row['status']})",
+                    ]),
+                    "status": "missing" if missing else hook_row["status"],
+                    "error": ("missing Kimi transport: " + ", ".join(missing)) if missing
+                    else hook_row.get("error", ""),
                 })
             else:
                 worker = HERE / "codex_app_server_worker.py"

@@ -224,7 +224,7 @@ def test_profile_snapshot_checks_the_selected_codex_home_hooks(monkeypatch, tmp_
     assert broken["status"] == "conflict"
 
 
-def test_kimi_snapshot_uses_native_transport_and_rejects_missing_components(monkeypatch, tmp_path):
+def test_kimi_snapshot_requires_native_transport_and_native_hook(monkeypatch, tmp_path):
     home = tmp_path / "user"
     registry = tmp_path / "profiles.json"
     pb.initialize_registry(registry, [
@@ -254,3 +254,9 @@ def test_kimi_snapshot_uses_native_transport_and_rejects_missing_components(monk
         assert row["ok"] is expected
         assert row["status"] == ("ok" if expected else "missing")
     assert not (home / ".kimi-work" / "hooks.json").exists()
+
+    config = home / ".kimi-work" / "config.toml"
+    config.write_text('default_model = "kimi-code/k3"\n', encoding="utf-8")
+    stale = sd._profile_snapshot(roster)["hooks"][0]
+    assert stale["ok"] is False
+    assert stale["status"] == "outdated"

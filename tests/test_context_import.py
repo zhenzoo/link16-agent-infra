@@ -78,6 +78,19 @@ class ImportTests(unittest.TestCase):
             self.assertTrue(plan.actions)
             self.assertEqual(before, sorted(str(p) for p in env.home.rglob("*")))
 
+    def test_instruction_target_uses_runtime_adapter_catalog(self):
+        root = Path("C:/profiles")
+        self.assertEqual(
+            ci._instructions_target(ci.Plan(root / "ccp", "claude", "ccp")),
+            root / "ccp" / "CLAUDE.md",
+        )
+        for runtime in ("codex", "kimi"):
+            with self.subTest(runtime=runtime):
+                self.assertEqual(
+                    ci._instructions_target(ci.Plan(root / runtime, runtime, runtime)),
+                    root / runtime / "AGENTS.md",
+                )
+
     def test_apply_full_matrix_and_never_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = _Env(tmp)

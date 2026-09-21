@@ -112,14 +112,18 @@ def _profiles_document():
 def profile_home_registries():
     """默认 SSOT 候选：各 runtime 默认 profile 的 home 下 `link16/agent-registry.json`。
 
-    先 claude 后 codex —— 没装 Claude、只用 Codex 的人自然落到第二个。
+    已知 runtime 保持 Claude、Codex、Kimi 顺序；以后登记的新 runtime
+    自动追加，不再因为硬编码遗漏而读不到唯一 agent registry。
     只算路径、不判断存在与否；存在性由 `registry_path()` 决定。
     """
     doc = _profiles_document()
     profiles = doc.get("profiles") or {}
     defaults = doc.get("default_profiles") or {}
     out = []
-    for runtime in ("claude", "codex"):
+    preferred = ("claude", "codex", "kimi")
+    runtimes = [runtime for runtime in preferred if runtime in defaults]
+    runtimes.extend(sorted(set(defaults) - set(preferred)))
+    for runtime in runtimes:
         spec = profiles.get(defaults.get(runtime)) or {}
         home = str(spec.get("home") or "").strip()
         if not home:

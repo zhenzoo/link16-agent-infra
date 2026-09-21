@@ -105,6 +105,32 @@ class KimiProfileTests(unittest.TestCase):
         self.assertFalse(runtime.is_ready(
             bot, " Ask When Needed  K3 \ncontext: 3% \n ⠹ thinking…"))
 
+    def test_optional_update_menu_is_dismissed_with_one_safe_escape(self):
+        bot = {"name": "test", "profile": "kp"}
+        modal = (
+            "Kimi Code Update Available\n"
+            "Current  0.41.0\nTarget  2.0.2\n"
+            "↑↓ choose · Enter confirm · Esc continue\n\n"
+            " ❯ Install update now (2.0.2)\n"
+            "   Continue with current version"
+        )
+        ready = " ╭────────╮\n │ >        │\n ╰────────╯\n context: 0% (0/1M)"
+        self.assertTrue(runtime.needs_kimi_update_dismissal(bot, modal))
+        self.assertFalse(runtime.is_ready(bot, modal))
+        with patch.object(feishu_bridge, "read_screen", side_effect=(modal, ready)), \
+                patch.object(feishu_bridge, "wmux") as send_key, \
+                patch.object(feishu_bridge, "_kimi_ready_signal", return_value=True), \
+                patch.object(feishu_bridge.time, "sleep"):
+            self.assertTrue(feishu_bridge._wait_agent_ready(
+                bot, "test-pty", "test-ws", timeout=1))
+        send_key.assert_called_once_with(
+            "key", "test-pty", "escape", "--allow-ws", "test-ws")
+
+    def test_update_words_in_normal_output_do_not_trigger_escape(self):
+        bot = {"name": "test", "profile": "kp"}
+        chatter = "我刚看过 Kimi Code Update Available，但当前没有选择菜单。"
+        self.assertFalse(runtime.needs_kimi_update_dismissal(bot, chatter))
+
     def test_startup_handshake_accepts_fresh_and_rejects_stale_or_foreign(self):
         bot = {"name": "test", "profile": "kp"}
         previous = feishu_bridge.STATE_DIR

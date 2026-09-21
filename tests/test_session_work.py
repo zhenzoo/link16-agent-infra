@@ -224,6 +224,38 @@ class HookContextTests(unittest.TestCase):
                 bridge_userprompt.main()
             self.assertEqual(out.getvalue().strip(), "")
 
+    def test_kimi_content_parts_get_plain_context_and_preserve_route_text(self):
+        import bridge_userprompt
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            session_work.set_work("tb25-test", "Link16", "核验 Kimi 飞书进度卡",
+                                  "Wire 已确认 ✅ → DM 验收 🔄", state_dir=state)
+            payload = {
+                "prompt": [
+                    {"type": "text", "text": "执行验收"},
+                    {"type": "image_url", "url": "PRIVATE_MEDIA"},
+                    {"type": "text", "text": "[飞书 from=host route=p2a]"},
+                ],
+                "session_id": "session-kimi",
+                "client_type": "kimi_code_cli",
+            }
+            env = {"FEISHU_BRIDGE_SESSION": "tb25-test", "FEISHU_BRIDGE_OUTBOX_DIR": tmp}
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(bridge_userprompt, "_read_stdin_json", return_value=payload), \
+                    mock.patch.object(bridge_userprompt.bridge_inbox, "confirm_prompt") as confirm, \
+                    redirect_stdout(out):
+                bridge_userprompt.main()
+            emitted = out.getvalue().strip()
+            self.assertIn("[Link16 工作行]", emitted)
+            self.assertIn("📌 Link16 · 核验 Kimi 飞书进度卡", emitted)
+            self.assertNotIn("hookSpecificOutput", emitted)
+            self.assertNotIn("PRIVATE_MEDIA", emitted)
+            confirm.assert_called_once_with(
+                state, "tb25-test",
+                "执行验收\n[飞书 from=host route=p2a]", "session-kimi",
+            )
+
 
 class CliTests(unittest.TestCase):
     def test_cli_refuses_other_bot_identity(self):

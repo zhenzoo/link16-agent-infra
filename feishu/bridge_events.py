@@ -245,13 +245,27 @@ def _plan_label(plan: list[dict]) -> str:
         number += 1
         status = str(item.get("status") or "pending")
         lines = str(item.get("step") or "").strip().splitlines() or [""]
-        # The renderer owns the ordered-list prefix so every runtime produces
-        # the same card.  Strip an agent-supplied prefix to avoid ``1. 1.``.
+        # The public contract uses explicit ``Stage N`` / ``N.M`` identities,
+        # not an extra Markdown ordered-list prefix.  Accept legacy producers
+        # during rollout, but emit one canonical surface for every runtime.
         first = re.sub(r"^\d+\.\s+", "", lines[0].strip())
         first = re.sub(r"^(?:✅|🔄|⏳|○)\s*", "", first)
-        rows.append(f"{number}. {icons.get(status, '⏳')} {first}".rstrip())
-        rows.extend(f"    {line.strip()}" for line in lines[1:] if line.strip())
-    return "📋 **当前计划**" + (("\n\n" + "\n".join(rows)) if rows else "")
+        stage_match = re.match(r"^Stage\s+(\d+)\s*｜", first, flags=re.IGNORECASE)
+        stage_number = stage_match.group(1) if stage_match else str(number)
+        if not stage_match:
+            first = f"Stage {stage_number}｜{first}"
+        rows.append(f"{icons.get(status, '⏳')} {first}".rstrip())
+        child_number = 0
+        for raw_line in lines[1:]:
+            line = raw_line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^(?:[-*]|↳)\s*", "", line)
+            if not re.match(r"^\d+\.\d+(?:\s|$)", line):
+                child_number += 1
+                line = f"{stage_number}.{child_number} {line}"
+            rows.append(f"　{line}")
+    return "📋 当前计划" + (("\n" + "\n".join(rows)) if rows else "")
 
 
 def _collab_label(item: dict) -> str:

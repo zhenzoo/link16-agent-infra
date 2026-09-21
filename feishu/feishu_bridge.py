@@ -976,6 +976,7 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
     wait_started = float(since) if since is not None else time.time()
     deadline = time.time() + timeout
     trust_sent = False
+    kimi_update_dismissed = False
     while time.time() < deadline:
         if agent_runtime.uses_app_server(bot):
             # The TUI's own correlated RPC response and the independent observer
@@ -999,6 +1000,14 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
             # A startup modal can be at the top of a tall terminal, above the
             # normal 30-line tail. Use the existing uncapped screen read here.
             scr = read_screen(pty, tail=None)
+            if agent_runtime.needs_kimi_update_dismissal(bot, scr):
+                if workspace_id and not kimi_update_dismissed:
+                    # Kimi labels Escape as the non-upgrading path. One key is
+                    # atomic; unlike Down+Enter it cannot accidentally install.
+                    wmux("key", pty, "escape", "--allow-ws", workspace_id)
+                    kimi_update_dismissed = True
+                time.sleep(READY_POLL_SEC)
+                continue
             if agent_runtime.needs_trust_confirmation(bot, scr):
                 if workspace_id and not trust_sent:
                     wmux("enter", pty, "--allow-ws", workspace_id)

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import agent_runtime
 import install_codex_bridge_hooks
+import install_kimi_bridge_hooks
 import profile_wrappers
 
 BASH_BEGIN = profile_wrappers.MARKER_BEGIN
@@ -177,10 +178,13 @@ def _skill_targets(home: Path, profiles, *, registry_path=None):
     targets, seen = [], set()
     for name in profiles:
         spec = agent_runtime.profile_spec(name, registry_path)
-        if spec.runtime == "claude":
+        adapter = agent_runtime.runtime_adapter_spec(spec.runtime)
+        if adapter.skill_scope == "profile-home":
             target = _home_relative_target(home, spec.home) / "skills" / "feishu"
-        else:
+        elif adapter.skill_scope == "shared-agents":
             target = home / ".agents" / "skills" / "feishu"
+        else:
+            raise ValueError(f"runtime {spec.runtime} 没有可安装的 skill scope")
         key = (target.parent.resolve() / target.name).as_posix().casefold()
         if key in seen:
             continue
@@ -435,13 +439,22 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
         after = _skill_status(FEISHU_SKILL_SOURCE, target)
         rows.append({**after, "before": before["status"]})
     for spec in specs:
-        if spec.runtime != "codex":
+        profile_home = profile_targets[spec.name]
+        installer_name = agent_runtime.runtime_adapter_spec(
+            spec.runtime
+        ).bootstrap_hook_installer
+        if installer_name is None:
             continue
-        codex_home = profile_targets[spec.name]
-        before, _desired = install_codex_bridge_hooks.hooks_plan(codex_home, PROJECT_ROOT)
+        installer = {
+            "codex": install_codex_bridge_hooks,
+            "kimi": install_kimi_bridge_hooks,
+        }.get(installer_name)
+        if installer is None:
+            raise ValueError(f"runtime {spec.runtime} hook installer 未实现：{installer_name}")
+        before, _desired = installer.hooks_plan(profile_home, PROJECT_ROOT)
         if apply and before["status"] in {"missing", "outdated"}:
-            install_codex_bridge_hooks.apply_hooks(codex_home, PROJECT_ROOT)
-        after, _desired = install_codex_bridge_hooks.hooks_plan(codex_home, PROJECT_ROOT)
+            installer.apply_hooks(profile_home, PROJECT_ROOT)
+        after, _desired = installer.hooks_plan(profile_home, PROJECT_ROOT)
         rows.append({**after, "name": spec.name, "before": before["status"]})
     return rows
 

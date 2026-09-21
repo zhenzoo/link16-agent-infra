@@ -663,16 +663,20 @@ def _header(full, usage):
 
 
 def _card_text(header, labels):
-    return header + (("\n\n" + "\n".join(labels)) if labels else "")
+    # Labels are semantic blocks (plan, commentary, receipt), not adjacent
+    # lines inside one block. Keep one blank line between blocks while each
+    # plan remains internally compact.
+    return header + (("\n\n" + "\n\n".join(labels)) if labels else "")
 
 
 def _fit_count(labels, head_len, budget):
-    """从头取尽量多 label·使 head_len + Σ(len+1) ≤ budget；至少 1（防单条超长卡死）。"""
+    """从头取尽量多 label；head_len 已包含 header 后的首个双换行。"""
     k, tot = 0, head_len
     for lbl in labels:
-        if k and tot + len(lbl) + 1 > budget:
+        extra = len(lbl) + (2 if k else 0)
+        if k and tot + extra > budget:
             break
-        tot += len(lbl) + 1
+        tot += extra
         k += 1
     return max(1, k)
 

@@ -64,7 +64,7 @@ class ClaudeProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("claude", record["runtime"])
         self.assertEqual("test-session:1", record["root_turn"])
         self.assertEqual("test-session", record["session"])
-        self.assertIn("1. 🔄 验收", next(s["label"] for s in record["steps"] if s["kind"] == "plan"))
+        self.assertIn("🔄 Stage 1｜验收", next(s["label"] for s in record["steps"] if s["kind"] == "plan"))
         self.assertNotIn("PRIVATE", json.dumps(record))
 
     def test_todo_plan_preserves_lines_indentation_icons_and_eta(self):
@@ -74,9 +74,9 @@ class ClaudeProgressTests(unittest.IsolatedAsyncioTestCase):
             {"content": "发布（预计 13:25 完成）", "status": "pending"},
         ]}), result()])
         plan = next(s for s in record["steps"] if s["kind"] == "plan")
-        self.assertIn("当前计划**\n\n1. ✅ 调研", plan["label"])
-        self.assertIn("\n    2.1 🔄 卡片换行（预计 13:15 完成）", plan["label"])
-        self.assertIn("\n3. ⏳ 发布（预计 13:25 完成）", plan["label"])
+        self.assertIn("📋 当前计划\n✅ Stage 1｜调研", plan["label"])
+        self.assertIn("\n　2.1 🔄 卡片换行（预计 13:15 完成）", plan["label"])
+        self.assertIn("\n⏳ Stage 3｜发布（预计 13:25 完成）", plan["label"])
         self.assertNotIn("✅ ✅", plan["label"])
         self.assertEqual((1, 3), (plan["plan_completed"], plan["plan_total"]))
 
@@ -94,7 +94,7 @@ class ClaudeProgressTests(unittest.IsolatedAsyncioTestCase):
             user("continue"), call("TaskUpdate", {"taskId": "7", "status": "completed", "subject": "验收（实际完成 13:50）"}, "update"), result("update"),
         ])
         plan = next(s for s in record["steps"] if s["kind"] == "plan")
-        self.assertIn("1. ✅ 验收（实际完成 13:50）", plan["label"])
+        self.assertIn("✅ Stage 1｜验收（实际完成 13:50）", plan["label"])
         self.assertEqual(1, plan["revision"])
         self.assertNotIn("14:00", plan["label"])
 

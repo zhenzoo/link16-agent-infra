@@ -63,7 +63,12 @@ class KimiEventsTests(unittest.TestCase):
         self.assertNotIn("检查文件", final["text"])
         plan = next(s for s in outputs[-2]["steps"] if s["kind"] == "plan")
         self.assertEqual((plan["plan_completed"], plan["plan_total"]), (1, 2))
-        self.assertIn("ETA 14:30", plan["label"])
+        self.assertEqual(
+            "📋 当前计划\n"
+            "✅ Stage 1｜检查文件（实际 14:29）\n"
+            "🔄 Stage 2｜核对结果（ETA 14:30）",
+            plan["label"],
+        )
         self.assertTrue(all(r["runtime"] == "kimi" for r in outputs))
         self.assertNotIn("✅ 检查完成。", json.dumps([r for r in outputs if r["kind"] == "progress"], ensure_ascii=False))
 

@@ -217,7 +217,7 @@ class ProfileBootstrapTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "禁止"):
                         pb._new_profile("bad", "claude", forbidden)
 
-    def test_kimi_only_cli_initialization_bootstraps_isolated_home_without_codex_hooks(self):
+    def test_kimi_only_cli_initialization_bootstraps_isolated_home_with_native_hook(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home = root / "new-user"
@@ -236,6 +236,10 @@ class ProfileBootstrapTests(unittest.TestCase):
             self.assertTrue((home / ".kimi-work").is_dir())
             self.assertTrue((home / ".agents" / "skills" / "feishu" / "SKILL.md").is_file())
             self.assertFalse((home / ".kimi-work" / "hooks.json").exists())
+            config = (home / ".kimi-work" / "config.toml").read_text(encoding="utf-8")
+            self.assertIn("[[hooks]]", config)
+            self.assertIn('event = "UserPromptSubmit"', config)
+            self.assertIn("bridge_userprompt.py", config)
             self.assertFalse((home / ".kimi-code").exists())
             self.assertEqual(list(home.rglob("auth.json")), [])
             bashrc = (home / ".bashrc").read_text(encoding="utf-8")

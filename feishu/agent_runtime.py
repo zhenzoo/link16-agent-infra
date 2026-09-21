@@ -17,7 +17,7 @@ import subprocess
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -92,8 +92,54 @@ def _unset_shell_env(keys) -> str:
 class RuntimeSpec:
     name: str
     display_name: str
+    entry_document: str
+    skill_scope: str
+    bridge_event_source: str
+    bootstrap_hook_installer: str | None
     transcript_root: Path | None = None
     pins_jsonl: bool = False
+
+
+_RUNTIME_ADAPTER_SPECS = {
+    "claude": RuntimeSpec(
+        name="claude",
+        display_name="Claude Code",
+        entry_document="CLAUDE.md",
+        skill_scope="profile-home",
+        bridge_event_source="claude-hooks",
+        bootstrap_hook_installer=None,
+    ),
+    "codex": RuntimeSpec(
+        name="codex",
+        display_name="Codex",
+        entry_document="AGENTS.md",
+        skill_scope="shared-agents",
+        bridge_event_source="codex-app-server",
+        bootstrap_hook_installer="codex",
+    ),
+    "kimi": RuntimeSpec(
+        name="kimi",
+        display_name="Kimi Code",
+        entry_document="AGENTS.md",
+        skill_scope="shared-agents",
+        bridge_event_source="kimi-wire",
+        bootstrap_hook_installer="kimi",
+    ),
+}
+
+
+def runtime_adapter_specs() -> tuple[RuntimeSpec, ...]:
+    """Return the complete declarative onboarding surface for profile runtimes."""
+    return tuple(_RUNTIME_ADAPTER_SPECS.values())
+
+
+def runtime_adapter_spec(name: str) -> RuntimeSpec:
+    """Resolve one canonical profile runtime; unknown values never fall through."""
+    key = str(name or "").strip().lower()
+    try:
+        return _RUNTIME_ADAPTER_SPECS[key]
+    except KeyError:
+        raise ValueError(f"unsupported agent runtime: {key or '<empty>'}") from None
 
 
 def _raw_runtime_name(bot) -> str:
@@ -115,19 +161,25 @@ def display_name(bot) -> str:
 def runtime_spec(bot) -> RuntimeSpec:
     name = runtime_name(bot)
     if name in ("claude", "claude-code", "ccp"):
-        return RuntimeSpec(
-            name="claude",
-            display_name="Claude Code",
+        return replace(
+            runtime_adapter_spec("claude"),
             transcript_root=_claude_config_dir(bot) / "projects",
             pins_jsonl=True,
         )
     if name in ("codex", "code-x", "code x"):
-        return RuntimeSpec(name="codex", display_name="Codex")
+        return runtime_adapter_spec("codex")
     if name == "kimi":
-        return RuntimeSpec(name="kimi", display_name="Kimi Code")
+        return runtime_adapter_spec("kimi")
     if name == "custom":
         label = bot.get("display_name") if isinstance(bot, dict) else None
-        return RuntimeSpec(name="custom", display_name=label or "Custom Agent")
+        return RuntimeSpec(
+            name="custom",
+            display_name=label or "Custom Agent",
+            entry_document="",
+            skill_scope="external",
+            bridge_event_source="external",
+            bootstrap_hook_installer=None,
+        )
     raise ValueError(f"unsupported agent runtime: {name}")
 
 
@@ -253,7 +305,7 @@ PROFILE_REGISTRY_ENV = "LINK16_AGENT_PROFILE_REGISTRY"
 ROSTER_LOCAL_PATH = Path(__file__).resolve().with_name("bridge-bots.local.json")
 ROSTER_COMMITTED_PATH = Path(__file__).resolve().with_name("bridge-bots.json")
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_PROFILE_RUNTIMES = {"claude", "codex", "kimi"}
+_PROFILE_RUNTIMES = frozenset(_RUNTIME_ADAPTER_SPECS)
 _PROFILE_LAUNCHERS = {"direct", "launch-sh"}
 
 
@@ -937,7 +989,7 @@ def standalone_worker_cmd(
                         for arg in args)
         if not is_subcommand and not has_mode and not is_prompt:
             command += " --yolo"
-    else:
+    elif profile.runtime == "codex":
         # Interactive workers historically own their sandbox policy, but a
         # non-interactive ``codex exec`` caller may be deliberately supplying
         # a stricter permission profile.  Do not silently punch through that
@@ -957,6 +1009,8 @@ def standalone_worker_cmd(
             )
         if cwd:
             command += f" -C {_q(str(cwd))}"
+    else:
+        raise ValueError(f"runtime {profile.runtime} has no standalone launch driver")
     if provider_args:
         # Provider arguments are opaque argv, not paths. Preserve backslashes,
         # TOML quotes, dollar signs and backticks without shell expansion.
@@ -1163,6 +1217,24 @@ def needs_trust_confirmation(bot, screen: str) -> bool:
             and not codex_composer_visible(screen))
 
 
+def needs_kimi_update_dismissal(bot, screen: str) -> bool:
+    """Is Kimi parked on its optional-update menu instead of the composer?
+
+    The menu explicitly documents ``Esc continue``.  Matching the complete
+    title/choice/footer tuple keeps the bridge from sending Escape to ordinary
+    Kimi output that merely mentions an update.
+    """
+    if runtime_spec(bot).name != "kimi":
+        return False
+    screen = screen or ""
+    return all(mark in screen for mark in (
+        "Kimi Code Update Available",
+        "Install update now",
+        "Continue with current version",
+        "Esc continue",
+    )) and re.search(r"(?m)^\s*│\s*>\s*│\s*$", screen) is None
+
+
 def is_ready(bot, screen: str) -> bool:
     spec = runtime_spec(bot)
     screen = screen or ""
@@ -1208,6 +1280,7 @@ def is_ready(bot, screen: str) -> bool:
         # type into a turn that is already running.
         return (
             "Trust this folder?" not in screen
+            and not needs_kimi_update_dismissal(bot, screen)
             and "context:" in screen
             and re.search(r"(?m)^\s*│\s*>\s*│\s*$", screen) is not None
         )

@@ -90,17 +90,19 @@ class RegistryPathResolution(unittest.TestCase):
 
 
 class ProfileHomeCandidates(unittest.TestCase):
-    def test_derives_both_runtimes_in_claude_first_order(self):
+    def test_derives_registered_runtimes_in_stable_order(self):
         doc = {
-            "default_profiles": {"claude": "ccp", "codex": "cxp"},
+            "default_profiles": {"claude": "ccp", "codex": "cxp", "kimi": "kp"},
             "profiles": {"ccp": {"home": "~/.claude-personal"},
-                         "cxp": {"home": "~/.codex-personal"}},
+                         "cxp": {"home": "~/.codex-personal"},
+                         "kp": {"home": "~/.kimi-personal"}},
         }
         with mock.patch.object(bridge_env, "_profiles_document", return_value=doc):
             got = bridge_env.profile_home_registries()
-        self.assertEqual(len(got), 2)
+        self.assertEqual(len(got), 3)
         self.assertEqual(got[0], Path("~/.claude-personal").expanduser() / "link16" / "agent-registry.json")
         self.assertEqual(got[1], Path("~/.codex-personal").expanduser() / "link16" / "agent-registry.json")
+        self.assertEqual(got[2], Path("~/.kimi-personal").expanduser() / "link16" / "agent-registry.json")
 
     def test_skips_runtime_without_default_profile(self):
         """只登记了 codex 的机器不该凭空造出一个 claude 候选。"""

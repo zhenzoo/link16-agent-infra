@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""bridge_userprompt.py — Claude Code **UserPromptSubmit hook**：每轮开头确定【本轮回信路由】，
+"""Claude / Codex / Kimi 的 UserPromptSubmit hook：每轮开头确定回信路由，
 写 `bridge-turn-route-<bot>.json`（桥 drainer/_reply_dest 读它路由 progress·bridge_stop 读它钉进 answer 记录）。
 
 per-turn 路由：桥把回址焊进【本条消息】末尾的结构化信封 [飞书 … route=<p2a|a2a> dest=.. at=..]，
@@ -34,6 +34,19 @@ def _state_dir():
     return Path(__file__).resolve().parents[2] / "_autopilot"   # 兜底(与 bridge_stop 一致)
 
 
+def _prompt_text(value):
+    """Normalize Claude/Codex strings and Kimi ContentPart[] without retaining media."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    return "\n".join(
+        item.get("text", "") for item in value
+        if isinstance(item, dict) and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
+    )
+
+
 def main():
     bot = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not bot:
@@ -42,7 +55,7 @@ def main():
         inp = _read_stdin_json()
     except Exception:                                     # noqa: BLE001
         inp = {}
-    prompt = inp.get("prompt") or ""
+    prompt = _prompt_text(inp.get("prompt"))
     sd = _state_dir()
     # This event confirms that the actual session consumed the exact prompt.
     # No terminal rendering, timing threshold, or model response is involved.
@@ -61,11 +74,16 @@ def main():
         )
     except OSError:
         pass
-    # 工作行提醒（2026-09-19 主人定）：每轮把「当前卡片顶栏是什么 + 什么时候该改」喂给会话。
-    # 只对 Claude（payload 带 transcript_path）用 additionalContext；Codex 的 hook 不认这个输出、不发。
-    if inp.get("transcript_path"):
+    # 每轮把「当前卡片顶栏是什么 + 什么时候该改」喂给支持上下文注入的 runtime。
+    # Codex 只从共享 AGENTS.md 取规则，没有 provider-specific context 输出，避免无效读状态。
+    is_kimi = inp.get("client_type") == "kimi_code_cli"
+    is_claude = bool(inp.get("transcript_path"))
+    if is_kimi or is_claude:
         context = _work_context(bot, sd)
-        if context:
+        if is_kimi and context:
+            # Kimi exit-0 stdout is appended to context; JSON is not its output contract.
+            print(context)
+        elif is_claude and context:
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit", "additionalContext": context}}, ensure_ascii=False))
 

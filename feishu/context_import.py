@@ -163,7 +163,8 @@ class Plan:
 
 # ---------------------------------------------------------------- 各类导入动作
 def _instructions_target(plan: Plan) -> Path:
-    return plan.home / ("AGENTS.md" if plan.runtime == "codex" else "CLAUDE.md")
+    import agent_runtime
+    return plan.home / agent_runtime.runtime_adapter_spec(plan.runtime).entry_document
 
 
 def import_instruction_block(plan: Plan, src: Path, source_id: str, apply: bool, label: str):
