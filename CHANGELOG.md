@@ -11,13 +11,21 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-22
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.30.0 — 2026-09-22 · Kimi 原生进度与三运行时计划卡统一
+
+- **飞书计划卡只有一套语义**：共享 renderer 现在按 `Stage N｜具体对象与结果` 为 Claude Code、Codex 和 Kimi 渲染同一份计划，不再为 Kimi 外套自动编号的 Markdown 列表；块间距和工作行标题同样由共享出站链统一处理。Codex/Claude 原有 `AGENTS.md`/`CLAUDE.md` 规则不会被 renderer 改写。
+- **Kimi 使用原生 hook 补齐入口**：新增可幂等安装的 Kimi `UserPromptSubmit` hook，把飞书 route、工作行要求与计划格式注入当前回合；bootstrap 和 doctor 检查安装结果，原生 wire 事件仍只公开安全的当前动作、工具和计划更新，不泄漏私有 thinking。启动时遇到 Kimi 升级弹窗会安全发送 `Esc`，避免卡在菜单。
+- **新平台接入改为显式目录**：`agent_runtime` 统一声明入口文档、技能范围、事件源与 hook 安装器；未登记的 Qwen、GLM 等 runtime 直接拒绝，不再默认当成 Codex 或 Kimi。新增平台只需补目录、它的原生入口/hook 适配和同一组合同测试。
+- **合入同期 profile 与进度修复**：登记 `kp` 官方 Kimi 个人账号与 `cxp2` Codex 账号，聚合 Codex 子任务生命周期事件，并固化官方 CLI 优先级和新版 Python 验证。
+- **验证**：拉入最新 `origin/main` 后，三运行时定向回归 **107 passed、18 subtests passed**，主测试集 `tests/` 全量 **998 passed、116 subtests passed**。仓库历史 `_state` 快照包含同名测试，因此全量命令必须显式以 `tests/` 为收集根。
 
 ## v0.29.1 — 2026-09-21 · 三运行时目录信任与 Kimi 启动失败闭环
 
