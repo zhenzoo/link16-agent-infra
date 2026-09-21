@@ -84,10 +84,11 @@ class AgentProfileTests(unittest.TestCase):
         fixture.start()
         self.addCleanup(fixture.stop)
 
-    def test_registry_has_ten_profiles_and_cxp_is_codex_default(self):
+    def test_registry_has_eleven_profiles_and_runtime_defaults(self):
         profiles = agent_runtime.profile_specs()
-        self.assertEqual(len(profiles), 10)
+        self.assertEqual(len(profiles), 11)
         self.assertEqual(agent_runtime.default_profile("codex"), "cxp")
+        self.assertEqual(agent_runtime.default_profile("kimi"), "kp")
         self.assertEqual(agent_runtime.profile_spec("cxp").home, "~/.codex-personal")
         self.assertEqual(agent_runtime.profile_spec("cxp2").home, "~/.codex-personal2")
         self.assertEqual(agent_runtime.profile_spec("cck").launcher, "launch-sh")

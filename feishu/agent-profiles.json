@@ -2,7 +2,8 @@
   "version": 1,
   "default_profiles": {
     "claude": "ccp",
-    "codex": "cxp"
+    "codex": "cxp",
+    "kimi": "kp"
   },
   "session_search": {
     "preferred_profiles": [
@@ -23,7 +24,8 @@
       "cck",
       "cx",
       "cxp",
-      "cxp2"
+      "cxp2",
+      "kp"
     ]
   },
   "profiles": {
@@ -87,6 +89,13 @@
       "home": "~/.codex-personal2",
       "launcher": "direct",
       "label": "Codex Personal 2"
+    },
+    "kp": {
+      "runtime": "kimi",
+      "home": "~/.kimi-personal",
+      "launcher": "direct",
+      "label": "Kimi Code Personal",
+      "recommended": true
     }
   }
 }
