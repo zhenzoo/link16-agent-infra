@@ -230,11 +230,11 @@ def main(argv=None) -> int:
         if provider_args[:1] == ["--"]:
             provider_args = provider_args[1:]
         run_cwd = str(Path(args.cwd).resolve()) if args.cwd else str(Path.cwd().resolve())
-        if args.command == "run" and agent_runtime.profile_spec(profile).runtime == "codex":
-            # `--yolo` bypasses approvals/sandboxing, but Codex project trust is a
-            # separate startup gate. Seed the exact cwd before a normal cx/cxp
-            # terminal launch, matching the bridge app-server path.
-            agent_runtime.ensure_codex_trust({"profile": profile}, run_cwd)
+        if args.command in {"run", "command"}:
+            # Permission bypass flags don't bypass project trust. Persist the
+            # selected terminal cwd before either TUI starts. ``command`` is
+            # the wmux-worker launch path, so it must prepare the same state.
+            agent_runtime.ensure_launch_cwd_trust({"profile": profile}, run_cwd)
         command = agent_runtime.standalone_worker_cmd(
             profile,
             cwd=args.cwd,

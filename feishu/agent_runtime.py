@@ -270,7 +270,6 @@ class ProfileSpec:
     def home_path(self) -> Path:
         return _expand_home(self.home)
 
-
 def _expand_home(raw) -> Path:
     value = str(raw or "").replace("\\", "/")
     if value == "~":
@@ -1014,12 +1013,23 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
     raise ValueError(f"runtime {spec.name} has no launch command")
 
 
-def ensure_codex_trust(bot, cwd) -> None:
-    """Seed the exact resolved cwd read by Codex's remote TUI.
+def _path_contains(parent, child) -> bool:
+    """Return whether two absolute path spellings describe an ancestor pair."""
+    try:
+        parent_key = os.path.normcase(os.path.abspath(str(parent)))
+        child_key = os.path.normcase(os.path.abspath(str(child)))
+        return os.path.commonpath([parent_key, child_key]) == parent_key
+    except (OSError, TypeError, ValueError):
+        return False
 
-    The backend can start with a lowercase Windows key while the remote TUI
-    still asks for trust. Preserve existing decisions (including legacy keys)
-    and unrelated TOML instead of treating a case-insensitive match as ready.
+
+def ensure_codex_trust(bot, cwd) -> None:
+    """Trust the launch cwd and any configured ancestor that would block it.
+
+    Codex 0.155.1 remote TUI rejects a trusted cwd when an ancestor remains
+    explicitly untrusted. Link16 owns these unattended launches, so the cwd
+    selected for this launch is authoritative: overwrite stale denials for the
+    exact path and already-configured ancestors while preserving unrelated TOML.
     """
     if runtime_spec(bot).name != "codex":
         return
@@ -1029,32 +1039,16 @@ def ensure_codex_trust(bot, cwd) -> None:
     profile = resolve_profile(bot, required=True)
     config = profile.home_path / "config.toml"
     project = Path(cwd).expanduser().resolve()
-    # With an isolated CODEX_HOME, Codex otherwise treats ~/.codex (another
-    # account's home) as project configuration when launched from ~. Project
-    # layers beat the selected profile's saved model/effort and MCP settings.
-    # Record an explicit untrusted decision for this one directory so native
-    # defaults and /model persistence work without injecting a fixed model.
-    user_home = Path.home().resolve()
-    account_collision = (
-        project == user_home
-        and profile.home_path.resolve() != user_home / ".codex"
-        and (user_home / ".codex" / "config.toml").is_file()
-    )
     key = str(project)
     with ProcessFileLock(config.with_name(".config.toml.link16.lck")):
         text = config.read_text(encoding="utf-8") if config.is_file() else ""
         document = tomlkit.parse(text)
         projects = document.setdefault("projects", tomlkit.table())
         aliases = [k for k in projects if os.path.normcase(k) == os.path.normcase(key)]
-        # An explicit rejection must also survive migration from a lowercase
-        # key. The isolated-home exclusion applies to every spelling.
-        denied = account_collision or any(
-            projects[k].get("trust_level") == "untrusted" for k in aliases
-        )
-        trust_level = "untrusted" if denied else "trusted"
-        targets = set(aliases + [key]) if denied else {key}
+        ancestors = [k for k in projects if _path_contains(k, key)]
+        targets = set(aliases + ancestors + [key])
         for target in targets:
-            projects.setdefault(target, tomlkit.table())["trust_level"] = trust_level
+            projects.setdefault(target, tomlkit.table())["trust_level"] = "trusted"
         updated = tomlkit.dumps(document)
         if updated != text:
             # Keep concurrent bridge launches from losing each other's keys;
@@ -1062,8 +1056,66 @@ def ensure_codex_trust(bot, cwd) -> None:
             tmp = config.with_name(f".config.toml.{os.getpid()}.{uuid.uuid4().hex}.tmp")
             tmp.write_text(updated, encoding="utf-8")
             os.replace(tmp, config)
-        if tomlkit.parse(config.read_text(encoding="utf-8"))["projects"][key]["trust_level"] != trust_level:
+        persisted = tomlkit.parse(config.read_text(encoding="utf-8"))["projects"]
+        if any(persisted[target]["trust_level"] != "trusted" for target in targets):
             raise RuntimeError("Codex project trust did not persist")
+
+
+def ensure_claude_trust(bot, cwd) -> None:
+    """Persist Claude Code's trust decision in the selected profile home."""
+    if runtime_spec(bot).name != "claude":
+        return
+    from bridge_injection import ProcessFileLock
+
+    profile = resolve_profile(bot, required=True)
+    state = profile.home_path / ".claude.json"
+    project = Path(cwd).expanduser().resolve()
+    key = project.as_posix()
+    with ProcessFileLock(state.with_name(".claude.json.link16.lck")):
+        if state.is_file():
+            document = json.loads(state.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise ValueError(f"Claude state is not an object: {state}")
+        else:
+            document = {}
+        projects = document.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            raise ValueError(f"Claude projects state is not an object: {state}")
+        aliases = [name for name in projects if os.path.normcase(name) == os.path.normcase(key)]
+        targets = set(aliases + [key])
+        for target in targets:
+            entry = projects.setdefault(target, {})
+            if not isinstance(entry, dict):
+                raise ValueError(f"Claude project state is not an object: {target}")
+            entry["hasTrustDialogAccepted"] = True
+        updated = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+        current = state.read_text(encoding="utf-8") if state.is_file() else ""
+        if updated != current:
+            state.parent.mkdir(parents=True, exist_ok=True)
+            tmp = state.with_name(f".claude.json.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(updated, encoding="utf-8")
+            os.replace(tmp, state)
+        persisted = json.loads(state.read_text(encoding="utf-8"))["projects"]
+        if any(persisted[target].get("hasTrustDialogAccepted") is not True for target in targets):
+            raise RuntimeError("Claude project trust did not persist")
+
+
+def ensure_launch_cwd_trust(bot, cwd) -> None:
+    """Trust the exact cwd in the selected runtime profile before launch."""
+    spec = runtime_spec(bot)
+    if spec.name == "codex":
+        ensure_codex_trust(bot, cwd)
+    elif spec.name == "claude":
+        ensure_claude_trust(bot, cwd)
+    elif spec.name == "kimi":
+        # Keep Kimi's native workspace-key algorithm in its worker module; the
+        # profile launcher calls this dispatcher before a standalone TUI starts.
+        # The import is deliberately lazy because kimi_native_worker imports
+        # agent_runtime for command construction.
+        from kimi_native_worker import ensure_workspace_trust
+
+        profile = resolve_profile(bot, required=True)
+        ensure_workspace_trust(profile.home_path, cwd)
 
 
 def codex_composer_visible(screen: str) -> bool:

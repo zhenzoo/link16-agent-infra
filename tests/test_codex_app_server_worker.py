@@ -128,11 +128,14 @@ class RemoteResumePermissionTests(unittest.TestCase):
                     mock.patch.object(worker.subprocess, "Popen", side_effect=popen), \
                     mock.patch.object(worker.threading, "Thread"), \
                     mock.patch.object(worker, "_wait_observer", return_value={"observer_pid": 123}), \
+                    mock.patch.object(worker.agent_runtime, "ensure_launch_cwd_trust") as ensure_trust, \
+                    mock.patch.dict(worker.os.environ, {worker.agent_runtime.PROFILE_ENV: "cxp"}), \
                     mock.patch.object(worker.codex_startup, "TuiGateway") as gateway:
                 gateway.return_value.session = {"source": "thread/resume", "thread_id": "existing-thread"}
                 result = worker.run(args)
 
             self.assertEqual(result, 0, "remote resume rejected a TUI permission override")
+            ensure_trust.assert_called_once_with({"profile": "cxp"}, state.resolve())
             rpc.request.assert_any_call("thread/resume", {
                 "threadId": "existing-thread", "cwd": str(state.resolve()),
                 "approvalPolicy": "never", "sandbox": "danger-full-access",

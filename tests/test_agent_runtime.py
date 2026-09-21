@@ -858,7 +858,7 @@ class ClaudeHomeSettingsTests(unittest.TestCase):
 
 
 class CodexTrustPreseedTests(unittest.TestCase):
-    """The remote TUI must find its exact cwd, without changing saved decisions."""
+    """Every Link16 TUI must find its launch cwd trusted before startup."""
 
     CODEX = {"name": "trustlab-codex", "agent": "codex"}
     CLAUDE = {"name": "trustlab-claude", "agent": "claude"}
@@ -892,7 +892,7 @@ class CodexTrustPreseedTests(unittest.TestCase):
             self.assertEqual(config.read_text(encoding="utf-8"), original)
 
     @unittest.skipUnless(os.name == "nt", "Windows path aliases")
-    def test_lowercase_legacy_decisions_are_visible_to_exact_tui_lookup(self):
+    def test_lowercase_legacy_decisions_are_overridden_for_exact_tui_lookup(self):
         import tomlkit
         for decision in ("trusted", "untrusted"):
             with self.subTest(decision=decision), tempfile.TemporaryDirectory() as td:
@@ -909,8 +909,30 @@ class CodexTrustPreseedTests(unittest.TestCase):
                     agent_runtime.ensure_codex_trust(self.CODEX, project)
                 self.assertEqual(first, config.read_text(encoding="utf-8"))
                 projects = tomlkit.parse(first)["projects"]
-                self.assertEqual(projects[key]["trust_level"], decision)
-                self.assertEqual(projects[legacy]["trust_level"], decision)
+                self.assertEqual(projects[key]["trust_level"], "trusted")
+                self.assertEqual(projects[legacy]["trust_level"], "trusted")
+
+    @unittest.skipUnless(os.name == "nt", "Windows path aliases")
+    def test_untrusted_ancestor_is_promoted_with_launch_cwd(self):
+        import tomlkit
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            project = home / "nested" / "repo"
+            project.mkdir(parents=True)
+            parent = str(home.resolve())
+            legacy = parent.lower()
+            config = home / "config.toml"
+            config.write_text(
+                f"[projects.{json.dumps(parent)}]\ntrust_level = 'untrusted'\n"
+                f"[projects.'{legacy}']\ntrust_level = 'untrusted'\n",
+                encoding="utf-8",
+            )
+            with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "codex")):
+                agent_runtime.ensure_codex_trust(self.CODEX, project)
+            projects = tomlkit.parse(config.read_text(encoding="utf-8"))["projects"]
+            self.assertEqual(projects[parent]["trust_level"], "trusted")
+            self.assertEqual(projects[legacy]["trust_level"], "trusted")
+            self.assertEqual(projects[str(project.resolve())]["trust_level"], "trusted")
 
     def test_inline_project_and_apostrophe_path_keep_unrelated_settings(self):
         import tomlkit
@@ -957,14 +979,18 @@ class CodexTrustPreseedTests(unittest.TestCase):
             projects = tomlkit.parse((home / 'config.toml').read_text(encoding='utf-8'))['projects']
             self.assertEqual(set(projects), {str(path.resolve()) for path in paths})
 
-    def test_claude_runtime_is_a_noop(self):
+    def test_claude_runtime_seeds_selected_profile_state(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
+            project = home / "Claude Repo"
+            project.mkdir()
             with patch.object(agent_runtime, "resolve_profile", return_value=self._profile(home, "claude")):
-                agent_runtime.ensure_codex_trust(self.CLAUDE, "C:/whatever")
-            self.assertFalse((home / "config.toml").exists())
+                agent_runtime.ensure_launch_cwd_trust(self.CLAUDE, project)
+                agent_runtime.ensure_launch_cwd_trust(self.CLAUDE, project)
+            state = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+            self.assertIs(state["projects"][project.resolve().as_posix()]["hasTrustDialogAccepted"], True)
 
-    def test_home_account_collision_is_excluded_without_changing_model_or_other_home(self):
+    def test_home_launch_overrides_stale_denial_without_changing_other_home(self):
         for existing_trust in (None, "trusted", "untrusted"):
             with self.subTest(existing_trust=existing_trust), tempfile.TemporaryDirectory() as td:
                 user_home = Path(td).resolve()
@@ -991,9 +1017,9 @@ class CodexTrustPreseedTests(unittest.TestCase):
                 self.assertEqual(first, config.read_text(encoding="utf-8"))
                 import tomlkit
                 projects = tomlkit.parse(first)["projects"]
-                self.assertEqual(projects[str(user_home)]["trust_level"], "untrusted")
+                self.assertEqual(projects[str(user_home)]["trust_level"], "trusted")
                 if existing_trust and os.name == "nt":
-                    self.assertEqual(projects[key]["trust_level"], "untrusted")
+                    self.assertEqual(projects[key]["trust_level"], "trusted")
                 self.assertIn('model = "recent-choice"\nmodel_reasoning_effort = "low"', first)
                 self.assertIn('[projects.other]\ntrust_level = "trusted"', first)
                 self.assertEqual(other_config.read_text(encoding="utf-8"), 'model = "other-account"\n')

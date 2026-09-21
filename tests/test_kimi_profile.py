@@ -66,6 +66,18 @@ class KimiProfileTests(unittest.TestCase):
         self.assertNotIn("codex_app_server", command)
         self.assertEqual(runtime.account_aliases(), ["kp"])
 
+    def test_launch_cwd_is_trusted_before_standalone_kimi_starts(self):
+        home = self.root / "kimi-home"
+        project = self.root / "repo"
+        project.mkdir()
+        profile = runtime.ProfileSpec("kp", "kimi", str(home), "direct")
+        with patch.object(runtime, "resolve_profile", return_value=profile):
+            runtime.ensure_launch_cwd_trust({"profile": "kp"}, project)
+        records = list((home / "workspace-trust").glob("wd_*"))
+        self.assertEqual(len(records), 1)
+        trust = json.loads(records[0].read_text(encoding="utf-8"))
+        self.assertEqual(trust["root"], project.resolve().as_posix().lower())
+
     def test_native_ready_requires_composer_and_status_without_trust_dialog(self):
         bot = {"name": "test", "profile": "kp"}
         screen = "│ >                        │\nyolo K2.7 Coding\ncontext: 14% (35k/256k)"

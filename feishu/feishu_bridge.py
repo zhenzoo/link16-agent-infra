@@ -1237,7 +1237,8 @@ def _ensure_session_unlocked(bot):
         )
     before = {str(p) for p, _ in _project_jsonls(bot)}
     cwd = current_cwd(bot)  # 沿用【当前所在目录】：/cd 过则自愈重生仍回那个目录（与账号自愈对称）·/close 清过或没 /cd 过则回名册默认
-    agent_runtime.ensure_codex_trust(bot, cwd)  # Backend readiness does not bypass the remote TUI's directory trust.
+    # Permission bypass flags do not bypass either runtime's directory-trust gate.
+    agent_runtime.ensure_launch_cwd_trust(bot, cwd)
     startup_bot = bot
     if agent_runtime.uses_app_server(bot):
         startup_bot = {**bot, "_startup_id": uuid.uuid4().hex}

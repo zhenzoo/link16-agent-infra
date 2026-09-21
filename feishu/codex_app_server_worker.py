@@ -617,6 +617,18 @@ def run(args) -> int:
     progress = codex_startup.StartupProgress(state_dir, args.bot, startup_id, cwd,
                                             os.environ.get(agent_runtime.PROFILE_ENV, ""))
     progress.update("worker_started", "启动命令已执行，正在启动本地 Codex 服务")
+    profile_name = os.environ.get(agent_runtime.PROFILE_ENV, "").strip()
+    if not profile_name:
+        progress.update("failed", f"启动失败：{agent_runtime.PROFILE_ENV} 未设置，拒绝猜账号")
+        return 1
+    try:
+        # The worker is a fresh process even when the long-lived bridge still
+        # has older modules loaded. Prepare trust here so a new cwd never needs
+        # a bridge restart before Codex's remote TUI can attach.
+        agent_runtime.ensure_launch_cwd_trust({"profile": profile_name}, cwd)
+    except Exception as exc:
+        progress.update("failed", f"启动失败：无法信任当前目录：{exc}")
+        return 1
     if not codex.is_file():
         progress.update("failed", f"找不到 Codex 可执行文件：{codex}")
         return 1
