@@ -204,7 +204,7 @@ profile 后续新会话，不要求为此销毁正在工作的生产会话。
 
 Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用：
 
-- `list`：列 profile，默认不检查本机安装；
+- `list`：列全部 profile；`list --names` 输出已登记名称，供 wrapper 动态发现；
 - `show` / `doctor`：解析 profile 并检查本机 home、launcher、CLI、**可用 shell**；
 - `run`：设置 provider 环境并执行 Claude/Codex/原生 Kimi Code；
 - `command`：给 wmux spawner 返回不含密钥的安全启动命令/JSON spec；
@@ -331,11 +331,16 @@ Codex runtime 适配、最小目标特例和不可复制的派生/私密状态�
 
 ## 9. 新账号、新智能体、新仓
 
-1. 新 Claude 账号走 `govctl mirror`，随后注册 Link16 profile、生成 wrapper、同步实体入口文档。
-2. 新 Codex 账号先建立独立 `CODEX_HOME` 并完成登录，再注册 profile、安装必要 hooks、同步 `AGENTS.md`。
+1. 标准新账号的创建、查询和移除统一调用用户级 `$agent-profile-governance/scripts/profile_lifecycle.py`；
+   `ccpN`、`cxpN`、`kpN` 分别推断 Claude、Codex、Kimi 的隔离 home 和参考 profile。
+2. 新 Claude 账号底层走 `govctl mirror`；Codex 建独立 `CODEX_HOME`；Kimi 建独立
+   `KIMI_CODE_HOME`。原生登录成功后才注册 profile、安装必要 hooks/overlay 并同步实体入口文档。
 3. 新飞书 bot 注册必须写入/继承一个合法 `profile`；调用者是 Claude、Codex 或 Kimi 不影响目标 profile。
 4. 新内容仓需要独立 wmux worker 时，只调用公共 launcher，不复制账号选择代码。
-5. 上述流程固化为用户级 infrastructure skill；skill 调 deterministic script，不在正文重复实现 registry/渲染逻辑。
+5. remove 在写 registry 前检查 runtime default、session search、recommended 和 bot/roster 引用；
+   有运行引用时要求同 runtime replacement。remove 默认保留 home，可选可恢复归档，不默认永久擦除凭据或历史。
+   停续费不引入通用 profile 状态；额度为“满”或“问不到”的账号由现有 fail-closed 选号规则排除。
+6. 上述流程固化为用户级 infrastructure skill；skill 调 deterministic script，不在正文重复实现 registry/渲染逻辑。
 
 ## 10. 验收
 

@@ -11,7 +11,7 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-14
+last_reviewed: 2026-09-21
 ---
 
 # CHANGELOG · link16-agent-infra
@@ -19,9 +19,9 @@ last_reviewed: 2026-09-14
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
-## 未发布 — 智能体改名流程与新旧名称兼容（2026-09-14）
+## v0.29.0 — 2026-09-21 · 智能体改名合流与账号 profile 生命周期基线
 
-本条记录 `feat/kimi-default-install` 分支基于 v0.26.0 完成的改名功能。远端 v0.27.0 已用于另一条启动与桥重启修复线；本分支尚未集成该版本，不复用其标签，也不提前声明包含那些修复的新正式版本。
+本版把 `feat/kimi-default-install` 上的智能体改名能力与远端 v0.27.0～v0.28.0 的启动、桥重启、表格和卡片工作行能力收敛进唯一 `main`，并补齐账号 profile 的动态 wrapper、fail-closed 选号与三运行时生命周期治理接口。
 
 飞书侧改名后，Link16 现在可以同步名称，让新名字继续找到原应用、凭据与历史。内部代号保持固定，避免改名导致原会话和状态失联。
 
@@ -37,8 +37,8 @@ last_reviewed: 2026-09-14
 - 对照已发布基线和仅包含本次提交的隔离目录；候选版本全套测试 **803 passed、2 skipped、82 subtests passed**，其中新增改名专项 33 例。修复了基线既有的脱敏检查失败。
 - 本机五只智能体各 8 项线上身份及名称解析检查通过，原环境文件、owner 记录和运行配置保持不变；没有把名称解析检查当作真实消息往返测试。
 - 普通改名无需轮换凭据、迁移会话或重启桥。其他电脑需取得名称解析代码与私有舰队名册的新名称字段；本次 Git 推送不替其他电脑执行安装或重启。
-- 未纳入其他 session 尚未提交的文档发布、妙搭、进度卡及用户配置改动；公开仓不包含真实名册、环境文件或认证数据。
-- 远端 v0.27.0 的 TB24 启动、重启续传和看门狗修复已单独审查；它新增 `tomlkit` 依赖，且桥文件与本机其他工作线重叠。本次保留在隔离目录核验，未将其应用到当前运行目录。
+- 未纳入当前工作树中另一 session 尚未提交的 cwd trust 改造；公开仓不包含真实名册、环境文件、认证数据、浏览器 profile 或 scratch。
+- 远端 v0.27.0～v0.28.0 已经单独审查并合入 `main`；其中新增 `tomlkit` 依赖，表格、卡片、桥重启与活动时钟的具体取舍见下节。
 
 ### 合并远端 main（v0.27.0 → v0.28.0）的取舍（2026-09-21）
 
@@ -46,6 +46,14 @@ last_reviewed: 2026-09-14
 - 在线文档表格引擎采用远端版：删"全篇 24 格"硬闸、写入节流约 3 次/秒、限频核实后重试、≤9×9 建表再扩、列宽按内容铺满；叠加本分支的结构编译/写后回读闸与单元格链接保留（`_write_cell_chunk` 接受 text_run 元素）。写失败一律报错，不再往文档追加纯文本兜底，也不转 import 绕过结构闸。
 - 入站附件：远端的持久收件箱缓存 + 本分支的 8 MiB Range 分片下载并存（图片走 SDK 通道，文件/音视频走分片）；卡片发送保留 3 次重试并带上工作行标题条参数；进度卡"满 1 小时换新卡"与远端的 `edit_card` 结构化返回叠加。
 - 新依赖 `tomlkit`（远端 Codex 启动修复引入，已在 `feishu/requirements.txt`）。合并后全量 980 passed。
+
+### Profile 生命周期与 wrapper 单一真源
+
+- 新增 `feishu/profile_wrappers.py` 作为 Git Bash、PowerShell 5/7 wrapper 的唯一渲染器；每次加载从 effective registry 的 `list --names` 动态发现已登记 profile，新增账号不再改静态名单。`profile_bootstrap.py` 与用户级 `$agent-profile-governance` 共用同一 desired output，旧检查器与治理 doctor 不再互相报 drift。
+- `profile_bootstrap.py` 应用后回读真实结果并输出稳定中文状态；新增/缺失 home、launcher 与 wrapper 不再把 apply 前状态冒充最终状态。
+- 看门狗显式 `failover --to <profile>` 也必须经过实时额度 verdict；只有“够用/紧张”可切换，“满/问不到”均 fail closed。registry 不增加通用 `active/disabled` 字段，CLI 生命周期保持 create/remove/status；未来只有真实出现“额度仍可用但禁止自动选号”的需求时才考虑窄范围 `auto_failover: false`。
+- 配套 Cloud Config 提供 `profile_lifecycle.py`：从 `ccpN/cxpN/kpN` 推断 Claude Code、Codex、Kimi Code 的隔离 home，串联安全偏好、原生登录、registry、入口文档、wrapper 与 doctor；remove 默认保留 home，并在 default/bot 引用存在时要求同 runtime replacement。
+- 验证：Link16 全量 **981 passed、114 subtests passed**；wrapper/bootstrap/watchdog 专项 **84 passed、5 subtests passed**；用户级 lifecycle **5 passed**。真实 `ccp2` 保持登记且 registry 无 status 字段，额度“问不到”时 pick 返回空。
 
 ## v0.28.0 — 2026-09-20 · 每张飞书卡片带「工作行」标题条：项目 · 对象 · 动作 + Stage 链
 
