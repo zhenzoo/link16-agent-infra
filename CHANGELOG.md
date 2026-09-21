@@ -53,7 +53,7 @@ last_reviewed: 2026-09-21
 - `profile_bootstrap.py` 应用后回读真实结果并输出稳定中文状态；新增/缺失 home、launcher 与 wrapper 不再把 apply 前状态冒充最终状态。
 - 看门狗显式 `failover --to <profile>` 也必须经过实时额度 verdict；只有“够用/紧张”可切换，“满/问不到”均 fail closed。registry 不增加通用 `active/disabled` 字段，CLI 生命周期保持 create/remove/status；未来只有真实出现“额度仍可用但禁止自动选号”的需求时才考虑窄范围 `auto_failover: false`。
 - 配套 Cloud Config 提供 `profile_lifecycle.py`：从 `ccpN/cxpN/kpN` 推断 Claude Code、Codex、Kimi Code 的隔离 home，串联安全偏好、原生登录、registry、入口文档、wrapper 与 doctor；remove 默认保留 home，并在 default/bot 引用存在时要求同 runtime replacement。
-- 验证：Link16 全量 **981 passed、114 subtests passed**；wrapper/bootstrap/watchdog 专项 **84 passed、5 subtests passed**；用户级 lifecycle **5 passed**。真实 `ccp2` 保持登记且 registry 无 status 字段，额度“问不到”时 pick 返回空。
+- 验证：从 `v0.29.0` 提交快照独立导出后全量 **978 passed、2 skipped、114 subtests passed**；叠加另一 session 尚未提交的 cwd trust 工作树后为 **981 passed、114 subtests passed**，两组口径均通过。wrapper/bootstrap/watchdog 专项 **84 passed、5 subtests passed**；用户级 lifecycle 的独立提交快照 **5 passed**。真实 `ccp2` 保持登记且 registry 无 status 字段，额度“问不到”时 pick 返回空。
 
 ## v0.28.0 — 2026-09-20 · 每张飞书卡片带「工作行」标题条：项目 · 对象 · 动作 + Stage 链
 

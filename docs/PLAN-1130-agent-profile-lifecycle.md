@@ -56,10 +56,10 @@ last_reviewed: 2026-09-21
 9. ✅ **⭐ Stage 9｜交付：撤销通用 disabled/enable，仅保留 create/remove/status（实际 12:07）**
 　9.1 ✅ 精确移除 runtime、quota、CLI 与治理层的停用分支，保留 cwd trust 并发改动（实际 12:01）
 　9.2 ✅ 更新 SOP、Skill、ARCH 与测试，确认 `ccp2` 未变且全量回归通过（实际 12:07）
-10. 🔄 **⭐ Stage 10｜交付：账号生命周期成果进入 Link16 与 Claude Config 远端 main（ETA 13:25）**
+10. ✅ **⭐ Stage 10｜交付：账号生命周期成果进入 Link16 与 Claude Config 远端 main（实际 13:08）**
 　10.1 ✅ 核对两仓最新远端提交与在途工作，确认 Cloud Config 同步治理已发布、Link16 trust 改动仍未提交且须隔离（实际 13:00）
-　10.2 🔄 只提交本 session 的 renderer、lifecycle、SOP、测试与文档，并完成版本标签评估（ETA 13:15）
-　10.3 ⏳ 依次推送 Link16 和 Claude Config 默认分支，回读两仓远端 SHA 且保留其他 session 的 dirty/staged 内容（ETA 13:25）
+　10.2 ✅ 只提交本 session 的 renderer、lifecycle、SOP、测试与文档，并完成 v0.29.0 版本标签评估（实际 13:05）
+　10.3 ✅ 依次推送 Link16 和 Claude Config 默认分支，回读两仓远端 SHA 且保留其他 session 的 dirty/staged 内容（实际 13:08）
 
 ## 2. 回执
 
@@ -76,3 +76,4 @@ last_reviewed: 2026-09-21
 - 2026-09-21 12:01：已从 runtime、CLI、quota、bootstrap、governance 与 lifecycle 源码精确移除停用分支，另一条 session 的 cwd trust 改动保持原样。
 - 2026-09-21 12:07：最终 lifecycle 仅暴露 create/remove/status；`ccp2` 保持登记且 registry 无 status 字段，额度“问不到”时 pick 返回空。Link16 全量 981 项与 114 个 subtest、个人 lifecycle 5 项通过，入口文档二次渲染为零漂移；未提交、未推送。
 - 2026-09-21 13:00：用户授权按两仓最新 main 提交并推送；Cloud Config 的 commit/pull/push 默认分支治理已在 `origin/main`，与本任务不冲突。Link16 `origin/main` 仍为 `06280a6`，cwd trust 系列仍是另一 session 的未提交改动，本次按文件与补丁隔离，不代提交。
+- 2026-09-21 13:08：Link16 首轮远端回读 `00652f1`，Claude Config 远端回读 `a41d310`；前者保留 8 个 trust/cwd tracked WIP 与 browser-profiles/scratch，后者保留 423 个 tracked WIP、既有 cnshop staged 与其他 untracked，均未混入本次提交。tag 快照独立测试为 978 passed、2 skipped、114 subtests；组合工作树为 981 passed、114 subtests。
