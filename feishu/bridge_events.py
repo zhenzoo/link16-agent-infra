@@ -255,7 +255,7 @@ def _plan_label(plan: list[dict]) -> str:
 
 
 def _collab_label(item: dict) -> str:
-    states = item.get("agentsStates") or {}
+    states = item.get("agentsStates") or item.get("agents_states") or {}
     if isinstance(states, dict) and states:
         values = [str((value or {}).get("status") or "unknown") for value in states.values()]
         completed = sum(status in {"completed", "shutdown"} for status in values)
@@ -264,6 +264,40 @@ def _collab_label(item: dict) -> str:
         return f"👥 子任务 {completed}/{len(values)} 已完成{suffix}"
     status = str(item.get("status") or item.get("kind") or "进行中")
     return f"👥 子任务：{status}"
+
+
+def _collab_summary(events: list[dict], revisions: dict[str, int]) -> dict | None:
+    """Collapse provider lifecycle noise into one current subagent summary.
+
+    Codex 0.155 emits three different records around one child: a spawn/wait
+    tool lifecycle plus explicit ``subAgentActivity`` state.  Counting every
+    record produced dozens of misleading ``started/completed`` rows.  Agent
+    identity is the stable unit; later state replaces earlier state.
+    """
+    states: dict[str, str] = {}
+    for event in events:
+        payload = event.get("payload") or {}
+        for agent_id, raw in (payload.get("agents_states") or {}).items():
+            value = raw.get("status") if isinstance(raw, dict) else raw
+            states[str(agent_id)] = str(value or "unknown")
+        agent_id = payload.get("agent_id")
+        if agent_id:
+            states[str(agent_id)] = str(payload.get("status") or "unknown")
+    if not states:
+        return None
+    values = list(states.values())
+    completed = sum(status in {"completed", "shutdown"} for status in values)
+    failed = sum(status in {"errored", "interrupted", "notFound"} for status in values)
+    active = len(values) - completed - failed
+    suffix = f" · {active} 进行中" if active else ""
+    if failed:
+        suffix += f" · {failed} 异常"
+    return {
+        "kind": "collab",
+        "event_id": "collab:summary",
+        "revision": sum(revisions.get(str(event["event_id"]), 1) for event in events),
+        "label": f"👥 子任务 {completed}/{len(values)} 已完成{suffix}",
+    }
 
 
 def normalize_codex_notification(message: dict, root_thread: str, *, workspace_root=None) -> dict | None:
@@ -317,12 +351,24 @@ def normalize_codex_notification(message: dict, root_thread: str, *, workspace_r
             "payload": payload,
         }
     if item_type in _COLLAB_TYPES:
+        states = item.get("agentsStates") or item.get("agents_states") or {}
+        agent_id = item.get("agentThreadId") or item.get("agent_thread_id")
+        # A bare collabAgentToolCall is only the spawn/wait tool lifecycle.
+        # Explicit subAgentActivity records carry the actual child state.
+        if item_type == "collabAgentToolCall" and not states:
+            return None
+        status = item.get("status") or item.get("kind")
+        payload = {"status": status}
+        if agent_id:
+            payload["agent_id"] = str(agent_id)
+        if isinstance(states, dict) and states:
+            payload["agents_states"] = deepcopy(states)
         return {
-            "event_id": item_id,
+            "event_id": f"collab-agent:{agent_id}" if agent_id else item_id,
             "event_type": "collab",
             "turn": turn,
             "label": _collab_label(item),
-            "payload": {"status": item.get("status") or item.get("kind")},
+            "payload": payload,
         }
     # reasoning, userMessage, hook UI, sleep/wait, token and transport noise.
     return None
@@ -364,6 +410,14 @@ class MilestoneAccumulator:
     def _steps(self) -> list[dict]:
         steps: list[dict] = []
         tool_ids: list[str] = []
+        collab_ids = [
+            event_id for event_id in self.order
+            if self.events[event_id].get("event_type") == "collab"
+        ]
+        collab_step = _collab_summary(
+            [self.events[event_id] for event_id in collab_ids], self.revisions
+        )
+        collab_emitted = False
 
         def flush_tools():
             if not tool_ids:
@@ -411,6 +465,11 @@ class MilestoneAccumulator:
                 tool_ids.append(event_id)
                 continue
             flush_tools()
+            if event.get("event_type") == "collab":
+                if collab_step and not collab_emitted:
+                    steps.append(collab_step)
+                    collab_emitted = True
+                continue
             step = {
                 "kind": event.get("event_type"),
                 "event_id": event_id,

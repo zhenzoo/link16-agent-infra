@@ -72,6 +72,41 @@ class CodexEventContractTests(unittest.TestCase):
         self.assertNotIn("不应进入", rendered)
         self.assertEqual(record["root_turn"], "parent-turn")
 
+    def test_subagent_lifecycle_is_one_summary_and_wait_noise_is_ignored(self):
+        messages = [
+            {"method": "item/completed", "params": {
+                "threadId": "root", "turnId": "turn", "item": {
+                    "id": "start-a", "type": "subAgentActivity", "kind": "started",
+                    "agentThreadId": "agent-a", "agentPath": "/root/a",
+                }}},
+            {"method": "item/completed", "params": {
+                "threadId": "root", "turnId": "turn", "item": {
+                    "id": "start-b", "type": "subAgentActivity", "kind": "started",
+                    "agentThreadId": "agent-b", "agentPath": "/root/b",
+                }}},
+            {"method": "item/completed", "params": {
+                "threadId": "root", "turnId": "turn", "item": {
+                    "id": "wait-call", "type": "collabAgentToolCall", "tool": "wait",
+                    "status": "completed", "agentsStates": {},
+                }}},
+            {"method": "item/completed", "params": {
+                "threadId": "root", "turnId": "turn", "item": {
+                    "id": "done-a", "type": "subAgentActivity", "kind": "completed",
+                    "agentThreadId": "agent-a", "agentPath": "/root/a",
+                }}},
+        ]
+        acc = MilestoneAccumulator()
+        for message in messages:
+            event = normalize_codex_notification(message, "root")
+            if event:
+                acc.apply(event)
+        collab = [step for step in acc.progress_record(session="root")["steps"]
+                  if step["kind"] == "collab"]
+        self.assertEqual(len(collab), 1)
+        self.assertEqual(collab[0]["event_id"], "collab:summary")
+        self.assertEqual(collab[0]["label"], "👥 子任务 1/2 已完成 · 1 进行中")
+        self.assertNotIn("wait-call", json.dumps(collab, ensure_ascii=False))
+
     def test_plan_revision_replaces_one_step_in_place(self):
         acc = MilestoneAccumulator()
         base = {"method": "turn/plan/updated", "params": {"threadId": "root", "turnId": "t", "plan": []}}
