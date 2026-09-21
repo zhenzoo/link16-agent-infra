@@ -19,6 +19,14 @@ last_reviewed: 2026-09-21
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.29.1 — 2026-09-21 · 三运行时目录信任与 Kimi 启动失败闭环
+
+- **启动目录信任**：`agent_profile_cli run/command`、飞书桥和新生 Codex worker 在启动前统一处理本次 terminal 的精确 `cwd`。Codex 会纠正同路径别名及已配置祖先的旧拒绝记录，Claude 原子更新所选隔离 profile，Kimi 复用原生 workspace trust；无关目录、其他账号配置和全盘权限不变。
+- **Kimi 登录前检**：`profile_login_state` 读取所选 Kimi home 的 `credentials/kimi-code.json`，没有可刷新或可用 token 时在创建 workspace 前直接提示登录，不再把“仓库已部署”误当成“本机账号已登录”。凭据内容不会进入状态文件、日志或 Git。
+- **Kimi 启动回执**：复用 `bridge-kimi-ready-<bot>.json` 写入 `worker_started → warming_up/session_found → session_ready → ready/failed`，携带 bot、profile、进程与时间证据。登录/模型预热失败、120 秒超时或 worker 提前退出会让就绪等待立即结束，飞书心跳显示真实阶段；失败回执只保留分类，不保存模型输出、工具参数或密钥。
+- **有限心跳**：失败状态只回报一次并终止；即使 worker 完全没有写出状态，启动播报也在 300 秒后明确结束，不再无限重复“正在创建工作区并提交启动命令”。
+- **验证与升级**：正式测试共 **988 passed、114 subtests passed**；Windows 临时文件 `os.replace` 偶发占用项拆出后 21/21 通过，其余 967/967 通过。现有长驻桥不会热加载代码；其他电脑拉取 `main` 后需按正常维护流程重启对应桥进程。
+
 ## v0.29.0 — 2026-09-21 · 智能体改名合流与账号 profile 生命周期基线
 
 本版把 `feat/kimi-default-install` 上的智能体改名能力与远端 v0.27.0～v0.28.0 的启动、桥重启、表格和卡片工作行能力收敛进唯一 `main`，并补齐账号 profile 的动态 wrapper、fail-closed 选号与三运行时生命周期治理接口。

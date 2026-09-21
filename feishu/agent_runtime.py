@@ -42,6 +42,7 @@ CLAUDE_BLOCKING_PROMPT_FOOTER = "Enter to confirm"
 _CLAUDE_TRUST_MENU_RE = re.compile(r"(?m)^\s*❯?\s*1\.\s")
 CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
 CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
+KIMI_STARTUP_CONTRACT = "kimi-startup-v1"
 
 # CLI versions whose startup/readiness contract was verified on a real terminal
 # here, so a silent upstream upgrade cannot quietly invalidate a screen marker
@@ -462,7 +463,7 @@ def profile_login_state(profile: ProfileSpec) -> dict:
       claude → home/.credentials.json（OAuth token）或 .claude.json 的 oauthAccount；
                第三方端点（launch.sh 设了 ANTHROPIC_AUTH_TOKEN / API_KEY）视为不需要登录。
       codex  → home/auth.json
-      kimi   → 尚无稳定凭据文件合同 → unknown（不拦）
+      kimi   → home/credentials/kimi-code.json 中存在 access/refresh token；
     返回 {"status": "ok"|"missing"|"unknown", "evidence": str, "fix": {"powershell": str, "bash": str}}。
     """
     home = profile.home_path
@@ -505,6 +506,22 @@ def profile_login_state(profile: ProfileSpec) -> dict:
             return {"status": "ok", "evidence": "auth.json 存在", "fix": fix}
         fix = {"powershell": f"{profile.name} login", "bash": f"{profile.name} login"}
         return {"status": "missing", "evidence": "没有 auth.json（从没登录过）", "fix": fix}
+    if profile.runtime == "kimi":
+        credentials = home / "credentials" / "kimi-code.json"
+        try:
+            data = json.loads(credentials.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            data = None
+        except (OSError, ValueError):
+            data = {}
+        if isinstance(data, dict) and any(
+            isinstance(data.get(key), str) and data[key].strip()
+            for key in ("refresh_token", "access_token")
+        ):
+            return {"status": "ok", "evidence": "credentials/kimi-code.json 含登录 token", "fix": fix}
+        evidence = ("没有 credentials/kimi-code.json（从没登录过）" if data is None
+                    else "credentials/kimi-code.json 无法读取或没有登录 token")
+        return {"status": "missing", "evidence": evidence, "fix": fix}
     return {"status": "unknown", "evidence": f"{profile.runtime} 的登录凭据位置尚未纳入合同", "fix": fix}
 
 
@@ -613,7 +630,7 @@ def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
         **profile_public_dict(profile),
         "ok": not errors,
         "errors": errors,
-        # 登录态只报告不判死：第三方端点/Kimi 没有统一凭据文件；桥在 spawn 前按 status=="missing" 拦。
+        # 登录态只报告不改变 doctor 的静态 ok；桥在 spawn 前按 status=="missing" 拦。
         "login": profile_login_state(profile),
     }
     if check_execution_env:

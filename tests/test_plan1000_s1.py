@@ -118,9 +118,12 @@ class S12ProfileLoginStateTests(unittest.TestCase):
             (Path(tmp) / "auth.json").write_text("{}", encoding="utf-8")
             self.assertEqual(agent_runtime.profile_login_state(spec("codex-work", "codex", tmp))["status"], "ok")
 
-    def test_kimi_is_unknown_not_blocking(self):
+    def test_kimi_missing_credentials_is_reported_before_bridge_start(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(agent_runtime.profile_login_state(spec("kimi-work", "kimi", tmp))["status"], "unknown")
+            self.assertEqual(
+                agent_runtime.profile_login_state(spec("kimi-work", "kimi", tmp))["status"],
+                "missing",
+            )
 
     def test_profile_doctor_reports_login_without_failing(self):
         with tempfile.TemporaryDirectory() as tmp:

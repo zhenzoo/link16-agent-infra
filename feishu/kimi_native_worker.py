@@ -18,6 +18,44 @@ import turn_delivery_guard
 from kimi_events import KimiEvents, WIRE_VERSION
 
 
+class StartupProgress:
+    """Small, sanitized startup receipt shared with the Feishu bridge."""
+
+    def __init__(self, state_dir, bot, profile, cwd):
+        self.path = Path(state_dir) / f"bridge-kimi-ready-{bot}.json"
+        self.started = time.monotonic()
+        self.record = {
+            "contract": agent_runtime.KIMI_STARTUP_CONTRACT,
+            "bot": bot,
+            "profile": profile,
+            "cwd": str(cwd),
+            "worker_pid": os.getpid(),
+        }
+
+    def update(self, stage, detail, **extra):
+        self.record.update(
+            stage=stage,
+            detail=detail,
+            ts=time.time(),
+            elapsed_sec=round(time.monotonic() - self.started, 2),
+            **extra,
+        )
+        bridge_injection.atomic_write_json(self.path, self.record)
+
+
+def _startup_failure_detail(exc):
+    """Return a useful cause without persisting raw model output or secrets."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "启动失败：Kimi 登录或模型预热在 120 秒内没有完成"
+    if isinstance(exc, TimeoutError):
+        return "启动失败：已有 Kimi worker 占用这个 bot，请先关闭旧会话"
+    if isinstance(exc, RuntimeError) and "warmup failed" in str(exc):
+        return "启动失败：Kimi 登录或模型不可用，预热没有返回可恢复会话"
+    if isinstance(exc, FileNotFoundError):
+        return "启动失败：找不到 Kimi 启动所需的本机文件"
+    return f"启动失败：Kimi worker 在就绪前退出（{type(exc).__name__}）"
+
+
 def _append(path, record):
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -208,7 +246,7 @@ def handoff_source(bot, profile, cwd, state_dir):
     return {"transcript": str(wire), "session_id": binding["session"], "transcript_runtime": "kimi"}
 
 
-def start_or_resume(bot, profile, cwd, state_dir):
+def start_or_resume(bot, profile, cwd, state_dir, progress=None):
     spec = agent_runtime.profile_spec(profile)
     if spec.runtime != "kimi":
         raise ValueError("Kimi worker requires a Kimi profile")
@@ -216,8 +254,12 @@ def start_or_resume(bot, profile, cwd, state_dir):
     previous = json.loads(pointer.read_text(encoding="utf-8")) if pointer.exists() else None
     if (previous and not previous.get("closed") and previous.get("profile") == profile
             and previous.get("cwd") == str(cwd)):
+        if progress:
+            progress.update("session_found", "已找到 Kimi 会话，正在重新连接")
         wire = find_wire(spec.home_path, previous["session"])
         return previous, wire
+    if progress:
+        progress.update("warming_up", "正在验证 Kimi 登录并创建可恢复会话")
     session = new_session(profile, cwd)
     wire = find_wire(spec.home_path, session)
     binding = {"session": session, "profile": profile, "cwd": str(cwd),
@@ -274,48 +316,54 @@ def supervise(native, command, log):
 
 def run(args):
     state_dir, cwd = Path(args.state_dir).resolve(), Path(args.cwd).resolve()
-    profile = agent_runtime.profile_from_env()
     state_dir.mkdir(parents=True, exist_ok=True)
-    with bridge_injection.ProcessFileLock(
-        bridge_injection.lock_path(state_dir, "kimi-worker", args.bot), timeout=0,
-    ):
-        binding, wire = start_or_resume(args.bot, profile.name, cwd, state_dir)
-        ensure_workspace_trust(profile.home_path, cwd, workspace_key=wire.parents[3].name)
-        with wire.open("rb") as handle:
-            KimiEvents(binding["session"], cwd).consume(json.loads(handle.readline()), 0)
-        command = agent_runtime.standalone_worker_cmd(
-            profile.name, provider_args=["--session", binding["session"]],
-            extra_env={"FEISHU_BRIDGE_SESSION": args.bot, "FEISHU_BRIDGE_OUTBOX_DIR": str(state_dir)},
-        )
-        observer_command = [sys.executable, str(Path(__file__).resolve()), "--observe-only",
-                            "--bot", args.bot, "--cwd", str(cwd), "--state-dir", str(state_dir)]
-        with (state_dir / f"bridge-kimi-observer-{args.bot}.log").open("a", encoding="utf-8") as log:
-            native = subprocess.Popen([agent_runtime.resolve_shell(), "-lc", command], cwd=cwd)
-            # Structured startup handshake, mirroring the Codex app-server worker:
-            # the bridge should learn "the right TUI for this session is up" from
-            # the process that started it, not by recognising vocabulary the CLI
-            # is free to rename. Written after Popen and stamped, so a stale file
-            # from an earlier spawn cannot pass the caller's freshness check.
-            bridge_injection.atomic_write_json(
-                state_dir / f"bridge-kimi-ready-{args.bot}.json",
-                {"session": binding["session"], "profile": profile.name, "cwd": str(cwd),
-                 "worker_pid": os.getpid(), "native_pid": native.pid, "ts": time.time(),
-                 "wire_version": WIRE_VERSION, "cli_version": agent_runtime.cli_version("kimi")},
-            )
-            supervise(native, observer_command, log)
+    profile_name = str(os.environ.get(agent_runtime.PROFILE_ENV) or "").strip()
+    progress = StartupProgress(state_dir, args.bot, profile_name, cwd)
+    progress.update("worker_started", "启动命令已执行，正在检查 Kimi 会话")
+    try:
+        profile = agent_runtime.profile_from_env()
         with bridge_injection.ProcessFileLock(
-            bridge_injection.lock_path(state_dir, "observer", args.bot), timeout=2,
+            bridge_injection.lock_path(state_dir, "kimi-worker", args.bot), timeout=0,
         ):
-            observer = WireObserver(bot=args.bot, session=binding["session"], wire=wire,
-                                    state_dir=state_dir, cwd=cwd, initial_offset=binding["initial_offset"])
-            try:
-                observer.poll()
-                if not observer.reducer.closed:
+            binding, wire = start_or_resume(
+                args.bot, profile.name, cwd, state_dir, progress=progress)
+            progress.update("session_ready", "Kimi 会话已就位，正在打开原生终端",
+                            session=binding["session"])
+            ensure_workspace_trust(profile.home_path, cwd, workspace_key=wire.parents[3].name)
+            with wire.open("rb") as handle:
+                KimiEvents(binding["session"], cwd).consume(json.loads(handle.readline()), 0)
+            command = agent_runtime.standalone_worker_cmd(
+                profile.name, provider_args=["--session", binding["session"]],
+                extra_env={"FEISHU_BRIDGE_SESSION": args.bot, "FEISHU_BRIDGE_OUTBOX_DIR": str(state_dir)},
+            )
+            observer_command = [sys.executable, str(Path(__file__).resolve()), "--observe-only",
+                                "--bot", args.bot, "--cwd", str(cwd), "--state-dir", str(state_dir)]
+            with (state_dir / f"bridge-kimi-observer-{args.bot}.log").open("a", encoding="utf-8") as log:
+                native = subprocess.Popen([agent_runtime.resolve_shell(), "-lc", command], cwd=cwd)
+                # The bridge combines this process-owned receipt with a visible
+                # composer; neither half depends on renameable TUI wording.
+                progress.update(
+                    "ready", "Kimi 原生终端已启动，正在确认输入框",
+                    session=binding["session"], native_pid=native.pid,
+                    wire_version=WIRE_VERSION, cli_version=agent_runtime.cli_version("kimi"),
+                )
+                supervise(native, observer_command, log)
+            with bridge_injection.ProcessFileLock(
+                bridge_injection.lock_path(state_dir, "observer", args.bot), timeout=2,
+            ):
+                observer = WireObserver(bot=args.bot, session=binding["session"], wire=wire,
+                                        state_dir=state_dir, cwd=cwd, initial_offset=binding["initial_offset"])
+                try:
+                    observer.poll()
+                    if not observer.reducer.closed:
+                        observer.report_failure(terminal=True)
+                except Exception:
                     observer.report_failure(terminal=True)
-            except Exception:
-                observer.report_failure(terminal=True)
-                raise
-        return native.returncode
+                    raise
+            return native.returncode
+    except Exception as exc:
+        progress.update("failed", _startup_failure_detail(exc), error_type=type(exc).__name__)
+        raise
 
 
 def main():

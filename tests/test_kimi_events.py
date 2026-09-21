@@ -1,7 +1,9 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, Mock
@@ -272,6 +274,61 @@ class NativeBindingTests(unittest.TestCase):
                     else:
                         with self.assertRaises(RuntimeError):
                             worker.new_session("kp", ".")
+
+    def test_worker_persists_sanitized_failure_before_native_tui_exists(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = SimpleNamespace(bot="test", cwd=str(root), state_dir=str(root))
+            profile = SimpleNamespace(name="kp", home_path=root)
+            with patch.dict(os.environ, {worker.agent_runtime.PROFILE_ENV: "kp"}), \
+                    patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
+                    patch.object(worker.bridge_injection, "ProcessFileLock",
+                                 return_value=nullcontext()), \
+                    patch.object(worker, "start_or_resume",
+                                 side_effect=RuntimeError("Kimi native warmup failed; secret output")):
+                with self.assertRaises(RuntimeError):
+                    worker.run(args)
+            record = json.loads(
+                (root / "bridge-kimi-ready-test.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["contract"], worker.agent_runtime.KIMI_STARTUP_CONTRACT)
+            self.assertEqual(record["stage"], "failed")
+            self.assertIn("登录或模型不可用", record["detail"])
+            self.assertNotIn("secret output", record["detail"])
+
+    def test_worker_persists_ready_stage_after_launching_native_tui(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cwd = root / "repo"
+            cwd.mkdir()
+            wire = root / "sessions/wd_repo_0123456789ab/session_test/agents/main/wire.jsonl"
+            wire.parent.mkdir(parents=True)
+            wire.write_text(json.dumps(fixture()[0]) + "\n", encoding="utf-8")
+            binding = {"session": "session_test", "profile": "kp", "cwd": str(cwd),
+                       "initial_offset": wire.stat().st_size}
+            args = SimpleNamespace(bot="test", cwd=str(cwd), state_dir=str(root))
+            profile = SimpleNamespace(name="kp", home_path=root)
+            native = Mock(pid=456, returncode=0)
+            observer = Mock()
+            observer.reducer.closed = True
+            with patch.dict(os.environ, {worker.agent_runtime.PROFILE_ENV: "kp"}), \
+                    patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
+                    patch.object(worker.bridge_injection, "ProcessFileLock",
+                                 return_value=nullcontext()), \
+                    patch.object(worker, "start_or_resume", return_value=(binding, wire)), \
+                    patch.object(worker, "ensure_workspace_trust"), \
+                    patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="kimi"), \
+                    patch.object(worker.agent_runtime, "resolve_shell", return_value="bash"), \
+                    patch.object(worker.agent_runtime, "cli_version", return_value="0.41.0"), \
+                    patch.object(worker.subprocess, "Popen", return_value=native), \
+                    patch.object(worker, "supervise"), \
+                    patch.object(worker, "WireObserver", return_value=observer):
+                self.assertEqual(worker.run(args), 0)
+            record = json.loads(
+                (root / "bridge-kimi-ready-test.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["stage"], "ready")
+            self.assertEqual(record["native_pid"], 456)
+            self.assertEqual(record["session"], "session_test")
+            self.assertEqual(record["cli_version"], "0.41.0")
 
     def test_exact_binding_resumes_and_handoff_rejects_closed_or_wrong_workspace(self):
         with tempfile.TemporaryDirectory() as temp:

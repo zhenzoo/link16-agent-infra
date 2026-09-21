@@ -57,6 +57,7 @@ REPLY_POLL_SEC = 2
 READY_TIMEOUT_SEC = 30            # legacy Codex/custom 的默认启动窗口
 CLAUDE_READY_TIMEOUT_SEC = 90     # Claude Code 2.1.240 新机冷启实测约 42s；30s 会误判并把启动命令重复塞进 TUI
 CODEX_APP_SERVER_READY_TIMEOUT_SEC = codex_startup.STARTUP_TIMEOUT_SEC
+STARTUP_HEARTBEAT_MAX_SEC = 300   # Never repeat a vague startup line forever.
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
 STARTUP_FAILURE_MAX_AGE_SEC = 24 * 60 * 60  # /screen 可回看最近一次已关闭失败 pane 的现场
 HANDOFF_RETRY_MAX_AGE_SEC = 6 * 60 * 60     # 已快照但未完成的手动 handoff 可在无活会话时重试
@@ -914,6 +915,28 @@ def _codex_startup_record(bot, since=0):
     return {}
 
 
+def _kimi_startup_record(bot, since=0):
+    if agent_runtime.runtime_spec(bot).name != "kimi":
+        return {}
+    path = STATE_DIR / f"bridge-kimi-ready-{bot['name']}.json"
+    record = codex_startup.read_state(path)
+    try:
+        if (
+            record.get("contract") == agent_runtime.KIMI_STARTUP_CONTRACT
+            and record.get("bot") == bot["name"]
+            and float(record.get("ts") or 0) >= since
+            and str(record.get("profile") or "") == agent_runtime.profile_name(bot, required=True)
+        ):
+            return record
+    except (ValueError, TypeError, AttributeError, KeyError):
+        pass
+    return {}
+
+
+def _agent_startup_record(bot, since=0):
+    return _codex_startup_record(bot, since) or _kimi_startup_record(bot, since)
+
+
 def _kimi_ready_signal(bot, since):
     """Did this spawn's own Kimi worker report that it started the native TUI?
 
@@ -924,15 +947,10 @@ def _kimi_ready_signal(bot, since):
     """
     if agent_runtime.runtime_spec(bot).name != "kimi":
         return False
-    path = STATE_DIR / f"bridge-kimi-ready-{bot['name']}.json"
+    record = _kimi_startup_record(bot, since)
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-        return (
-            int(record.get("native_pid") or 0) > 0
-            and float(record.get("ts") or 0) >= since
-            and str(record.get("profile") or "") == agent_runtime.profile_name(bot, required=True)
-        )
-    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return record.get("stage") == "ready" and int(record.get("native_pid") or 0) > 0
+    except (ValueError, TypeError, AttributeError):
         return False
 
 
@@ -952,10 +970,10 @@ def _ready_timeout(bot, explicit=None):
     return float(READY_TIMEOUT_SEC)
 
 
-def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
+def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
     """spawn worker 后轮询屏幕，看到该 runtime 的 ready marker = 就绪可注入。"""
     timeout = _ready_timeout(bot, timeout)
-    wait_started = time.time()
+    wait_started = float(since) if since is not None else time.time()
     deadline = time.time() + timeout
     trust_sent = False
     while time.time() < deadline:
@@ -971,6 +989,12 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None):
                 return False
             time.sleep(min(.15, max(0, deadline - time.time())))
             continue
+        if agent_runtime.runtime_spec(bot).name == "kimi":
+            record = _kimi_startup_record(bot, wait_started)
+            if record.get("stage") == "failed":
+                return False
+            if record.get("worker_pid") and not codex_startup.process_alive(record["worker_pid"]):
+                return False
         try:
             # A startup modal can be at the top of a tall terminal, above the
             # normal 30-line tail. Use the existing uncapped screen read here.
@@ -1028,9 +1052,10 @@ def _startup_retryable_shell(bot, pty, screen=None):
     return not agent_runtime.is_live(bot, screen)
 
 
-def _finish_worker_startup(bot, workspace_id, pty, cwd):
+def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
     """Wait for one worker startup and perform at most one evidence-gated retry."""
-    if _wait_agent_ready(bot, pty, workspace_id):
+    startup_started = float(started) if started is not None else time.time()
+    if _wait_agent_ready(bot, pty, workspace_id, since=startup_started):
         _clear_startup_failure(bot["name"])
         return True
 
@@ -1046,6 +1071,26 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd):
         _record_startup_failure(bot, workspace_id=workspace_id, pty=pty, cwd=cwd,
                                 stage=record.get("stage") or "worker-not-started", reason=detail, screen=screen)
         return False
+
+    if agent_runtime.runtime_spec(bot).name == "kimi":
+        record = _kimi_startup_record(bot, startup_started)
+        worker_died = bool(
+            record.get("worker_pid")
+            and not codex_startup.process_alive(record["worker_pid"])
+        )
+        if record.get("stage") == "failed" or worker_died:
+            detail = record.get("detail") or "Kimi worker 未确认开始执行"
+            if worker_died and record.get("stage") != "failed":
+                detail += "；Kimi worker 已提前退出"
+            try:
+                screen = read_screen(pty, 100)
+            except RuntimeError:
+                screen = ""
+            _record_startup_failure(
+                bot, workspace_id=workspace_id, pty=pty, cwd=cwd,
+                stage=record.get("stage") or "worker-exited", reason=detail, screen=screen,
+            )
+            return False
 
     try:
         screen = read_screen(pty, 100)
@@ -1240,6 +1285,7 @@ def _ensure_session_unlocked(bot):
     # Permission bypass flags do not bypass either runtime's directory-trust gate.
     agent_runtime.ensure_launch_cwd_trust(bot, cwd)
     startup_bot = bot
+    startup_started = time.time()
     if agent_runtime.uses_app_server(bot):
         startup_bot = {**bot, "_startup_id": uuid.uuid4().hex}
         # One shell invocation works from either PowerShell or Git Bash. The
@@ -1254,7 +1300,7 @@ def _ensure_session_unlocked(bot):
     else:
         r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)
     ws, pty = r["workspace_id"], r["pty"]
-    if not _finish_worker_startup(startup_bot, ws, pty, cwd):
+    if not _finish_worker_startup(startup_bot, ws, pty, cwd, started=startup_started):
         try:
             wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
         except Exception:  # noqa: BLE001
@@ -2148,8 +2194,17 @@ async def _startup_heartbeat(bot, chat_id, started, reply, interval=5):
         while True:
             await asyncio.sleep(interval)
             waited = int(time.time() - started)
-            record = _codex_startup_record(bot, started)
+            record = _agent_startup_record(bot, started)
             stage = record.get("stage")
+            if stage == "failed":
+                detail = record.get("detail") or "启动失败：worker 未返回失败原因"
+                await reply(chat_id, f"❌ {detail}（已用 {waited} 秒）")
+                return
+            if waited >= STARTUP_HEARTBEAT_MAX_SEC:
+                detail = record.get("detail") or (
+                    f"启动超过 {STARTUP_HEARTBEAT_MAX_SEC} 秒仍未完成；已停止重复播报")
+                await reply(chat_id, f"❌ {detail}（已用 {waited} 秒）")
+                return
             if stage != previous or time.time() - last_report >= 15:
                 detail = record.get("detail") or "正在创建工作区并提交启动命令"
                 await reply(chat_id, f"⏳ {detail}（已用 {waited} 秒）")

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -111,13 +112,17 @@ class KimiProfileTests(unittest.TestCase):
         try:
             path = self.root / "bridge-kimi-ready-test.json"
             path.write_text(json.dumps(
-                {"native_pid": 123, "ts": 20, "profile": "kp"}), encoding="utf-8")
+                {"contract": runtime.KIMI_STARTUP_CONTRACT, "bot": "test", "stage": "ready",
+                 "native_pid": 123, "ts": 20, "profile": "kp"}), encoding="utf-8")
             self.assertTrue(feishu_bridge._kimi_ready_signal(bot, 10))
             self.assertFalse(feishu_bridge._kimi_ready_signal(bot, 30))   # 上一次 spawn 的残留
             path.write_text(json.dumps(
-                {"native_pid": 123, "ts": 20, "profile": "other"}), encoding="utf-8")
+                {"contract": runtime.KIMI_STARTUP_CONTRACT, "bot": "test", "stage": "ready",
+                 "native_pid": 123, "ts": 20, "profile": "other"}), encoding="utf-8")
             self.assertFalse(feishu_bridge._kimi_ready_signal(bot, 10))   # 别的账号的会话
-            path.write_text(json.dumps({"ts": 20, "profile": "kp"}), encoding="utf-8")
+            path.write_text(json.dumps(
+                {"contract": runtime.KIMI_STARTUP_CONTRACT, "bot": "test", "stage": "ready",
+                 "ts": 20, "profile": "kp"}), encoding="utf-8")
             self.assertFalse(feishu_bridge._kimi_ready_signal(bot, 10))   # 没起出 TUI
         finally:
             feishu_bridge.STATE_DIR = previous
@@ -129,7 +134,9 @@ class KimiProfileTests(unittest.TestCase):
         feishu_bridge.STATE_DIR = self.root
         try:
             (self.root / "bridge-kimi-ready-test.json").write_text(
-                json.dumps({"native_pid": 123, "ts": time.time() + 1, "profile": "kp"}),
+                json.dumps({"contract": runtime.KIMI_STARTUP_CONTRACT, "bot": "test",
+                            "stage": "ready", "native_pid": 123,
+                            "ts": time.time() + 1, "profile": "kp"}),
                 encoding="utf-8")
             # No "context:", no mode word — nothing left but the composer box.
             future_screen = " ╭────────╮ \n │ >        │ \n ╰────────╯ \n 全新状态栏 "
@@ -139,6 +146,80 @@ class KimiProfileTests(unittest.TestCase):
             self.assertFalse(runtime.is_ready(bot, future_screen))  # 读屏这条确实已失效
         finally:
             feishu_bridge.STATE_DIR = previous
+
+    def test_failed_worker_stops_ready_wait_without_reading_the_screen(self):
+        bot = {"name": "test", "profile": "kp"}
+        previous = feishu_bridge.STATE_DIR
+        feishu_bridge.STATE_DIR = self.root
+        try:
+            (self.root / "bridge-kimi-ready-test.json").write_text(json.dumps({
+                "contract": runtime.KIMI_STARTUP_CONTRACT, "bot": "test",
+                "stage": "failed", "detail": "启动失败：Kimi 登录或模型不可用",
+                "worker_pid": 123, "ts": time.time() + 1, "profile": "kp",
+            }), encoding="utf-8")
+            with patch.object(feishu_bridge, "read_screen",
+                              side_effect=AssertionError("failed worker must short-circuit")):
+                self.assertFalse(feishu_bridge._wait_agent_ready(bot, "test-pty", timeout=1))
+        finally:
+            feishu_bridge.STATE_DIR = previous
+
+    def test_startup_heartbeat_reports_kimi_failure_instead_of_workspace_fallback(self):
+        bot = {"name": "test", "profile": "kp"}
+        previous = feishu_bridge.STATE_DIR
+        feishu_bridge.STATE_DIR = self.root
+        started = time.time() - 10
+        messages = []
+
+        async def no_sleep(_):
+            return None
+
+        async def reply(_chat_id, message):
+            messages.append(message)
+
+        try:
+            (self.root / "bridge-kimi-ready-test.json").write_text(json.dumps({
+                "contract": runtime.KIMI_STARTUP_CONTRACT, "bot": "test",
+                "stage": "failed", "detail": "启动失败：Kimi 登录或模型不可用",
+                "worker_pid": 123, "ts": time.time(), "profile": "kp",
+            }), encoding="utf-8")
+            with patch("asyncio.sleep", new=no_sleep):
+                asyncio.run(feishu_bridge._startup_heartbeat(
+                    bot, "chat", started, reply, interval=0))
+            self.assertEqual(len(messages), 1)
+            self.assertTrue(messages[0].startswith("❌ 启动失败：Kimi 登录或模型不可用"))
+            self.assertNotIn("正在创建工作区", messages[0])
+        finally:
+            feishu_bridge.STATE_DIR = previous
+
+    def test_startup_heartbeat_has_a_terminal_bound_without_worker_status(self):
+        bot = {"name": "test", "profile": "kp"}
+        messages = []
+
+        async def no_sleep(_):
+            return None
+
+        async def reply(_chat_id, message):
+            messages.append(message)
+
+        started = time.time() - feishu_bridge.STARTUP_HEARTBEAT_MAX_SEC - 1
+        with patch("asyncio.sleep", new=no_sleep):
+            asyncio.run(feishu_bridge._startup_heartbeat(
+                bot, "chat", started, reply, interval=0))
+        self.assertEqual(len(messages), 1)
+        self.assertIn("已停止重复播报", messages[0])
+        self.assertNotIn("正在创建工作区并提交启动命令", messages[0])
+
+    def test_kimi_login_state_uses_profile_local_credentials(self):
+        home = self.root / "login-home"
+        home.mkdir()
+        profile = runtime.ProfileSpec("kp", "kimi", str(home), "direct")
+        self.assertEqual(runtime.profile_login_state(profile)["status"], "missing")
+        credentials = home / "credentials" / "kimi-code.json"
+        credentials.parent.mkdir()
+        credentials.write_text("{}", encoding="utf-8")
+        self.assertEqual(runtime.profile_login_state(profile)["status"], "missing")
+        credentials.write_text(json.dumps({"refresh_token": "present"}), encoding="utf-8")
+        self.assertEqual(runtime.profile_login_state(profile)["status"], "ok")
 
     def test_version_drift_only_fires_on_positive_evidence(self):
         verified = runtime.VERIFIED_CLI_VERSIONS["kimi"]
