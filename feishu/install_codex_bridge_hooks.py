@@ -30,11 +30,15 @@ def _hook_cmd(path: Path) -> str:
 
 def bridge_hooks(repo: Path) -> dict:
     stop = repo / "feishu" / "hooks" / "codex_bridge_stop.py"
+    workline_stop = repo / "feishu" / "hooks" / "bridge_workline_stop.py"
     post = repo / "feishu" / "hooks" / "codex_bridge_posttool.py"
     route = repo / "feishu" / "hooks" / "bridge_userprompt.py"
     return {
         "Stop": [{
-            "hooks": [{"type": "command", "command": _hook_cmd(stop), "timeout": 10}],
+            "hooks": [
+                {"type": "command", "command": _hook_cmd(workline_stop), "timeout": 5},
+                {"type": "command", "command": _hook_cmd(stop), "timeout": 10},
+            ],
         }],
         "PostToolUse": [{
             # Current Codex canonical hook surfaces. Edit/Write are documented
@@ -87,6 +91,7 @@ def _is_bridge_command(command: str | None) -> bool:
         "/hooks/codex_bridge_stop.py",
         "/hooks/codex_bridge_posttool.py",
         "/hooks/bridge_userprompt.py",
+        "/hooks/bridge_workline_stop.py",
     ))
 
 

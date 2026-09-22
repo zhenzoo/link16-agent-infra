@@ -128,11 +128,14 @@ def _profile_snapshot(roster: dict) -> dict:
                 errors.append(f"未知 profile：{name}")
                 continue
             runtimes[name] = spec.runtime
-            for target in profile_bootstrap._skill_targets(
-                    Path.home(), (name,), registry_path=registry):
-                row = profile_bootstrap._skill_status(profile_bootstrap.FEISHU_SKILL_SOURCE, target)
-                skills.append({"profile": name, "runtime": spec.runtime,
-                               "path": row["path"], "status": row["status"]})
+            for source in profile_bootstrap.MANAGED_SKILL_SOURCES:
+                for target in profile_bootstrap._skill_targets(
+                        Path.home(), (name,), registry_path=registry,
+                        skill_name=source.name):
+                    row = profile_bootstrap._skill_status(source, target)
+                    skills.append({"profile": name, "runtime": spec.runtime,
+                                   "name": source.name, "path": row["path"],
+                                   "status": row["status"]})
             if spec.runtime == "claude":
                 # Bridge-owned Claude sessions receive this generated settings
                 # file via ``claude --settings``.  The hooks intentionally do
@@ -143,7 +146,8 @@ def _profile_snapshot(roster: dict) -> dict:
                 except OSError:
                     text = ""
                 ok = all(name in text for name in (
-                    "bridge_userprompt.py", "bridge_stop.py", "bridge_posttool.py",
+                    "bridge_userprompt.py", "bridge_workline_stop.py",
+                    "bridge_stop.py", "bridge_posttool.py",
                 ))
                 hooks.append({"profile": name, "runtime": "claude", "ok": ok,
                               "evidence": str(settings)})

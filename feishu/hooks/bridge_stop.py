@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import turn_delivery_guard  # noqa: E402
+import session_work  # noqa: E402
 
 
 def _project_dir():
@@ -297,6 +298,11 @@ def main():
         return                                    # 首轮 transcript 可能未落 → 跳过（下轮 Stop 再来）
 
     proj = _project_dir()
+    outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
+    active_at_stop = turn_delivery_guard.read_route(outdir, bot)
+    if session_work.delivery_work(bot, {"route": active_at_stop or {}}, outdir) is False:
+        _trace(f"WAIT bot={bot} feishu-workline 仍 pending，本次 Stop 不产出 answer")
+        return
     # import 从【hook 自身的 orchestrator/】(永在 xhs 仓库)·不靠 CLAUDE_PROJECT_DIR：config bot cwd≠xhs 时
     # 它指错 → import 失败 → 下面 except 静默 return → 该 bot 回复全丢(2026-06-17 实证 config bot 形同失声)。
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -306,7 +312,6 @@ def main():
         _trace(f"EXIT bot={bot} import jsonl_reply_extract 失败: {_e}")
         return
     # outdir 先算出来：cursor(上轮扫到哪行) 和 outbox 同目录（FEISHU_BRIDGE_OUTBOX_DIR = 桥给每个 bot 钉的 _state/）
-    outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
     floor = _read_cursor(outdir, bot, sid, tp)
     r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts, floor_line=floor)
     cards = [c.strip() for c in (r.get("cards") or []) if c and c.strip()]
@@ -353,7 +358,9 @@ def main():
         with open(outbox, "a", encoding="utf-8") as f:
             for c in cards:
                 rec = {"kind": "answer", "ts": int(time.time()), "session": sid,
-                       "anchor": anchor, "text": c, "route": route}
+                       "anchor": anchor, "text": c, "route": route,
+                       "turn_key": (active_route or {}).get("turn_key"),
+                       "workline_gate": (active_route or {}).get("workline_gate")}
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError as _e:
         _trace(f"EXIT bot={bot} 写 outbox 失败: {_e}")

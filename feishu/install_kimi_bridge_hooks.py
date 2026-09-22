@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge Link16's UserPromptSubmit hook into one isolated Kimi home."""
+"""Merge Link16's UserPromptSubmit and Stop gates into one isolated Kimi home."""
 from __future__ import annotations
 
 import argparse
@@ -16,15 +16,18 @@ def default_kimi_home() -> Path:
     return Path(os.path.expanduser(raw)) if raw else Path.home() / ".kimi-code"
 
 
-def _hook_command(repo: Path) -> str:
-    hook = repo / "feishu" / "hooks" / "bridge_userprompt.py"
+def _hook_command(repo: Path, name="bridge_userprompt.py") -> str:
+    hook = repo / "feishu" / "hooks" / name
     return f'python "{hook.as_posix()}"'
 
 
 def _is_bridge_command(command: object) -> bool:
     if not isinstance(command, str):
         return False
-    return "/hooks/bridge_userprompt.py" in command.replace("\\", "/").lower()
+    normalized = command.replace("\\", "/").lower()
+    return any(name in normalized for name in (
+        "/hooks/bridge_userprompt.py", "/hooks/bridge_workline_stop.py",
+    ))
 
 
 def _load(path: Path):
@@ -46,34 +49,37 @@ def _merged(document, repo: Path):
     for entry in out.get("hooks") or []:
         if not _is_bridge_command(entry.get("command")):
             hooks.append(entry)
-    hook = tomlkit.table()
-    hook.add("event", "UserPromptSubmit")
-    hook.add("command", _hook_command(repo))
-    hook.add("timeout", 5)
-    hooks.append(hook)
+    for event, name in (("UserPromptSubmit", "bridge_userprompt.py"),
+                        ("Stop", "bridge_workline_stop.py")):
+        hook = tomlkit.table()
+        hook.add("event", event)
+        hook.add("command", _hook_command(repo, name))
+        hook.add("timeout", 5)
+        hooks.append(hook)
     out["hooks"] = hooks
     return out
 
 
 def _installed(document, repo: Path) -> bool:
-    expected = {
-        "event": "UserPromptSubmit",
-        "command": _hook_command(repo),
-        "timeout": 5,
-    }
+    expected = [
+        {"event": "UserPromptSubmit", "command": _hook_command(repo), "timeout": 5},
+        {"event": "Stop", "command": _hook_command(repo, "bridge_workline_stop.py"), "timeout": 5},
+    ]
     rows = [entry for entry in document.get("hooks") or []
             if _is_bridge_command(entry.get("command"))]
-    return len(rows) == 1 and dict(rows[0]) == expected
+    return len(rows) == 2 and [dict(row) for row in rows] == expected
 
 
 def hooks_plan(kimi_home: Path, repo: Path) -> tuple[dict, str | None]:
     kimi_home, repo = Path(kimi_home), Path(repo).resolve()
     target = kimi_home / "config.toml"
-    hook = repo / "feishu" / "hooks" / "bridge_userprompt.py"
-    if not hook.is_file():
+    hook_files = [repo / "feishu" / "hooks" / name for name in
+                  ("bridge_userprompt.py", "bridge_workline_stop.py")]
+    missing = [str(path) for path in hook_files if not path.is_file()]
+    if missing:
         return ({"kind": "kimi-bridge-hook", "path": str(target),
                  "status": "conflict", "error": "bridge hook script missing",
-                 "missing": [str(hook)]}, None)
+                 "missing": missing}, None)
     existed = target.is_file()
     try:
         document = _load(target)

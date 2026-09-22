@@ -99,7 +99,7 @@ last_reviewed: 2026-09-09
 | 桥**开机自启** | Windows 计划任务 `FeishuBridge-Autostart`（登录后 +1 分钟触发） | `Get-ScheduledTaskInfo FeishuBridge-Autostart` → `LastTaskResult` 应为 0 |
 | 桥进程 | 每只 bot 一个进程 | `python feishu/feishu_bridge.py status` → 进程数应 == 本机名册 bot 数 |
 | **看门狗**随桥起停 | 每 120 秒巡所有面板，处理 API 错 / 撞额度 / 选择器卡住 / 桥死 | `python feishu/bridge_watchdog.py status` → 进程数应 == 1 |
-| 隔离 profile + 仓内 feishu skill + Codex hooks | `~/.claude-personal`、`~/.codex-personal` 等 home 及各自 `skills/feishu` | `python feishu/profile_bootstrap.py --doctor` |
+| 隔离 profile + 仓内 feishu / feishu-workline skills + runtime hooks | `~/.claude-personal`、`~/.codex-personal` 等 home 及对应 skills 目录 | `python feishu/profile_bootstrap.py --doctor` |
 
 > **这些改动都是先看后写**：`service_installer.py plan` 和不带 `--apply` 的 `profile_bootstrap.py`
 > 都只打印 before/after，你确认了才写。我们不在你点头之前动你的机器。
@@ -171,7 +171,7 @@ pip install -r feishu/requirements.txt
 # 2) 建本机隔离 profile registry（示例选三种 CLI；只提供实际选择的参数组）
 python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --kimi-profile kimi-work --kimi-home ~/.kimi-work
 python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --kimi-profile kimi-work --kimi-home ~/.kimi-work --apply
-python feishu/profile_bootstrap.py                   # 预览 profile/入口/feishu skill 安装
+python feishu/profile_bootstrap.py                   # 预览 profile/入口/feishu + feishu-workline skills 安装
 python feishu/profile_bootstrap.py --apply
 python feishu/profile_bootstrap.py --doctor
 
@@ -197,7 +197,7 @@ python feishu/service_doctor.py           # 文件/配置/运行/真实收发四
 #    重试到 GIVE_UP_SEC 后放弃。2026-08-30 起【没有任何兜底通道】，所以不会再降级刷进群 —— 消息就是发不出去。
 ```
 
-gstack 不在默认安装范围。clone Link16 会带上 repo-owned `feishu` skill 真源；
+gstack 不在默认安装范围。clone Link16 会带上 repo-owned `feishu` 与 `feishu-workline` skills 真源；
 三种 CLI 的新安装均走官方原生安装器及其默认程序目录，可用 `--skip` 取消不需要的项；
 例如只选 Kimi 时使用 `--skip claude,codex`。已有安装先复用，不自动卸载或迁移。
 程序路径与隔离账号目录的区别见 [SOP-100 安装清单](docs/SOP-100-new-machine-setup.md#部署前只确认一次8-项安装清单)。
@@ -303,7 +303,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 能干什么 | 什么时候用 |
 |---|---|
 | `windows_bootstrap.py` | 新机器第一步，8 项 Windows 清单；三种 CLI 默认选中、可取消 |
-| `profile_bootstrap.py` | 建隔离 profile、shell 入口、装仓内 feishu skill |
+| `profile_bootstrap.py` | 建隔离 profile、shell 入口、装仓内 feishu / feishu-workline skills |
 | `preflight.py` | 装之前体检：Python / node / wmux / 编码 / 凭据 / 名册 |
 | `service_doctor.py` · `bridge_doctor.py` | 装之后验收：文件 / 配置 / 运行 / 真实收发四层 |
 

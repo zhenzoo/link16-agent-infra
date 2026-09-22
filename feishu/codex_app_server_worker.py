@@ -25,6 +25,7 @@ import bridge_injection
 import agent_runtime
 import turn_delivery_guard
 import codex_startup
+import session_work
 
 
 WARMUP_MARKER = "LINK16_APP_SERVER_READY"
@@ -100,7 +101,9 @@ def _answer_record(event: dict, *, session: str, route: dict | None) -> dict | N
         "text": text + "\n\n---\n✅ 已完成",
     }
     if isinstance(route, dict):
-        record["route"] = route
+        record["route"] = turn_delivery_guard.public_route(route)
+        record["turn_key"] = route.get("turn_key")
+        record["workline_gate"] = route.get("workline_gate")
     return record
 
 
@@ -345,10 +348,13 @@ class MilestoneObserver:
             if event_id and event_id in self.final_event_ids:
                 return
             active_route = _load_route(self.state_dir, self.bot)
+            if session_work.delivery_work(
+                    self.bot, {"route": active_route or {}}, self.state_dir) is False:
+                return
             record = _answer_record(
                 event,
                 session=self.root_thread,
-                route=turn_delivery_guard.public_route(active_route),
+                route=active_route,
             )
             if record:
                 _append_jsonl(outbox, record)

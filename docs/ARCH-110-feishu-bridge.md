@@ -155,7 +155,7 @@ LINK16_AGENT_PROFILE=ccp FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR="
 | 回传格式 | `_autopilot/bridge-outbox-<bot>.jsonl` | `answer/progress/ask` 记录是跨 CLI 合约；飞书发送层不关心来源 |
 | Claude hook | `_autopilot/bridge-hooks.json` + `feishu/hooks/bridge_*.py` | Claude 支持 per-session `--settings`，所以桥 spawn 时临时挂 hook |
 | Codex hook | `CODEX_HOME/hooks.json` + `feishu/hooks/codex_bridge_*.py` | Codex 从 CODEX_HOME / project `.codex` 发现 hook；用 `install_codex_bridge_hooks.py --write` 合并安装 |
-| Kimi hook | `KIMI_CODE_HOME/config.toml` + `feishu/hooks/bridge_userprompt.py` | `profile_bootstrap.py` 合并安装一条原生 `UserPromptSubmit`；只在桥 env 命中时确认输入、钉路由并注入当前工作行 |
+| Kimi hook | `KIMI_CODE_HOME/config.toml` + `feishu/hooks/bridge_userprompt.py` / `bridge_workline_stop.py` | `profile_bootstrap.py` 合并安装原生 `UserPromptSubmit` + 同步 Stop 闸；只在桥 env 命中时确认输入、钉路由、显式触发工作行 skill，并验收回执 |
 | Kimi 进度与终答 | Kimi native Wire 1.5 + `kimi_native_worker.py` / `kimi_events.py` | observer 只发布 main agent 的公开 text、todo、工具白名单摘要和 final；`think`、工具参数/结果与错误原文不进入 outbox |
 
 **Codex 启动命令**（由 `agent_runtime.py` 生成，不手写到多处）：
@@ -177,7 +177,7 @@ python feishu/install_codex_bridge_hooks.py --write
 
 该脚本合并到 `CODEX_HOME/hooks.json`，按 command 去重并保留已有 hook（例如个人 Stop 声音提醒）。Codex hook 脚本自身仍用 `FEISHU_BRIDGE_SESSION` 守门，所以即使全局安装，也只对桥 spawn 的 Codex 会话写 outbox；普通 Codex 会话 env 不命中即 no-op。
 
-**Kimi 原生 hook 与 Wire observer**：`profile_bootstrap.py --profile <kimi-profile> --apply` 用 `install_kimi_bridge_hooks.py` 把一条 `UserPromptSubmit` 合并进该 profile 的 `config.toml`，保留已有 `[[hooks]]`，重复执行不增副本；`service_doctor.py` 同时检查 hook、worker 和 reducer。Kimi 0.41 的 `prompt` 是 `ContentPart[]`，`bridge_userprompt.py` 只拼接其中的 text part 来确认 inbox 与解析最末路由信封，图片等 part 不落状态。hook 以 exit-0 stdout 注入当前工作行；普通 Kimi 会话没有 `FEISHU_BRIDGE_SESSION` 时立即 no-op。
+**Kimi 原生 hook 与 Wire observer**：`profile_bootstrap.py --profile <kimi-profile> --apply` 用 `install_kimi_bridge_hooks.py` 把 `UserPromptSubmit` 与 `Stop` 两条 bridge hook 合并进该 profile 的 `config.toml`，保留已有 `[[hooks]]`，重复执行不增副本；`service_doctor.py` 同时检查 hook、worker 和 reducer。Kimi 0.41 的 `prompt` 是 `ContentPart[]`，`bridge_userprompt.py` 只拼接其中的 text part 来确认 inbox 与解析最末路由信封，图片等 part 不落状态。hook 以 exit-0 stdout 显式触发 `feishu-workline`；Wire observer 用 prompt digest 复用 UserPromptSubmit 已建立的 turn key，避免同一轮长出两份回执。普通 Kimi 会话没有 `FEISHU_BRIDGE_SESSION` 时立即 no-op。
 
 Kimi 可能在 composer 前弹出可选升级菜单。ready loop 只在同时看到 `Kimi Code Update Available`、两个选项和 `Esc continue` 时发送一次 Escape，选择继续当前已验证版本；不使用 `Down+Enter`，避免丢键后误触升级，也不把 worker 已启动误判成 composer 可注入。
 
@@ -371,10 +371,11 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
   · 正文首行 `找素材 ✅ → 写帖子 🔄 → 得出结论 ⏳`（Stage 链带状态；飞书副标题只给一行所以不放 header），下面一条分割线，再是原正文。
   · `config.summary.content`（飞书客户端**会话列表预览行 / 推送通知**用的就是它）= `📌 TC101P · <对象> ｜ <正文第一句>`，进度链不塞预览。
   进度卡、答案卡、桥的短回复（`card_send`）三条卡片路都过同一个 `session_work.apply_banner`；已有 `header` 的卡不重复加；a2a 群纯文字不加（peer 协议不动）。
-- **真源**：`feishu/_state/session-work-<bot>.json`（`project` ≤40 字、`task` / `progress` 各 ≤300 字可多行、`source`、`updated`），由 agent 自己在会话里跑 `python feishu/session_work.py set --project <代号> --task "<对象+动作+结果>" --progress "<Stage 链>"` 写；`show` 看、`clear` 清；bot 名取 `FEISHU_BRIDGE_SESSION`，过 `assert_sender_identity` 身份闸，不能改别的 bot 的行。
-- **什么时候改、写什么（agent 的判断活·不是每条消息）**：接到新任务、PLAN 的 Stage 切换、旧任务做完开新任务时改；旧任务完成只写新的、不留旧的。`task` 必须点名具体文档/功能/系统 + 要做的动作 + 交付结果，不写「实现+测试」「调研」这类抽象类别（同 Stage 标题规则）；`progress` 有 PLAN Markdown 就按 PLAN 的 Stage 写，没有就自己概括。这条规则只维护在 `$agent-profile-governance` 抽取的共享沟通块，由 renderer 同时注入 Claude `CLAUDE.md`、Codex/Kimi `AGENTS.md`，不再在某个 runtime 模板里复制第二份。
-- **动态提醒**：`hooks/bridge_userprompt.py` 每轮附当前顶栏与更新命令。Claude 用 `additionalContext` JSON；Kimi 原生 hook 用 exit-0 stdout；Codex 当前从共享 `AGENTS.md` 执行同一规则，不消费 provider-specific context 输出。三者最终都只写同一份 `session-work-<bot>.json`，卡片 header/body/summary 仍统一由 `session_work.apply_banner` 注入。
-- **兜底**：没写过或已清 → `project` = 会话 cwd 目录名（`bridge-session-<bot>.json`）；Claude 可再取 transcript 最后一条 `ai-title` 作 `task`。Codex/Kimi 没有这项 Claude 元数据时只剩项目名；连 cwd 都不知道 → 不加顶栏。
+- **两份状态、一个语义真源**：`session-work-<bot>.json` 保存当前可渲染工作行（`contract/revision/project/task/progress/source/updated`）；`session-work-gate-<bot>.json` 保存最近 64 个 turn 的 `pending / ready / failed-ready` 回执与当轮快照。卡片永远使用该 turn 的快照，不会被下一轮刚改的新标题串写。旧 `set` 命令保持兼容；正常桥 turn 由 `decide --action keep|replace|progress --turn-key <key>` 原子提交，bot 身份仍过 `assert_sender_identity`。
+- **字段归属**：LM 只判断 `keep / replace / progress`，并在需要时写 `project`、具体的 `task`（对象 + 动作 + 交付结果）和 `progress`（Stage 链）；桥机械填写 bot/session/runtime/profile/cwd/route/turn key/timestamps/revision/status、卡片结构、颜色、摘要与裁切。`keep` 只允许复用已有 LM 状态；`replace` 必须有 project + task；`progress` 必须有已有语义状态 + 新 Stage 链；旧 turn 或 revision 不符一律拒绝。
+- **机械触发与放行**：repo-owned `.agents/skills/feishu-workline` 只在收到 Link16 turn contract 时执行；Codex metadata 另设 `allow_implicit_invocation=false`。真正的必触发保证不依赖 runtime 是否支持某个私有 frontmatter：`bridge_userprompt.py` 先创建 pending，再把 skill 正文、turn key 和精确命令作为 developer context 注入三种 runtime；Codex 不再是“只靠 AGENTS.md 记得写”。outbox 对带 `session-work-gate-v1` 的 answer/progress/ask 在 ready 前保留 HWM、不做网络调用；ready 后把当轮快照随 fragment 交给 renderer。
+- **Stop 完成闸**：同步 `bridge_workline_stop.py` 在第一次缺回执时返回 `decision=block`，要求 runtime 补做 skill；异步 Claude/legacy producer 和 Codex typed final 同时拒绝产出 pending final。第二次仍缺时不再循环，机械写入 `🔴 feishu-workline 回执连续缺失` 的故障工作行并标为 `failed-ready`，让答案保留且故障显眼。普通成功路径不会增加额外模型服务或守护进程。
+- **兜底边界**：cwd + Claude `ai-title` 只供入站 `project_hint`、旧记录与停用开关兼容，不能让新 gated turn 的 `keep` 通过。`LINK16_WORK_LINE=off` 会同时关闭 skill 注入与新回执闸，恢复升级前行为。
 - **清理**：`/new`、`/clear`、`/cd` 都清掉工作行（上下文没了 / 换目录 = 旧行作废），下一个会话自己再写。
 - **容量**：标题 ≤400 字且不占正文预算；正文首行的 Stage 链按 `CARD_HARD 2980 − 正文` 只裁自己尾巴、正文一字不动，所以叠在 `CARD_BUDGET 2800` 上仍在飞书单卡 ~3000 之内；不动分片规则（分片 ID / ACK 不变）。长度还没打磨，先把内容写清再收。
 

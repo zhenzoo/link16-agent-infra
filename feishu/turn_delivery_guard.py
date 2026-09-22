@@ -45,7 +45,7 @@ def read_route(state_dir, bot):
     return row if isinstance(row, dict) else None
 
 
-def activate(state_dir, bot, route, *, session=None, now=None, turn_key=None):
+def activate(state_dir, bot, route, *, session=None, now=None, turn_key=None, metadata=None):
     state_dir = Path(state_dir)
     row = {
         **public_route(route),
@@ -54,6 +54,8 @@ def activate(state_dir, bot, route, *, session=None, now=None, turn_key=None):
         "session": str(session or ""),
         "started_at": int(time.time() if now is None else now),
     }
+    if isinstance(metadata, dict):
+        row.update({key: value for key, value in metadata.items() if value is not None})
     state_dir.mkdir(parents=True, exist_ok=True)
     with bridge_injection.injection_lock(state_dir, "turn-route", bot):
         bridge_injection.atomic_write_json(route_path(state_dir, bot), row)

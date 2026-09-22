@@ -32,10 +32,17 @@ class KimiBridgeHookTests(unittest.TestCase):
             commands = [row["command"] for row in parsed["hooks"]]
             self.assertIn("play-sound", commands)
             self.assertEqual(sum("bridge_userprompt.py" in command for command in commands), 1)
+            self.assertEqual(sum("bridge_workline_stop.py" in command for command in commands), 1)
             bridge = next(row for row in parsed["hooks"] if "bridge_userprompt.py" in row["command"])
             self.assertEqual(dict(bridge), {
                 "event": "UserPromptSubmit",
                 "command": f'python "{(ROOT / "feishu/hooks/bridge_userprompt.py").as_posix()}"',
+                "timeout": 5,
+            })
+            stop = next(row for row in parsed["hooks"] if "bridge_workline_stop.py" in row["command"])
+            self.assertEqual(dict(stop), {
+                "event": "Stop",
+                "command": f'python "{(ROOT / "feishu/hooks/bridge_workline_stop.py").as_posix()}"',
                 "timeout": 5,
             })
             self.assertIn("# keep this comment", first.decode("utf-8"))

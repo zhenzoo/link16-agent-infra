@@ -1906,7 +1906,7 @@ def _send_group_text(app_id, app_secret, chat_id, text, at_open_id=None, message
     )
 
 
-def _card_payload(text, at=None, mark=False, bot_name=None):
+def _card_payload(text, at=None, mark=False, bot_name=None, workline=None):
     content = text
     if at:
         content = f"<at id={at}></at> " + content
@@ -1917,7 +1917,9 @@ def _card_payload(text, at=None, mark=False, bot_name=None):
     }
     # 工作行（2026-09-19 主人定）：每张卡第一行 `📌 <项目> · <任务>` + 摘要=会话列表预览，
     # 十几个 bot 并排时不点开、不翻记录也认得出它在做哪个项目。没有 bot_name（外部调用）不加。
-    return session_work.apply_banner(payload, bot_name, STATE_DIR) if bot_name else payload
+    return session_work.apply_banner(
+        payload, bot_name, STATE_DIR, work=workline,
+    ) if bot_name else payload
 
 
 def _send_interactive_message(app_id, app_secret, target, payload, message_uuid=None):
@@ -2023,7 +2025,10 @@ async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, rou
             mid = await asyncio.wait_for(
                 asyncio.to_thread(
                     _send_interactive_message, bot["app_id"], bot["app_secret"], target,
-                    _card_payload(text, at if kind == "p2a-ext" else None, bot_name=bot_name), message_uuid,
+                    _card_payload(
+                        text, at if kind == "p2a-ext" else None, bot_name=bot_name,
+                        workline=(fragment or {}).get("workline"),
+                    ), message_uuid,
                 ), CARD_SEND_TIMEOUT,
             )
         except Exception as exc:  # noqa: BLE001

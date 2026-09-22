@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import turn_delivery_guard  # noqa: E402
+import session_work  # noqa: E402
 
 
 def _read_stdin_json():
@@ -40,6 +41,9 @@ def main():
         return
 
     outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (Path.cwd() / "_autopilot"))
+    active_route = turn_delivery_guard.read_route(outdir, bot)
+    if session_work.delivery_work(bot, {"route": active_route or {}}, outdir) is False:
+        return
     text = (inp.get("last_assistant_message") or "").strip()
     if not text:
         return
@@ -61,6 +65,8 @@ def main():
         active_route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
         if isinstance(active_route, dict):
             rec["route"] = turn_delivery_guard.public_route(active_route)
+            rec["turn_key"] = active_route.get("turn_key")
+            rec["workline_gate"] = active_route.get("workline_gate")
     except (OSError, ValueError):
         active_route = None
         pass

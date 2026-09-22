@@ -15,6 +15,7 @@ from pathlib import Path
 import agent_runtime
 import bridge_injection
 import turn_delivery_guard
+import session_work
 from kimi_events import KimiEvents, WIRE_VERSION
 
 
@@ -186,11 +187,36 @@ class WireObserver:
                 if end > self.committed:
                     if record.get("type") == "turn.prompt" and self.reducer.route:
                         route = self.reducer.route
+                        # UserPromptSubmit runs inside Kimi before the Wire
+                        # observer sees this journal row. Reuse that exact key
+                        # so the injected decide command and typed events bind
+                        # to one mechanical gate.
+                        pending = session_work.turn_for_prompt(
+                            self.bot, self.reducer.prompt_digest, self.state_dir,
+                        )
+                        if pending:
+                            route["turn_key"] = pending["turn_key"]
+                            self.reducer.turn = pending["turn_key"]
+                            self.reducer.accumulator.turn = pending["turn_key"]
+                        else:
+                            hint = session_work.resolve(self.bot, self.state_dir).get("project") or ""
+                            session_work.begin_turn(
+                                self.bot, route["turn_key"], session=self.session,
+                                runtime="kimi", project_hint=hint,
+                                prompt_digest=self.reducer.prompt_digest,
+                                state_dir=self.state_dir, now=route["started_at"],
+                            )
+                        route["workline_gate"] = session_work.GATE_CONTRACT
                         turn_delivery_guard.activate(
                             self.state_dir, self.bot, route, session=self.session,
                             now=route["started_at"], turn_key=route["turn_key"],
+                            metadata={"workline_gate": session_work.GATE_CONTRACT},
                         )
                     for index, public in enumerate(records):
+                        if record.get("type") == "turn.prompt" and self.reducer.route:
+                            public["route"] = dict(self.reducer.route)
+                            public["root_turn"] = self.reducer.turn
+                            public["turn"] = self.reducer.turn
                         identity = f"kimi:{self.session}:{start}:{index}"
                         if identity not in self.published:
                             public.update(source_event_id=identity, ts=int(record.get("time", 0) / 1000))

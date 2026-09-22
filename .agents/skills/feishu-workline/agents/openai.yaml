@@ -1,0 +1,6 @@
+interface:
+  display_name: "Feishu Workline"
+  short_description: "Commit a semantic title before Link16 sends work cards"
+  default_prompt: "Choose keep, replace, or progress for the active Feishu turn and commit its workline before continuing."
+policy:
+  allow_implicit_invocation: false

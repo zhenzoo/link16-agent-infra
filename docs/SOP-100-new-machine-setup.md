@@ -152,7 +152,7 @@ python feishu/windows_bootstrap.py --skip claude,codex --apply --yes
 
 1. **Python 依赖**（pip · 跟着 requirements.txt 走）
 2. **wmux + 仓库自带的 RPC 客户端**（⚠️ 最容易卡的一步 · 见 §3）
-3. **本机 profile registry + repo-owned `feishu` skill**（用户显式命名、hash/drift 可验）
+3. **本机 profile registry + repo-owned `feishu` / `feishu-workline` skills**（用户显式命名、hash/drift 可验）
 4. **本机 `.env` 凭证 + 机器本地 bot 名册**（每台机各管各的）
 
 > 🔑 **「为什么之前在新机器拿不到 wmux handler？」** —— 因为缺 `wmux-rpc.js`。桥靠 `node <wmux-rpc.js> rpc workspace.list/new/…` 跟 wmux daemon 对话；这个脚本**原是仓库外的自建脚本（没提交进 git）**，只活在主力机 home，所以 `git pull` 带不来它。新机器 `git clone` 完，Python 装好、wmux 也开着，但只要找不到 `wmux-rpc.js`，桥就连不上 wmux = 拿不到 handler。
@@ -165,7 +165,7 @@ python feishu/windows_bootstrap.py --skip claude,codex --apply --yes
 |---|---|---|
 | 飞书桥、wmux RPC、注册、网络/机器体检 | **完整可用** | 不改变核心链路 |
 | 隔离 profile | `profile_bootstrap.py` 按本机 local registry 建独立 home 与 Shell 函数；用户分别原生登录 | 可再叠加本人规则、模型预设与长期记忆 |
-| 飞书操作入口 | repo-owned `.agents/skills/feishu`，bootstrap 安装并校验 hash/drift | 不需要私人 skill |
+| 飞书操作入口 | repo-owned `.agents/skills/feishu` 与显式触发的 `.agents/skills/feishu-workline`，bootstrap 安装并校验 hash/drift | 不需要私人 skill |
 | 个人 workflows | 不安装，也不影响桥 | 用户自己决定 anysearch、push、pull、align、commit 等增强 |
 | Jina | 不属于桥；用户明确选择时才装 `requirements-agent-tools.txt` | 由用户自己的配置决定额外增强 |
 | gstack | **不安装、也不需要** | 仍是单独来源、明确 opt-in，不随个人 skills 同步而默认安装 |
@@ -255,7 +255,7 @@ python feishu/profile_bootstrap.py --apply
 python feishu/profile_bootstrap.py --doctor
 ```
 
-`--doctor` 必须同时看到 repo-owned `feishu` skill 与所选 Codex home 的 bridge hooks 为 `ok`。已有的私人 hooks 会保留；损坏或结构非法的 `hooks.json` 报 conflict，安装器不会覆盖。
+`--doctor` 必须同时看到 repo-owned `feishu` / `feishu-workline` skills 与所选 Codex home 的 bridge hooks 为 `ok`。已有的私人 hooks 会保留；损坏或结构非法的 `hooks.json` 报 conflict，安装器不会覆盖。
 Kimi 通过原生终端与 Wire 观察程序接桥，`service_doctor.py` 检查 Kimi 的 worker/event 组件，
 不向 Kimi home 安装 Codex `hooks.json`。只选 Kimi 时，Agent CLI 检查也应通过。
 
@@ -263,7 +263,7 @@ Kimi 通过原生终端与 Wire 观察程序接桥，`service_doctor.py` 检查 
 - 本机名示例：`<prefix>-link16`、`<prefix>-baseball`。写入共享 agent registry 前，要说明 private collaborator 可见主机元数据。
 - profile ID 与 home 由用户选择；新建流程拒绝精确的 `~/.claude`、`~/.codex`、`~/.kimi-code`，推荐 `~/.claude-work`、`~/.codex-work2`、`~/.kimi-work` 这类隔离目录。
 - `agent-profiles.local.json` 是 gitignored 的单一本机有效 registry，不与 committed 文件合并；旧机迁移期 committed `agent-profiles.json` 只作显式 fallback。
-- Claude 的 `feishu` 安装到各所选 profile home；Codex/Kimi 共用用户级 `$HOME/.agents/skills/feishu`。
+- Claude 的 `feishu` / `feishu-workline` 安装到各所选 profile home；Codex/Kimi 共用用户级 `$HOME/.agents/skills/<skill>`。
 - 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
 - 重开 Git Bash，用用户自己命名的 profile 函数进入对应账号并在官方页面登录；不复制别人的认证文件。
 - Kimi 示例：`kimi-work login`，随后 `kimi-work --version` 和 `python feishu/agent_profile_cli.py selftest --profile kimi-work`；版本检查只证明程序可启动，仍需真实模型回复验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。

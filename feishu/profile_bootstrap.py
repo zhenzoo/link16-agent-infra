@@ -27,6 +27,8 @@ PS_END = BASH_END
 DEFAULT_PROFILES = ("ccp", "ccp2", "cxp")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FEISHU_SKILL_SOURCE = PROJECT_ROOT / ".agents" / "skills" / "feishu"
+WORKLINE_SKILL_SOURCE = PROJECT_ROOT / ".agents" / "skills" / "feishu-workline"
+MANAGED_SKILL_SOURCES = (FEISHU_SKILL_SOURCE, WORKLINE_SKILL_SOURCE)
 SKILL_MANIFEST = ".link16-skill-install.json"
 SKILL_MANAGED_BY = "link16-agent-infra"
 LEGACY_CODEX_ADAPTER = "claude-compat-feishu"
@@ -95,16 +97,17 @@ def _skill_name(path: Path) -> str | None:
     return field.group(1).strip() if field else path.parent.name
 
 
-def _tree_files(root: Path):
+def _tree_files(root: Path, expected_name=None):
+    expected_name = expected_name or root.name
     if not root.is_dir():
-        raise ValueError(f"Link16 feishu skill 真源不存在：{root}")
+        raise ValueError(f"Link16 {expected_name} skill 真源不存在：{root}")
     rows = []
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
         if path.is_file() and path.name != SKILL_MANIFEST:
             rows.append((path.relative_to(root).as_posix(), path))
     skill = root / "SKILL.md"
-    if not skill.is_file() or _skill_name(skill) != "feishu":
-        raise ValueError(f"Link16 feishu skill 真源无效：{skill}")
+    if not skill.is_file() or _skill_name(skill) != expected_name:
+        raise ValueError(f"Link16 {expected_name} skill 真源无效：{skill}")
     return rows
 
 
@@ -127,7 +130,8 @@ def _manifest(path: Path) -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
-def _named_skill_conflicts(target: Path) -> list[str]:
+def _named_skill_conflicts(target: Path, skill_name=None) -> list[str]:
+    skill_name = skill_name or target.name
     parent = target.parent
     if not parent.is_dir():
         return []
@@ -136,16 +140,17 @@ def _named_skill_conflicts(target: Path) -> list[str]:
     for skill_file in parent.glob("*/SKILL.md"):
         if skill_file.parent.resolve().as_posix().casefold() == target_key:
             continue
-        if (_skill_name(skill_file) or "").casefold() == "feishu":
+        if (_skill_name(skill_file) or "").casefold() == skill_name.casefold():
             conflicts.append(str(skill_file.parent))
     return sorted(set(conflicts), key=str.casefold)
 
 
 def _skill_status(source: Path, target: Path) -> dict:
+    skill_name = source.name
     source_hash, source_files = _tree_hash(source)
-    conflicts = _named_skill_conflicts(target)
+    conflicts = _named_skill_conflicts(target, skill_name)
     base = {
-        "kind": "skill", "name": "feishu", "path": str(target),
+        "kind": "skill", "name": skill_name, "path": str(target),
         "source": str(source), "source_sha256": source_hash,
     }
     if conflicts:
@@ -174,15 +179,15 @@ def _skill_status(source: Path, target: Path) -> dict:
     return {**base, "status": "ok", "actual_sha256": actual_hash}
 
 
-def _skill_targets(home: Path, profiles, *, registry_path=None):
+def _skill_targets(home: Path, profiles, *, registry_path=None, skill_name="feishu"):
     targets, seen = [], set()
     for name in profiles:
         spec = agent_runtime.profile_spec(name, registry_path)
         adapter = agent_runtime.runtime_adapter_spec(spec.runtime)
         if adapter.skill_scope == "profile-home":
-            target = _home_relative_target(home, spec.home) / "skills" / "feishu"
+            target = _home_relative_target(home, spec.home) / "skills" / skill_name
         elif adapter.skill_scope == "shared-agents":
-            target = home / ".agents" / "skills" / "feishu"
+            target = home / ".agents" / "skills" / skill_name
         else:
             raise ValueError(f"runtime {spec.runtime} 没有可安装的 skill scope")
         key = (target.parent.resolve() / target.name).as_posix().casefold()
@@ -194,9 +199,10 @@ def _skill_targets(home: Path, profiles, *, registry_path=None):
 
 
 def _apply_skill(source: Path, target: Path) -> None:
+    skill_name = source.name
     row = _skill_status(source, target)
     if row["status"] not in {"missing", "adoptable", "outdated"}:
-        raise ValueError(f"feishu skill 不能安全安装：{target}：{row['status']}")
+        raise ValueError(f"{skill_name} skill 不能安全安装：{target}：{row['status']}")
     if row["status"] != "adoptable":
         target.mkdir(parents=True, exist_ok=True)
         for relative, path in _tree_files(source):
@@ -204,11 +210,11 @@ def _apply_skill(source: Path, target: Path) -> None:
     source_hash, files = _tree_hash(source)
     actual_hash, _ = _tree_hash(target)
     if actual_hash != source_hash:
-        raise ValueError(f"feishu skill 安装后 hash 不一致：{target}")
+        raise ValueError(f"{skill_name} skill 安装后 hash 不一致：{target}")
     _atomic_write(target / SKILL_MANIFEST, json.dumps({
         "version": 1,
         "managed_by": SKILL_MANAGED_BY,
-        "source": ".agents/skills/feishu",
+        "source": f".agents/skills/{skill_name}",
         "source_sha256": source_hash,
         "installed_sha256": actual_hash,
         "files": files,
@@ -432,12 +438,14 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
         ) == _normalized(row["desired"]) else before
         rows.append({"kind": "shell-function", "path": str(row["path"]),
                      "status": after, "before": before})
-    for target in _skill_targets(home, profile_names, registry_path=registry_path):
-        before = _skill_status(FEISHU_SKILL_SOURCE, target)
-        if apply and before["status"] in {"missing", "adoptable", "outdated"}:
-            _apply_skill(FEISHU_SKILL_SOURCE, target)
-        after = _skill_status(FEISHU_SKILL_SOURCE, target)
-        rows.append({**after, "before": before["status"]})
+    for source in MANAGED_SKILL_SOURCES:
+        for target in _skill_targets(
+                home, profile_names, registry_path=registry_path, skill_name=source.name):
+            before = _skill_status(source, target)
+            if apply and before["status"] in {"missing", "adoptable", "outdated"}:
+                _apply_skill(source, target)
+            after = _skill_status(source, target)
+            rows.append({**after, "before": before["status"]})
     for spec in specs:
         profile_home = profile_targets[spec.name]
         installer_name = agent_runtime.runtime_adapter_spec(
@@ -460,7 +468,7 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="建立隔离 agent profiles、Shell 入口与 Link16 feishu skill")
+    parser = argparse.ArgumentParser(description="建立隔离 agent profiles、Shell 入口与 Link16 skills")
     parser.add_argument("--apply", action="store_true", help="实际写入；默认只预览")
     parser.add_argument("--doctor", action="store_true", help="只检查；任何 missing/drift/conflict 返回非 0")
     parser.add_argument("--home", help="测试/特殊用户目录；默认当前用户 home")
@@ -530,7 +538,7 @@ def main(argv=None) -> int:
         print(json.dumps({"applied": args.apply, "rows": rows}, ensure_ascii=False, indent=2))
     else:
         action = "已应用" if args.apply else ("体检" if args.doctor else "只预览")
-        print(f"{action}：Link16 profiles / Shell 函数 / feishu skill")
+        print(f"{action}：Link16 profiles / Shell 函数 / feishu + feishu-workline skills")
         status_text = {
             "ok": "✅ 已对齐",
             "missing": "⏳ 缺失",

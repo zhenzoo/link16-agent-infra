@@ -111,6 +111,42 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
             force_flush=True,
         )
 
+    async def test_workline_gate_holds_record_then_pins_ready_snapshot(self):
+        state = fresh_state()
+        calls = []
+
+        async def new_card(text, route=None, purpose="answer", fragment=None):
+            calls.append((text, fragment))
+            return {"ok": True, "message_id": "m1"}
+
+        async def edit_card(_mid, _text):
+            return True
+
+        async def send_plain(*_args, **_kwargs):
+            return True
+
+        record = {
+            "kind": "answer", "session": "s", "anchor": "a", "text": "done",
+            "turn_key": "turn-1", "workline_gate": "session-work-gate-v1",
+        }
+        with self.assertRaises(bridge_outbox.RetrySend):
+            await bridge_outbox.drain_batch(
+                [dict(record)], new_card=new_card, edit_card=edit_card,
+                send_plain=send_plain, state=state, coalesce_sec=0,
+                clock=lambda: 100, force_flush=True,
+                workline_gate=lambda _record: False,
+            )
+        self.assertEqual(calls, [])
+
+        work = {"project": "Link16", "task": "根治卡片缺标题", "progress": "测试 🔄"}
+        await bridge_outbox.drain_batch(
+            [dict(record)], new_card=new_card, edit_card=edit_card,
+            send_plain=send_plain, state=state, coalesce_sec=0,
+            clock=lambda: 100, force_flush=True,
+            workline_gate=lambda _record: work,
+        )
+        self.assertEqual(calls[0][1]["workline"], work)
+
     async def test_legacy_edit_failure_continues_with_only_unseen_delta(self):
         state, cards = fresh_state(), FakeCards()
         await self.drain([{"kind": "progress", "turn": "t", "steps": [{"kind": "tool", "label": "OLD"}]}], state, cards)

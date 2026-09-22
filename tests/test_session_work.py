@@ -101,6 +101,97 @@ class SessionWorkStateTests(unittest.TestCase):
         self.assertEqual(session_work.resolve(self.bot, self.state)["project"], "notes")
 
 
+class WorklineGateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name)
+        self.bot = "tb25-test"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def begin(self, key="turn-1", digest="digest-1"):
+        return session_work.begin_turn(
+            self.bot, key, session="s1", runtime="codex",
+            project_hint="Link16", prompt_digest=digest, state_dir=self.state, now=10,
+        )
+
+    def test_replace_commits_revision_and_pins_delivery_snapshot(self):
+        self.begin()
+        pending = {"route": {"turn_key": "turn-1", "workline_gate": session_work.GATE_CONTRACT}}
+        self.assertIs(session_work.delivery_work(self.bot, pending, self.state), False)
+        row = session_work.decide_work(
+            self.bot, "turn-1", "replace", project="Link16",
+            task="给飞书卡片接入标题回执闸，交付三 runtime 一致标题",
+            progress="字段合同 ✅ → 机械验收 🔄", state_dir=self.state, now=11,
+        )
+        self.assertEqual(row["status"], "ready")
+        self.assertEqual(row["committed_revision"], 1)
+        work = session_work.delivery_work(self.bot, pending, self.state)
+        self.assertEqual(work["task"], "给飞书卡片接入标题回执闸，交付三 runtime 一致标题")
+        # A later global update cannot relabel an already queued turn.
+        session_work.set_work(self.bot, "Other", "新任务", state_dir=self.state)
+        self.assertEqual(session_work.delivery_work(self.bot, pending, self.state)["project"], "Link16")
+
+    def test_keep_requires_model_state_and_progress_increments_revision(self):
+        self.begin()
+        with self.assertRaisesRegex(ValueError, "必须 replace"):
+            session_work.decide_work(self.bot, "turn-1", "keep", state_dir=self.state)
+        session_work.decide_work(
+            self.bot, "turn-1", "replace", project="Link16", task="修复卡片标题",
+            progress="实现 🔄", state_dir=self.state,
+        )
+        self.begin("turn-2", "digest-2")
+        kept = session_work.decide_work(self.bot, "turn-2", "keep", state_dir=self.state)
+        self.assertEqual(kept["committed_revision"], 1)
+        self.begin("turn-3", "digest-3")
+        changed = session_work.decide_work(
+            self.bot, "turn-3", "progress", progress="实现 ✅ → 测试 🔄",
+            state_dir=self.state,
+        )
+        self.assertEqual(changed["committed_revision"], 2)
+        self.assertEqual(changed["work"]["task"], "修复卡片标题")
+
+    def test_new_turn_and_revision_both_reject_stale_writes(self):
+        self.begin("old")
+        self.begin("new")
+        with self.assertRaisesRegex(ValueError, "已过期"):
+            session_work.decide_work(
+                self.bot, "old", "replace", project="P", task="旧任务", state_dir=self.state,
+            )
+        session_work.set_work(self.bot, "P", "旁路更新", state_dir=self.state)
+        with self.assertRaisesRegex(ValueError, "revision"):
+            session_work.decide_work(
+                self.bot, "new", "replace", project="P", task="新任务", state_dir=self.state,
+            )
+
+    def test_stop_blocks_once_then_creates_visible_failure_title(self):
+        self.begin()
+        reason = session_work.request_stop_repair(self.bot, "turn-1", state_dir=self.state, now=20)
+        self.assertIn("回执缺失", reason)
+        self.assertIsNone(session_work.request_stop_repair(
+            self.bot, "turn-1", state_dir=self.state, now=21,
+        ))
+        record = {"turn_key": "turn-1", "workline_gate": session_work.GATE_CONTRACT}
+        work = session_work.delivery_work(self.bot, record, self.state)
+        self.assertIn("标题生成失败", work["task"])
+        self.assertIn("🔴", work["progress"])
+
+    def test_prompt_digest_recovers_kimi_userprompt_turn(self):
+        self.begin("hook-key", "same-prompt")
+        self.assertEqual(
+            session_work.turn_for_prompt(self.bot, "same-prompt", self.state)["turn_key"],
+            "hook-key",
+        )
+        self.assertIsNone(session_work.turn_for_prompt(self.bot, "different", self.state))
+
+    def test_missing_old_receipt_degrades_to_visible_red_title_not_deadlock(self):
+        record = {"turn_key": "evicted", "workline_gate": session_work.GATE_CONTRACT}
+        work = session_work.delivery_work(self.bot, record, self.state)
+        self.assertIn("回执已过期", work["task"])
+        self.assertIn("🔴", work["progress"])
+
+
 class ApplyBannerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -168,6 +259,14 @@ class ApplyBannerTests(unittest.TestCase):
         full = session_work.apply_banner(_card("短"), self.bot, self.state)["body"]["elements"][0]["content"]
         self.assertIn("阶段" * 60, full)
 
+    def test_turn_snapshot_overrides_later_global_workline(self):
+        old = {"project": "TC101P", "task": "交付旧 turn 的正确标题", "progress": "完成 ✅"}
+        session_work.set_work(self.bot, "TC101S", "后来一轮的新任务", state_dir=self.state)
+        payload = session_work.apply_banner(_card("旧 turn 正文"), self.bot, self.state, work=old)
+        self.assertEqual(payload["header"]["title"]["content"],
+                         "📌 TC101P · 交付旧 turn 的正确标题")
+        self.assertTrue(payload["body"]["elements"][0]["content"].startswith("完成 ✅"))
+
 
 class KillSwitchTests(unittest.TestCase):
     def test_env_off_disables_banner_and_hook(self):
@@ -207,11 +306,12 @@ class HookContextTests(unittest.TestCase):
             self.assertEqual(emitted["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
             self.assertIn("📌 TC101P · 给 TC101P 写帖子 ⏎ 找素材 ✅ → 写帖子 🔄", ctx)
             self.assertIn("session_work.py", ctx)
-            self.assertIn("set --project", ctx)
+            self.assertIn("decide --turn-key", ctx)
+            self.assertIn("--project", ctx)
             self.assertIn("--progress", ctx)
             self.assertIn("交付结果", ctx)
 
-    def test_codex_turn_prints_nothing(self):
+    def test_codex_turn_gets_explicit_skill_context_and_pending_gate(self):
         import bridge_userprompt
         with tempfile.TemporaryDirectory() as tmp:
             payload = {"prompt": "hi", "thread_id": "t1"}
@@ -222,7 +322,13 @@ class HookContextTests(unittest.TestCase):
                     mock.patch.object(bridge_userprompt.bridge_inbox, "confirm_prompt"), \
                     redirect_stdout(out):
                 bridge_userprompt.main()
-            self.assertEqual(out.getvalue().strip(), "")
+            emitted = json.loads(out.getvalue().strip())
+            ctx = emitted["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("explicitly activates the feishu-workline skill", ctx)
+            route = json.loads((Path(tmp) / "bridge-turn-route-tb25-test.json").read_text(encoding="utf-8"))
+            self.assertEqual(route["workline_gate"], session_work.GATE_CONTRACT)
+            gate = json.loads(session_work.gate_path("tb25-test", tmp).read_text(encoding="utf-8"))
+            self.assertEqual(gate["turns"][route["turn_key"]]["status"], "pending")
 
     def test_kimi_content_parts_get_plain_context_and_preserve_route_text(self):
         import bridge_userprompt
@@ -247,7 +353,7 @@ class HookContextTests(unittest.TestCase):
                     redirect_stdout(out):
                 bridge_userprompt.main()
             emitted = out.getvalue().strip()
-            self.assertIn("[Link16 工作行]", emitted)
+            self.assertIn("[Link16 feishu-workline]", emitted)
             self.assertIn("📌 Link16 · 核验 Kimi 飞书进度卡", emitted)
             self.assertNotIn("hookSpecificOutput", emitted)
             self.assertNotIn("PRIVATE_MEDIA", emitted)

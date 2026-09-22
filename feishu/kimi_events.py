@@ -6,6 +6,7 @@ tool args/results, error messages, or native configuration enters public state.
 """
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 
 from bridge_events import MilestoneAccumulator, _plan_label, _safe_relative_path
@@ -34,6 +35,7 @@ class KimiEvents:
         self.tool_steps = set()
         self.seen = set()
         self.closed = True
+        self.prompt_digest = ""
 
     def _progress(self):
         result = self.accumulator.progress_record(session=self.session, route=self.route)
@@ -63,6 +65,9 @@ class KimiEvents:
                 if isinstance(p, dict) and p.get("type") == "text"
             )
             self.turn = f"kimi:{self.session}:{offset}"
+            self.prompt_digest = hashlib.sha256(
+                prompt.replace("\r\n", "\n").replace("\r", "\n").strip().encode("utf-8")
+            ).hexdigest()
             self.route = {
                 **route_from_prompt(prompt), "active": True,
                 "turn_key": self.turn, "session": self.session,

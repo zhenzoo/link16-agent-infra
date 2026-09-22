@@ -25,6 +25,8 @@ class ProfileBootstrapTests(unittest.TestCase):
             self.assertTrue((home / ".codex-personal").is_dir())
             self.assertTrue((home / ".claude-personal" / "skills" / "feishu" / "SKILL.md").is_file())
             self.assertTrue((home / ".agents" / "skills" / "feishu" / "SKILL.md").is_file())
+            self.assertTrue((home / ".claude-personal" / "skills" / "feishu-workline" / "SKILL.md").is_file())
+            self.assertTrue((home / ".agents" / "skills" / "feishu-workline" / "SKILL.md").is_file())
             hooks = json.loads((home / ".codex-personal" / "hooks.json").read_text(encoding="utf-8"))
             self.assertEqual(set(hooks["hooks"]), {"Stop", "PostToolUse", "UserPromptSubmit"})
             bashrc = (home / ".bashrc").read_text(encoding="utf-8")

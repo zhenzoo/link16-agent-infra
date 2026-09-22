@@ -46,6 +46,7 @@ class HookInstallerTests(unittest.TestCase):
         self.assertEqual(sum("codex_bridge_stop.py" in cmd for cmd in commands), 1)
         self.assertEqual(sum("codex_bridge_posttool.py" in cmd for cmd in commands), 1)
         self.assertEqual(sum("bridge_userprompt.py" in cmd for cmd in commands), 1)
+        self.assertEqual(sum("bridge_workline_stop.py" in cmd for cmd in commands), 1)
 
         twice = installer.merge_hooks(merged, additions)
         self.assertEqual(merged, twice)
@@ -84,6 +85,7 @@ class HookInstallerTests(unittest.TestCase):
             self.assertEqual(sum("codex_bridge_stop.py" in item for item in commands), 1)
             self.assertEqual(sum("codex_bridge_posttool.py" in item for item in commands), 1)
             self.assertEqual(sum("bridge_userprompt.py" in item for item in commands), 1)
+            self.assertEqual(sum("bridge_workline_stop.py" in item for item in commands), 1)
 
     def test_missing_installs_and_malformed_or_invalid_shape_fail_closed(self):
         installer = load_installer()

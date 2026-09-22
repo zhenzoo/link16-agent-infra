@@ -18,6 +18,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import turn_delivery_guard  # noqa: E402
+
 
 def _read_stdin_json():
     """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
@@ -75,6 +78,14 @@ def main():
     except Exception:                             # noqa: BLE001
         rec["label"] = f"🔧 {tool_name}"
     outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
+    try:
+        active_route = turn_delivery_guard.read_route(outdir, bot)
+        if isinstance(active_route, dict):
+            rec["route"] = turn_delivery_guard.public_route(active_route)
+            rec["turn_key"] = active_route.get("turn_key")
+            rec["workline_gate"] = active_route.get("workline_gate")
+    except OSError:
+        pass
     outbox = outdir / f"bridge-outbox-{bot}.jsonl"
     try:
         outbox.parent.mkdir(exist_ok=True)

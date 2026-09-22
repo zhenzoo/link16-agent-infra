@@ -19,6 +19,14 @@ last_reviewed: 2026-09-22
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.31.0 — 2026-09-22 · 飞书工作标题从软提醒升级为三运行时机械回执闸
+
+- **标题语义仍由 LM 写，触发和验收改由桥负责**：新增 repo-owned `feishu-workline` 显式 skill。每个飞书 turn 由 UserPromptSubmit 先建立 `pending`，再把 skill 正文、turn key 与精确 `decide` 命令注入 Claude、Codex、Kimi；LM 只判断 `keep / replace / progress` 并填写 `project / task / progress`，session、runtime、route、revision、状态、配色、摘要和裁切全部机械生成。
+- **普通工作卡拿不到回执就不出站**：outbox 对新合同的 answer/progress/ask 保留水位，直到回执 `ready`；放行时把该 turn 的工作行快照钉进 card fragment，后来一轮即使已改全局标题，也不会把旧答案错标成新任务。回执过期或被清理时以红色故障标题降级，不会把队头永久卡死。
+- **Stop 只续跑一次**：三种 runtime 均安装同步 `bridge_workline_stop.py`。第一次缺回执返回 `decision=block` 让 LM 补做 skill；第二次仍缺则写 `failed-ready` 红色标题并保留答案，既不静默缺标题，也不形成无限 Stop 循环。Claude 异步 Stop、legacy Codex 和 typed Codex final 在 pending 时不产出抢跑终答；Kimi Wire 用 prompt digest 复用 hook 创建的同一 turn key。
+- **部署与兼容**：`profile_bootstrap.py` 幂等安装 `feishu` + `feishu-workline` 两棵 skill，并继续对同名冲突、用户 drift 和 manifest drift fail closed；Codex/Kimi hook 合并保留用户原配置。旧 `session_work.py set`、无 gate 的历史 outbox、`LINK16_WORK_LINE=off` 和 a2a 纯文字路径保持兼容。现有长驻桥不会热加载本版，需在维护窗口按正常流程重启对应 bridge。
+- **验证**：全仓 `1007 passed、2 skipped、117 subtests passed`；新增端到端 fixture 证明 pending 零网络调用、ready 卡片同时有 header/Stage/summary、跨 turn 仍用原快照；真实 Claude transcript Stop 重放 1 个落点、丢正文 0；2026-09-20 起 baseball-2/3/4/6、baseball、ccp、link16 共 105 轮重发审计 0 次；skill 官方校验通过，Python compileall 与 `git diff --check` 通过。
+
 ## v0.30.0 — 2026-09-22 · Kimi 原生进度与三运行时计划卡统一
 
 - **飞书计划卡只有一套语义**：共享 renderer 现在按 `Stage N｜具体对象与结果` 为 Claude Code、Codex 和 Kimi 渲染同一份计划，不再为 Kimi 外套自动编号的 Markdown 列表；块间距和工作行标题同样由共享出站链统一处理。Codex/Claude 原有 `AGENTS.md`/`CLAUDE.md` 规则不会被 renderer 改写。

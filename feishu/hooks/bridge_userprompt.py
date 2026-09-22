@@ -68,29 +68,39 @@ def main():
     # ⚠️ p2a-ext 放最前：正则从左试·"p2a" 会抢先匹配 "p2a-ext" 的前缀只剩 "-ext"（外部真人回信就漏回群了）。
     route = turn_delivery_guard.route_from_prompt(prompt)
 
-    try:
-        turn_delivery_guard.activate(
-            sd, bot, route, session=inp.get("session_id") or inp.get("thread_id"),
-        )
-    except OSError:
-        pass
-    # 每轮把「当前卡片顶栏是什么 + 什么时候该改」喂给支持上下文注入的 runtime。
-    # Codex 只从共享 AGENTS.md 取规则，没有 provider-specific context 输出，避免无效读状态。
+    session = inp.get("session_id") or inp.get("thread_id")
     is_kimi = inp.get("client_type") == "kimi_code_cli"
     is_claude = bool(inp.get("transcript_path"))
-    if is_kimi or is_claude:
-        context = _work_context(bot, sd)
-        if is_kimi and context:
-            # Kimi exit-0 stdout is appended to context; JSON is not its output contract.
-            print(context)
-        elif is_claude and context:
-            print(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit", "additionalContext": context}}, ensure_ascii=False))
+    runtime = "kimi" if is_kimi else ("claude" if is_claude else "codex")
+    active = None
+    try:
+        import session_work
+        gate_on = session_work.enabled()
+        hint = session_work.resolve(bot, sd).get("project") or ""
+        active = turn_delivery_guard.activate(
+            sd, bot, route, session=session,
+            metadata={"workline_gate": session_work.GATE_CONTRACT} if gate_on else None,
+        )
+        if gate_on:
+            session_work.begin_turn(
+                bot, active["turn_key"], session=session, runtime=runtime,
+                project_hint=hint, prompt_digest=bridge_inbox.prompt_digest(prompt),
+                state_dir=sd,
+            )
+    except (OSError, ValueError):
+        pass
+    # 机械触发 repo-owned skill。Claude/Codex 接 JSON additionalContext；
+    # Kimi 的 exit-0 stdout 会直接进入上下文。
+    context = _work_context(bot, sd, active)
+    if is_kimi and context:
+        print(context)
+    elif context:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": context}}, ensure_ascii=False))
 
 
-def _work_context(bot, sd):
-    """当前顶栏 + 规则。规则是 agent 的判断活（不是每条消息都改）：接新任务 / Stage 切换 / 旧任务做完。
-    主人 2026-09-19 定：顶栏必须写清【项目名 · 对象 · 要做的动作 · 交付结果】+ Stage 链；不限一行，先不抠长度。"""
+def _work_context(bot, sd, active=None):
+    """Inject the explicit skill plus this turn's mechanically owned fields."""
     try:
         import session_work
         if not session_work.enabled():                    # 总开关关了 → 不提醒
@@ -108,14 +118,27 @@ def _work_context(bot, sd):
         state = f"当前卡片顶栏（自动兜底=目录名+会话标题，还没写项目代号）：{shown}"
     else:
         state = "当前卡片顶栏：空"
+    turn_key = str((active or {}).get("turn_key") or "")
+    try:
+        skill = (Path(__file__).resolve().parents[2] / ".agents" / "skills"
+                 / "feishu-workline" / "SKILL.md").read_text(encoding="utf-8")
+        if skill.startswith("---"):
+            skill = skill.split("---", 2)[-1].strip()
+    except OSError:
+        skill = (
+            "Choose keep, replace, or progress for this turn. Before any other tool, "
+            "run the supplied session_work.py decide command. replace requires project "
+            "+ concrete task; progress requires a Stage chain; keep requires an existing LM workline."
+        )
+    command = f'python "{cli}" decide --turn-key "{turn_key}" --action <keep|replace|progress>'
     return (
-        f"[Link16 工作行] {state}。主人靠它认出你在做哪个项目——十几个 bot 并排、TC101P/TC101S 长得像。"
-        f"不是每条消息都改：接到新任务、PLAN 的 Stage 切换、旧任务做完开新任务时更新；旧任务完成只写新的、不留旧的。"
-        f"内容必须写清：--project 项目代号（可带括号说明是什么仓/什么项目）；--task 对象 + 要做的动作 + 交付结果"
-        f"（点名具体文档/功能/系统，不写「实现+测试」这类抽象类别，例：给 TC101P 的 PRD 补可行性章节，交付改好的 PRD.md）；"
-        f"--progress Stage 链带状态（有 PLAN Markdown 按 PLAN 的 Stage 写，没有就自己概括，例：找素材 ✅ → 写帖子 🔄 → 得出结论 ⏳）。"
-        f"写的是【真实当前情况的大白话】，主人看了就知道你在干嘛；绝不写「项目标签」「对象·动作·交付结果」这类格式词或样例。"
-        f"不限一行，两三行可以，长度先不抠。命令：python \"{cli}\" set --project <代号> --task \"<对象+动作+结果>\" --progress \"<Stage 链>\""
+        f"[Link16 feishu-workline] This bridge turn explicitly activates the feishu-workline skill.\n"
+        f"Mechanical fields: bot={bot}; turn_key={turn_key}; contract={session_work.GATE_CONTRACT}.\n"
+        f"{state}。\nExact command prefix: {command}\n"
+        f"For replace append --project \"<项目>\" --task \"<具体对象+动作+交付结果>\" "
+        f"--progress \"<Stage 链>\"; for progress append --progress; keep needs no semantic flags.\n"
+        f"The first side effect of this turn must be that command; continue the user's request only after it succeeds.\n\n"
+        f"{skill}"
     )
 
 

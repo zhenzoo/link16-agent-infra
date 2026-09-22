@@ -69,6 +69,8 @@ def test_blank_home_dry_run_apply_and_second_apply_are_safe(tmp_path, monkeypatc
     assert all(row["status"] == "ok" for row in second)
     assert (home / ".claude-work" / "skills" / "feishu" / "SKILL.md").is_file()
     assert (home / ".agents" / "skills" / "feishu" / "SKILL.md").is_file()
+    assert (home / ".claude-work" / "skills" / "feishu-workline" / "SKILL.md").is_file()
+    assert (home / ".agents" / "skills" / "feishu-workline" / "SKILL.md").is_file()
     hooks = json.loads((home / ".codex-work" / "hooks.json").read_text(encoding="utf-8"))
     assert set(hooks["hooks"]) == {"Stop", "PostToolUse", "UserPromptSubmit"}
     assert first

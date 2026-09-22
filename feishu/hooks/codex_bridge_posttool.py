@@ -7,6 +7,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import turn_delivery_guard  # noqa: E402
+
 
 def _read_stdin_json():
     """Decode hook payload bytes as UTF-8, independent of Windows ANSI locale."""
@@ -59,7 +62,9 @@ def main():
     try:
         route = json.loads((outdir / f"bridge-turn-route-{bot}.json").read_text(encoding="utf-8"))
         if isinstance(route, dict):
-            rec["route"] = route
+            rec["route"] = turn_delivery_guard.public_route(route)
+            rec["turn_key"] = route.get("turn_key")
+            rec["workline_gate"] = route.get("workline_gate")
     except (OSError, ValueError):
         pass
     outbox = outdir / f"bridge-outbox-{bot}.jsonl"

@@ -58,9 +58,13 @@ def _self_contained_checks() -> list[tuple[str, bool]]:
         hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
         return [
             ("repo-owned feishu skill source", (ROOT / ".agents/skills/feishu/SKILL.md").is_file()),
+            ("repo-owned feishu-workline skill source",
+             (ROOT / ".agents/skills/feishu-workline/SKILL.md").is_file()),
             ("Claude and Codex skill targets", all(path.is_file() for path in (
                 home / ".claude-work/skills/feishu/SKILL.md",
                 home / ".agents/skills/feishu/SKILL.md",
+                home / ".claude-work/skills/feishu-workline/SKILL.md",
+                home / ".agents/skills/feishu-workline/SKILL.md",
             ))),
             ("Codex three-event hooks", set(hooks.get("hooks") or {}) == {
                 "Stop", "PostToolUse", "UserPromptSubmit",

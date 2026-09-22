@@ -18,6 +18,8 @@ import time
 import uuid
 from pathlib import Path
 
+import session_work
+
 PROGRESS_TAIL = 20          # 合并进度卡最多显示最近 N 步（旧·已不用）
 
 
@@ -166,6 +168,7 @@ def load_progress_state(state_dir, bot):
         "v2_card_ids": raw.get("card_ids") or [],
         "v2_acked": raw.get("acked") or {},
         "v2_route": raw.get("route"),
+        "v2_workline": raw.get("workline"),
         "v2_pending": raw.get("pending"),
         "v2_completed": raw.get("completed") or [],
     }
@@ -184,6 +187,7 @@ def save_progress_state(state_dir, bot, state):
         "card_ids": state.get("v2_card_ids") or [],
         "acked": state.get("v2_acked") or {},
         "route": state.get("v2_route"),
+        "workline": state.get("v2_workline"),
         "pending": state.get("v2_pending"),
         "completed": state.get("v2_completed") or [],
     }
@@ -490,6 +494,7 @@ def write_hooks_settings(state_dir, hooks_dir):
     """运行时生成 bridge-hooks.json（abs hook 路径·跨机/跨 repo 安全 → spawn 时 --settings 指它）。
     async=true 不阻塞会话；PostToolUse 收窄到实质动作。返回文件路径。"""
     stop = (Path(hooks_dir) / "bridge_stop.py").as_posix()
+    workline_stop = (Path(hooks_dir) / "bridge_workline_stop.py").as_posix()
     post = (Path(hooks_dir) / "bridge_posttool.py").as_posix()
     pre = (Path(hooks_dir) / "bridge_pretool.py").as_posix()
     ups = (Path(hooks_dir) / "bridge_userprompt.py").as_posix()
@@ -508,6 +513,7 @@ def write_hooks_settings(state_dir, hooks_dir):
             # active-turn record is the mechanical duplicate-send guard.
             {"type": "command", "command": f'python "{ups}"', "timeout": 10}]}],
         "Stop": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f'python "{workline_stop}"', "timeout": 5},
             {"type": "command", "command": f'python "{stop}"', "timeout": 15, "async": True}]}],
         "PostToolUse": [{"matcher": PROGRESS_TOOLS, "hooks": [
             {"type": "command", "command": f'python "{post}"', "timeout": 10, "async": True}]}],
@@ -817,7 +823,7 @@ class RetrySend(Exception):
 
 async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_sec, clock,
                       force_flush=False, on_ask=None, on_resume=None, persist_answer=None,
-                      persist_progress=None):
+                      persist_progress=None, workline_gate=None):
     """统一卡片流：progress 当前卡 edit_card 原地长大 → 满 CARD_BUDGET 或 edit 失败 → 冻结开新卡接着写(不截断)；
     answer 拆 ≤BUDGET 连续多卡(new_card·失败退 send_plain)·发前先把进度卡刷到最新·保序。
     deps（均 coroutine）：new_card(text)->mid|{ok,message_id}|None · edit_card(mid,text)->bool · send_plain(text)。
@@ -909,8 +915,10 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         for item in pending["chunks"]:
             if item.get("acked"):
                 continue
-            result = await new_card(item["text"], route=pending["route"], purpose="progress",
-                                    fragment={"fragment_id": item["id"]})
+            result = await new_card(
+                item["text"], route=pending["route"], purpose="progress",
+                fragment={"fragment_id": item["id"], "workline": pending.get("workline")},
+            )
             ok, mid = _result(result)
             if result != "skip-progress" and not ok:
                 raise RetrySend()
@@ -948,7 +956,10 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 chunks_to_send.append({"id": hashlib.sha256(("progress:" + uuid.uuid4().hex).encode()).hexdigest(),
                                        "text": chunk, "acked": False,
                                        "card_ids": [str(step["event_id"]) for step in group if step.get("event_id")]})
-        state["v2_pending"] = {"chunks": chunks_to_send, "steps": steps, "route": state.get("v2_route")}
+        state["v2_pending"] = {
+            "chunks": chunks_to_send, "steps": steps, "route": state.get("v2_route"),
+            "workline": state.get("v2_workline"),
+        }
         _checkpoint_progress()
         await _resume_progress_send()
         return state.get("v2_mid"), state.get("v2_card_ids") or []
@@ -1041,7 +1052,8 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                     pending = [s.get("label", "") for s in full[pending_start:state["seg_start"] + k]]
                     delta = _card_text(head, pending or seg[:k])
                     result = await new_card(
-                        delta, route=state.get("progress_route"), purpose="progress"
+                        delta, route=state.get("progress_route"), purpose="progress",
+                        fragment={"workline": state.get("progress_workline")},
                     )
                     ok, mid = _result(result)
                     state["cur_mid"] = mid if ok else None
@@ -1049,7 +1061,8 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                     n += 1
             else:
                 result = await new_card(
-                    text, route=state.get("progress_route"), purpose="progress"
+                    text, route=state.get("progress_route"), purpose="progress",
+                    fragment={"workline": state.get("progress_workline")},
                 )
                 ok, mid = _result(result)
                 state["cur_mid"] = mid if ok else None
@@ -1163,7 +1176,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             )}
             meta.update({
                 "session": record.get("session"), "anchor": record.get("anchor"),
-                "source_ts": record.get("ts"),
+                "source_ts": record.get("ts"), "workline": record.get("_workline"),
             })
             result = await new_card(
                 fragment["rendered"], route=route, purpose="answer", fragment=meta,
@@ -1200,6 +1213,11 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
     for r in recs:
         kind = r.get("kind")
         state["_active_record_kind"] = kind
+        record_workline = None
+        if workline_gate and kind in {"answer", "progress", "ask"}:
+            record_workline = workline_gate(r)
+            if record_workline is False:
+                raise RetrySend()
         if kind == "doc_delivery":
             _remember_doc_delivery(state, r)
             continue
@@ -1208,6 +1226,8 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             if on_resume:
                 on_resume()
         if kind == "answer":
+            if isinstance(record_workline, dict):
+                r["_workline"] = record_workline
             text = (r.get("text") or "").strip()
             if not text:
                 continue
@@ -1277,6 +1297,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                     state["v2_acked"] = {}
                 state["v2_steps"] = r.get("steps") or []
                 state["v2_route"] = r.get("route")
+                state["v2_workline"] = record_workline
                 continue
             steps = r.get("steps")
             if steps is None:                              # 老式单 label 兜底 → 累加
@@ -1293,6 +1314,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             state["steps"] = steps
             state["usage"] = r.get("usage") or state.get("usage") or {}
             state["progress_route"] = r.get("route") or state.get("progress_route")
+            state["progress_workline"] = record_workline
     if _has_pending(state) and (force_flush or clock() - state["last_flush"] >= coalesce_sec):
         state["_active_record_kind"] = "progress"
         await _flush_v2()
@@ -1325,6 +1347,7 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
         new_card=new_card, edit_card=edit_card, send_plain=send_plain,
         persist_answer=lambda delivery: save_answer_state(state_dir, bot, delivery),
         persist_progress=lambda value: save_progress_state(state_dir, bot, value),
+        workline_gate=lambda record: session_work.delivery_work(bot, record, state_dir),
     )
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
     on_ask = lambda qs, key, sess: picker_write(state_dir, bot, qs, session=sess, key=key)   # noqa: E731

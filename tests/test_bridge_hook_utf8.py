@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOKS = ROOT / "feishu" / "hooks"
 HOOK_FILES = (
     "bridge_userprompt.py",
+    "bridge_workline_stop.py",
     "bridge_pretool.py",
     "bridge_posttool.py",
     "bridge_stop.py",
