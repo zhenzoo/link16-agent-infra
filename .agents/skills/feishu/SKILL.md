@@ -17,6 +17,7 @@ description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档
 - `docs/SOP-125-bot-rename.md`：已有 bot 改名、后台链接、名称同步与恢复。
 - `docs/SOP-140-feishu-document-io.md`：正文与原生表格的读写、逐格核验和失败处理。
 - `docs/SOP-141-native-media-review.md`：图片、音频、视频放进正文后实际点播的发布与验收流程；包括超过20MB的分片上传。
+- `references/SOP-020-native-sheet-from-reference.md`：用飞书API读取一份参考电子表格的布局与交互合同，再新建同类型原生Sheet并完整回读。
 
 不要把工具脚本复制进 runtime home，也不要依赖某个用户的私人 skills。
 
@@ -44,6 +45,7 @@ description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档
 | 读全文、解析wiki链接、表格写回、查文档权限 | `python feishu/docio_cli.py --bot <我> inspect/read/write/doctor ...`；依 SOP-140，媒体插入走上一行 |
 | 发可播放语音 | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"` |
 | 发布飞书在线文档 | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
+| 参照现有表格新建同类型飞书Sheet | 读 [原生Sheet参考表复刻流程](references/SOP-020-native-sheet-from-reference.md)，再按`lark-shared`与`lark-sheets`调用飞书API；先只读参考表，声明式新建，最后回读工作簿、单元格、样式、合并、冻结、下拉和条件格式 |
 | 将已有 HTML、视频交互或三维查看器发布为妙搭应用链接 | 读 [HTML→妙搭流程](references/SOP-010-html-to-miaoda.md)，复用 `lark-apps`，保留已有应用入口；资源清单和发布核验用 `python feishu/miaoda_delivery.py --help` |
 | 把 bot 建的在线文档交给主人（主人说“这份给我/交接给我/要发给别人看”，或 PRD 交付稿） | `python feishu/docio_cli.py transfer-owner <url>`（默认 dry-run，确认后加 `--apply`）；用**创建它的那只 bot** 身份跑，主人 = 该 bot 的 owner 文件，bot 保留可管理；不挂群、不改其他协作者与分享设置 |
 | 明确发送原文件附件 | `python feishu/send_feishu_file.py --bot <我> --to <oc_群/ou_人> --file <路径>` |
@@ -81,6 +83,7 @@ description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档
 - `set-online on|off` 是持久用户偏好，不是一次发送的临时事务。单次在线交付必须用 `--explicit-online`，不得先开全局值再依赖 shell `finally` 恢复；外层执行器超时或被终止会让恢复语句来不及运行。
 - 用户要新建在线文档用 `send --doc`；失败时核验权限、频控与格式原因，**绝不自动发送本地原文件附件**。只有用户明确要“把文件内容发成聊天文字”时才用 `--file-as-text`，不得跨 bot 代发。
 - Markdown/TXT 优先走不依赖 `drive:drive` 的原生 docx；HTML/Office 才优先走 import。在线失败时按需运行权限审计并给修复入口，不擅自降低交付形态。
+- 用户要“像某张飞书表格一样”时，`一样`默认指原生Sheet资源类型、字段、布局和交互能力相同，不等于复制参考表正文。必须先按SOP-020回读参考表的真实结构，再用`+workbook-create`声明式新建；不得把Doc原生表、Markdown表或Excel导入冒充同类型Sheet，也不得为省事改写参考表。
 - 研究、计划和日常回复默认用纵向标题、段落与列表，手机阅读优先；正式PRD按需要使用原生表格。不要把本地Markdown里的竖线表格直接塞进飞书普通文字块，也不把用户偏好解释成禁止任何表格。用户要比较时用同一内容展示真实原生样式。
 - Markdown创建的机械闸在 `feishu/doc_structure.py`：非PRD表格编译为原生字段列表并保留链接；PRD简单原生表格先检查全篇预算，复杂表格/媒体转 `lark-doc` 专用资源流程。写入后完整分页回读正文、链接、样式和结构，`structure_verified=true`才准返回成功。失败不再纯文本降级，也不得用import绕过检查。
 - 更新已有在线文档先读 `lark-doc` 的XML与资源规范，再走 `python feishu/docio_cli.py write <url> --patch <json>`；补丁 `docx.format=xml`，写入前绑定当前revision，已获授权则加 `--apply`。整篇覆盖/追加自动构造全文核验目标；局部替换必须提供 `expected_document` 完整XML。`doc_xml_structure.py`逐项核对全文、链接、原生列表/表格、样式与资源标识后才报告成功。不要直接调用裸 `lark-cli +update` 绕过回读闸；保留已有评论/资源，局部内容变化不能擅自整篇覆盖。
