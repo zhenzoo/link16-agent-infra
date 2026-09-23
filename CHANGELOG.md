@@ -19,6 +19,12 @@ last_reviewed: 2026-09-23
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.32.2 — 2026-09-23 · profile doctor 不再被长驻进程的 PATH 快照误导
+
+- **已装的 CLI 不再被判成缺失**：`profile_doctor` 的 CLI 检查改为两级——先查本进程 PATH，未命中再查注册表里的 user+machine 持久 PATH（即新开终端会看到什么）。只在持久 PATH 命中时记 `warnings` 并保持 `ok`，两条来源都查不到才沿用原来的 `CLI 不可用：<runtime>` 错误。结果字典新增 `warnings` 字段；非 Windows 或注册表读不到时退回只信本进程 PATH，不猜。
+- **为什么**：本机 wmux daemon 与全部桥进程起于 9-15，其后安装的 kimi（9-21）与自更新后的 codex 不在它们的 PATH 快照里，于是 doctor 报错、govctl 每次提交打 ERROR。实测新开的 wmux pane `which codex kimi claude` 三个全部解析成功，面板并未受影响；重启舰队只会白白冷启在跑的会话。
+- **验证**：`tests/test_agent_runtime.py` 76 项通过（新增 4 个回归覆盖仅持久 PATH 命中、两处都缺、本进程命中不读注册表、注册表读不到）；真机 `cxp`/`kp` doctor 由 FAIL 转为 ok + warning。
+
 ## v0.32.1 — 2026-09-23 · 看门狗自动换号候选范围
 
 - **避免额度不足后切到未授权账号**：`agent_quota` 从本机 effective profile registry 读取可选 `auto_failover_profiles`，只在该范围内按额度与 runtime 选号；候选为空或配置错误时不切号。看门狗的显式 `failover --to` 和换号就绪显示共用此范围；直接 `/account` 仍由主人手动选择。
