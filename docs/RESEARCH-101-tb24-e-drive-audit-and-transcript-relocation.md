@@ -186,7 +186,7 @@ C 盘 249 GB，剩 9.7 GB。用户目录 145 GB 里持续增长的是：
 
 ### 6.2 方案：搬实体、留入口——不改任何默认路径
 
-用 NTFS 目录联接（junction，`mklink /J`）：把 `C:\Users\zhuzhen\.codex-personal\sessions` 整个搬到 `E:\...\codex-personal\sessions`，再在原位置建一个同名联接指向它。对所有程序来说，`C:\Users\zhuzhen\.codex-personal\sessions\2026\09\...` 这个路径继续存在、继续可读可写，只是字节落在 E 盘。
+用 NTFS 目录联接（junction，`mklink /J`）：把 `%USERPROFILE%\.codex-personal\sessions` 整个搬到 `E:\...\codex-personal\sessions`，再在原位置建一个同名联接指向它。对所有程序来说，`%USERPROFILE%\.codex-personal\sessions\2026\09\...` 这个路径继续存在、继续可读可写，只是字节落在 E 盘。
 
 为什么它不影响任何现有工具：
 
