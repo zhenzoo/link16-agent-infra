@@ -115,6 +115,23 @@ def test_选号_跨runtime兜底():
     assert q.pick(rows, exclude=[], prefer_runtime="claude")["profile"] == "cxp"
 
 
+def test_自动候选范围_额度再高也不切到被排除的cx或kimi(monkeypatch):
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: frozenset({"ccp", "cxp"}))
+    rows = [_row("cx", "codex", 0, "够用"), _row("kp", "kimi", 0, "够用"),
+            _row("cxp", "codex", 70, "够用")]
+    assert q.pick(rows, prefer_runtime="codex")["profile"] == "cxp"
+    assert q.pick(rows, exclude=["cxp"], prefer_runtime="codex") is None
+
+
+def test_自动候选范围_拼错profile时拒绝选号(monkeypatch):
+    known = q.agent_runtime.profile_specs()
+    monkeypatch.setattr(q.agent_runtime, "profile_specs", lambda: known)
+    monkeypatch.setattr(q.agent_runtime, "_profile_document",
+                        lambda path=None: {"auto_failover_profiles": ["cxpr"]})
+    with pytest.raises(ValueError, match="未知 profile"):
+        q.auto_failover_profiles()
+
+
 def test_选号_问不到的绝不选():
     """宁可不换，也不换到一个不知深浅的号 —— 换过去再撞一次比不换更糟。"""
     rows = [_row("ccp2", "claude", 100, "满"),

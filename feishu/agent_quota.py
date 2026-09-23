@@ -306,13 +306,33 @@ def collect(names=None):
     return rows
 
 
+def auto_failover_profiles():
+    """本机 effective registry 中允许自动换入的 profile；缺字段沿用旧行为。"""
+    configured = agent_runtime._profile_document().get("auto_failover_profiles")
+    if configured is None:
+        return None
+    if (not isinstance(configured, list)
+            or any(not isinstance(name, str) or not name for name in configured)
+            or len(configured) != len(set(configured))):
+        raise ValueError("auto_failover_profiles 必须是不重复的 profile 名数组")
+    known = {spec.name for spec in agent_runtime.profile_specs()}
+    unknown = set(configured) - known
+    if unknown:
+        raise ValueError(f"auto_failover_profiles 含未知 profile：{sorted(unknown)!r}")
+    return frozenset(configured)
+
+
 def pick(rows, exclude=(), prefer_runtime=None):
     """选一个「最该切过去」的 profile。规则（按序）：
-       ① 只考虑 verdict=够用/紧张（问不到的绝不选 —— 宁可不切，也不切到一个不知深浅的号）
-       ② 同 runtime 优先（claude→claude 才能续同一份 transcript）
-       ③ 余量大的优先（取 5h/周 里较差的那个当分数）
+       ① effective registry 的自动候选范围（如已配置）
+       ② 只考虑 verdict=够用/紧张（问不到的绝不选）
+       ③ 同 runtime 优先，再按 5h/周较差的余量排序
        返回 row 或 None。"""
-    ok = [r for r in rows if r["verdict"] in ("够用", "紧张") and r["profile"] not in set(exclude)]
+    allowed = auto_failover_profiles()
+    excluded = set(exclude)
+    ok = [r for r in rows if r["verdict"] in ("够用", "紧张")
+          and r["profile"] not in excluded
+          and (allowed is None or r["profile"] in allowed)]
     if not ok:
         return None
 

@@ -880,7 +880,11 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     # ① 选号
     rows = agent_quota.collect()
     by = {r["profile"]: r for r in rows}
+    allowed = agent_quota.auto_failover_profiles()
+    candidate_rows = [r for r in rows if allowed is None or r["profile"] in allowed]
     if target:
+        if allowed is not None and target not in allowed:
+            log(f"❌ 指定的目标号 {target} 不在本机自动换号候选范围"); return False
         chosen = by.get(target)
         if not chosen:
             log(f"❌ 指定的目标号 {target} 不在 profile 表"); return False
@@ -888,13 +892,13 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
             log(f"❌ 指定的目标号 {target} 当前不可切：{chosen.get('verdict')}")
             return False
     else:
-        chosen = agent_quota.pick(rows, exclude=[cur],
+        chosen = agent_quota.pick(candidate_rows, exclude=[cur],
                                   prefer_runtime=(by.get(cur) or {}).get("runtime"))
     if not chosen:
         notify(bot_name, "no_target",
-               f"🔴 {bot_name} 撞额度上限（{cur}），但**所有号都不可用**，没换。\n"
+               f"🔴 {bot_name} 撞额度上限（{cur}），但**允许自动切换的号都不可用**，没换。\n"
                + "\n".join(f"· {r['profile']} {r['verdict']} 周{r['weekly_percent']}%"
-                           for r in rows if r["status"] == "ok"))
+                           for r in candidate_rows))
         return False
     tgt = chosen["profile"]
     curr = by.get(cur) or {}
@@ -906,7 +910,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     cur_rt = curr.get("runtime")
     why_cross = ""
     if cur_rt and chosen["runtime"] != cur_rt:
-        same = [r for r in rows if r["runtime"] == cur_rt and r["profile"] != cur]
+        same = [r for r in candidate_rows if r["runtime"] == cur_rt and r["profile"] != cur]
         detail = "、".join(f"{r['profile']}({r['verdict']})" for r in same) or "一个都没有"
         why_cross = (f"\n· **跨 runtime 说明**：同为 {cur_rt} 的其他号都用不了 —— {detail}；"
                      f"所以切到 {chosen['runtime']} 的 {tgt}。这是预期行为，不是切错。")
@@ -1444,8 +1448,10 @@ def failover_readiness(rows=None):
 
     返回 {runtime: {"bots": n, "usable": [profile…], "ok": bool}}。"""
     rows = rows if rows is not None else agent_quota.collect()
+    allowed = agent_quota.auto_failover_profiles()
+    candidates = [r for r in rows if allowed is None or r["profile"] in allowed]
     by_rt = {}
-    for r in rows:
+    for r in candidates:
         by_rt.setdefault(r["runtime"], []).append(r)
     in_use = {}
     for bot in _iter_bots():
@@ -1460,7 +1466,7 @@ def failover_readiness(rows=None):
         usable = [r["profile"] for r in by_rt.get(rt, []) if r["verdict"] in ("够用", "紧张")]
         # 换号至少要有 2 个可用号才有意义（撞了的那个会被排除）；
         # 但跨 runtime 也算数 —— 主人已拍板跨 runtime 直接自动切。
-        cross = [r["profile"] for r in rows if r["verdict"] in ("够用", "紧张")]
+        cross = [r["profile"] for r in candidates if r["verdict"] in ("够用", "紧张")]
         out[rt] = {"bots": info["bots"], "usable": usable,
                    "cross_usable": cross, "ok": len(cross) >= 1}
     return out
