@@ -11,13 +11,20 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-23
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.32.0 — 2026-09-23 · 飞书在线链接反查本地 HTML
+
+- **在线入口直达本地审阅页**：新增只读 `feishu/online_local_html.py`，按完整在线 URL 查 `meta.json`／`*.meta.json`，仅接受显式 `local_entry`／`primary_entry` 或文档正文快照映射，并核对 HTML 存在且位于指定项目根目录。引用同一链接的其他页面不会被误认作发布源；只有元数据而无明确 HTML 时返回 `metadata_only`。
+- **真实案例与验证**：虎鲸 VS 蓝袜在线应用链接定位到本地 `player/index.html` 及其 `meta.json`；3 项测试覆盖跨页误认、缺失 HTML 和 Docx 正文快照，`feishu` skill 与 `TOOLS.md` 增加统一入口。
+- **交付规则归属**：飞书 skill 只引用用户级共享沟通段的可见成果节奏，继续负责在线策略、回执和本机打开，不复制 Stage／Step 排程规则。
+- **同期文档**：新增 `RESEARCH-101`，记录 TB24 E 盘审计与 TB25 覆盖核查；研究结论本身不触发文件删除。
 
 ## v0.31.0 — 2026-09-22 · 飞书工作标题从软提醒升级为三运行时机械回执闸
 
