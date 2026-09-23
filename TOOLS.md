@@ -8,6 +8,7 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
+| `feishu/online_local_html.py` | 只读反查飞书在线链接对应的本地 HTML：按完整 URL 找现有 `meta.json` / `*.meta.json`，区分交互评审页与在线文档正文快照，核对明确映射和文件存在性，不把参考页误认成当前页面 | `python feishu/online_local_html.py "<URL>" [--root <项目总目录>] [--json]` |
 | `feishu/miaoda_delivery.py` | 已有 HTML 发布妙搭的资源允许清单与版本核验；只测量明确资源、回读精确 release，不上传整仓、不改可见范围、不发消息。流程见 repo-owned feishu skill 的 HTML→妙搭 reference | `inventory --root <目录> --entry <HTML> --files <清单.json> --output <回执.json>`；`verify-release --project <应用仓> --release-id <ID> --expected-commit <SHA> --output <回执.json>` |
 | `feishu/kimi_native_worker.py` | 原生 Kimi TUI 与可独立重启的 Wire 1.5 观察程序；由 registry 锁定 profile/home，复用 outbox 和卡片 | 桥通过 `agent_runtime.worker_cmd()` 启动；`--observe-only --bot <bot> --cwd <cwd> --state-dir <state>` 只观察已绑定会话，不另建会话；机制见 ARCH-120 §11 |
 | `feishu/bridge_process.py` | 桥、cron、watchdog 共用的 Windows 进程观测与服务互斥；查询失败为未知，受控停止等待退出，同一服务持有系统文件锁到退出 | 库；通过三种服务的 `start` / `stop` / `status` 使用 |

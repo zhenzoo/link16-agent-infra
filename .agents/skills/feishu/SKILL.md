@@ -1,6 +1,6 @@
 ---
 name: feishu
-description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档、在已有文档插入/嵌入图片音频视频、大文件在线审阅、发送消息和语音，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，以及 bot 注册、改名、历史、a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
+description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HTML、新建或编辑在线文档、在已有文档插入/嵌入图片音频视频、大文件在线审阅、发送消息和语音，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，以及 bot 注册、改名、历史、a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
 ---
 
 # Feishu — Link16 核心工具入口
@@ -36,6 +36,7 @@ description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档
 
 | 用户要做什么 | 确定性入口 |
 |---|---|
+| 给飞书在线链接反查本地 HTML | `python feishu/online_local_html.py "<URL>"`：只读匹配项目 `meta.json` / `*.meta.json` 中的精确在线 URL，区分交互评审页与在线文档正文快照，回读存在的 HTML 与映射来源；无显式映射时如实报告，不按文件名猜 |
 | 查看/切换本机全局在线产物开关 | `python feishu/artifact_delivery.py status`；`set-online on|off` |
 | 给另一只 bot 派活、回结果或续轮 | `python feishu/send_feishu_msg.py --bot <我> --to-agent <对方> --text "…"` |
 | 查看可发送的 agent | `python feishu/send_feishu_msg.py --list-agents` |
@@ -60,6 +61,8 @@ description: Link16 飞书/Lark 统一入口。用于新建或编辑在线文档
 | 已有 bot 改名 / 查后台链接 / 改名后新名不识别 | 先读 SOP-125；`python feishu/rename_bot.py plan --bot <原名或别名> --name <准确新名> --out feishu/_state/bot-renames/<本次操作>.json`，按状态给 console_url、watch 或 apply，最后 verify |
 
 表中没有的操作先读 `TOOLS.md`，不要另造脚本。
+
+反查返回 `metadata_only` 时，继续查看已命中的 `meta.json` 中的 `local_source`、发布回执或构建入口，向用户说明找到的是源码还是候选 HTML；没有明确 `local_entry` 就不宣称它是线上发布页的本地同版文件。
 
 改名由 Link16 承担，不在业务仓建脚本。用户已明确指定新名即授权相应本地同步；先 plan，线上名称已经一致则直接 apply 和 verify，需人操作则给后台链接并启动 `watch --background`。普通改名固定内部代号和凭据键，只更新两本名册的显示名与历史别名；不重建应用、不搬会话、不重启桥。转写有歧义只澄清该名称；只有 API 回读和两本名册核验通过才报告完成。运行时专用旧工具需要内部代号时用 `rename_bot.py resolve --bot <显示名>`，不猜变量名。
 
