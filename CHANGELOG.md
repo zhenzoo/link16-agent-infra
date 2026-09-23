@@ -19,6 +19,11 @@ last_reviewed: 2026-09-23
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.32.1 — 2026-09-23 · 看门狗自动换号候选范围
+
+- **避免额度不足后切到未授权账号**：`agent_quota` 从本机 effective profile registry 读取可选 `auto_failover_profiles`，只在该范围内按额度与 runtime 选号；候选为空或配置错误时不切号。看门狗的显式 `failover --to` 和换号就绪显示共用此范围；直接 `/account` 仍由主人手动选择。
+- **回归**：验证 `cx` 或 Kimi 即使显示额度可用也不会被自动选中，以及写错 profile 名时会拒绝选号；看门狗聚焦测试 69 项通过。
+
 ## v0.32.0 — 2026-09-23 · 飞书在线链接反查本地 HTML
 
 - **在线入口直达本地审阅页**：新增只读 `feishu/online_local_html.py`，按完整在线 URL 查 `meta.json`／`*.meta.json`，仅接受显式 `local_entry`／`primary_entry` 或文档正文快照映射，并核对 HTML 存在且位于指定项目根目录。引用同一链接的其他页面不会被误认作发布源；只有元数据而无明确 HTML 时返回 `metadata_only`。
