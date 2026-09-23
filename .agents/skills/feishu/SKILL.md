@@ -80,6 +80,8 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 
 ## 4. 交付规则
 
+持续任务的可见成果何时交付，遵循用户级共享沟通段；本 skill 只处理成果形成后的在线策略、回执与本机打开，不另设一套 Stage／Step 或时间节奏。
+
 - 每份可审阅产物的回执固定是一块三行（SPEC-210）：第一行 `📄 <中文标题>（飞书在线文档·登录飞书查看）：`，第二行真实 https URL，第三行本机绝对路径。三行连写、任何一行不得省略：没有在线副本时第二行写括号原因（`（本机在线开关 off，本轮未建在线副本）` / `（在线副本创建失败：<原因>）`），本机没有文件时第三行写 `（本地无此文件，仅在线文档）`。禁止只发路径、只发 URL 或“标题 + URL”两行。路径用普通可复制文字，不放代码块，也不写成 Markdown / `file:///` 假链接；飞书只对 `http://` / `https://` 提供可靠链接语义。
 - 三行块由 `python feishu/artifact_delivery.py receipt --title <标题> [--url <URL>] --path <文件>` 渲染；`send --doc`、`send_feishu_media.py` 和 drainer 的 final 对账块已内置同一渲染器，agent 手写回执时也用它输出，不自行拼行。
 - 创建在线副本前先运行 `python feishu/artifact_delivery.py decide --json`。默认全局开关为 off：不调用在线文档/媒体工具，第二行写开关 off 的括号原因；开关为 on 时才按文件类型调用在线工具并把真实 URL 放进第二行。用户本轮明确要求在线稿可在发送命令加 `--explicit-online` 单次覆盖，不修改全局值。
