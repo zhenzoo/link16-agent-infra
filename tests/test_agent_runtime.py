@@ -1321,3 +1321,45 @@ class BridgeStartupRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PersistentPathCliCheckTests(unittest.TestCase):
+    """长驻进程的 PATH 快照不得把「装好的 CLI」误判成缺失（2026-09-23）。
+
+    wmux 面板是新开的终端，用的是持久 PATH；桥/看门狗进程用的是启动那刻的
+    快照。实测新 pane 能解析 codex/kimi 而同期桥进程不能，所以只有两条来源
+    都查不到才算真缺失。
+    """
+
+    def test_missing_in_process_path_but_present_in_persistent_path_is_warning(self):
+        with patch.object(agent_runtime.shutil, "which", return_value=None), \
+             patch.object(agent_runtime, "_persistent_path_which",
+                          return_value=r"C:\tools\codex.EXE"), \
+             patch.object(agent_runtime, "resolve_shell", return_value="/usr/bin/bash"):
+            result = agent_runtime.profile_doctor("cxp")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(any("持久 PATH 有" in w for w in result["warnings"]))
+
+    def test_missing_in_both_paths_still_fails(self):
+        with patch.object(agent_runtime.shutil, "which", return_value=None), \
+             patch.object(agent_runtime, "_persistent_path_which", return_value=None), \
+             patch.object(agent_runtime, "resolve_shell", return_value="/usr/bin/bash"):
+            result = agent_runtime.profile_doctor("cxp")
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("CLI 不可用" in e for e in result["errors"]))
+        self.assertEqual(result["warnings"], [])
+
+    def test_present_in_process_path_emits_no_warning(self):
+        with patch.object(agent_runtime.shutil, "which",
+                          return_value=r"C:\tools\codex.EXE"), \
+             patch.object(agent_runtime, "_persistent_path_which",
+                          side_effect=AssertionError("命中本进程 PATH 时不该再读注册表")), \
+             patch.object(agent_runtime, "resolve_shell", return_value="/usr/bin/bash"):
+            result = agent_runtime.profile_doctor("cxp")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["warnings"], [])
+
+    def test_persistent_path_lookup_returns_none_without_registry(self):
+        with patch.object(agent_runtime, "_persistent_windows_path", return_value=""):
+            self.assertIsNone(agent_runtime._persistent_path_which("codex"))

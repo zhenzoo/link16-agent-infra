@@ -653,6 +653,36 @@ def version_drift_note(name: str):
     )
 
 
+def _persistent_windows_path() -> str:
+    """Windows 注册表里的 user+machine PATH —— 即「新开一个终端会看到什么」。
+
+    非 Windows 或读不到时返回空串，调用方据此退回「只信本进程 PATH」。
+    """
+    rows = []
+    try:
+        import winreg  # noqa: PLC0415 — 仅 Windows 且仅此处需要
+    except ImportError:
+        return ""
+    for hive, key_name in (
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key_name) as key:
+                value, _kind = winreg.QueryValueEx(key, "Path")
+            rows.append(os.path.expandvars(str(value)))
+        except OSError:
+            continue
+    return os.pathsep.join(row for row in rows if row)
+
+
+def _persistent_path_which(name: str) -> str | None:
+    """在持久 PATH 里找可执行文件；持久 PATH 读不到时返回 None（不猜）。"""
+    path = _persistent_windows_path()
+    return shutil.which(name, path=path) if path else None
+
+
 def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
     """Check profile assets and, when requested, this process's launch environment.
 
@@ -663,6 +693,7 @@ def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
     """
     profile = profile_spec(name)
     errors = []
+    warnings: list[str] = []
     home = profile.home_path
     if not home.is_dir():
         errors.append(f"home 不存在：{profile.home}")
@@ -671,7 +702,18 @@ def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
         errors.append(f"launch.sh 不存在：{profile.home}/launch.sh")
     if check_execution_env:
         if not shutil.which(profile.runtime):
-            errors.append(f"CLI 不可用：{profile.runtime}")
+            # 长驻进程（wmux daemon 起于 N 天前的桥 / 看门狗）拿的是启动那刻的
+            # PATH 快照；此后装的 CLI 在它眼里永远缺失。持久 PATH 才是「新开一个
+            # 终端会看到什么」，而面板正是新开的终端 —— 2026-09-23 实测新 pane
+            # 能解析 codex/kimi，而同期的桥进程不能。所以只有两条来源都查不到才
+            # 是真缺失；仅当前进程查不到降级为 warning，不判 doctor 失败。
+            if _persistent_path_which(profile.runtime):
+                warnings.append(
+                    f"CLI 不在本进程 PATH，但持久 PATH 有：{profile.runtime}"
+                    "（本进程 PATH 是启动时快照；新开的终端/面板可用）"
+                )
+            else:
+                errors.append(f"CLI 不可用：{profile.runtime}")
         # 没有可用 shell 时，`run` 起不来但静态资产全绿 —— 正是 PLAN-923 之前
         # 「doctor 全绿却启动失败」的盲区，所以 direct-run 仍做完整体检。
         try:
@@ -682,6 +724,7 @@ def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
         **profile_public_dict(profile),
         "ok": not errors,
         "errors": errors,
+        "warnings": warnings,
         # 登录态只报告不改变 doctor 的静态 ok；桥在 spawn 前按 status=="missing" 拦。
         "login": profile_login_state(profile),
     }
