@@ -13,6 +13,7 @@ from bridge_process import ProcessControlError  # noqa: F401 — re-exported for
 CONTRACT = 'bridge-control-v1'
 STOP_GRACE_SECONDS = 3            # 空闲的桥 0.5 秒内自行退出；超过这个时间直接结束进程
 ALERT_AFTER_SECONDS = 60          # 断开超过这么久才告诉主人（短暂抖动只进日志）
+ALERT_WINDOW_SECONDS = 1800       # 全机每 30 分钟最多一次断开提醒
 STATE_LABELS = {'starting': '启动中', 'reconnecting': '重连飞书中', 'ready': '空闲',
                 'handling': '正在处理消息', 'draining': '退出中', 'failed': '已失败', 'stopped': '已停止'}
 
@@ -87,16 +88,42 @@ def stop_bridges(state_dir, pids, kill, *, grace=STOP_GRACE_SECONDS, report=prin
         mark_stopped(state_dir, pid)
 
 
+def claim_outage_alert(state_dir, *, window=ALERT_WINDOW_SECONDS, clock=time.time):
+    """全机单发：整台机器 window 秒内只有第一个抢到的桥能发断开提醒（10 个 bot 同时断网只发一条）。"""
+    now, root = clock(), Path(state_dir)
+    for old in root.glob('bridge-outage-alert-*.lock'):
+        try:  # 刚被别的桥建出、还没写入时间的空文件按文件时间算，不误删
+            text = old.read_text(encoding='utf-8').strip()
+            claimed_at = float(text) if text else old.stat().st_mtime
+        except (OSError, ValueError):
+            claimed_at = 0
+        if now - claimed_at < window:
+            return False
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    try:  # O_EXCL：同一时刻多个桥一起抢，只有一个能建成
+        fd = os.open(root / f'bridge-outage-alert-{int(now // window)}.lock', os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        handle.write(str(now))
+    return True
+
+
 class OutageAlert:
-    """飞书长连接断开 / 恢复提醒。重连本身交给 SDK：首次连接失败和运行中断线都会无限重试。
+    """飞书长连接断开 / 恢复提醒。重连本身交给 SDK：首次连接失败和运行中断线都会无限重试，进程不退出。
 
     桥自己不 stop 再重开同一个 channel——SDK 旧线程还在时会留下两条长连接（09-24 10:48
-    baseball-6 实证）。这里只记断开时刻：断开超过 alert_after 秒告诉主人一次，恢复后再说一次。
+    baseball-6 实证）。这里只记断开时刻：断开超过 alert_after 秒、且抢到全机提醒名额才说一次，
+    恢复后由同一个桥再说一次；每次重试都不发消息。
     """
 
-    def __init__(self, tell, report, *, alert_after=ALERT_AFTER_SECONDS, clock=time.time):
-        self.tell, self.report, self.alert_after, self.clock = tell, report, alert_after, clock
-        self.since, self.told = None, False
+    def __init__(self, tell, report, *, claim=lambda: True, alert_after=ALERT_AFTER_SECONDS, clock=time.time):
+        self.tell, self.report, self.claim = tell, report, claim
+        self.alert_after, self.clock = alert_after, clock
+        self.since, self.decided, self.told = None, False, False
 
     def disconnected(self):
         if self.since is None:
@@ -105,15 +132,21 @@ class OutageAlert:
 
     def reconnected(self):
         since, told = self.since, self.told
-        self.since, self.told = None, False
+        self.since, self.decided, self.told = None, False, False
         if since is None:
             return
-        minutes = max(1, round((self.clock() - since) / 60))
-        self.report(f'✅ 已重新连上飞书（断开约 {minutes} 分钟）')
+        gap = self.clock() - since
+        label = f'{int(gap)} 秒' if gap < 60 else f'约 {round(gap / 60)} 分钟'
+        self.report(f'✅ 已重新连上飞书（断开 {label}）')
         if told:
-            self.tell(f'✅ 桥已重新连上飞书（断开约 {minutes} 分钟）。断开期间发的消息如果没看到 👍，请重发一次。')
+            self.tell(f'✅ 已重新连上飞书（断开{label}）。断开期间发的消息如果没看到 👍，请重发一次。')
 
     def poll(self):
-        if self.since is not None and not self.told and self.clock() - self.since >= self.alert_after:
+        if self.since is None or self.decided or self.clock() - self.since < self.alert_after:
+            return
+        self.decided = True
+        if self.claim():
             self.told = True
-            self.tell('⚠️ 桥和飞书断开超过 1 分钟，SDK 正在自动重连；恢复后会再告诉你。')
+            self.tell('⚠️ 本机桥和飞书断开超过 1 分钟，正在自动重连；恢复后再说一次。多个 bot 同时断开只发这一条。')
+        else:
+            self.report('断开超过 1 分钟；30 分钟内已有桥提醒过主人，不重复发')

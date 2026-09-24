@@ -3104,7 +3104,8 @@ def _run_bot(bot_name=None):
             threading.Thread(target=send, daemon=True).start()
 
         # 首次连接失败和运行中断线都由 SDK 无限重连；不设超时、不自己 stop 重开（会留下两条长连接）。
-        outage = bridge_control.OutageAlert(_tell_owner, lambda m: blog(bname, m))
+        outage = bridge_control.OutageAlert(_tell_owner, lambda m: blog(bname, m),
+                                            claim=lambda: bridge_control.claim_outage_alert(STATE_DIR))
         ch.on("reconnecting", outage.disconnected)
         ch.on("reconnected", outage.reconnected)
 
@@ -3231,7 +3232,9 @@ def _start_locked(bot_filter=None):
         if not children:
             break
         if time.monotonic() >= deadline:
-            raise bridge_process.ProcessControlError(f'桥启动未验收：{[name for name, _ in children]}')
+            # 进程在跑、只是还没连上飞书（断网时 SDK 会一直重连）：不当失败，照常拉起看门狗和 cron。
+            print(f"⏳ 还没连上飞书，进程在自动重连：{[name for name, _ in children]}", flush=True)
+            break
         time.sleep(0.1)
     _stop_hint = f"`stop --bot {bot_filter}` 停它" if bot_filter else "`stop` 停全部"
     print(f"\n已后台启动 {len(started)} 个 bot 进程。"

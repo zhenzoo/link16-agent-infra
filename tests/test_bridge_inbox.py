@@ -313,6 +313,32 @@ class InboxTests(unittest.TestCase):
         alert.poll()
         self.assertEqual(len(told), 2)
 
+    def test_whole_machine_outage_sends_one_alert_pair_not_one_per_bot(self):
+        now, told = [5000.0], []
+        claim = lambda: bc.claim_outage_alert(self.sd, clock=lambda: now[0])
+        bots = [bc.OutageAlert(told.append, lambda _: None, claim=claim, clock=lambda: now[0]) for _ in range(10)]
+        for bot in bots:
+            bot.disconnected()
+        now[0] += 90
+        for bot in bots:
+            bot.poll()
+            bot.poll()
+        now[0] += 60
+        for bot in bots:
+            bot.reconnected()
+        self.assertEqual(len(told), 2)                # 一条断开 + 一条恢复
+        now[0] += 600                                 # 30 分钟内再断：不再提醒
+        bots[3].disconnected()
+        now[0] += 90
+        bots[3].poll()
+        bots[3].reconnected()
+        self.assertEqual(len(told), 2)
+        now[0] += bc.ALERT_WINDOW_SECONDS             # 超过窗口：可以再提醒一次
+        bots[5].disconnected()
+        now[0] += 90
+        bots[5].poll()
+        self.assertEqual(len(told), 3)
+
     def test_outage_alert_stays_quiet_for_short_blip(self):
         now, told = [0.0], []
         alert = bc.OutageAlert(told.append, lambda _: None, alert_after=60, clock=lambda: now[0])
