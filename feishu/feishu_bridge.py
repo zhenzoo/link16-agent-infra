@@ -57,7 +57,6 @@ REPLY_POLL_SEC = 2
 READY_TIMEOUT_SEC = 30            # legacy Codex/custom 的默认启动窗口
 CLAUDE_READY_TIMEOUT_SEC = 90     # Claude Code 2.1.240 新机冷启实测约 42s；30s 会误判并把启动命令重复塞进 TUI
 CODEX_APP_SERVER_READY_TIMEOUT_SEC = codex_startup.STARTUP_TIMEOUT_SEC
-STARTUP_HEARTBEAT_MAX_SEC = 300   # Never repeat a vague startup line forever.
 READY_POLL_SEC = 1.5             # 轮询间隔（先读后睡·首轮不空等）
 STARTUP_FAILURE_MAX_AGE_SEC = 24 * 60 * 60  # /screen 可回看最近一次已关闭失败 pane 的现场
 HANDOFF_RETRY_MAX_AGE_SEC = 6 * 60 * 60     # 已快照但未完成的手动 handoff 可在无活会话时重试
@@ -2199,34 +2198,6 @@ def run(bot_name=None):
         lease.release()
 
 
-async def _startup_heartbeat(bot, chat_id, started, reply, interval=5):
-    """Report real stages using the handler's explicitly supplied reply callback."""
-    import asyncio
-    try:
-        previous = None
-        last_report = started
-        while True:
-            await asyncio.sleep(interval)
-            waited = int(time.time() - started)
-            record = _agent_startup_record(bot, started)
-            stage = record.get("stage")
-            if stage == "failed":
-                detail = record.get("detail") or "启动失败：worker 未返回失败原因"
-                await reply(chat_id, f"❌ {detail}（已用 {waited} 秒）")
-                return
-            if waited >= STARTUP_HEARTBEAT_MAX_SEC:
-                detail = record.get("detail") or (
-                    f"启动超过 {STARTUP_HEARTBEAT_MAX_SEC} 秒仍未完成；已停止重复播报")
-                await reply(chat_id, f"❌ {detail}（已用 {waited} 秒）")
-                return
-            if stage != previous or time.time() - last_report >= 15:
-                detail = record.get("detail") or "正在创建工作区并提交启动命令"
-                await reply(chat_id, f"⏳ {detail}（已用 {waited} 秒）")
-                previous, last_report = stage, time.time()
-    except asyncio.CancelledError:
-        pass
-
-
 def _run_bot(bot_name=None):
     bots = load_bots()
     if bot_name:
@@ -2772,19 +2743,17 @@ def _run_bot(bot_name=None):
                         _dir = await asyncio.to_thread(current_cwd, bot)
                         _acc_lbl, _dir_lbl = runtime_labels(_dir)
                         await reply(msg.chat_id,
-                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}，会按实际启动阶段报告进度。"
+                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}；启动失败会告警一次。"
                                      if ws_present else
-                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}，会按实际启动阶段报告进度。"))
-                    _hb = None
+                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}；启动失败会告警一次。"))
                     if not reusable:
                         startup_window["start"] = time.time()
                         startup_window["end"] = float("inf")
-                        _hb = asyncio.create_task(_startup_heartbeat(bot, msg.chat_id, startup_window["start"], reply))
                     try:
                         ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
+                    except Exception as exc:
+                        raise bridge_inbox.NonRetryableHandoffError(str(exc)) from exc
                     finally:
-                        if _hb:
-                            _hb.cancel()
                         if not reusable:
                             startup_window["end"] = time.time()
                     # 入站附件：真下载字节到 inbox，注入【本地路径】而非 SDK 的 `![image](key)` 占位。
@@ -3130,6 +3099,10 @@ def _run_bot(bot_name=None):
             control.publish('handling', message_id=payload['message']['message_id'])
             try:
                 await ch.dispatch_saved(payload, received, inbound_handler)
+            except bridge_inbox.NonRetryableHandoffError as exc:
+                await card_send(ch, payload['message']['chat_id'],
+                                f"❌ 启动失败：{exc}\n原消息已保存在收件队列，已停止自动重试；请排除故障后重新发送。", bname)
+                raise
             except Exception:
                 row = durable_inbox.get(payload['message']['message_id']) or {}
                 if row.get('attempts') == 1 and row.get('state') != 'done':

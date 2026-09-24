@@ -189,52 +189,6 @@ class KimiProfileTests(unittest.TestCase):
         finally:
             feishu_bridge.STATE_DIR = previous
 
-    def test_startup_heartbeat_reports_kimi_failure_instead_of_workspace_fallback(self):
-        bot = {"name": "test", "profile": "kp"}
-        previous = feishu_bridge.STATE_DIR
-        feishu_bridge.STATE_DIR = self.root
-        started = time.time() - 10
-        messages = []
-
-        async def no_sleep(_):
-            return None
-
-        async def reply(_chat_id, message):
-            messages.append(message)
-
-        try:
-            (self.root / "bridge-kimi-ready-test.json").write_text(json.dumps({
-                "contract": runtime.KIMI_STARTUP_CONTRACT, "bot": "test",
-                "stage": "failed", "detail": "启动失败：Kimi 登录或模型不可用",
-                "worker_pid": 123, "ts": time.time(), "profile": "kp",
-            }), encoding="utf-8")
-            with patch("asyncio.sleep", new=no_sleep):
-                asyncio.run(feishu_bridge._startup_heartbeat(
-                    bot, "chat", started, reply, interval=0))
-            self.assertEqual(len(messages), 1)
-            self.assertTrue(messages[0].startswith("❌ 启动失败：Kimi 登录或模型不可用"))
-            self.assertNotIn("正在创建工作区", messages[0])
-        finally:
-            feishu_bridge.STATE_DIR = previous
-
-    def test_startup_heartbeat_has_a_terminal_bound_without_worker_status(self):
-        bot = {"name": "test", "profile": "kp"}
-        messages = []
-
-        async def no_sleep(_):
-            return None
-
-        async def reply(_chat_id, message):
-            messages.append(message)
-
-        started = time.time() - feishu_bridge.STARTUP_HEARTBEAT_MAX_SEC - 1
-        with patch("asyncio.sleep", new=no_sleep):
-            asyncio.run(feishu_bridge._startup_heartbeat(
-                bot, "chat", started, reply, interval=0))
-        self.assertEqual(len(messages), 1)
-        self.assertIn("已停止重复播报", messages[0])
-        self.assertNotIn("正在创建工作区并提交启动命令", messages[0])
-
     def test_kimi_login_state_uses_profile_local_credentials(self):
         home = self.root / "login-home"
         home.mkdir()

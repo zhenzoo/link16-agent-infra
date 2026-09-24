@@ -113,6 +113,30 @@ class InboxTests(unittest.TestCase):
         self.inbox.fail('file', 'download offline')
         self.assertEqual(self.inbox.claim()['id'], 'stop')
 
+    def test_startup_failure_is_kept_once_without_restarting_or_blocking_close(self):
+        self.inbox.receive(payload('start'))
+        self.inbox.receive(payload('close', '/close'))
+        handled = []
+
+        async def handler(item, _received):
+            mid = item['message']['message_id']
+            handled.append(mid)
+            if mid == 'start':
+                raise bi.NonRetryableHandoffError('Codex terminal did not attach')
+
+        asyncio.run(bi.consume(self.inbox, handler, asyncio.Event(),
+                               lambda: handled[-1:] == ['close'], lambda _: None))
+        self.assertEqual(handled, ['start', 'close'])
+        self.assertEqual(self.inbox.get('start')['state'], 'failed')
+        self.assertIsNotNone(self.inbox.get('start')['payload'])
+        self.assertEqual(self.inbox.get('close')['state'], 'done')
+        self.assertIsNone(self.inbox.claim())
+        self.inbox.recover()  # A bridge restart must not replay the failed startup.
+        self.assertIsNone(self.inbox.claim())
+
+        self.inbox.cancel_before('close')
+        self.assertEqual(self.inbox.get('start')['state'], 'cancelled')
+
     def test_completed_attachment_download_is_reused_after_restart(self):
         path = self.sd / 'photo.png'
         path.write_bytes(b'complete-file')

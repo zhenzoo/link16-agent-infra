@@ -106,18 +106,6 @@ class ReadyContractTests(unittest.TestCase):
                 rpc.close()
 
 
-class StartupProgressTests(unittest.IsolatedAsyncioTestCase):
-    async def test_handler_callback_receives_actual_stage_and_elapsed_time(self):
-        reply = mock.AsyncMock(side_effect=asyncio.CancelledError())
-        record = {"stage": "observer_binding", "detail": "正在确认同一会话的回传连接"}
-        with mock.patch.object(bridge, "_codex_startup_record", return_value=record):
-            await bridge._startup_heartbeat({"name": "bot"}, "chat", time.time()-7, reply, interval=.001)
-        reply.assert_awaited_once()
-        self.assertEqual(reply.call_args.args[0], "chat")
-        self.assertIn(record["detail"], reply.call_args.args[1])
-        self.assertIn("已用 7 秒", reply.call_args.args[1])
-
-
 class GatewayTests(unittest.TestCase):
     def test_mirror_rejects_other_threads_and_private_raw_fields(self):
         gateway = startup.TuiGateway("unused", mock.Mock())

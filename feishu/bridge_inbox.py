@@ -18,6 +18,10 @@ def prompt_digest(prompt):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+class NonRetryableHandoffError(RuntimeError):
+    """Preparation failed before terminal submission; keep the input without replay."""
+
+
 class Inbox:
     def __init__(self, state_dir, bot):
         # Hash the namespace: neither remote IDs nor bot names become paths.
@@ -135,7 +139,7 @@ class Inbox:
         with self.connect() as db:
             db.execute("""UPDATE messages SET state='cancelled',payload=NULL,updated=?
                 WHERE seq < (SELECT seq FROM messages WHERE id=?)
-                AND state IN ('queued','awaiting_confirmation','uncertain')""", (time.time(), mid))
+                AND state IN ('queued','awaiting_confirmation','uncertain','failed')""", (time.time(), mid))
             db.execute("DELETE FROM meta WHERE key='last_prompt'")
 
     def confirm(self, prompt, session=None):
@@ -153,14 +157,16 @@ class Inbox:
                 WHERE id=? AND state IN ('processing','command','submitting','confirmed')""",
                 (time.time(), mid))
 
-    def fail(self, mid, error):
+    def fail(self, mid, error, *, retryable=True):
         with self.connect() as db:
             row = db.execute('SELECT attempts FROM messages WHERE id=?', (mid,)).fetchone()
             retry_at = time.time() + min(60, 2 ** min(row[0] if row else 1, 6))
             db.execute("""UPDATE messages SET
-                state=CASE WHEN state='processing' THEN 'queued' ELSE 'uncertain' END,
+                state=CASE WHEN ?=0 AND state='processing' THEN 'failed'
+                           WHEN state='processing' THEN 'queued' ELSE 'uncertain' END,
                 error=?,updated=?,retry_at=? WHERE id=? AND state NOT IN ('done','confirmed')""",
-                (str(error)[:300], time.time(), retry_at, mid))
+                (int(retryable), str(error)[:300], time.time(),
+                 retry_at if retryable else 0, mid))
 
     def resource(self, mid, key, path=None):
         digest = hashlib.sha256(str(key).encode()).hexdigest()
@@ -207,7 +213,7 @@ async def consume(inbox, handler, wake, stopping, report):
             await handler(json.loads(row['payload']), row['received'])
             inbox.finish(mid)
         except Exception as exc:
-            inbox.fail(mid, exc)
+            inbox.fail(mid, exc, retryable=not isinstance(exc, NonRetryableHandoffError))
             report(f"入站交接保留待办 message_id={mid}: {type(exc).__name__}: {str(exc)[:180]}")
             # Failure backoff only; healthy dispatch wakes immediately.
             try:
