@@ -3090,20 +3090,33 @@ def _run_bot(bot_name=None):
             ad, lambda: [bname], asleep=asyncio.sleep, interval=30, stale_sec=120,
             remediate=_remediate, notify=_notify, recover_pending=_recover_pending))
 
-        async def _tell_owner(text):
-            """断连 / 恢复只走一次 REST 纯文字 DM（不依赖长连接）；发不出去只进日志，不重试刷屏。"""
-            target = mirror_target(bname) or next(iter(sorted(ALLOWED_OPEN_IDS)), None)
-            try:
-                sent = target and await asyncio.to_thread(
-                    _send_text_message, bot["app_id"], bot["app_secret"], target, f"[{bname}] {text}")
-            except Exception as exc:  # noqa: BLE001 — 网络断着时本来就可能发不出
-                sent = None
-                blog(bname, f"通知主人失败：{str(exc)[:120] or type(exc).__name__}")
-            blog(bname, f"{'已通知主人' if sent else '未能通知主人'}：{text}")
+        def _tell_owner(text):
+            """断连 / 恢复只走一次 REST 纯文字 DM（不依赖长连接、不阻塞 SDK 线程）；发不出去只进日志。"""
+            def send():
+                target = mirror_target(bname) or next(iter(sorted(ALLOWED_OPEN_IDS)), None)
+                try:
+                    sent = target and _send_text_message(bot["app_id"], bot["app_secret"], target, f"[{bname}] {text}")
+                except Exception as exc:  # noqa: BLE001 — 网络断着时本来就可能发不出
+                    sent = None
+                    blog(bname, f"通知主人失败：{str(exc)[:120] or type(exc).__name__}")
+                blog(bname, f"{'已通知主人' if sent else '未能通知主人'}：{text}")
+            import threading
+            threading.Thread(target=send, daemon=True).start()
+
+        # 首次连接失败和运行中断线都由 SDK 无限重连；不设超时、不自己 stop 重开（会留下两条长连接）。
+        outage = bridge_control.OutageAlert(_tell_owner, lambda m: blog(bname, m))
+        ch.on("reconnecting", outage.disconnected)
+        ch.on("reconnected", outage.reconnected)
+
+        async def _watch_outage():
+            while True:
+                await asyncio.sleep(10)
+                outage.poll()
+        asyncio.create_task(_watch_outage())
 
         wake = asyncio.Event()
         ch.bind_inbox(wake)
-        await bridge_control.connect_until_ready(ch, control, report=lambda m: blog(bname, m), tell=_tell_owner)
+        await ch.start_background(timeout=None)
         control.publish('ready', inbox=durable_inbox.counts())
         blog(bname, '持久收件已就绪：落盘后确认接收；stop 立即生效，未完成的待办重启后续接。')
         async def _dispatch(payload, received):

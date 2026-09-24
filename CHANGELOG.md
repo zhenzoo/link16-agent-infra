@@ -19,6 +19,13 @@ last_reviewed: 2026-09-23
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.33.1 — 2026-09-24 · 断线重连交还飞书 SDK，避免双长连接
+
+- **问题**：v0.33.0 的原地重连在超时后先 `stop()` 再对同一个 channel 重新 `start_background`。10:48 baseball-6 实测：SDK 上一轮的连接线程还没退出，第二次报 `This event loop is already running`，第三次连上时同一进程出现两条长连接。
+- **修正**：删去 `connect_until_ready`，`start_background(timeout=None)` 等 SDK 自己无限重连（首次连接失败同样会重试，这正是 09-24 早上僵尸桥里 SDK 线程一直在做的事，只是被桥的 30 秒超时打断后吊死）。新增 `bridge_control.OutageAlert` 订阅 SDK `reconnecting` / `reconnected`：断开超过 60 秒通知一次、恢复再通知一次，启动和运行中断线共用。
+- **看门狗 R8 状态检查恢复**：Codex 接入终端网关后，观察进程参数改为 `--url <网关>/events`，`bridge_activity` 仍按旧 `--thread` 参数匹配，对全部 bot 报 `ValueError`。现改为从启动记录取 worker，找它唯一的 `codex app-server --listen` 子进程查询真实状态；对不上或多于一个时判未知。进程查询超时由 3 秒改为与其他查询一致的 15 秒。
+- **验证**：新增断开一分钟只通知一次 / 短抖动不打扰、R8 端点取 worker 自身 app-server、R6 惰性 import 回归；全仓测试通过。
+
 ## v0.33.0 — 2026-09-24 · 桥断网自动重连、stop 立即生效、看门狗单 bot 重启
 
 - **不再出现收不到消息的僵尸桥**：以前桥启动时撞上 DNS 故障，`start_background` 超时抛错，`asyncio.run` 收尾一直等 SDK 线程，进程活着却不收消息、不点赞，控制状态永远停在 `starting`（09-23 19:18–23:54 与 09-24 09:57–10:16 各发生一次）。现在 `bridge_control.connect_until_ready` 按 10/20/40/60 秒原地重连直到成功；连续失败两次才给主人发一条断开通知，恢复后再发一条。其他未预期崩溃立即退出并记 `failed`。

@@ -1,7 +1,6 @@
-"""Bridge lifecycle control: immediate stop, self-reconnect, crash-restart markers."""
+"""Bridge lifecycle control: immediate stop, outage alerts, crash-restart markers."""
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
 import time
@@ -13,8 +12,7 @@ from bridge_process import ProcessControlError  # noqa: F401 — re-exported for
 
 CONTRACT = 'bridge-control-v1'
 STOP_GRACE_SECONDS = 3            # 空闲的桥 0.5 秒内自行退出；超过这个时间直接结束进程
-RECONNECT_DELAYS = (10, 20, 40, 60)
-ALERT_AFTER_FAILURES = 2          # 连续失败这么多次才告诉主人（单次抖动只进日志）
+ALERT_AFTER_SECONDS = 60          # 断开超过这么久才告诉主人（短暂抖动只进日志）
 STATE_LABELS = {'starting': '启动中', 'reconnecting': '重连飞书中', 'ready': '空闲',
                 'handling': '正在处理消息', 'draining': '退出中', 'failed': '已失败', 'stopped': '已停止'}
 
@@ -89,34 +87,33 @@ def stop_bridges(state_dir, pids, kill, *, grace=STOP_GRACE_SECONDS, report=prin
         mark_stopped(state_dir, pid)
 
 
-async def connect_until_ready(channel, control, *, report, tell, sleep=asyncio.sleep,
-                              delays=RECONNECT_DELAYS, alert_after=ALERT_AFTER_FAILURES):
-    """连不上飞书就原地重连直到成功；只在断开和恢复时各告诉主人一次，不刷屏。
+class OutageAlert:
+    """飞书长连接断开 / 恢复提醒。重连本身交给 SDK：首次连接失败和运行中断线都会无限重试。
 
-    SDK 在连接超时后会 stop() 自己并允许再次 start；这里不让异常冒出主循环，
-    否则 asyncio.run 收尾时会一直等 SDK 线程，进程变成收不到消息的僵尸。
+    桥自己不 stop 再重开同一个 channel——SDK 旧线程还在时会留下两条长连接（09-24 10:48
+    baseball-6 实证）。这里只记断开时刻：断开超过 alert_after 秒告诉主人一次，恢复后再说一次。
     """
-    failures, since = 0, None
-    while True:
-        try:
-            await channel.start_background(timeout=30)
-            break
-        except Exception as exc:  # noqa: BLE001 — DNS / 网络 / 握手失败都按可重试处理
-            failures += 1
-            since = since or time.time()
-            delay = delays[min(failures, len(delays)) - 1]
-            reason = str(exc)[:160] or type(exc).__name__
-            control.publish('reconnecting', failures=failures, error=reason)
-            report(f'⚠️ 连不上飞书（第 {failures} 次）：{reason}；{delay} 秒后重连')
-            if failures == alert_after:
-                await tell(f'⚠️ 桥连不上飞书（{reason[:80]}），正在自动重连；恢复后会再告诉你。')
-            try:
-                channel.stop()
-            except Exception:  # noqa: BLE001 — 清理失败不影响下一次重连
-                pass
-            await sleep(delay)
-    if failures >= alert_after:
-        minutes = max(1, round((time.time() - since) / 60))
-        await tell(f'✅ 桥已重新连上飞书（断开约 {minutes} 分钟）。断开期间发的消息如果没看到 👍，请重发一次。')
-    elif failures:
-        report(f'✅ 第 {failures + 1} 次连接成功')
+
+    def __init__(self, tell, report, *, alert_after=ALERT_AFTER_SECONDS, clock=time.time):
+        self.tell, self.report, self.alert_after, self.clock = tell, report, alert_after, clock
+        self.since, self.told = None, False
+
+    def disconnected(self):
+        if self.since is None:
+            self.since = self.clock()
+            self.report('⚠️ 与飞书的长连接断开，SDK 正在自动重连')
+
+    def reconnected(self):
+        since, told = self.since, self.told
+        self.since, self.told = None, False
+        if since is None:
+            return
+        minutes = max(1, round((self.clock() - since) / 60))
+        self.report(f'✅ 已重新连上飞书（断开约 {minutes} 分钟）')
+        if told:
+            self.tell(f'✅ 桥已重新连上飞书（断开约 {minutes} 分钟）。断开期间发的消息如果没看到 👍，请重发一次。')
+
+    def poll(self):
+        if self.since is not None and not self.told and self.clock() - self.since >= self.alert_after:
+            self.told = True
+            self.tell('⚠️ 桥和飞书断开超过 1 分钟，SDK 正在自动重连；恢复后会再告诉你。')

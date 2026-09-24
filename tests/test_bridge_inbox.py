@@ -293,59 +293,34 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(kills, [[os.getpid()]])
         self.assertEqual(bc.latest_state(self.sd, 'unit')['state'], 'stopped')
 
-    def test_reconnect_retries_until_ready_and_tells_owner_once_each_way(self):
-        control = bc.Control(self.sd, 'unit')
-        outcomes = [OSError('getaddrinfo failed'), OSError('getaddrinfo failed'), None]
-        told, states, sleeps = [], [], []
-
-        class Channel:
-            stops = 0
-
-            async def start_background(self, timeout):
-                outcome = outcomes.pop(0)
-                if outcome:
-                    raise outcome
-
-            def stop(self):
-                Channel.stops += 1
-
-        async def tell(text):
-            told.append(text)
-
-        async def sleep(seconds):
-            sleeps.append(seconds)
-            states.append(bc.latest_state(self.sd, 'unit')['state'])
-
-        asyncio.run(bc.connect_until_ready(Channel(), control, report=lambda _: None, tell=tell, sleep=sleep))
-        self.assertEqual(outcomes, [])
-        self.assertEqual(sleeps, [10, 20])
-        self.assertEqual(states, ['reconnecting', 'reconnecting'])
-        self.assertEqual(Channel.stops, 2)
+    def test_outage_alert_tells_once_after_a_minute_and_once_on_recovery(self):
+        now, told = [1000.0], []
+        alert = bc.OutageAlert(told.append, lambda _: None, alert_after=60, clock=lambda: now[0])
+        alert.disconnected()
+        now[0] += 30
+        alert.poll()
+        alert.disconnected()                      # SDK 再次开始重连：不重置断开时刻
+        self.assertEqual(told, [])
+        now[0] += 40
+        alert.poll()
+        alert.poll()                              # 断开期间只说一次
+        self.assertEqual(len(told), 1)
+        self.assertIn('断开超过 1 分钟', told[0])
+        now[0] += 120
+        alert.reconnected()
         self.assertEqual(len(told), 2)
-        self.assertIn('连不上飞书', told[0])
         self.assertIn('重新连上', told[1])
+        alert.poll()
+        self.assertEqual(len(told), 2)
 
-    def test_single_reconnect_glitch_stays_quiet(self):
-        control = bc.Control(self.sd, 'unit')
-        outcomes = [OSError('reset'), None]
-        told = []
-
-        class Channel:
-            async def start_background(self, timeout):
-                outcome = outcomes.pop(0)
-                if outcome:
-                    raise outcome
-
-            def stop(self):
-                pass
-
-        async def tell(text):
-            told.append(text)
-
-        async def sleep(_):
-            pass
-
-        asyncio.run(bc.connect_until_ready(Channel(), control, report=lambda _: None, tell=tell, sleep=sleep))
+    def test_outage_alert_stays_quiet_for_short_blip(self):
+        now, told = [0.0], []
+        alert = bc.OutageAlert(told.append, lambda _: None, alert_after=60, clock=lambda: now[0])
+        alert.disconnected()
+        now[0] += 20
+        alert.poll()
+        alert.reconnected()
+        alert.reconnected()                       # 首次连接成功也会触发，未断开时不说话
         self.assertEqual(told, [])
 
     def test_real_process_waits_for_handoff_and_exits_with_next_message_saved(self):
