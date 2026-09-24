@@ -253,3 +253,42 @@ def test_cron_menu_unknown_does_not_offer_start(monkeypatch, capsys):
     monkeypatch.setattr('builtins.input', lambda *args: pytest.fail('unknown must not prompt to start'))
     cron._menu_commit([{'bot': 'unit', 'name': 'job', 'on': True, 'was': False, 'cron': '* * * * *'}])
     assert '未知' in capsys.readouterr().out
+
+
+def test_thumbs_up_retries_through_dns_blip_and_counts_success_false_as_failure(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    outcomes = [OSError('getaddrinfo failed'), SimpleNamespace(success=False, error='dns'), SimpleNamespace(success=True)]
+    calls, logs = [], []
+
+    class Channel:
+        async def add_reaction(self, message_id, emoji):
+            calls.append((message_id, emoji))
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(fb, 'blog', lambda name, text: logs.append(text))
+    assert asyncio.run(fb._thumbs_up(Channel(), 'om_1', 'unit', sleep=no_sleep)) is True
+    assert calls == [('om_1', 'THUMBSUP')] * 3
+    assert any('第 3 次才点上' in line for line in logs)
+
+
+def test_thumbs_up_gives_up_after_all_delays_and_logs_once(monkeypatch):
+    import asyncio
+    logs = []
+
+    class Channel:
+        async def add_reaction(self, message_id, emoji):
+            raise OSError('getaddrinfo failed')
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(fb, 'blog', lambda name, text: logs.append(text))
+    assert asyncio.run(fb._thumbs_up(Channel(), 'om_1', 'unit', delays=(0, 1, 2), sleep=no_sleep)) is False
+    assert logs == ['👍 点赞失败（已试 3 次）：getaddrinfo failed']

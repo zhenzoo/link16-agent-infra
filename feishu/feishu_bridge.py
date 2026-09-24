@@ -1821,6 +1821,35 @@ def _download_message_resource(app_id, app_secret, message_id, file_key, *,
     return final_path
 
 
+THUMBS_UP_DELAYS = (0, 2, 5, 15, 30, 60)
+_BACKGROUND = set()   # 持有后台任务引用，防止被垃圾回收中途丢掉
+
+
+async def _thumbs_up(channel, message_id, name, delays=THUMBS_UP_DELAYS, sleep=asyncio.sleep):
+    """👍 是单独一次 HTTP 调用（要解析 open.feishu.cn），消息本身走长连接不受影响。
+    DNS 抖动时在后台按 delays 重试（约 2 分钟），失败只记日志；以前失败直接吞掉、不重试（09-24 11:35 实证）。"""
+    last = None
+    for attempt, delay in enumerate(delays, 1):
+        await sleep(delay)
+        try:
+            result = await channel.add_reaction(message_id, "THUMBSUP")
+            if getattr(result, "success", True) is not False:
+                if attempt > 1:
+                    blog(name, f"👍 第 {attempt} 次才点上（前面网络失败）")
+                return True
+            last = getattr(result, "error", None) or getattr(result, "raw", None) or "success=False"
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+    blog(name, f"👍 点赞失败（已试 {len(delays)} 次）：{str(last)[:120]}")
+    return False
+
+
+def thumbs_up(channel, message_id, name):
+    task = asyncio.create_task(_thumbs_up(channel, message_id, name))
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+
+
 async def card_send(channel, target, text, name):
     """发飞书【互动卡片】（2.0 schema markdown·**非流式**·裸 URL 自动包成可点链接），
     卡片装不下(>CARD_SAFE_CHARS) 或失败 → 退 guaranteed_send 逐级降级（markdown→text·仍是同一条 DM）。
@@ -2664,10 +2693,7 @@ def _run_bot(bot_name=None):
                             }, ensure_ascii=False, default=str) + "\n")
                     except Exception:  # noqa: BLE001
                         pass
-                    try:
-                        await channel.add_reaction(msg.id, "THUMBSUP")
-                    except Exception:  # noqa: BLE001
-                        pass
+                    thumbs_up(channel, msg.id, bot["name"])
                     blog(bot["name"], f"[{(msg.id or '')[-6:]}] 收到{'卡片占位' if _card_placeholder else '无文本'}消息 type={rct} → 回执+抓raw落盘(不静默吞)")
                     if _card_placeholder:
                         await reply(msg.chat_id, (
@@ -2703,10 +2729,7 @@ def _run_bot(bot_name=None):
                 blog(bot["name"], "⚠️ 本 bot 还没认主人(无 owner 文件)且只在群里被 @ 过 —— "
                                   "普通回复(route=p2a)无处可投·请主人【私聊它一句】完成认主(SOP-125)")
             # 回信路由 per-turn：回址焊进消息末尾信封 + UserPromptSubmit hook 取【最末】信封→turn-route·不存 session 级 reply_dest（长 turn 交错会串台·见 ARCH-110 §2.5.1）
-            try:
-                await channel.add_reaction(msg.id, "THUMBSUP")
-            except Exception:  # noqa: BLE001
-                pass
+            thumbs_up(channel, msg.id, bot["name"])
 
             # 🔒 串行化：同一 bot 同时收到多条消息时一条一条处理，防「并发注入交错 + ensure_session race」
             # （Zara 式「运行中的消息排队下一轮」· 2026-06-15 实证：连发两条，第二条的回复被冲掉没发回）。
