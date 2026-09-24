@@ -271,14 +271,82 @@ class InboxTests(unittest.TestCase):
         second = self.inbox.claim()
         self.assertEqual(json.loads(json.loads(second['payload'])['message']['content'])['text'], '/stop')
 
-    def test_cooperative_timeout_never_uses_kill(self):
+    def test_stop_kills_after_grace_and_marks_stopped(self):
         control = bc.Control(self.sd, 'unit')
+        control.publish('ready')
         kills = []
         with patch.object(bc, 'process_alive', return_value=True):
-            with self.assertRaises(bc.ProcessControlError):
-                bc.stop_bridges(self.sd, [os.getpid()], kills.append, timeout=0, report=lambda _: None)
+            bc.stop_bridges(self.sd, [os.getpid()], kills.append, grace=0, report=lambda _: None)
         self.assertTrue(control.stopping())
-        self.assertEqual(kills, [])
+        self.assertEqual(kills, [[os.getpid()]])
+        self.assertEqual(bc.latest_state(self.sd, 'unit')['state'], 'stopped')
+
+    def test_stop_kills_starting_or_reconnecting_bridge_without_waiting(self):
+        control = bc.Control(self.sd, 'unit')
+        control.publish('reconnecting', failures=4)
+        kills = []
+        started = time.monotonic()
+        with patch.object(bc, 'process_alive', return_value=True):
+            bc.stop_bridges(self.sd, [os.getpid()], kills.append, grace=30, report=lambda _: None)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertFalse(control.stopping())      # no handoff request: it is killed directly
+        self.assertEqual(kills, [[os.getpid()]])
+        self.assertEqual(bc.latest_state(self.sd, 'unit')['state'], 'stopped')
+
+    def test_reconnect_retries_until_ready_and_tells_owner_once_each_way(self):
+        control = bc.Control(self.sd, 'unit')
+        outcomes = [OSError('getaddrinfo failed'), OSError('getaddrinfo failed'), None]
+        told, states, sleeps = [], [], []
+
+        class Channel:
+            stops = 0
+
+            async def start_background(self, timeout):
+                outcome = outcomes.pop(0)
+                if outcome:
+                    raise outcome
+
+            def stop(self):
+                Channel.stops += 1
+
+        async def tell(text):
+            told.append(text)
+
+        async def sleep(seconds):
+            sleeps.append(seconds)
+            states.append(bc.latest_state(self.sd, 'unit')['state'])
+
+        asyncio.run(bc.connect_until_ready(Channel(), control, report=lambda _: None, tell=tell, sleep=sleep))
+        self.assertEqual(outcomes, [])
+        self.assertEqual(sleeps, [10, 20])
+        self.assertEqual(states, ['reconnecting', 'reconnecting'])
+        self.assertEqual(Channel.stops, 2)
+        self.assertEqual(len(told), 2)
+        self.assertIn('连不上飞书', told[0])
+        self.assertIn('重新连上', told[1])
+
+    def test_single_reconnect_glitch_stays_quiet(self):
+        control = bc.Control(self.sd, 'unit')
+        outcomes = [OSError('reset'), None]
+        told = []
+
+        class Channel:
+            async def start_background(self, timeout):
+                outcome = outcomes.pop(0)
+                if outcome:
+                    raise outcome
+
+            def stop(self):
+                pass
+
+        async def tell(text):
+            told.append(text)
+
+        async def sleep(_):
+            pass
+
+        asyncio.run(bc.connect_until_ready(Channel(), control, report=lambda _: None, tell=tell, sleep=sleep))
+        self.assertEqual(told, [])
 
     def test_real_process_waits_for_handoff_and_exits_with_next_message_saved(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -293,7 +361,7 @@ class InboxTests(unittest.TestCase):
             kills = []
             with ThreadPoolExecutor() as pool:
                 stopping = pool.submit(bc.stop_bridges, self.sd, [proc.pid], kills.append,
-                                       timeout=10, report=lambda _: None)
+                                       grace=10, report=lambda _: None)
                 while not bc.control_path(self.sd, proc.pid, True).exists():
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(0.02)
@@ -318,6 +386,7 @@ if __name__ == '__main__':
         box.receive(payload('next'))
         async def work():
             async def handle(item, received):
+                control.publish('handling')            # same state the live bridge publishes while dispatching
                 (directory / 'entered').write_text('handling', encoding='utf-8')
                 while not (directory / 'release').exists():
                     await asyncio.sleep(0.02)

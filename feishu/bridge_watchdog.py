@@ -263,6 +263,62 @@ def bridge_alive():
     return None if pids is None else bool(pids)
 
 
+REVIVE_COOLDOWN = 300        # 同一只 bot 两次自动重启至少间隔 5 分钟
+REVIVE_MAX = 3               # 30 分钟内重启这么多次还起不来 → 停手，只告诉主人一次
+REVIVE_WINDOW = 1800
+
+
+def revive_dead_bridges():
+    """R4 单 bot 看护：某只 bot 的桥意外退出（不是 stop 停的）→ 单独重启它，并告诉主人。
+
+    只认结构信号：本机名册里的 bot 没有桥进程，且它最新的控制记录不是 stopped
+    （stop 会显式记 stopped；从没在本机跑过的 bot 没有记录，一律不碰）。
+    """
+    import bridge_control
+    rows = bridge_process.query_processes()
+    if rows is None:
+        return 0
+    revived = 0
+    for spec in _iter_bots():
+        name = spec.get("name")
+        if not name or bridge_process.select_pids(rows, HERE / "feishu_bridge.py", name):
+            continue
+        last = bridge_control.latest_state(STATE_DIR, name)
+        if not last or last.get("state") == "stopped":
+            continue
+        alerts = _alerts_load()
+        rec = alerts.get(f"{name}:revive", {})
+        now = time.time()
+        if now - float(rec.get("first", 0)) > REVIVE_WINDOW:
+            rec = {"first": now, "count": 0}
+        if now - float(rec.get("last", 0)) < REVIVE_COOLDOWN or rec.get("gave_up"):
+            continue
+        why = last.get("error") or bridge_control.STATE_LABELS.get(last.get("state"), "未知状态")
+        manual = f"请在 link16-agent-infra 跑 python feishu/feishu_bridge.py start --bot {name}"
+        if rec["count"] >= REVIVE_MAX:
+            rec["gave_up"] = True
+            alerts[f"{name}:revive"] = rec
+            _alerts_save(alerts)
+            log(f"[R4] {name} 30 分钟内已自动重启 {REVIVE_MAX} 次仍退出 → 停止自动重启")
+            notify(name, "bridge_revive", f"❌ {name} 的桥 30 分钟内自动重启 {REVIVE_MAX} 次仍退出（{why}），"
+                                          f"已停止自动重启。{manual}")
+            continue
+        rec.update(last=now, count=rec["count"] + 1)
+        alerts[f"{name}:revive"] = rec
+        _alerts_save(alerts)
+        try:
+            subprocess.run([sys.executable, str(HERE / "feishu_bridge.py"), "start", "--bot", name],
+                           cwd=str(PROJECT), timeout=150, check=True, capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            result = "已自动重启 ✅"
+        except (OSError, subprocess.SubprocessError) as exc:
+            result = f"自动重启失败 ❌（{str(exc)[:120]}）；{manual}"
+        log(f"[R4] {name} 桥意外退出（{why}）→ {result}")
+        notify(name, "bridge_revive", f"🔁 {name} 的桥意外退出（{why[:120]}），{result}")
+        revived += 1
+    return revived
+
+
 def _allow(pty):
     """注入时带 --allow-ws：wmux-rpc 守卫默认只放行 workspace.list[0]，多 bot 环境不带会被 DENIED。"""
     out = rpc(["rpc", "workspace.list", "{}"])
@@ -1392,6 +1448,13 @@ def cmd_run(auto=True):
             except Exception as _e:                       # noqa: BLE001 —— 巡检绝不因它崩
                 checks["r7"] = f"error: {_e}"
                 log(f"R7 CLI 版本漂移扫描失败（不致命）：{_e}")
+
+            # ---- R4 · 单只 bot 的桥意外退出 → 单独重启 ----
+            try:
+                acted += revive_dead_bridges()
+            except Exception as _e:                       # noqa: BLE001 —— 巡检绝不因它崩
+                checks["r4"] = f"error: {_e}"
+                log(f"R4 单 bot 看护失败（不致命）：{_e}")
 
             # ---- R4 · 桥进程活→死（每轮一次·不针对面板）----
             ba = bridge_alive()

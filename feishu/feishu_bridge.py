@@ -3090,11 +3090,22 @@ def _run_bot(bot_name=None):
             ad, lambda: [bname], asleep=asyncio.sleep, interval=30, stale_sec=120,
             remediate=_remediate, notify=_notify, recover_pending=_recover_pending))
 
+        async def _tell_owner(text):
+            """断连 / 恢复只走一次 REST 纯文字 DM（不依赖长连接）；发不出去只进日志，不重试刷屏。"""
+            target = mirror_target(bname) or next(iter(sorted(ALLOWED_OPEN_IDS)), None)
+            try:
+                sent = target and await asyncio.to_thread(
+                    _send_text_message, bot["app_id"], bot["app_secret"], target, f"[{bname}] {text}")
+            except Exception as exc:  # noqa: BLE001 — 网络断着时本来就可能发不出
+                sent = None
+                blog(bname, f"通知主人失败：{str(exc)[:120] or type(exc).__name__}")
+            blog(bname, f"{'已通知主人' if sent else '未能通知主人'}：{text}")
+
         wake = asyncio.Event()
         ch.bind_inbox(wake)
-        await ch.start_background(timeout=30)
+        await bridge_control.connect_until_ready(ch, control, report=lambda m: blog(bname, m), tell=_tell_owner)
         control.publish('ready', inbox=durable_inbox.counts())
-        blog(bname, '持久收件已就绪：落盘后确认接收；重启会等待当前交接完成。')
+        blog(bname, '持久收件已就绪：落盘后确认接收；stop 立即生效，未完成的待办重启后续接。')
         async def _dispatch(payload, received):
             control.publish('handling', message_id=payload['message']['message_id'])
             try:
@@ -3123,9 +3134,23 @@ def _run_bot(bot_name=None):
         await ch.disconnect()
         control.publish('stopped', inbox=durable_inbox.counts())
 
+    async def guarded():
+        try:
+            await runner()
+        except Exception as exc:  # noqa: BLE001
+            # 立刻退出：若让异常冒出 asyncio.run，收尾会等 SDK 线程，进程成了收不到消息的僵尸。
+            # 控制状态记为 failed，看门狗据此单独重启这只 bot。
+            import traceback
+            traceback.print_exc()
+            reason = f"{type(exc).__name__}: {str(exc)[:200]}"
+            blog(bot['name'], f"❌ 桥主循环崩溃，进程退出等看门狗重启：{reason}")
+            control.publish('failed', error=reason)
+            sys.stdout.flush()
+            os._exit(1)
+
     print(f"[{bot['name']}] 连接中…", flush=True)
     try:
-        asyncio.run(runner())
+        asyncio.run(guarded())
     except KeyboardInterrupt:
         print(f"\n[{bot['name']}] Ctrl+C → 退出", flush=True)
         os._exit(0)

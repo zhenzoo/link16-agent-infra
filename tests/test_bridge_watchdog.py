@@ -830,3 +830,45 @@ def test_holds_roster取不到时不误伤(monkeypatch):
                         lambda: [{"bot": "x", "name": "任务", "enabled": True}])
     monkeypatch.setattr(bridge_cron, "_roster_bots", lambda: set())
     assert w._holds("bridge_cron.py", "python bridge_cron.py run").startswith("1 条")
+
+
+# ─────────────────────── R4 · 单只 bot 的桥意外退出 → 单独重启 ───────────────────────
+
+def _revive_env(monkeypatch, tmp_path, states, running=()):
+    import bridge_control as bc
+    for pid, (bot, state) in enumerate(states, start=1000):
+        (tmp_path / f"bridge-control-{pid}.json").write_text(
+            f'{{"contract": "{bc.CONTRACT}", "pid": {pid}, "bot": "{bot}", "state": "{state}", "at": {pid}}}',
+            encoding="utf-8")
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(w, "ALERTS_PATH", tmp_path / "alerts.json")
+    monkeypatch.setattr(w, "_iter_bots", lambda: [{"name": b} for b in ("crashed", "stopped", "alive", "never")])
+    monkeypatch.setattr(w.bridge_process, "query_processes", lambda: [{"ProcessId": 1}])
+    monkeypatch.setattr(w.bridge_process, "select_pids", lambda rows, script, bot: ["1"] if bot in running else [])
+    started, told = [], []
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: started.append(cmd[-1]))
+    monkeypatch.setattr(w, "notify", lambda bot, kind, text: told.append((bot, text)) or True)
+    return started, told
+
+
+def test_r4_只重启意外退出的bot_不碰stop停的和从没跑过的(monkeypatch, tmp_path):
+    started, told = _revive_env(monkeypatch, tmp_path,
+                                [("crashed", "failed"), ("stopped", "stopped"), ("alive", "ready")],
+                                running=("alive",))
+    assert w.revive_dead_bridges() == 1
+    assert started == ["crashed"]
+    assert len(told) == 1 and "已自动重启" in told[0][1]
+
+
+def test_r4_冷却内不重复重启_连续起不来就停手只说一次(monkeypatch, tmp_path):
+    started, told = _revive_env(monkeypatch, tmp_path, [("crashed", "failed")])
+    w.revive_dead_bridges()
+    w.revive_dead_bridges()                        # 冷却内：不动
+    assert started == ["crashed"]
+    for _ in range(w.REVIVE_MAX + 2):              # 每次跳过冷却，模拟反复崩
+        data = w._alerts_load()
+        data["crashed:revive"]["last"] = 0
+        w._alerts_save(data)
+        w.revive_dead_bridges()
+    assert started == ["crashed"] * w.REVIVE_MAX
+    assert sum("已停止自动重启" in t for _, t in told) == 1
