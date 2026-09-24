@@ -9,44 +9,55 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import time
 
 import bridge_process
 
 SILENT_MINUTES = 60
-_process_snapshot = (0.0, None)
+_codex_snapshot = (0.0, None)
+_CODEX_QUERY = """
+$ErrorActionPreference = 'Stop'
+try {
+  $rows = @(Get-CimInstance Win32_Process -Filter "Name='codex.exe'" -ErrorAction Stop |
+    Select-Object ProcessId,ParentProcessId,CommandLine)
+  @{ok=$true; processes=$rows} | ConvertTo-Json -Depth 4 -Compress
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+"""
+_LISTEN = re.compile(r"\bapp-server\s+--listen\s+(ws://127\.0\.0\.1:\d+)(?=\s|$)")
+
+
+def _codex_rows():
+    """codex.exe snapshot, cached 10s; same PowerShell budget as bridge_process queries."""
+    global _codex_snapshot
+    now = time.monotonic()
+    if now - _codex_snapshot[0] >= 10 or _codex_snapshot[1] is None:
+        rows = bridge_process._envelope(
+            bridge_process._powershell(_CODEX_QUERY, bridge_process.QUERY_TIMEOUTS[0])).get("processes")
+        if not isinstance(rows, list):
+            raise ValueError("进程状态未知")
+        _codex_snapshot = (now, rows)
+    return _codex_snapshot[1]
 
 
 def _observer_endpoint(state_dir, bot):
-    global _process_snapshot
-    ready = json.loads((Path(state_dir) / f"bridge-codex-app-ready-{bot}.json").read_text(encoding="utf-8"))
+    """The bot's own app-server RPC endpoint and current thread.
+
+    The worker records its PID in the startup record and is the only parent of
+    `codex app-server --listen ws://127.0.0.1:<port>`. The observer now reads a
+    private TUI-gateway `/events` stream and cannot answer RPC, so it is not used.
+    """
+    state_dir = Path(state_dir)
+    ready = json.loads((state_dir / f"bridge-codex-app-ready-{bot}.json").read_text(encoding="utf-8"))
+    start = json.loads((state_dir / f"bridge-codex-app-startup-{bot}.json").read_text(encoding="utf-8"))
     thread = ready["thread_id"]
-    now = time.monotonic()
-    if now - _process_snapshot[0] >= 10 or _process_snapshot[1] is None:
-        _process_snapshot = (now, bridge_process.query_processes(timeouts=(3,)))
-    rows = _process_snapshot[1]
-    if rows is None:
-        raise ValueError("进程状态未知")
-    matches = []
-    script = Path(__file__).with_name("codex_app_server_worker.py").resolve()
-    for row in rows:
-        args = [x.strip('"\'') for x in shlex.split(row["CommandLine"], posix=False)]
-        if "observe" not in args:
-            continue
-        i = args.index("observe")
-        if i < 2 or Path(args[i - 1]).resolve() != script:
-            continue
-        flags = args[i + 1:]
-        def flag(name):
-            return flags[flags.index(name) + 1] if name in flags else None
-        if flag("--bot") == bot and flag("--thread") == thread:
-            url = flag("--url") or ""
-            if re.fullmatch(r"ws://127\.0\.0\.1:\d+", url):
-                matches.append(url)
-    if len(matches) != 1:
-        raise ValueError("无法唯一匹配当前 bot 的观察连接")
-    return matches[0], thread
+    if start.get("thread_id") != thread or start.get("startup_id") != ready.get("startup_id"):
+        raise ValueError("启动记录与当前会话不一致")
+    worker = int(start["worker_pid"])
+    urls = {m.group(1) for row in _codex_rows() if row.get("ParentProcessId") == worker
+            for m in [_LISTEN.search(row.get("CommandLine") or "")] if m}
+    if len(urls) != 1:
+        raise ValueError("无法唯一匹配当前 bot 的 app-server")
+    return urls.pop(), thread
 
 
 def read_activity(state_dir, bot, *, inspect_tools=False):

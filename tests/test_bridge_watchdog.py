@@ -872,3 +872,15 @@ def test_r4_冷却内不重复重启_连续起不来就停手只说一次(monkey
         w.revive_dead_bridges()
     assert started == ["crashed"] * w.REVIVE_MAX
     assert sum("已停止自动重启" in t for _, t in told) == 1
+
+
+def test_r6_及各巡检用到fb的函数都自带惰性import():
+    """历史故障：R6 每轮报 `name 'fb' is not defined`。守住：凡用 `fb.` 的函数自己 import。"""
+    import ast
+    tree = ast.parse(Path(w.__file__).read_text(encoding="utf-8"))
+    for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        uses = any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "fb"
+                   for n in ast.walk(fn))
+        imports = any(isinstance(n, ast.Import) and any(a.asname == "fb" for a in n.names)
+                      for n in ast.walk(fn))
+        assert not uses or imports, f"{fn.name} 用了 fb 却没有 import feishu_bridge as fb"

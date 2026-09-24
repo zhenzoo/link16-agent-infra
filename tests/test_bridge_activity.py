@@ -90,16 +90,31 @@ def test_mismatched_thread_or_completed_turn_is_unknown(rpc):
     assert a.read_activity("state", "bot")["state"] == "unknown"
 
 
-def test_endpoint_uses_exact_live_bot_and_thread_not_shared_cwd(tmp_path, monkeypatch):
-    (tmp_path / "bridge-codex-app-ready-bot.json").write_text(json.dumps({"thread_id": "thread-1"}))
-    script = Path(worker.__file__).resolve()
-    command = [sys.executable, "-u", str(script), "observe", "--bot", "bot", "--thread", "thread-1",
-               "--url", "ws://127.0.0.1:1234", "--cwd", "C:/shared"]
-    rows = [{"ProcessId": 1, "CommandLine": subprocess.list2cmdline(command)}]
-    monkeypatch.setattr(a, "_process_snapshot", (0, None))
-    monkeypatch.setattr(a.bridge_process, "query_processes", lambda **kwargs: rows)
+def test_endpoint_is_the_workers_own_app_server_not_the_events_mirror(tmp_path, monkeypatch):
+    # 2026-09-24: observers run `--url <gateway>/events --startup-id`, which cannot
+    # answer RPC; every Codex bot was reported "ValueError". Use the worker's child.
+    (tmp_path / "bridge-codex-app-ready-bot.json").write_text(json.dumps({"thread_id": "thread-1", "startup_id": "s1"}))
+    (tmp_path / "bridge-codex-app-startup-bot.json").write_text(
+        json.dumps({"thread_id": "thread-1", "startup_id": "s1", "worker_pid": 10}))
+    rows = [
+        {"ProcessId": 11, "ParentProcessId": 10,
+         "CommandLine": "codex.exe --dangerously-bypass-hook-trust app-server --listen ws://127.0.0.1:1234"},
+        {"ProcessId": 12, "ParentProcessId": 10, "CommandLine": "codex.exe --remote ws://127.0.0.1:9999"},
+        {"ProcessId": 21, "ParentProcessId": 20,
+         "CommandLine": "codex.exe app-server --listen ws://127.0.0.1:5555"},
+    ]
+    budgets = []
+    monkeypatch.setattr(a, "_codex_snapshot", (0, None))
+    monkeypatch.setattr(a.bridge_process, "_powershell", lambda script, timeout: budgets.append(timeout))
+    monkeypatch.setattr(a.bridge_process, "_envelope", lambda result: {"ok": True, "processes": rows})
     assert a._observer_endpoint(tmp_path, "bot") == ("ws://127.0.0.1:1234", "thread-1")
-    rows[0]["CommandLine"] = rows[0]["CommandLine"].replace("thread-1", "stale-thread")
+    assert budgets and budgets[0] >= 15          # the old 3s budget timed out under load
+    rows.append({"ProcessId": 13, "ParentProcessId": 10,
+                 "CommandLine": "codex.exe app-server --listen ws://127.0.0.1:4321"})
+    assert a.read_activity(tmp_path, "bot")["state"] == "unknown"   # ambiguous → never guess
+    rows.pop()
+    (tmp_path / "bridge-codex-app-startup-bot.json").write_text(
+        json.dumps({"thread_id": "stale-thread", "startup_id": "s0", "worker_pid": 10}))
     assert a.read_activity(tmp_path, "bot")["state"] == "unknown"
 
 
