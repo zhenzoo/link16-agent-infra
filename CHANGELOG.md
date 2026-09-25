@@ -19,6 +19,15 @@ last_reviewed: 2026-09-26
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.34.0 — 2026-09-26 · 三平台一视同仁：平台检测与检查 skill、看门狗 R8 覆盖 Claude/Kimi、bot 不绑定平台
+
+- **平台检测**：`python feishu/agent_profile_cli.py platforms` 列出 Link16 支持的全部智能体平台（唯一清单 `agent_runtime._RUNTIME_ADAPTER_SPECS`）与本机安装、版本、账号。新增只读 skill `link16-platforms`，登记进 `profile_bootstrap` 分发到 Claude 账号目录与 Codex/Kimi 共享 `.agents/skills`；`CLAUDE.md`/`AGENTS.md`「开工先读」第 4 条、ARCH-120 §2 唯一真相源表同步。改共享机制前先跑它，每个平台都要设计，本机已装的才能真机验证。
+- **看门狗 R8 三平台**：执行状态按 bot 当前平台读结构化记录——Codex 问 app-server（原逻辑）、Claude Code 读钉住的 transcript、Kimi Code 读 Wire 主 agent 日志；守卫测试要求清单每个平台都有读取器。「状态无法确认」只在原因变化时记一次并写明缺口（以前每 2 分钟对每只 Claude bot 记一行，累计 4170 行）。真机：tb25-link16=执行中（工具在跑），tb25-ccp / tb25-lab-3=空闲。
+- **bot 不绑定平台**：任一 bot 可随 `/account` 切到任一 profile，`-codex` 后缀只是历史命名。SOP-121 改为「让 bot 用 Codex profile」，SOP-120 示例、README、入口文档、feishu skill、ARCH-150 cron 说明原位改口；注册脚本不再往身份名册写 `runtime`（无人读取且已与实际 profile 不一致）。
+- **测试配置入库**：`pytest.ini`（收集限定 `tests/`，否则 `_state` 里的旧测试副本造成 21 个收集错误）与 `tests/__init__.py`（优先于 site-packages 同名 `tests` 包）。
+- **验证**：全仓 1042 passed。
+- **升级**：拉取后跑 `python feishu/profile_bootstrap.py --apply` 装上新 skill；重启桥让看门狗与桥进程加载新的 R8。
+
 ## v0.33.7 — 2026-09-26 · 定时任务缺 pyyaml 不再静默漏跑；Python 下限降到 3.11
 
 - **现象**：9-26 00:00 tb24-xhs-autopilot 的每晚写稿（daily-cruise）没有触发，日志无报错；`board` 显示「还没有任何定时任务」，而 `feishu/cron-jobs/` 下 6 个任务文件都在。
