@@ -1,9 +1,9 @@
 ---
 doc_type: SOP
 doc_id: SOP-121
-title: 建一个 Codex 飞书 bot（SOP-120 之上的 Codex 增量）
+title: 让 bot 用 Codex profile（SOP-120 之上的 Codex 增量）
 status: active
-purpose: 在通用注册流程之上，列出由 Codex CLI 驱动的 bot 需要额外做的那几处。
+purpose: 在通用注册流程之上，列出 bot 选用 Codex profile 时需要额外做的那几处；bot 不绑定平台，可随 /account 切换。
 owns:
   - Codex 专属的 profile 选择与名册字段
   - app-server typed progress 与 final 的取用
@@ -13,18 +13,18 @@ does_not_own:
   - Codex 运行时机制（见 ARCH-110 §2.4.1）
   - Codex Personal 的迁移（见 SOP-160）
 read_when:
-  - 要新建一个 Codex（而非 Claude）飞书 bot
+  - 某个 bot 首次选用 Codex profile（注册时 --profile，或事后 /account）
 last_reviewed: 2026-09-07
 ---
-# SOP-121 · 建一个 Feishu Codex bot（SOP-120 之上的 Codex 增量）
+# SOP-121 · 让 bot 用 Codex profile（SOP-120 之上的 Codex 增量）
 
-> **一句话**：建 Codex bot = 先按 [`SOP-120`](SOP-120-feishu-register.md) 那套建 Feishu bot（OAuth 应用 / 名册 / 权限 / 拉群 / 双机），**再叠下面这几处 Codex 专属增量**。运行时差异全收束在 `feishu/agent_runtime.py`（机制见 [`ARCH-110 §2.4.1`](ARCH-110-feishu-bridge.md)），本 SOP 只做「照做清单」，不重复讲机制。
-> **适用**：在任意机器新建一个由 **Codex CLI**（而非 Claude Code）驱动的飞书智能体。
+> **一句话**：bot 用 Codex profile = 先按 [`SOP-120`](SOP-120-feishu-register.md) 那套建 Feishu bot（OAuth 应用 / 名册 / 权限 / 拉群 / 双机），**再叠下面这几处 Codex 专属增量**。运行时差异全收束在 `feishu/agent_runtime.py`（机制见 [`ARCH-110 §2.4.1`](ARCH-110-feishu-bridge.md)），本 SOP 只做「照做清单」，不重复讲机制。
+> **适用**：在任意机器让一个飞书智能体由 **Codex CLI** 驱动（新建时选 Codex profile，或已有 bot 用 `/account` 切过来）。bot 不绑定平台，之后同样可以 `/account` 切回 Claude Code 或 Kimi Code。
 > 缘起：2026-07-21 tb24 上线 GPT 5.6 Codex bot 时，发现建 Codex bot 的流程散在 ARCH-110 §2.4.1（机制）+ SOP-120（OAuth）两处、没有一份照做清单 → 合成本 SOP。
 
 ## 前置（Codex 专属 · Link16 单仓基线）
 
-Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史按 profile 隔离；同事只 clone Link16 时不依赖任何人的 `.claude-personal`：
+用 Codex profile 的 bot 依赖一个隔离的 Codex home。认证、额度、会话和历史按 profile 隔离；同事只 clone Link16 时不依赖任何人的 `.claude-personal`：
 
 1. **建立或选择 local registry 中的隔离 Codex profile**：
    ```powershell
@@ -92,7 +92,7 @@ Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史�
 
 ## 默认 canary（typed-event）· 老「标准路径」已弃用（主人 2026-07-23 拍板）
 
-**新建的 Codex bot 一律走 typed-event（app-server worker · 契约 `milestone-v1`）**，不再有「先标准路径、富投递等转正」这一说 —— 那条老路（裸 `codex` CLI + `codex_bridge_posttool.py` 的 `_label` 逐条 dump 命令首行）会让主人手机上的进度卡**一条条刷原始命令**（🔧 Get-Content… / 🔧 git status…），已**弃用**。
+**任何 bot 以 Codex profile 起会话时一律走 typed-event（app-server worker · 契约 `milestone-v1`）**，不再有「先标准路径、富投递等转正」这一说 —— 那条老路（裸 `codex` CLI + `codex_bridge_posttool.py` 的 `_label` 逐条 dump 命令首行）会让主人手机上的进度卡**一条条刷原始命令**（🔧 Get-Content… / 🔧 git status…），已**弃用**。
 
 - **机制上已经兜住**：`agent_runtime.codex_transport()` —— 名册**没写** `codex_transport` = 默认 `app-server-canary`；**只有显式**写 `cli-legacy` / `bare-cli` / `standard` 才回退老路（应急口，正常别用）。⇒ 漏写字段不再会把 bot 掉回刷屏路（tb24 那两只就是这么掉的）。
 - **两条路的区别**（同一个 Codex，只是桥怎么起它）：
@@ -103,7 +103,7 @@ Codex bot 依赖一个隔离的 Codex home。认证、额度、会话和历史�
   | 进度卡 | 工具**类型 / 次数 / 仓库相对路径**聚合（`读取`、`搜索 rg ×2`…） | **命令原文首行**逐条刷 |
   | 命令 / 参数 / 输出 / reasoning | **不进飞书**（实测 691 条 tool 事件 raw leak = 0） | 命令首行进飞书 |
 
-## 给【已在跑的】Codex bot 切过来（⚠️ 比新建多一步 · tb24 2026-07-23 实测）
+## 给【已在跑 Codex 会话】的 bot 切过来（⚠️ 比新建多一步 · tb24 2026-07-23 实测）
 
 **只有存量 bot 需要这节；新建 bot 第一次就带 canary 起，没有这个问题（没有旧会话）。**
 

@@ -189,7 +189,7 @@ hook 不承担“读取思维链”。桥会话里的 Kimi 把可公开的当前
 
 ### § 2.4.2 · Codex typed milestone canary（PLAN-915 · 2026-07-17）
 
-Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026-07-23 起这是所有 Codex bot 的默认路**（`agent_runtime.codex_transport()`：名册没写 = `app-server-canary`；只有显式写 `cli-legacy` 才回退到已弃用的裸 CLI + hook「命令原文」路）。拓扑：
+Codex commentary 不从 transcript 猜，也不从终端 scrollback 抓。**2026-07-23 起这是所有 Codex profile 会话的默认路**（`agent_runtime.codex_transport()`：名册没写 = `app-server-canary`；只有显式写 `cli-legacy` 才回退到已弃用的裸 CLI + hook「命令原文」路）。拓扑：
 
 `官方 Codex TUI --remote` ↔ `本机透明 WebSocket 网关` ↔ `该 bot 私有 app-server`；网关将 TUI 收到的允许事件镜像给独立 observer → `milestone-v1 outbox` → 共享 drainer。
 

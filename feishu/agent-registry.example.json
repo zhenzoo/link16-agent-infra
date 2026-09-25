@@ -57,7 +57,6 @@
     "aliases": "可选字符串数组：历史显示名；与 name/display_name/at_name/send_key 共用不区分大小写及连字符/下划线的唯一名称解析。",
     "repo": "它分管哪个仓库（仓库目录名）。注册脚本不知道这个，必须人工填。",
     "shared": "该仓是否在 shared_repos 里 —— 决定 /push 后要不要跨机通知。应与 shared_repos 保持一致。",
-    "runtime": "claude 或 codex —— 这只 bot 背后跑的是哪个 CLI。",
     "role": "一句话职责，纯给人看，机器不读。",
     "verified": "注册时是否成功查到了 open_id 与显示名。false = 需要人工核对。"
   },
@@ -70,7 +69,6 @@
       "at_name": "@我的基建助手",
       "repo": "link16-agent-infra",
       "shared": true,
-      "runtime": "claude",
       "role": "基建/桥",
       "verified": true
     },
@@ -82,7 +80,6 @@
       "at_name": "@我的笔记助手",
       "repo": "my-shared-repo",
       "shared": true,
-      "runtime": "claude",
       "role": "内容/随笔",
       "verified": true
     },
@@ -94,7 +91,6 @@
       "at_name": "@台式机基建助手",
       "repo": "link16-agent-infra",
       "shared": true,
-      "runtime": "codex",
       "role": "基建/桥（另一台机上的对应物 · /push 后就是通知它来 pull）",
       "verified": true
     }

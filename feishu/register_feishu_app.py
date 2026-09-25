@@ -175,7 +175,7 @@ def _resolve_machine(slug, name, machines):
     return ""
 
 
-def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"):
+def append_registry_stub(app_id, app_secret, bot_arg, cli_name):
     """建完【自动】往 agent-registry.json 补一条 stub —— 把「登记协议」从『靠人记得回写』变成『脚本自动做』。
     open_id/显示名现查·verified 按是否查到·幂等(已有同名跳过)。repo/machine 让运行的 agent 核对补全(脚本不知道它管哪个仓)。"""
     import json
@@ -211,7 +211,7 @@ def append_registry_stub(app_id, app_secret, bot_arg, cli_name, runtime="claude"
         print(f"\n✅ agent-registry.json 已有 '{name}' → 跳过（幂等·没重复加）", flush=True)
         return next(a for a in data.get("agents", []) if a.get("name") == name)
     stub = {"name": name, "machine": machine, "send_key": send_key, "open_id": oid or "",
-            "at_name": f"@{name}", "repo": "", "shared": False, "runtime": runtime,
+            "at_name": f"@{name}", "repo": "", "shared": False,
             "role": "", "verified": bool(oid)}
     # 2026-09-08 机器 3050：空骨架把数组写成一行 `"agents": []`，旧的字符串定位（找换行加两空格加 `]`）
     # 命中不了就静默跳过。改为按结构追加、整文件 JSON 回写（indent=2·保 key 顺序·不引入依赖）。
@@ -571,7 +571,7 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
     print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
 
     # 自动登记进 agent-registry.json（登记协议自动化·不靠人记得回写）
-    stub = append_registry_stub(app_id, secret, args.bot, args.name, runtime)
+    stub = append_registry_stub(app_id, secret, args.bot, args.name)
     runtime_bot_name = (stub or {}).get("send_key") or args.bot or args.name
     at_name = (stub or {}).get("at_name") or f"@{args.name}"
     row = agent_runtime.upsert_runtime_bot(

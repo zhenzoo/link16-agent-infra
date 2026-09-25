@@ -13,7 +13,7 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 - `docs/ARCH-150-agent-cron.md`：定时派活。
 - `docs/ARCH-160-agent-watchdog.md`：看门狗。
 - `docs/SOP-120-feishu-register.md`：注册通用流程。
-- `docs/SOP-121-codex-bot-register.md`：Codex bot 增量流程。
+- `docs/SOP-121-codex-bot-register.md`：bot 选用 Codex profile 的增量流程（bot 不绑定平台，可随 /account 切换）。
 - `docs/SOP-125-bot-rename.md`：已有 bot 改名、后台链接、名称同步与恢复。
 - `docs/SOP-140-feishu-document-io.md`：正文与原生表格的读写、逐格核验和失败处理。
 - `docs/SOP-141-native-media-review.md`：图片、音频、视频放进正文后实际点播的发布与验收流程；包括超过20MB的分片上传。

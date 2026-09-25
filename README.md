@@ -357,7 +357,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 理解 Codex 启动为何等待、改后凭什么就绪 | [RESEARCH-080：启动根因与真机验收](docs/RESEARCH-080-codex-startup-readiness.md) |
 | 审查工作中重启飞书桥能否续接原卡和消息 | [RESEARCH-090：原卡续接与持久收件交接](docs/RESEARCH-090-bridge-restart-continuity.md) |
 | 查 tb24 E 盘被什么占满、哪些能零决策删、聊天记录怎样搬出 C 盘不改路径 | [RESEARCH-101：E 盘全盘彻查与聊天记录 junction 搬迁](docs/RESEARCH-101-tb24-e-drive-audit-and-transcript-relocation.md)（清单待拍板） |
-| 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（Codex 版：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
+| 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（选 Codex profile 的增量：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
 | 给已有的 bot 改名、查专属后台并同步新旧名称 | [`SOP-125`](docs/SOP-125-bot-rename.md)：`rename_bot.py plan → apply → verify`；执行与本机验证见 [PLAN-1100](docs/PLAN-1100-bot-rename-workflow.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
 | 弄懂桥到底怎么运转 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) |

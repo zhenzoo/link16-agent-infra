@@ -20,7 +20,7 @@ last_reviewed: 2026-08-26
 
 # Link16 · Claude 部署工程师入口
 
-本仓是飞书（Lark）↔ Claude/Codex 会话桥与 wmux 驱动层。内容业务属于各内容仓，不进入这里。
+本仓是飞书（Lark）↔ Claude Code / Codex / Kimi Code 会话桥与 wmux 驱动层。内容业务属于各内容仓，不进入这里。
 
 ## 共同职责与唯一真源
 

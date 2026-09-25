@@ -20,7 +20,7 @@ last_reviewed: 2026-08-26
 
 # Link16 · Codex 部署工程师入口
 
-本仓是飞书（Lark）↔ Claude/Codex 会话桥与 wmux 驱动层。内容业务属于各内容仓，不进入这里。
+本仓是飞书（Lark）↔ Claude Code / Codex / Kimi Code 会话桥与 wmux 驱动层。内容业务属于各内容仓，不进入这里。
 
 ## 共同职责与唯一真源
 
@@ -34,7 +34,7 @@ last_reviewed: 2026-08-26
 架构理由与硬合同按任务进入相应 [ARCH](docs/ARCH-110-feishu-bridge.md)；出站格式、分片与去重见
 [SPEC-210](docs/SPEC-210-outbound-delivery.md)，飞书权限基线见
 [SPEC-220](docs/SPEC-220-feishu-scope-baseline.md)。单 bot 注册见
-[SOP-120](docs/SOP-120-feishu-register.md)，Codex 增量见
+[SOP-120](docs/SOP-120-feishu-register.md)，选 Codex profile 的增量见
 [SOP-121](docs/SOP-121-codex-bot-register.md)。
 
 ## 接到“开始部署 Link16”

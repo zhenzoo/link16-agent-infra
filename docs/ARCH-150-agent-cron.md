@@ -20,7 +20,7 @@ last_reviewed: 2026-08-17
 ---
 # ARCH-150 · 给智能体排定时任务（CRON）—— 闹钟 vs 大脑 · 每 bot 专属 · 零硬编码
 
-> **一句话**：到点把**一句触发词**注入某个 bot 的 Claude Code 会话（= 定时替你 @ 它派活）。机制（几点·派给谁·发哪句）在 `feishu/bridge_cron.py`；**真正的活（大脑）在那个 bot 自己仓里的一份 SOP**，触发词只是把它引过去。
+> **一句话**：到点把**一句触发词**注入某个 bot 的当前会话（按它此刻的 profile：Claude Code / Codex / Kimi Code）（= 定时替你 @ 它派活）。机制（几点·派给谁·发哪句）在 `feishu/bridge_cron.py`；**真正的活（大脑）在那个 bot 自己仓里的一份 SOP**，触发词只是把它引过去。
 >
 > 实现：`feishu/bridge_cron.py`（守护进程 + CLI）· 载体：`feishu/cron-jobs/<bot>.yaml`。用法速查在 `TOOLS.md`🔵 / `feishu` skill。
 

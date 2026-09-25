@@ -12,7 +12,7 @@ owns:
   - bot↔仓库↔职责 名册表
 does_not_own:
   - 桥的运行时机制（见 ARCH-110）
-  - Codex bot 的增量步骤（见 SOP-121）
+  - bot 选用 Codex profile 的增量步骤（见 SOP-121）
   - 改名（见 SOP-125）
   - 装机（见 SOP-100）
 read_when:
@@ -119,8 +119,8 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
     "profiles": { "claude": "<claude-profile>", "codex": "<codex-profile>" }
   },
   "bots": [
-    { "name": "默认 Claude bot", "...": "不写身份字段" },
-    { "name": "Codex bot", "profile": "<codex-profile>" }
+    { "name": "<bot-a>", "profile": "<claude-profile>" },
+    { "name": "<bot-b>", "profile": "<codex-profile>" }
   ]
 }
 ```
