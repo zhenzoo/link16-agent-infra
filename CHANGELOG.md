@@ -19,6 +19,14 @@ last_reviewed: 2026-09-23
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.33.6 — 2026-09-25 · bot 里再起的智能体不再冒充 bot；新锁文件初始化不再撞车
+
+- **卡片误标「工作标题生成失败」**：23:06–23:12 tb25-link16 的卡片顶栏变成「工作标题生成失败；本轮答案已保留」「🔴 feishu-workline 回执连续缺失」。工作行闸显示失败的两轮来自 bot 在 shell 里跑的两次 `codex exec`，不是 bot 自己。所有桥 hook 只凭 `FEISHU_BRIDGE_SESSION` 认身份，而它被 bot 派生的一切继承，于是嵌套的 Codex 以 bot 身份开 turn、改回信路由、发进度卡，回不了执就把 bot 的标题判为失败。
+- **修正**：新增 `bridge_env.nested_agent`：环境里外层智能体的会话戳（`CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`）与本 hook 会话号不同 → 7 个桥 hook 全部 no-op。bot 自己的 hook 两边永远相等（Claude 每次派生都写当前会话号，Codex 跑 hook 时按本会话重写）；桥启动三种运行时的 bot 前清掉这两个戳，防止面板残留误伤。边界：Codex 里再起 Codex、Kimi 里再起 Codex/Kimi 识别不到。
+- **新锁文件初始化竞态**：`ProcessFileLock` 旧写法让所有竞争者往同一个空锁文件并发写初始化字节，Windows 上偶发 `PermissionError`（v0.33.4 起 hook 信任与目录信任共用 `.config.toml.link16.lck`，多个 Codex 同时冷启动正是这种场景）。改为 `O_EXCL` 选出唯一初始化者，其余等字节落盘再加锁。原修复在 `wip/tb25-codex-tui-startup`，本版收纳后删除该分支。
+- **验证**：全仓 1033 passed、1 skipped。锁竞态测试旧代码 30 轮失败 1 轮、新代码 30 轮 0 失败。真机：从 Claude bot 会话里嵌套跑 `codex exec` → 零文件写入；干净环境下同样的 `codex exec` → 正常开 turn、会话号即其 thread；本 bot 自己的下一轮照常拿到工作行指令并回执。
+- **升级**：hook 与 worker 每次都是新进程，拉取即生效；bot 启动命令清戳在重启桥后生效。
+
 ## v0.33.5 — 2026-09-25 · 整体 start 部分失败也照常拉起看门狗
 
 - **现象**：tb24 20:58 冷启动，20:59:54 开机任务按时触发，但 Wi-Fi 21:02:30 才连上；16 只桥解析 open.feishu.cn 失败、30 秒超时退出。`start` 看到桥退出当场抛错，看门狗与 cron 都没起，直到 22:48 手动 start，全体 bot 失联 1 小时 48 分，期间消息（含两条 `/close`）没有点赞也不会补推。
