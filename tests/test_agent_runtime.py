@@ -776,22 +776,47 @@ class ClaudeStartupPromptTests(unittest.TestCase):
         "❯ "
     )
 
+    # 2026-09-20 真机抓屏（Claude Code 2.1.278）：光标默认停在 No, exit，按回车 = 退出。
+    NO_EXIT_DEFAULT_SCREEN = (
+        "───────────────────────────────────────────────────────────────\n"
+        " Accessing workspace:\n\n"
+        " C:\\Users\\user\\AppData\\Local\\Temp\\link16-claude-trust-eval\\control-noseed\n\n"
+        " Quick safety check: Is this a project you created or one you trust?\n\n"
+        " Claude Code'll be able to read, edit, and execute files here.\n\n"
+        " Security guide\n\n"
+        " ❯ No, exit\n"
+        "   Yes, I trust this folder\n\n"
+        " Enter to confirm · Esc to cancel\n"
+    )
+
     def test_trust_prompt_is_not_ready_even_though_it_paints_the_ready_mark(self):
         # 这就是 bug 本体：弹窗的选择光标和空 composer 用的是同一个 `❯`。
         self.assertIn(agent_runtime.CLAUDE_READY_MARK, self.TRUST_SCREEN)
         self.assertFalse(agent_runtime.is_ready(self.CLAUDE, self.TRUST_SCREEN))
-        self.assertTrue(agent_runtime.needs_trust_confirmation(self.CLAUDE, self.TRUST_SCREEN))
+        self.assertTrue(agent_runtime.claude_trust_modal(self.CLAUDE, self.TRUST_SCREEN))
+
+    def test_claude_trust_dialog_is_never_answered_whatever_its_default(self):
+        # 2.1.233 默认 Yes、2.1.278 起默认 No, exit：按键答题会随版本漂，桥一律不答。
+        for screen in (self.TRUST_SCREEN, self.NO_EXIT_DEFAULT_SCREEN):
+            with self.subTest(screen=screen[-60:]):
+                self.assertTrue(agent_runtime.claude_trust_modal(self.CLAUDE, screen))
+                self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, screen))
+                self.assertFalse(agent_runtime.is_ready(self.CLAUDE, screen))
 
     def test_real_composer_after_trust_is_ready(self):
-        # 按完回车之后的真屏：判就绪，且不再要求按回车（否则会往活会话里空按）。
         self.assertTrue(agent_runtime.is_ready(self.CLAUDE, self.COMPOSER_SCREEN))
-        self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, self.COMPOSER_SCREEN))
+        self.assertFalse(agent_runtime.claude_trust_modal(self.CLAUDE, self.COMPOSER_SCREEN))
 
     def test_older_trust_wording_is_also_caught(self):
         # 老版本文案换过一次；ready 判据不该跟着 Claude Code 的措辞漂。
         legacy = "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit"
         self.assertFalse(agent_runtime.is_ready(self.CLAUDE, legacy))
-        self.assertTrue(agent_runtime.needs_trust_confirmation(self.CLAUDE, legacy))
+        self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, legacy))
+
+    def test_trust_dialog_text_above_a_live_composer_is_not_a_modal(self):
+        # 讨论这个 bug 的会话，滚屏里可能同时有两句原文；最后一行是输入框就不是弹窗。
+        scrollback = self.NO_EXIT_DEFAULT_SCREEN + "\n● 上面是我抓到的弹窗原文。\n\n❯ \n"
+        self.assertFalse(agent_runtime.claude_trust_modal(self.CLAUDE, scrollback))
 
     def test_unknown_startup_modal_blocks_ready_but_never_auto_answers(self):
         # 未知弹窗（如 CLAUDE.md external includes）：不知道哪个选项安全 →
@@ -802,6 +827,7 @@ class ClaudeStartupPromptTests(unittest.TestCase):
         )
         self.assertFalse(agent_runtime.is_ready(self.CLAUDE, unknown))
         self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, unknown))
+        self.assertFalse(agent_runtime.claude_trust_modal(self.CLAUDE, unknown))
 
     def test_trust_wording_in_scrollback_is_not_a_live_modal(self):
         # 跨机隐患：正在讨论这个 bug 的 bot，滚屏里就有这句话。只有文案、没有菜单结构
@@ -811,7 +837,7 @@ class ClaudeStartupPromptTests(unittest.TestCase):
             "和空输入框共用同一个箭头，所以就绪判据被骗了。\n"
             "❯ "
         )
-        self.assertFalse(agent_runtime.needs_trust_confirmation(self.CLAUDE, chatter))
+        self.assertFalse(agent_runtime.claude_trust_modal(self.CLAUDE, chatter))
         self.assertTrue(agent_runtime.is_ready(self.CLAUDE, chatter))
 
     def test_codex_and_plain_claude_composer_unchanged(self):
@@ -1232,6 +1258,31 @@ class BridgeStartupRecoveryTests(unittest.TestCase):
             self.assertIn("最近一次启动失败现场", feishu_bridge._startup_failure_markdown(
                 self.BOT["name"]
             ))
+
+        self._with_state_dir(check)
+
+    def test_claude_trust_dialog_fails_fast_without_any_keypress(self):
+        screen = ClaudeStartupPromptTests.NO_EXIT_DEFAULT_SCREEN
+
+        def check(_tmp):
+            with (
+                patch.object(feishu_bridge, "read_screen", return_value=screen),
+                patch.object(feishu_bridge.wmux_session, "pty_state", return_value=(True, "claude")),
+                patch.object(feishu_bridge, "_claude_state_file", return_value="C:/profile/.claude.json"),
+                patch.object(feishu_bridge.time, "sleep"),
+                patch.object(feishu_bridge, "wmux") as send,
+            ):
+                started = time.monotonic()
+                self.assertFalse(feishu_bridge._wait_agent_ready(self.BOT, "pty-test", "ws-test", timeout=30))
+                self.assertLess(time.monotonic() - started, 5, "must not sit out the ready timeout")
+                self.assertFalse(feishu_bridge._finish_worker_startup(
+                    self.BOT, "ws-test", "pty-test", "C:/repo",
+                ))
+            send.assert_not_called()
+            failure = feishu_bridge._load_startup_failure(self.BOT["name"])
+            self.assertEqual(failure["stage"], "claude-trust-modal")
+            self.assertIn("C:/profile/.claude.json", failure["reason"])
+            self.assertIn("hasTrustDialogAccepted", failure["reason"])
 
         self._with_state_dir(check)
 

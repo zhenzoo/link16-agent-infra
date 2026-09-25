@@ -1007,6 +1007,10 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
                     kimi_update_dismissed = True
                 time.sleep(READY_POLL_SEC)
                 continue
+            if agent_runtime.claude_trust_modal(bot, scr):
+                # Trust was written before launch; never answer the dialog
+                # (its default is "No, exit"). Fail now with the real cause.
+                return False
             if agent_runtime.needs_trust_confirmation(bot, scr):
                 if workspace_id and not trust_sent:
                     wmux("enter", pty, "--allow-ws", workspace_id)
@@ -1058,6 +1062,13 @@ def _startup_retryable_shell(bot, pty, screen=None):
         except RuntimeError:
             return False
     return not agent_runtime.is_live(bot, screen)
+
+
+def _claude_state_file(bot):
+    try:
+        return (agent_runtime.resolve_profile(bot, required=True).home_path / ".claude.json").as_posix()
+    except Exception:  # noqa: BLE001 — 报错文案里的路径拿不到也不能挡住失败上报
+        return "所选 Claude 账号的 .claude.json"
 
 
 def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
@@ -1127,6 +1138,11 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
             pass
         stage = "bare-shell-retry-failed"
         reason = screen_error or "明确检测到裸 shell；补发一次后仍未就绪"
+    elif agent_runtime.claude_trust_modal(bot, screen):
+        stage = "claude-trust-modal"
+        reason = (f"Claude 仍弹出目录信任框：启动前已在 {_claude_state_file(bot)} 写入 "
+                  f"projects[\"{Path(cwd).resolve().as_posix()}\"].hasTrustDialogAccepted，"
+                  "但 Claude 没有认；桥没有按任何键（默认选项是 No, exit）")
     else:
         stage = "agent-started-not-ready"
         reason = screen_error or "agent 已在启动或被弹窗阻塞；为防重复输入，未补发启动命令"

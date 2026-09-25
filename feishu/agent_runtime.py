@@ -36,9 +36,8 @@ CLAUDE_TRUST_TEXTS = (
 # footer. We do not know which option is safe to auto-pick, so treat it as not
 # ready and let the ready wait time out into a DM: reporting beats swallowing.
 CLAUDE_BLOCKING_PROMPT_FOOTER = "Enter to confirm"
-# The trust wording can also show up as plain scrollback text — a session that merely
-# discussed this bug would otherwise look like a live modal, and the bridge would press
-# Enter into a working composer. Require the surrounding menu structure too.
+# Older trust dialogs numbered their options; with the trust wording that menu
+# alone already means "not a composer" for readiness.
 _CLAUDE_TRUST_MENU_RE = re.compile(r"(?m)^\s*❯?\s*1\.\s")
 CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
 CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
@@ -1241,21 +1240,35 @@ def codex_composer_visible(screen: str) -> bool:
     )
 
 
+def claude_trust_modal(bot, screen: str) -> bool:
+    """Is Claude parked on its directory-trust dialog right now?
+
+    Link16 never answers this dialog. Claude 2.1.278 moved the cursor to
+    "No, exit", so the Enter that was safe in 2.1.233 now quits. The launch
+    path writes ``hasTrustDialogAccepted`` first — the key Claude's own
+    error text tells non-interactive callers to set — so a dialog that still
+    appears means that write did not take effect: a startup failure to report.
+    The footer must be the last painted line; the same words in scrollback of
+    a session that discussed this bug are not a live dialog.
+    """
+    if runtime_spec(bot).name != "claude":
+        return False
+    lines = [line for line in (screen or "").splitlines() if line.strip()]
+    if not lines or CLAUDE_BLOCKING_PROMPT_FOOTER not in lines[-1]:
+        return False
+    return any(t in line for line in lines[:-1] for t in CLAUDE_TRUST_TEXTS)
+
+
 def needs_trust_confirmation(bot, screen: str) -> bool:
     """Is the session parked on a trust prompt whose default option is safe to accept?
 
-    Both runtimes preselect "trust this folder", so a single Enter clears it. The
-    caller presses that Enter; everything else is left for a human.
+    Only Codex qualifies: its prompt preselects "Yes, continue", so a single
+    Enter clears it. Claude's default became "No, exit" (see
+    ``claude_trust_modal``), so Claude never qualifies.
     """
-    spec = runtime_spec(bot)
-    screen = screen or ""
-    if spec.name == "claude":
-        if not any(t in screen for t in CLAUDE_TRUST_TEXTS):
-            return False
-        return (CLAUDE_BLOCKING_PROMPT_FOOTER in screen
-                or _CLAUDE_TRUST_MENU_RE.search(screen) is not None)
-    if spec.name != "codex":
+    if runtime_spec(bot).name != "codex":
         return False
+    screen = screen or ""
     return (CODEX_TRUST_TEXT in screen and "Press enter to continue" in screen
             and not codex_composer_visible(screen))
 
@@ -1282,7 +1295,10 @@ def is_ready(bot, screen: str) -> bool:
     spec = runtime_spec(bot)
     screen = screen or ""
     if spec.name == "claude":
-        if CLAUDE_BLOCKING_PROMPT_FOOTER in screen or needs_trust_confirmation(bot, screen):
+        if CLAUDE_BLOCKING_PROMPT_FOOTER in screen or (
+            any(t in screen for t in CLAUDE_TRUST_TEXTS)
+            and _CLAUDE_TRUST_MENU_RE.search(screen) is not None
+        ):
             return False
         return CLAUDE_READY_MARK in screen
     if spec.name == "codex":
