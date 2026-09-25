@@ -406,6 +406,52 @@ def _wait_rpc(url: str, timeout=30, server=None) -> RpcConnection:
     raise RuntimeError(f"app-server did not listen at {url}: {last_error}")
 
 
+def _hooks_needing_review(rpc: RpcConnection, cwd: Path) -> dict[str, str]:
+    """Hooks the TUI would stop on at startup, mapped to their current hash.
+
+    Same test as codex-rs tui ``hook_needs_review``: only untrusted or modified
+    hooks open "Hooks need review"; managed hooks cannot be trusted here.
+    """
+    listing = rpc.request("hooks/list", {"cwds": [str(cwd)]})
+    return {
+        hook["key"]: hook["currentHash"]
+        for entry in listing.get("data") or []
+        for hook in entry.get("hooks") or []
+        if hook.get("trustStatus") in {"untrusted", "modified"}
+    }
+
+
+def ensure_hook_trust(rpc: RpcConnection, cwd: Path, codex_home: Path) -> list[str]:
+    """Record hook trust exactly as the TUI's "Trust all and continue" does.
+
+    A remote TUI that resumes a thread ignores --dangerously-bypass-hook-trust
+    for its startup review (codex-rs tui/src/lib.rs ``is_persistent_resume``),
+    so every hook that Link16 or a plugin adds or edits would park each resumed
+    bot on "Hooks need review". The server already runs hooks under the bypass
+    flag; persisting their current hashes through the same config/batchWrite
+    makes the TUI agree instead of asking. Returns the keys newly trusted.
+    """
+    pending = _hooks_needing_review(rpc, cwd)
+    if not pending:
+        return []
+    from bridge_injection import ProcessFileLock
+
+    # ensure_codex_trust holds this lock for its config.toml writes too.
+    with ProcessFileLock(codex_home / ".config.toml.link16.lck"):
+        rpc.request("config/batchWrite", {
+            "edits": [{
+                "keyPath": "hooks.state",
+                "value": {key: {"trusted_hash": digest} for key, digest in pending.items()},
+                "mergeStrategy": "upsert",
+            }],
+            "reloadUserConfig": True,
+        })
+    remaining = _hooks_needing_review(rpc, cwd)
+    if remaining:
+        raise RuntimeError("hook 信任写入后仍待审阅：" + "、".join(sorted(remaining)))
+    return sorted(pending)
+
+
 def _thread_state_path(state_dir: Path, bot: str) -> Path:
     return state_dir / f"bridge-codex-app-thread-{bot}.json"
 
@@ -669,6 +715,9 @@ def run(args) -> int:
                 },
             )
             rpc.notify("initialized")
+            trusted_hooks = ensure_hook_trust(rpc, cwd, Path(args.codex_home).expanduser())
+            if trusted_hooks:
+                progress.record["hook_trust_written"] = trusted_hooks
             progress.update("session_prepare", "本地服务已连接，正在检查已有会话")
             root_thread = _start_or_resume_thread(
                 rpc, state_dir=state_dir, bot=args.bot, cwd=cwd

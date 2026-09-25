@@ -166,7 +166,7 @@ LINK16_AGENT_PROFILE=ccp FEISHU_BRIDGE_SESSION=config FEISHU_BRIDGE_OUTBOX_DIR="
 LINK16_AGENT_PROFILE=cxp FEISHU_BRIDGE_SESSION=<bot> FEISHU_BRIDGE_OUTBOX_DIR="<repo>/_autopilot" CODEX_HOME="<registry-derived-home>" codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --no-alt-screen -C "<cwd>"
 ```
 
-注意：`--dangerously-bypass-approvals-and-sandbox` **不要**再叠 `-a never` / `-s danger-full-access`，Codex CLI 会拒绝这种组合。`--dangerously-bypass-hook-trust` 只跳过 hook trust，不跳过项目目录 trust；首次进新目录若出现 `Do you trust the contents of this directory?`，桥会自动按一次 Enter 继续。
+注意：`--dangerously-bypass-approvals-and-sandbox` **不要**再叠 `-a never` / `-s danger-full-access`，Codex CLI 会拒绝这种组合。`--dangerously-bypass-hook-trust` 只跳过 hook trust，不跳过项目目录 trust；首次进新目录若出现 `Do you trust the contents of this directory?`，桥会自动按一次 Enter 继续。远程终端**恢复已有会话**时，Codex 故意不让这个参数跳过启动时的 hook 审阅（源码 `is_persistent_resume`）；所以 app-server worker 在终端启动前，用 TUI「Trust all and continue」同一条 `config/batchWrite` 把 `untrusted` / `modified` hook 的当前哈希写进 `hooks.state`，写后复查，写入的键记进启动记录 `hook_trust_written`（v0.33.4）。
 
 **Codex 回复解析**：不要复刻 Claude JSONL parser。默认 app-server 路径由 typed observer 直接把 `agentMessage.phase=final_answer` 写成最终回复；`cli-legacy` 才使用官方 Stop payload 的 `last_assistant_message`。两条路都不依赖 Codex transcript JSONL 的非稳定格式，也不会影响 Claude 的 race-guard JSONL 解析。
 
@@ -613,7 +613,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 **契约（SSOT 在 `agent_runtime.py`）**：
 
 - `is_ready(claude, screen)`：屏上有 `Enter to confirm` 这个弹窗 footer，或命中信任文案 → **一律不就绪**。
-- `needs_trust_confirmation(claude, screen)`：只认**信任弹窗**（默认项就是「信任」，按回车安全）。桥 `_wait_agent_ready` 已有的按一次回车分支对 Claude 天然生效，无需改桥。
+- `claude_trust_modal(claude, screen)`：最后一行是 `Enter to confirm` 且上方有信任文案，才算活弹窗。**桥绝不回答它**：Claude 2.1.278 起默认项改成「No, exit」，按回车 = 退出（v0.33.4 起）。目录信任由启动前写入所选账号 `.claude.json` 的 `projects[<cwd>].hasTrustDialogAccepted` 负责（Claude 报错文案自己给出的免交互写法）；弹窗仍出现 = 预写没被认，`_wait_agent_ready` 立即返回失败，启动失败记 `claude-trust-modal` 并写明配置文件与目录键。`needs_trust_confirmation` 只对 Codex 生效（其默认项仍是 Yes, continue）。
 - **其它未知启动弹窗**（如 CLAUDE.md external includes 审批）→ 判未就绪、让它超时 DM 喊主人。**不知道哪个选项安全就绝不盲按**：宁可报错，绝不静默吞消息。
 - 文案匹配同时留了老版 `Do you trust the files in this folder`，Claude Code 改措辞不至于把判据打漂。
 

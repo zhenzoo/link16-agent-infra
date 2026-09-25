@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "feishu"))
 
 import codex_app_server_worker as worker  # noqa: E402
+import codex_startup  # noqa: E402
 from codex_app_server_worker import MilestoneObserver  # noqa: E402
 
 
@@ -103,6 +104,54 @@ class AppServerFinalDeliveryTests(unittest.TestCase):
             self.assertIn("✅ 已完成", records[0]["text"])
 
 
+class HookTrustTests(unittest.TestCase):
+    """A resumed remote TUI ignores --dangerously-bypass-hook-trust for its startup review."""
+
+    @staticmethod
+    def hook(key, status):
+        return {"key": key, "currentHash": f"sha256:{key}", "trustStatus": status}
+
+    def _rpc(self, first, second=None):
+        rpc = mock.Mock()
+        listing = lambda hooks: {"data": [{"cwd": "C:/repo", "hooks": hooks}]}  # noqa: E731
+        rpc.request.side_effect = [listing(first), {}, listing(second or [])]
+        return rpc
+
+    def test_trusts_exactly_what_the_tui_would_review_in_one_official_write(self):
+        key = "C:\\Users\\u\\.codex-personal\\hooks.json:stop:1:1"
+        rpc = self._rpc([
+            self.hook(key, "untrusted"), self.hook("changed", "modified"),
+            self.hook("ok", "trusted"), self.hook("org", "managed"),
+        ], [self.hook(key, "trusted"), self.hook("org", "managed")])
+        with tempfile.TemporaryDirectory() as home:
+            self.assertEqual(worker.ensure_hook_trust(rpc, Path("C:/repo"), Path(home)),
+                             sorted([key, "changed"]))
+        rpc.request.assert_any_call("hooks/list", {"cwds": [str(Path("C:/repo"))]})
+        # Same request the TUI's "Trust all and continue" sends: one upsert of
+        # the hooks.state table, so Windows keys need no key-path escaping.
+        rpc.request.assert_any_call("config/batchWrite", {
+            "edits": [{
+                "keyPath": "hooks.state",
+                "value": {key: {"trusted_hash": f"sha256:{key}"},
+                          "changed": {"trusted_hash": "sha256:changed"}},
+                "mergeStrategy": "upsert",
+            }],
+            "reloadUserConfig": True,
+        })
+
+    def test_nothing_to_review_writes_nothing(self):
+        rpc = mock.Mock()
+        rpc.request.return_value = {"data": [{"hooks": [self.hook("ok", "trusted"), self.hook("org", "managed")]}]}
+        with tempfile.TemporaryDirectory() as home:
+            self.assertEqual(worker.ensure_hook_trust(rpc, Path("C:/repo"), Path(home)), [])
+        self.assertEqual([c.args[0] for c in rpc.request.call_args_list], ["hooks/list"])
+
+    def test_write_that_does_not_take_effect_fails_the_startup_by_name(self):
+        rpc = self._rpc([self.hook("stuck", "modified")], [self.hook("stuck", "modified")])
+        with tempfile.TemporaryDirectory() as home, self.assertRaisesRegex(RuntimeError, "stuck"):
+            worker.ensure_hook_trust(rpc, Path("C:/repo"), Path(home))
+
+
 class RemoteResumePermissionTests(unittest.TestCase):
     def test_remote_tui_inherits_permissions_from_app_server(self):
         """Codex 0.154 rejects permission overrides on a remote resume.
@@ -122,7 +171,10 @@ class RemoteResumePermissionTests(unittest.TestCase):
                 "--codex", str(codex), "--codex-home", tmp,
             ])
             rpc = mock.Mock()
-            rpc.request.side_effect = [{}, {"config": {}}, {"thread": {"id": "existing-thread"}}]
+            rpc.request.side_effect = [
+                {}, {"data": [{"cwd": tmp, "hooks": [HookTrustTests.hook("new", "untrusted")]}]},
+                {}, {"data": []}, {"config": {}}, {"thread": {"id": "existing-thread"}},
+            ]
             server = mock.Mock()
             server.poll.return_value = None
             tui = mock.Mock(pid=12345)
@@ -153,6 +205,11 @@ class RemoteResumePermissionTests(unittest.TestCase):
 
             self.assertEqual(result, 0, "remote resume rejected a TUI permission override")
             ensure_trust.assert_called_once_with({"profile": "cxp"}, state.resolve())
+            methods = [c.args[0] for c in rpc.request.call_args_list]
+            self.assertEqual(methods[:4], ["initialize", "hooks/list", "config/batchWrite", "hooks/list"],
+                             "hook trust must be settled before the remote TUI resumes")
+            record = json.loads(codex_startup.state_path(state, "test-bot").read_text(encoding="utf-8"))
+            self.assertEqual(record["hook_trust_written"], ["new"])
             rpc.request.assert_any_call("thread/resume", {
                 "threadId": "existing-thread", "cwd": str(state.resolve()),
                 "approvalPolicy": "never", "sandbox": "danger-full-access",
