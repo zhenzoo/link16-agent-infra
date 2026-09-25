@@ -19,6 +19,13 @@ last_reviewed: 2026-09-23
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.33.4 — 2026-09-25 · Claude 与 Codex 的启动信任只靠预写，桥不再答弹窗
+
+- **Claude 目录信任**：2.1.278 起信任框默认项是「No, exit」，旧兜底「认出就按回车」等于替它退出，再补发、再退出，最后只报「未就绪」。现在桥绝不回答这个框：信任仍由启动前写入 `projects[<cwd>].hasTrustDialogAccepted` 负责；框仍出现就立即判失败（阶段 `claude-trust-modal`），写明 `.claude.json` 路径和目录键。
+- **Codex hook 审阅**：远程终端恢复会话时，Codex 故意不让 `--dangerously-bypass-hook-trust` 跳过启动审阅，Link16 每更新一次自己的 hook，所有 Codex bot 就卡在「Hooks need review」。现在 worker 在终端启动前，用 TUI「Trust all and continue」同一条 `config/batchWrite` 写入 `untrusted` / `modified` hook 的当前哈希，写后复查，写入的键记进 `hook_trust_written`。
+- **验证**：全仓 1030 passed、1 skipped。真机 Claude 2.1.282：不预写 → 光标在 No, exit、新码 0.05s 判失败且零按键；预写 → 1.8s 直达输入框。真机 Codex 0.154.0：旧参数恢复会话出现审阅框；新 worker 恢复同一会话无弹窗、stage=ready、写入 2 键。
+- **升级**：Codex 部分随下一次 worker 启动生效，无需重启桥；Claude 部分在常驻桥进程里，重启桥后生效。
+
 ## v0.33.3 — 2026-09-24 · 👍 在网络抖动时后台重试
 
 - **现象**：11:35 tb26-baseball-2 收到消息并已交给会话，但没有 👍；同一分钟本机 DNS 解析 open.feishu.cn 间歇失败，回复卡片也降成纯文本（11:37:27 送达）。
