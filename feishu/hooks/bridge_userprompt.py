@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import turn_delivery_guard  # noqa: E402
 import bridge_inbox  # noqa: E402
+import bridge_env  # noqa: E402
 
 
 def _read_stdin_json():
@@ -55,6 +56,8 @@ def main():
         inp = _read_stdin_json()
     except Exception:                                     # noqa: BLE001
         inp = {}
+    if bridge_env.nested_agent(inp):
+        return                                            # bot 里再起的智能体不是 bot 本身
     prompt = _prompt_text(inp.get("prompt"))
     sd = _state_dir()
     # This event confirms that the actual session consumed the exact prompt.

@@ -33,6 +33,9 @@ def main():
         inp = _read_stdin_json()
     except Exception:  # noqa: BLE001
         return
+    from bridge_env import nested_agent
+    if nested_agent(inp):
+        return  # bot 里再起的智能体不是 bot 本身
 
     if os.environ.get("FEISHU_CODEX_EVENT_STREAM") == "1":
         # The app-server observer receives the authoritative typed final item.

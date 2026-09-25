@@ -277,6 +277,29 @@ def _may_send_as(me):
     return set()
 
 
+# 智能体给自己派生的进程盖的会话戳：Claude 每次派生都写当前 session（/clear 后跟着换），
+# Codex 给 shell 工具写 thread id。桥启动 bot 前清掉它们（agent_runtime.worker_cmd），
+# 所以 bot 自己的 hook 只会看到「自己的戳」或没有戳。
+AGENT_SESSION_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
+
+
+def nested_agent(payload) -> bool:
+    """Is this hook firing for an agent started from inside the bot, not the bot itself?
+
+    FEISHU_BRIDGE_SESSION is inherited by everything the bot runs, so a
+    `codex exec` launched from the bot's shell would open Feishu turns, move the
+    reply route, post progress cards and fail the bot's card title as if it were
+    the bot (2026-09-25: two test execs left tb25-link16 on
+    「工作标题生成失败」). Such a hook still carries the outer agent's session
+    stamp, which never equals its own session.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    session = str(payload.get("session_id") or payload.get("thread_id") or "")
+    return bool(session) and any(
+        os.environ.get(key) not in (None, "", session) for key in AGENT_SESSION_ENV_KEYS
+    )
+
+
 def assert_sender_identity(bot):
     """发送者身份闸：桥 spawn 的 agent 会话不得用【别的 bot】身份发消息（防冒用·PLAN-920）。
 

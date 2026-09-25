@@ -32,6 +32,9 @@ def main():
         _inp = _read_stdin_json()
     except Exception:  # noqa: BLE001
         _inp = {}
+    from bridge_env import nested_agent
+    if nested_agent(_inp):
+        return  # bot 里再起的智能体不是 bot 本身，不能替 bot 判工作行失败
     state_dir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or
                      (Path(__file__).resolve().parents[2] / "_autopilot"))
     route = turn_delivery_guard.read_route(state_dir, bot)

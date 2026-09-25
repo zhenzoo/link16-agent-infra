@@ -291,6 +291,10 @@ def main():
         # 和「hook 压根没跑」长得一模一样。
         _trace(f"EXIT bot={bot} 读/解析 stdin 失败: {_e!r}")
         return
+    from bridge_env import nested_agent
+    if nested_agent(inp):
+        _trace(f"EXIT bot={bot} 是 bot 里再起的智能体（session={inp.get('session_id')}），不代 bot 回信")
+        return
     tp = inp.get("transcript_path")
     sid = inp.get("session_id", "")
     if not tp or not os.path.exists(tp):

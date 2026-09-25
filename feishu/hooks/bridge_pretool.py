@@ -34,6 +34,9 @@ def main():
         inp = _read_stdin_json()
     except Exception:                             # noqa: BLE001
         return
+    from bridge_env import nested_agent
+    if nested_agent(inp):
+        return                                    # bot 里再起的智能体不是 bot 本身
     if inp.get("tool_name") != "AskUserQuestion":
         return
     questions = ((inp.get("tool_input") or {}).get("questions")) or []

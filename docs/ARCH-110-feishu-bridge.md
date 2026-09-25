@@ -177,7 +177,7 @@ python feishu/install_codex_bridge_hooks.py
 python feishu/install_codex_bridge_hooks.py --write
 ```
 
-该脚本合并到 `CODEX_HOME/hooks.json`，按 command 去重并保留已有 hook（例如个人 Stop 声音提醒）。Codex hook 脚本自身仍用 `FEISHU_BRIDGE_SESSION` 守门，所以即使全局安装，也只对桥 spawn 的 Codex 会话写 outbox；普通 Codex 会话 env 不命中即 no-op。
+该脚本合并到 `CODEX_HOME/hooks.json`，按 command 去重并保留已有 hook（例如个人 Stop 声音提醒）。Codex hook 脚本自身仍用 `FEISHU_BRIDGE_SESSION` 守门，所以即使全局安装，也只对桥 spawn 的 Codex 会话写 outbox；普通 Codex 会话 env 不命中即 no-op。**bot 里再起的智能体不算 bot**（v0.33.6）：这个变量会被 bot 派生的一切继承，bot 在 shell 里跑的 `codex exec` 也带着它。所有桥 hook 先调 `bridge_env.nested_agent(payload)`：环境里外层智能体的会话戳（`CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`）与本 hook 的会话号不同 → 直接 no-op，不开 turn、不改路由、不发进度、不判工作行失败。桥启动 bot 时清掉这些戳（`agent_runtime.BOT_LAUNCH_SCRUB_KEYS`），bot 自己的 hook 只会看到自己的戳。边界：Codex bot 里再起 Codex、Kimi 里再起 Codex/Kimi 时内层会覆盖或不带戳，识别不到。
 
 **Kimi 原生 hook 与 Wire observer**：`profile_bootstrap.py --profile <kimi-profile> --apply` 用 `install_kimi_bridge_hooks.py` 把 `UserPromptSubmit` 与 `Stop` 两条 bridge hook 合并进该 profile 的 `config.toml`，保留已有 `[[hooks]]`，重复执行不增副本；`service_doctor.py` 同时检查 hook、worker 和 reducer。Kimi 0.41 的 `prompt` 是 `ContentPart[]`，`bridge_userprompt.py` 只拼接其中的 text part 来确认 inbox 与解析最末路由信封，图片等 part 不落状态。hook 以 exit-0 stdout 显式触发 `feishu-workline`；Wire observer 用 prompt digest 复用 UserPromptSubmit 已建立的 turn key，避免同一轮长出两份回执。普通 Kimi 会话没有 `FEISHU_BRIDGE_SESSION` 时立即 no-op。
 

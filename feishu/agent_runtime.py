@@ -58,6 +58,9 @@ CODEX_TRANSPORT_APP_SERVER = "app-server-canary"
 CODEX_TRANSPORT_LEGACY = "cli-legacy"
 _CODEX_LEGACY_ALIASES = {"cli-legacy", "bare-cli", "standard", "legacy", "cli"}
 CLAUDE_HARNESS_ENV_KEYS = ("CLAUDE_CODE_CHILD_SESSION",)
+# A bot must start without any outer agent's session stamp; its hooks rely on
+# that to tell the bot from agents it launches (bridge_env.nested_agent).
+BOT_LAUNCH_SCRUB_KEYS = CLAUDE_HARNESS_ENV_KEYS + ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
 
 
 def codex_transport(bot) -> str:
@@ -1086,13 +1089,15 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         if profile.launcher == "launch-sh":
             prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
         return (
-            _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS)
+            _unset_shell_env(BOT_LAUNCH_SCRUB_KEYS)
             + prefix
             + env
             + f"CLAUDE_CONFIG_DIR={_q(config_dir)} "
             + f"claude --dangerously-skip-permissions --settings {_q(hooks_json)}"
             + _claude_home_settings_args(profile, cwd)
         )
+    if spec.name in {"codex", "kimi"}:
+        env = _unset_shell_env(BOT_LAUNCH_SCRUB_KEYS) + env
     if spec.name == "codex":
         codex_home = profile.home_path.as_posix()
         if uses_app_server(bot):

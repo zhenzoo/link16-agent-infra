@@ -225,11 +225,15 @@ class AgentProfileTests(unittest.TestCase):
         command = json.loads(output.getvalue())["command"]
         self.assertEqual(shlex.split(command)[-len(supplied):], supplied)
 
-    def test_bridge_claude_worker_clears_parent_harness_marker(self):
-        bot = {"name": "claude-bot", "profile": "ccp"}
-        with patch.object(agent_runtime, "_require_profile_available"):
-            command = agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
-        self.assertTrue(command.startswith("unset CLAUDE_CODE_CHILD_SESSION;"))
+    def test_bridge_worker_of_every_runtime_starts_without_outer_agent_stamps(self):
+        # The bot's hooks tell it from agents it launches by these stamps
+        # (bridge_env.nested_agent); a stale one from the pane must not survive.
+        scrub = "unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID;"
+        for profile in ("ccp", "cxp"):
+            bot = {"name": f"{profile}-bot", "profile": profile}
+            with self.subTest(profile=profile), patch.object(agent_runtime, "_require_profile_available"):
+                command = agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
+                self.assertTrue(command.startswith(scrub), command[:120])
 
     @unittest.skipUnless(os.name == "nt", "requires Git Bash/native Windows boundary")
     def test_git_bash_does_not_rewrite_native_provider_slash_arguments(self):
