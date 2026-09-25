@@ -325,6 +325,7 @@ class HookContextTests(unittest.TestCase):
             emitted = json.loads(out.getvalue().strip())
             ctx = emitted["hookSpecificOutput"]["additionalContext"]
             self.assertIn("explicitly activates the feishu-workline skill", ctx)
+            self.assertRegex(ctx, r"now=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \w{3} Beijing")
             route = json.loads((Path(tmp) / "bridge-turn-route-tb25-test.json").read_text(encoding="utf-8"))
             self.assertEqual(route["workline_gate"], session_work.GATE_CONTRACT)
             gate = json.loads(session_work.gate_path("tb25-test", tmp).read_text(encoding="utf-8"))

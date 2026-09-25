@@ -12,6 +12,7 @@ env-scope：只对桥 spawn 的会话生效（FEISHU_BRIDGE_SESSION 未设=普�
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -136,7 +137,10 @@ def _work_context(bot, sd, active=None):
     command = f'python "{cli}" decide --turn-key "{turn_key}" --action <keep|replace|progress>'
     return (
         f"[Link16 feishu-workline] This bridge turn explicitly activates the feishu-workline skill.\n"
-        f"Mechanical fields: bot={bot}; turn_key={turn_key}; contract={session_work.GATE_CONTRACT}.\n"
+        f"Mechanical fields: bot={bot}; turn_key={turn_key}; contract={session_work.GATE_CONTRACT}; "
+        # The only per-turn clock every bot session gets on every platform; profile
+        # settings carry no time hook (checked on TB25/TB26, 2026-09). China has no DST.
+        f"now={datetime.now(timezone(timedelta(hours=8))):%Y-%m-%d %H:%M:%S %a} Beijing.\n"
         f"{state}。\nExact command prefix: {command}\n"
         f"For replace append --project \"<项目>\" --task \"<具体对象+动作+交付结果>\" "
         f"--progress \"<Stage 链>\"; for progress append --progress; keep needs no semantic flags.\n"
