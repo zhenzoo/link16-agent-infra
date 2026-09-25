@@ -11,13 +11,22 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-23
+last_reviewed: 2026-09-26
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.33.7 — 2026-09-26 · 定时任务缺 pyyaml 不再静默漏跑；Python 下限降到 3.11
+
+- **现象**：9-26 00:00 tb24-xhs-autopilot 的每晚写稿（daily-cruise）没有触发，日志无报错；`board` 显示「还没有任何定时任务」，而 `feishu/cron-jobs/` 下 6 个任务文件都在。
+- **原因**：v0.33.5 同批把 tb24 的开机任务与 cron 换到 Python 3.14，cron 在 9-25 23:28 按 3.14 重启。3.14 没装 pyyaml，`bridge_cron` 导入失败时把 yaml 置空，读任务文件直接得到空表——守护进程照常空转，外观和「没排任务」一样。pyyaml 从未写进 `feishu/requirements.txt`，任何按依赖清单新装的解释器都会缺它。
+- **修正**：`requirements.txt` 补 `pyyaml>=6.0`；缺 pyyaml 且有任务文件时，守护进程启动日志、`board`、复选菜单都直接报「读不到 N 个任务文件」并给修法；`preflight.py` 体检增查 yaml。
+- **Python 下限 3.12 → 3.11**（主人 9-26 定）：SOP-100、README、`preflight`、`windows_bootstrap`、profile wrapper 的解释器选择器同步改为 3.11+。核查：`feishu/`、`wmux/`、`tests/` 全部按 3.11 语法解析 0 失败，未用 3.12 专属标准库接口。
+- **验证**：新增 `tests/test_bridge_cron_yaml.py`；Python 3.14 全量 1036 passed、1 failed（`test_registration_monitor::test_process_probe_keeps_real_child_alive`，单跑时过时不过，本版未改动相关代码）。真机：tb24 为 3.14 装 pyyaml 后只重启 cron，`board` 回读到全部任务；00:35 手动补发 daily-cruise，xhs 会话进入运行。
+- **升级**：跑桥的解释器执行一次 `pip install -r feishu/requirements.txt`，再 `python feishu/bridge_cron.py stop` → `start`（不重启任何 bot 桥）；`board` 能列出任务即生效。
 
 ## v0.33.6 — 2026-09-25 · bot 里再起的智能体不再冒充 bot；新锁文件初始化不再撞车
 
