@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import tomllib
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -996,6 +997,35 @@ def infrastructure_env(project=None):
     return {"LINK16_AGENT_INFRA_ROOT": root.resolve().as_posix()}
 
 
+def codex_saved_model_args(codex_home, cwd) -> list[str]:
+    """Keep a non-default Codex home's saved model when ~/.codex is a project layer.
+
+    Starting in the user's home (or a child directory) makes the default Codex
+    home's config.toml a trusted project config. That layer outranks the selected
+    CODEX_HOME's user config. Replay only the shadowed model keys as CLI config;
+    explicit provider arguments can still override them later.
+    """
+    user_home = Path.home()
+    default_home = user_home / ".codex"
+    selected_home = Path(codex_home).expanduser()
+    if (os.path.normcase(os.path.abspath(selected_home)) ==
+            os.path.normcase(os.path.abspath(default_home)) or
+            not _path_contains(user_home, cwd or Path.cwd())):
+        return []
+    default_config = default_home / "config.toml"
+    selected_config = selected_home / "config.toml"
+    if not default_config.is_file() or not selected_config.is_file():
+        return []
+    shadowing = tomllib.loads(default_config.read_text(encoding="utf-8"))
+    saved = tomllib.loads(selected_config.read_text(encoding="utf-8"))
+    args: list[str] = []
+    for key in ("model", "model_reasoning_effort"):
+        value = saved.get(key)
+        if key in shadowing and isinstance(value, str) and value:
+            args.extend(("-c", f"{key}={json.dumps(value)}"))
+    return args
+
+
 def standalone_worker_cmd(
     profile_name_: str,
     cwd=None,
@@ -1077,6 +1107,9 @@ def standalone_worker_cmd(
             )
         if cwd:
             command += f" -C {_q(str(cwd))}"
+        model_args = codex_saved_model_args(profile.home_path, cwd)
+        if model_args:
+            command += " " + " ".join(shlex.quote(arg) for arg in model_args)
     else:
         raise ValueError(f"runtime {profile.runtime} has no standalone launch driver")
     if provider_args:
@@ -1137,6 +1170,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
             + "codex --dangerously-bypass-approvals-and-sandbox "
             + "--dangerously-bypass-hook-trust --no-alt-screen "
             + f"-C {_q(cwd)}"
+            + "".join(" " + shlex.quote(arg) for arg in codex_saved_model_args(codex_home, cwd))
         )
     if spec.name == "kimi":
         worker = (project / "feishu" / "kimi_native_worker.py").as_posix()

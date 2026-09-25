@@ -197,6 +197,8 @@ class RemoteResumePermissionTests(unittest.TestCase):
                     mock.patch.object(worker.subprocess, "Popen", side_effect=popen), \
                     mock.patch.object(worker.threading, "Thread"), \
                     mock.patch.object(worker, "_wait_observer", return_value={"observer_pid": 123}), \
+                    mock.patch.object(worker.agent_runtime, "codex_saved_model_args",
+                                      return_value=["-c", 'model="gpt-6-sol"']), \
                     mock.patch.object(worker.agent_runtime, "ensure_launch_cwd_trust") as ensure_trust, \
                     mock.patch.dict(worker.os.environ, {worker.agent_runtime.PROFILE_ENV: "cxp"}), \
                     mock.patch.object(worker.codex_startup, "TuiGateway") as gateway:
@@ -218,6 +220,8 @@ class RemoteResumePermissionTests(unittest.TestCase):
             self.assertIn("--remote", command)
             self.assertEqual(command[-2:], ["resume", "existing-thread"])
             self.assertIn("--dangerously-bypass-hook-trust", command)
+            self.assertEqual(launched[0][1:3], ["-c", 'model="gpt-6-sol"'])
+            self.assertEqual(command[1:3], ["-c", 'model="gpt-6-sol"'])
             self.assertFalse(worker._ready_state_path(state, "test-bot").exists())
             server.terminate.assert_called_once()
 

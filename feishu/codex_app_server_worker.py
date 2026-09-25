@@ -694,6 +694,7 @@ def run(args) -> int:
     url = f"ws://127.0.0.1:{port}"
     log_path = state_dir / f"codex-app-server-{args.bot}.log"
     env = worker_environment(args.bot, args.codex_home, state_dir)
+    model_args = agent_runtime.codex_saved_model_args(args.codex_home, cwd)
     with open(log_path, "a", encoding="utf-8") as log:
         server = None
         rpc = None
@@ -703,7 +704,7 @@ def run(args) -> int:
         observer_box = {}
         try:
             server = subprocess.Popen(
-                [str(codex), "--dangerously-bypass-hook-trust", "app-server", "--listen", url],
+                [str(codex), *model_args, "--dangerously-bypass-hook-trust", "app-server", "--listen", url],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env,
             )
             rpc = _wait_rpc(url, server=server)
@@ -751,6 +752,7 @@ def run(args) -> int:
             progress.update("tui_starting", "回传连接已就位，正在打开 Codex 终端；首次任务前不调用模型")
             command = [
                 str(codex),
+                *model_args,
                 "--remote", tui_url,
                 # Permissions are owned by thread/start or thread/resume above.
                 # Codex 0.154 rejects TUI permission overrides on remote resume.

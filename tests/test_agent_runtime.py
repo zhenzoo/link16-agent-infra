@@ -212,6 +212,76 @@ class AgentProfileTests(unittest.TestCase):
         self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
         self.assertNotIn("CLAUDE_CODE_CHILD_SESSION", codex)
 
+    def test_cxp_saved_model_wins_when_default_home_is_a_project_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            default_home = home / ".codex"
+            selected_home = home / ".codex-personal"
+            default_home.mkdir()
+            selected_home.mkdir()
+            (default_home / "config.toml").write_text(
+                'model = "gpt-6-astra"\nmodel_reasoning_effort = "medium"\n', encoding="utf-8"
+            )
+            saved_config = selected_home / "config.toml"
+            saved_config.write_text(
+                'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "xhigh"\n', encoding="utf-8"
+            )
+            spec = agent_runtime.ProfileSpec("cxp", "codex", str(selected_home), "direct")
+            with patch.object(agent_runtime.Path, "home", return_value=home), \
+                    patch.object(agent_runtime, "profile_spec", return_value=spec), \
+                    patch.object(agent_runtime, "_require_profile_available"):
+                command = agent_runtime.standalone_worker_cmd("cxp", cwd=home / "project")
+                args = shlex.split(command)
+                self.assertIn('model="gpt-5.6-sol"', args)
+                self.assertIn('model_reasoning_effort="xhigh"', args)
+                self.assertEqual(agent_runtime.codex_saved_model_args(default_home, home), [])
+                self.assertEqual(agent_runtime.codex_saved_model_args(selected_home, ROOT), [])
+                saved_config.write_text(
+                    'model = "gpt-6-sol"\nmodel_reasoning_effort = "high"\n', encoding="utf-8"
+                )
+                updated = shlex.split(agent_runtime.standalone_worker_cmd("cxp", cwd=home))
+                self.assertIn('model="gpt-6-sol"', updated)
+                self.assertIn('model_reasoning_effort="high"', updated)
+
+    def test_cx_and_cxp2_keep_independent_saved_model_choices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            default_home = home / ".codex"
+            personal2_home = home / ".codex-personal2"
+            default_home.mkdir()
+            personal2_home.mkdir()
+            default_config = default_home / "config.toml"
+            personal2_config = personal2_home / "config.toml"
+            default_config.write_text(
+                'model = "gpt-6-astra"\nmodel_reasoning_effort = "medium"\n', encoding="utf-8"
+            )
+            personal2_config.write_text(
+                'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "xhigh"\n', encoding="utf-8"
+            )
+            specs = {
+                "cx": agent_runtime.ProfileSpec("cx", "codex", str(default_home), "direct"),
+                "cxp2": agent_runtime.ProfileSpec("cxp2", "codex", str(personal2_home), "direct"),
+            }
+            with patch.object(agent_runtime.Path, "home", return_value=home), \
+                    patch.object(agent_runtime, "profile_spec", side_effect=specs.__getitem__), \
+                    patch.object(agent_runtime, "_require_profile_available"):
+                cx = shlex.split(agent_runtime.standalone_worker_cmd("cx", cwd=home))
+                cxp2 = shlex.split(agent_runtime.standalone_worker_cmd("cxp2", cwd=home))
+                self.assertNotIn('model="gpt-5.6-sol"', cx)
+                self.assertIn('model="gpt-5.6-sol"', cxp2)
+                self.assertIn('model_reasoning_effort="xhigh"', cxp2)
+                default_config.write_text(
+                    'model = "gpt-6-sol"\nmodel_reasoning_effort = "high"\n', encoding="utf-8"
+                )
+                unchanged = shlex.split(agent_runtime.standalone_worker_cmd("cxp2", cwd=home))
+                self.assertIn('model="gpt-5.6-sol"', unchanged)
+                personal2_config.write_text(
+                    'model = "gpt-6-luna"\nmodel_reasoning_effort = "low"\n', encoding="utf-8"
+                )
+                changed = shlex.split(agent_runtime.standalone_worker_cmd("cxp2", cwd=home))
+                self.assertIn('model="gpt-6-luna"', changed)
+                self.assertIn('model_reasoning_effort="low"', changed)
+
     def test_public_command_preserves_explicit_provider_arguments(self):
         import agent_profile_cli
         import io
