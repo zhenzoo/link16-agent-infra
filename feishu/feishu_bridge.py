@@ -3258,10 +3258,15 @@ def _start_locked(bot_filter=None):
         if i < total:
             time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地（最后一个不用再等）
     deadline = time.monotonic() + sum(_PIDS_QUERY_TIMEOUTS) + 15
+    # 失败先记下、最后再报：看门狗是唯一会复活死桥的部件，某只桥或 cron 起不来也绝不能连累它不起
+    # （09-25 20:59 开机早于联网：桥超时退出 → start 当场抛错 → 看门狗没起，全体 bot 失联 1 小时 48 分）。
+    problems = []
     while children:
         for name, child in list(children):
             if child.poll() is not None:
-                raise bridge_process.ProcessControlError(f'{name} 启动失败 exit={child.returncode}，请看桥日志')
+                problems.append(f'{name} 启动失败 exit={child.returncode}，请看桥日志')
+                children.remove((name, child))
+                continue
             state = bridge_control.read_state(bridge_control.control_path(STATE_DIR, child.pid))
             if (bridge_process.ready_pid('bridge:' + name) == child.pid
                     and state.get('pid') == child.pid and state.get('bot') == name
@@ -3291,7 +3296,9 @@ def _start_locked(bot_filter=None):
                                cwd=str(PROJECT), timeout=150, check=True,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢焦点
             except (OSError, subprocess.SubprocessError) as _e:  # noqa: BLE001
-                raise bridge_process.ProcessControlError(f"{_hint}启动未完成：{_e}") from _e
+                problems.append(f"{_hint}启动未完成：{_e}")
+    if problems:
+        raise bridge_process.ProcessControlError('；'.join(problems))
 
 
 def cmd_stop(bot_filter=None):

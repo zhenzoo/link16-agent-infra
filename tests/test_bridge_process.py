@@ -143,6 +143,27 @@ def test_whole_stop_observes_then_stops_bridges_before_guardians(monkeypatch):
     assert events == ['query', ['101'], ['102'], ['103']]
 
 
+def test_whole_start_still_starts_guardians_when_a_bridge_or_cron_fails(tmp_path, monkeypatch):
+    """09-25 开机早于联网：一只桥起不来就抛错，看门狗没起，没人复活死桥。失败要最后再报。"""
+    class Exited:
+        pid, returncode = 4242, 1
+        def poll(self):
+            return 1
+    guardians = []
+    def run(cmd, **kw):
+        guardians.append(Path(cmd[1]).name)
+        if guardians[-1] == 'bridge_cron.py':
+            raise subprocess.CalledProcessError(1, cmd)
+    monkeypatch.setattr(fb, 'load_bots', lambda: [{'name': 'unit-bot'}])
+    monkeypatch.setattr(p, 'query_processes', lambda *args: [])
+    monkeypatch.setattr(fb, 'LOG_DIR', tmp_path)
+    monkeypatch.setattr(fb.subprocess, 'Popen', lambda *args, **kw: Exited())
+    monkeypatch.setattr(fb.subprocess, 'run', run)
+    with pytest.raises(p.ProcessControlError, match='unit-bot 启动失败.*cron 守护进程启动未完成'):
+        fb.cmd_start()
+    assert guardians == ['bridge_cron.py', 'bridge_watchdog.py']
+
+
 def test_run_releases_lease_on_unknown_query(monkeypatch):
     monkeypatch.setattr(p, 'query_processes', lambda: None)
     with pytest.raises(p.ProcessControlError):
