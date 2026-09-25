@@ -93,18 +93,19 @@ def _fresh_which(name):
 def check_python():
     v = sys.version_info
     s = f"{v.major}.{v.minor}.{v.micro}"
-    if (v.major, v.minor) >= (3, 12):
+    if (v.major, v.minor) >= (3, 11):
         return Result("Python 版本", OK, s)
     if (v.major, v.minor) >= (3, 10):
-        return Result("Python 版本", WARN, f"{s}（建议 3.12+）",
-                      "装 Python 3.12+：https://www.python.org/downloads/")
+        return Result("Python 版本", WARN, f"{s}（建议 3.11+）",
+                      "装 Python 3.11+：https://www.python.org/downloads/")
     return Result("Python 版本", FAIL, f"{s} 太旧",
-                  "装 Python 3.12+：https://www.python.org/downloads/")
+                  "装 Python 3.11+：https://www.python.org/downloads/")
 
 
 def check_deps():
     missing = []
-    for mod, why in (("lark_oapi", "飞书官方 SDK"), ("lark_channel", "长连接通道")):
+    for mod, why in (("lark_oapi", "飞书官方 SDK"), ("lark_channel", "长连接通道"),
+                     ("yaml", "定时任务读 cron-jobs/*.yaml")):
         try:
             __import__(mod)
         except Exception:  # noqa: BLE001
@@ -112,7 +113,7 @@ def check_deps():
     if missing:
         return Result("Python 依赖", FAIL, "缺 " + "、".join(missing),
                       "pip install -r feishu/requirements.txt")
-    return Result("Python 依赖", OK, "lark_oapi + lark_channel 都在")
+    return Result("Python 依赖", OK, "lark_oapi + lark_channel + yaml 都在")
 
 
 def check_node():

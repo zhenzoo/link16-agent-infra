@@ -191,6 +191,22 @@ def _bot_yaml(bot):
     return JOBS_DIR / f"{bot}.yaml"
 
 
+def yaml_blind_warning():
+    """没装 pyyaml 却有 cron-jobs/*.yaml → 返回一句报错；否则 None。
+
+    缺 pyyaml 时 load_jobs 只能返回空表，守护进程照常空转、board 显示「还没有任何定时任务」，
+    和真没排任务长得一样（2026-09-26 tb24 换到 Python 3.14 后 0 点写稿没触发就是这样）。
+    """
+    if yaml is not None or not JOBS_DIR.is_dir():
+        return None
+    files = sorted(p.name for p in JOBS_DIR.glob("*.yaml"))
+    if not files:
+        return None
+    return (f"❌ 当前 Python（{sys.executable}）没装 pyyaml，读不到 {len(files)} 个任务文件"
+            f"（{'、'.join(files)}），里面的任务一个都不会触发 · "
+            "用这个 Python 跑 pip install -r feishu/requirements.txt，再 stop → start cron")
+
+
 def _load_bot_file(bot):
     """读 cron-jobs/<bot>.yaml → jobs list（每条注入 bot=文件名·文件里不必重复写 bot）。绝不抛。"""
     if yaml is None:
@@ -313,6 +329,8 @@ def fire(job, dry_run=False):
 # ---------- 守护循环 ----------
 def cmd_run():
     log(f"cron 守护进程启动 · tick={TICK_SEC}s · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
+    if blind := yaml_blind_warning():
+        log(blind)
     lastfire = _load_lastfire()
     while True:
         try:
@@ -395,6 +413,9 @@ def cmd_board():
     for j in jobs:
         by_bot.setdefault(j.get("bot", "?"), []).append(j)
     print(f"cron 守护进程：{'在跑 PID=' + ','.join(pids) if pids else '没跑（用 `start` 起）'} · 目录 {JOBS_DIR}")
+    if blind := yaml_blind_warning():
+        print(blind)
+        return
     if not by_bot:
         print("（还没有任何定时任务 · `add --bot <bot> --name <n> --cron \"0 9 * * *\" --sop <仓内SOP路径>` 加一个）")
         return
@@ -786,6 +807,9 @@ def _menu_lines(rows):
 
 def cmd_menu():
     rows = _menu_load()
+    if blind := yaml_blind_warning():
+        print(blind)
+        return
     if not rows:
         print("（还没有任何定时任务 · 用 `add --bot X --name N --cron \"0 9 * * *\" --sop <仓内SOP>` 加一个）")
         return
