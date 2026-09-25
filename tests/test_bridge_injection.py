@@ -38,6 +38,29 @@ class BridgeInjectionTests(unittest.TestCase):
                 thread.join()
             self.assertEqual(maximum, 1)
 
+    def test_new_lock_file_initialization_is_thread_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "first-use.lck"
+            ready = threading.Barrier(24)
+            failures = []
+
+            def worker():
+                try:
+                    ready.wait(timeout=2)
+                    with bridge_injection.ProcessFileLock(path, timeout=5, poll=.001):
+                        pass
+                except Exception as exc:  # pragma: no cover - asserted below
+                    failures.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(24)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=7)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            self.assertEqual(path.read_bytes(), b"0")
+
     def test_different_identities_do_not_block_each_other(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)

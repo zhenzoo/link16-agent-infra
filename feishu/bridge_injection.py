@@ -33,12 +33,35 @@ class ProcessFileLock:
 
     def acquire(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+b")
-        self._fh.seek(0, os.SEEK_END)
-        if self._fh.tell() == 0:
-            self._fh.write(b"0")
-            self._fh.flush()
         deadline = time.monotonic() + self.timeout
+        # A Windows byte-range lock needs one byte in the file. Initializing it
+        # after every contender has opened the same empty file lets two threads
+        # write/flush concurrently, which intermittently raises PermissionError.
+        # Exclusive creation elects one initializer; contenders wait until its
+        # byte is durable before opening their own lock handle.
+        while True:
+            try:
+                descriptor = os.open(
+                    self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
+            except FileExistsError:
+                try:
+                    initialized = self.path.stat().st_size >= 1
+                except FileNotFoundError:
+                    continue
+                if initialized:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"lock initialization timeout: {self.path.name}")
+                time.sleep(self.poll)
+            else:
+                try:
+                    os.write(descriptor, b"0")
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                break
+        self._fh = open(self.path, "r+b")
         while True:
             try:
                 self._fh.seek(0)
