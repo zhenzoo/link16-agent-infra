@@ -35,7 +35,7 @@ last_reviewed: 2026-09-26
 - **修正**：`requirements.txt` 补 `pyyaml>=6.0`；缺 pyyaml 且有任务文件时，守护进程启动日志、`board`、复选菜单都直接报「读不到 N 个任务文件」并给修法；`preflight.py` 体检增查 yaml。
 - **Python 下限 3.12 → 3.11**（主人 9-26 定）：SOP-100、README、`preflight`、`windows_bootstrap`、profile wrapper 的解释器选择器同步改为 3.11+。核查：`feishu/`、`wmux/`、`tests/` 全部按 3.11 语法解析 0 失败，未用 3.12 专属标准库接口。
 - **验证**：新增 `tests/test_bridge_cron_yaml.py`；Python 3.14 全量 1036 passed、1 failed（`test_registration_monitor::test_process_probe_keeps_real_child_alive`，单跑时过时不过，本版未改动相关代码）。真机：tb24 为 3.14 装 pyyaml 后只重启 cron，`board` 回读到全部任务；00:35 手动补发 daily-cruise，xhs 会话进入运行。
-- **升级**：跑桥的解释器执行一次 `pip install -r feishu/requirements.txt`，再 `python feishu/bridge_cron.py stop` → `start`（不重启任何 bot 桥）；`board` 能列出任务即生效。
+- **升级**：跑桥的解释器执行一次 `pip install -r feishu/requirements.txt`，再 `python feishu/bridge_cron.py stop` → `start`（不重启任何 bot 桥）；`board` 能列出任务即生效。3.11 选择器会让已渲染的 `.bashrc` / PowerShell 启动包装被判为漂移（提交说明里「行为不受影响」不准确）：先跑 `python feishu/profile_bootstrap.py --apply` 再拉 claude-config，否则它拉取后的体检报错并跳过 skill 同步；claude-config `31fa636` 起拉取钩子会先生成包装再体检。
 
 ## v0.33.6 — 2026-09-25 · bot 里再起的智能体不再冒充 bot；新锁文件初始化不再撞车
 
