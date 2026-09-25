@@ -128,6 +128,9 @@ def main(argv=None) -> int:
     p_list.add_argument("--json", action="store_true")
     p_list.add_argument("--names", action="store_true")
 
+    p_platforms = sub.add_parser("platforms", help="Link16 支持的智能体平台 × 本机实际安装")
+    p_platforms.add_argument("--json", action="store_true")
+
     for name in ("show", "doctor"):
         p = sub.add_parser(name)
         p.add_argument("--profile")
@@ -180,6 +183,19 @@ def main(argv=None) -> int:
                 for row in rows:
                     marker = " · recommended" if row["recommended"] else ""
                     print(f"{row['name']}: {row['runtime']} · {row['home']}{marker}")
+            return 0
+
+        if args.command == "platforms":
+            rows = agent_runtime.platform_inventory()
+            if args.json:
+                _print_json(rows)
+                return 0
+            print(f"Link16 支持 {len(rows)} 个智能体平台（agent_runtime._RUNTIME_ADAPTER_SPECS）；"
+                  "改共享机制时每个平台都要设计，本机已装的才能真机验证：")
+            for row in rows:
+                here = (f"本机已装 {row['version'] or '版本未知'}" if row["installed"] else "本机未装")
+                print(f"  {row['display_name']} ({row['runtime']}) · 入口 {row['entry_document']} · "
+                      f"事件源 {row['event_source']} · {here} · 账号 {', '.join(row['profiles']) or '无'}")
             return 0
 
         if args.command == "selftest":

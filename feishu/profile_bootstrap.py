@@ -28,7 +28,8 @@ DEFAULT_PROFILES = ("ccp", "ccp2", "cxp")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FEISHU_SKILL_SOURCE = PROJECT_ROOT / ".agents" / "skills" / "feishu"
 WORKLINE_SKILL_SOURCE = PROJECT_ROOT / ".agents" / "skills" / "feishu-workline"
-MANAGED_SKILL_SOURCES = (FEISHU_SKILL_SOURCE, WORKLINE_SKILL_SOURCE)
+PLATFORMS_SKILL_SOURCE = PROJECT_ROOT / ".agents" / "skills" / "link16-platforms"
+MANAGED_SKILL_SOURCES = (FEISHU_SKILL_SOURCE, WORKLINE_SKILL_SOURCE, PLATFORMS_SKILL_SOURCE)
 SKILL_MANIFEST = ".link16-skill-install.json"
 SKILL_MANAGED_BY = "link16-agent-infra"
 LEGACY_CODEX_ADAPTER = "claude-compat-feishu"
@@ -538,7 +539,7 @@ def main(argv=None) -> int:
         print(json.dumps({"applied": args.apply, "rows": rows}, ensure_ascii=False, indent=2))
     else:
         action = "已应用" if args.apply else ("体检" if args.doctor else "只预览")
-        print(f"{action}：Link16 profiles / Shell 函数 / feishu + feishu-workline skills")
+        print(f"{action}：Link16 profiles / Shell 函数 / feishu + feishu-workline + link16-platforms skills")
         status_text = {
             "ok": "✅ 已对齐",
             "missing": "⏳ 缺失",

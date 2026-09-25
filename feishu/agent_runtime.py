@@ -144,6 +144,29 @@ def runtime_adapter_spec(name: str) -> RuntimeSpec:
         raise ValueError(f"unsupported agent runtime: {key or '<empty>'}") from None
 
 
+def platform_inventory(path=None) -> list[dict]:
+    """Every platform Link16 supports, and what this machine actually has.
+
+    The adapter table above is the one list of supported agent platforms. Work
+    on a shared mechanism (hooks, cards, watchdog, profiles, skills) covers every
+    row; ``installed`` only says which rows can also be verified live here.
+    """
+    profiles = profile_specs(path)
+    rows = []
+    for spec in runtime_adapter_specs():
+        installed = bool(shutil.which(spec.name) or _persistent_path_which(spec.name))
+        rows.append({
+            "runtime": spec.name,
+            "display_name": spec.display_name,
+            "entry_document": spec.entry_document,
+            "event_source": spec.bridge_event_source,
+            "installed": installed,
+            "version": cli_version(spec.name) if installed else None,
+            "profiles": [p.name for p in profiles if p.runtime == spec.name],
+        })
+    return rows
+
+
 def _raw_runtime_name(bot) -> str:
     raw = ""
     if isinstance(bot, dict):

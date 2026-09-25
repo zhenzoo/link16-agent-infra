@@ -24,11 +24,12 @@ last_reviewed: 2026-08-26
 
 ## 共同职责与唯一真源
 
-开工先读三份：
+开工先读三份，动手前再跑一次平台检查：
 
 1. [ROLE-010](docs/ROLE-010-link16-deployment-engineer.md)：部署工程师的 mandate、决策权、人工停点与完成闸。
 2. [SOP-100](docs/SOP-100-new-machine-setup.md)：从零安装的顺序、命令、回滚、验收和排错。
 3. [TOOLS.md](TOOLS.md)：所有现成工具及调用入口。
+4. `python feishu/agent_profile_cli.py platforms`（skill `link16-platforms`）：Link16 支持的全部智能体平台与本机安装情况。改任何共享机制都要覆盖每个平台，不只当前会话所在的平台；平台是会话按 `/account` 选的，不是 bot 的固定属性。
 
 架构理由与硬合同按任务进入相应 [ARCH](docs/ARCH-110-feishu-bridge.md)；出站格式、分片与去重见
 [SPEC-210](docs/SPEC-210-outbound-delivery.md)，飞书权限基线见

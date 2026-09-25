@@ -44,6 +44,7 @@ Kimi 原生 TUI 与独立 Wire observer 合同见 §11；逐机部署证据与�
 
 | 事实 | 唯一真相源 | 其他位置的角色 |
 |---|---|---|
+| Link16 支持哪些智能体平台 | `feishu/agent_runtime.py` 的 `_RUNTIME_ADAPTER_SPECS` | `agent_profile_cli.py platforms` 列出它并检测本机安装与账号（skill `link16-platforms`）；共享机制按它逐平台实现（如看门狗 R8 的 `bridge_activity._READERS`），守卫测试要求每行都有实现 |
 | profile 如何映射到 runtime/home/launcher | effective registry：显式路径 → `feishu/agent-profiles.local.json` → 无本地文件才用 legacy `agent-profiles.json` | 只选一份，不合并；代码不再内置 alias 表 |
 | 某个飞书 bot 当前选择哪个 profile | `feishu/bridge-bots.local.json` 的 `profile` | `/account` 只修改这一项 |
 | 当前主 session 正在使用哪个 profile | `LINK16_AGENT_PROFILE` | 从 roster 或手工 wrapper 派生；只作进程级载体，不是第二份持久配置 |

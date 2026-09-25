@@ -225,6 +225,19 @@ class AgentProfileTests(unittest.TestCase):
         command = json.loads(output.getvalue())["command"]
         self.assertEqual(shlex.split(command)[-len(supplied):], supplied)
 
+    def test_platform_inventory_lists_every_supported_platform_with_local_presence(self):
+        from types import SimpleNamespace
+        profiles = [SimpleNamespace(name="ccp", runtime="claude"), SimpleNamespace(name="cxp", runtime="codex")]
+        with patch.object(agent_runtime, "profile_specs", return_value=profiles), \
+                patch.object(agent_runtime.shutil, "which", side_effect=lambda n, **_: None if n == "kimi" else f"/bin/{n}"), \
+                patch.object(agent_runtime, "_persistent_path_which", return_value=None), \
+                patch.object(agent_runtime, "cli_version", return_value="1.0.0"):
+            rows = {r["runtime"]: r for r in agent_runtime.platform_inventory()}
+        self.assertEqual(set(rows), {s.name for s in agent_runtime.runtime_adapter_specs()})
+        self.assertEqual((rows["claude"]["installed"], rows["claude"]["profiles"]), (True, ["ccp"]))
+        self.assertEqual((rows["kimi"]["installed"], rows["kimi"]["version"], rows["kimi"]["profiles"]),
+                         (False, None, []))
+
     def test_bridge_worker_of_every_runtime_starts_without_outer_agent_stamps(self):
         # The bot's hooks tell it from agents it launches by these stamps
         # (bridge_env.nested_agent); a stale one from the pane must not survive.
