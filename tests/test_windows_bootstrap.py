@@ -31,7 +31,7 @@ class ComponentPlanTests(unittest.TestCase):
 
     def test_python_reprobe_accepts_new_interpreter_not_bootstrap_process(self):
         fresh = Path("C:/Users/test/AppData/Local/Programs/Python/Python313/python.exe")
-        with mock.patch.object(wb, "_python312_executable", return_value=fresh):
+        with mock.patch.object(wb, "_python311_executable", return_value=fresh):
             self.assertEqual(wb.detect_component("python"), fresh)
 
     def test_default_plan_has_eight_and_providers_use_official_native_installers(self):

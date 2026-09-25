@@ -21,7 +21,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-09-09
+last_reviewed: 2026-09-26
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -88,7 +88,7 @@ winget install --id GitHub.cli -e --accept-source-agreements --accept-package-ag
 winget install --id Python.Python.3.13 -e --accept-source-agreements --accept-package-agreements
 ```
 
-重开终端，确认 `git --version`、`gh --version`、`python --version`（必须 3.12+），再按 §1.1 登录并 clone。
+重开终端，确认 `git --version`、`gh --version`、`python --version`（必须 3.11+），再按 §1.1 登录并 clone。
 若 `winget` 本身不存在，先从 Microsoft Store 安装/更新“应用安装程序”；这是空白机唯一额外人工安装点。
 
 ### 部署前只确认一次：8 项安装清单
@@ -101,7 +101,7 @@ Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要�
 |---:|---|---|---|
 | 1 | ☑ 必需 | Git + Git Bash | Git for Windows 官方包（WinGet `Git.Git`） |
 | 2 | ☑ 必需 | GitHub CLI | GitHub 官方包（WinGet `GitHub.cli`） |
-| 3 | ☑ 必需 | Python 3.12+ | Python Software Foundation 官方包 |
+| 3 | ☑ 必需 | Python 3.11+ | Python Software Foundation 官方包 |
 | 4 | ☑ 必需 | Node.js LTS | OpenJS 官方 LTS；仓库 RPC 运行时依赖 |
 | 5 | ☑ 必需 | wmux | wmux 官方 WinGet 包；安装后建桌面快捷方式并设 Git Bash |
 | 6 | ☑ 可取消 | Claude Code | Anthropic 官方 native 安装器 `https://claude.ai/install.ps1` |
@@ -183,7 +183,7 @@ python feishu/windows_bootstrap.py --skip claude,codex --apply --yes
 |---|---|
 | **Git for Windows / Git Bash** | 安装 Git for Windows。具体 `bash.exe` 路径由 `preflight.py` 发现，不假定必在 `C:\Program Files` 。 |
 | **GitHub CLI (`gh`)** | `winget install --id GitHub.cli -e`；每位同事登录自己的 GitHub 账号，不复制他人 token。 |
-| **Python 3.12+** | 运行 `Get-Command python -All`、`python --version`、`py -3 --version`。若只命中 `WindowsApps\python.exe` 占位符，安装官方 Python、勾 Add to PATH，必要时关闭 App execution alias，然后重开终端。 |
+| **Python 3.11+** | 运行 `Get-Command python -All`、`python --version`、`py -3 --version`。若只命中 `WindowsApps\python.exe` 占位符，安装官方 Python、勾 Add to PATH，必要时关闭 App execution alias，然后重开终端。 |
 | **Python UTF-8 模式** | `windows_bootstrap.py --apply --yes` 自动写用户级 `PYTHONUTF8=1`，重开终端后由 `preflight.py` 验收。**不要求**勾 Windows“Beta: 使用 Unicode UTF-8”系统区域选项；Link16 hook 还会直接按 UTF-8 读原始字节，不依赖机器 ANSI 代码页。 |
 | **`VIBECODING_ROOT` 环境变量** | 指向这个用户自己的 `.env` 所在根（例 `C:\410_VibeCoding`）。首次写凭据前必须明确设定，不依赖其他电脑的盘符。 |
 | **`PROXY_URL`** | 放在 `$VIBECODING_ROOT/.env`（如本地 mixed port）。下载/安装由 `feishu/network_route.py` 对实际 URL 同时探测直连与此代理；代码不写死端口、不改 v2rayN。 |

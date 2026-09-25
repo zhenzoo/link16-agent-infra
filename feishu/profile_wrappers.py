@@ -51,7 +51,7 @@ __link16_python() {
   fi
   while IFS= read -r candidate; do
     [ -x "$candidate" ] || continue
-    "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && resolved="$candidate"
+    "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1 && resolved="$candidate"
   done < <(printf '%s\n' "$appdata"/Programs/Python/Python*/python.exe | sort -V)
   if [ -n "$resolved" ]; then
     printf '%s\n' "$resolved"
@@ -125,7 +125,7 @@ function Resolve-Link16UserEnvironmentValue {
 function Resolve-Link16Python {
     $command = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($command -and $command.Source -notlike '*\Microsoft\WindowsApps\*') {
-        & $command.Source -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
+        & $command.Source -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>$null
         if ($LASTEXITCODE -eq 0) { return $command.Source }
     }
     $pythonRoot = Join-Path $env:LOCALAPPDATA 'Programs\Python'
@@ -137,12 +137,12 @@ function Resolve-Link16Python {
         ForEach-Object { Join-Path $_.FullName 'python.exe' } |
         Where-Object {
             if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) { return $false }
-            & $_ -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
+            & $_ -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>$null
             $LASTEXITCODE -eq 0
         } | Select-Object -First 1
     if ($candidate) { return $candidate }
     if ($command -and $command.Source -notlike '*\Microsoft\WindowsApps\*') { return $command.Source }
-    throw 'Python not found. Install Python 3.12+ or add python.exe to PATH.'
+    throw 'Python not found. Install Python 3.11+ or add python.exe to PATH.'
 }
 
 function Resolve-Link16AgentProfileCli {

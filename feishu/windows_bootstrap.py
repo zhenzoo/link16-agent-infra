@@ -40,7 +40,7 @@ COMPONENTS = (
     Component("gh", "GitHub CLI", True, "GitHub / WinGet",
               "https://github.com/cli/cli/releases/latest",
               ("winget", "install", "--id", "GitHub.cli", *WINGET_FLAGS)),
-    Component("python", "Python 3.12+", True, "Python Software Foundation / WinGet",
+    Component("python", "Python 3.11+", True, "Python Software Foundation / WinGet",
               "https://www.python.org/downloads/windows/",
               ("winget", "install", "--id", "Python.Python.3.13", *WINGET_FLAGS)),
     Component("node", "Node.js LTS", True, "OpenJS / WinGet",
@@ -145,7 +145,7 @@ def _python_version(path):
         return None
 
 
-def _python312_executable():
+def _python311_executable():
     """Re-probe installed interpreters; the bootstrap process may still be the old Python."""
     candidates = [Path(sys.executable)]
     found = preflight._fresh_which("python")
@@ -165,7 +165,7 @@ def _python312_executable():
             continue
         seen.add(key)
         version = _python_version(path)
-        if version and version >= (3, 12, 0):
+        if version and version >= (3, 11, 0):
             valid.append((version, path))
     return max(valid, default=(None, None))[1]
 
@@ -192,7 +192,7 @@ def detect_component(key):
     if key == "gh":
         return preflight._gh_path()
     if key == "python":
-        return _python312_executable()
+        return _python311_executable()
     if key == "node":
         found = preflight._fresh_which("node")
         return Path(found) if found else _winget_package("OpenJS.NodeJS.LTS_*/node-*/node.exe")

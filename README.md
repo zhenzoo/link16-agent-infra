@@ -121,7 +121,7 @@ last_reviewed: 2026-09-09
 |---|---|
 | **Windows** | 桥依赖 Windows 计划任务做开机自启。macOS 未适配（wmux 本身支持 macOS，是本仓这一侧还没做）。 |
 | **GitHub CLI (`gh`)** | 验证每位 collaborator 自己的 GitHub 账号，再 clone private `main`；不共享 token。 |
-| **Python 3.12+** | `pip install -r feishu/requirements.txt`（lark-oapi + lark-channel-sdk） |
+| **Python 3.11+** | `pip install -r feishu/requirements.txt`（lark-oapi + lark-channel-sdk） |
 | **Node.js** | 桥用一个 node 脚本跟 wmux daemon 通信（脚本仓库自带，见 `wmux/wmux-rpc.js`） |
 | **Git for Windows / Git Bash** | Windows Terminal 与 wmux 的默认 shell；安装/升级后由 `preflight.py` 检查，不靠 `.bashrc` alias |
 | **wmux** ⭐ | **必装，且必须开着** —— 见下节 |

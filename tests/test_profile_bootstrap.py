@@ -307,13 +307,13 @@ class ProfileBootstrapTests(unittest.TestCase):
         bash = next((path for path in candidates if path.is_file()), None)
         if not bash:
             self.skipTest("Git for Windows bash not installed")
-        if sys.version_info < (3, 12):
+        if sys.version_info < (3, 11):
             # 本用例把 sys.executable 拷成 Python39/Python313 两个假解释器，靠它们【自报版本】
-            # 来演示「在合格的解释器里挑最新的」。跑测试的解释器若本身 < 3.12，两个拷贝都不合格，
+            # 来演示「在合格的解释器里挑最新的」。跑测试的解释器若本身 < 3.11，两个拷贝都不合格，
             # 解析器只会退到 PATH 上的 python —— 那不是被测行为，是环境不具备演示条件。
             # （tb24 是 3.10.10。2026-08-30 主人拍板把 PATH 兜底的硬闸放宽后，
             #   returncode 会变 0，但 stdout 仍不可能是 Python313 —— 断言不该为此改弱。）
-            self.skipTest("需要 Python 3.12+ 才能演示「优先挑更新的解释器」")
+            self.skipTest("需要 Python 3.11+ 才能演示「优先挑更新的解释器」")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home = root / "home"
@@ -343,10 +343,10 @@ class ProfileBootstrapTests(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertIn("Python313/python.exe", done.stdout.replace("\\", "/"))
 
-    def test_powershell_resolver_uses_semantic_version_and_requires_312(self):
+    def test_powershell_resolver_uses_semantic_version_and_requires_311(self):
         block = pb._powershell_block()
         self.assertIn("[version]", block)
-        self.assertIn("sys.version_info >= (3, 12)", block)
+        self.assertIn("sys.version_info >= (3, 11)", block)
         self.assertNotIn("Sort-Object Name -Descending", block)
 
     @unittest.skipUnless(shutil.which("powershell.exe"), "requires PowerShell")
