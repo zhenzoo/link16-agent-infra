@@ -3061,7 +3061,7 @@ def _run_bot(bot_name=None):
                 _silence.reset(bname)
                 return
             now = time.time()
-            activity = await asyncio.to_thread(_silence.sample, ad, bname)
+            activity = await asyncio.to_thread(_silence.sample, ad, bot)
             mins = activity["minutes"]
             if mins is None or mins < bridge_activity.SILENT_MINUTES or now - _silent_alerted["at"] < 3600:
                 return

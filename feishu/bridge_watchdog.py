@@ -483,8 +483,9 @@ def codex_dead_turn(bot_name, bot_obj):
 #   主人不发消息它一次都不看（主人 2026-09-11 原话：「必须让我发消息给他，他才会检测」）。
 #
 # 2026-09-14 baseball-zhen：回合已 completed，TUI 仍显示 Working、wmux 仍报 running。
-# 两者只能作诊断，不能授权打断。改读该 bot 活着的 observer 对应的后台状态，
-# 与桥共用 SilenceClock：只有同一回合连续确认 active 才计时；等待/结束/未知都清零。
+# 两者只能作诊断，不能授权打断。改读该 bot 平台自己的结构化记录（bridge_activity._READERS：
+# Codex 问 app-server、Claude 读钉住的 transcript、Kimi 读 Wire 日志；2026-09-26 起三平台一视同仁），
+# 与桥共用 SilenceClock：只有同一回合连续确认 active 才计时；等待/结束/未知都清零；未知只在原因变化时记日志。
 # 满一小时后复查回合与未完成工具；未知不打断，长工具只提醒，同一回合最多打断一次。
 STALL_MIN = bridge_activity.SILENT_MINUTES
 STALL_NUDGE_TEXT = ("⚠️ 看门狗确认本回合执行中连续 {mins} 分钟无回传，按了一下 Esc。"
@@ -1200,6 +1201,7 @@ def cmd_run(auto=True):
         f"覆盖【全部 workspace 的全部面板】· 一视同仁")
     states = {}                      # {pty: {"hash","err_stuck","lim_stuck","last_nudge"}}
     silence = bridge_activity.SilenceClock()
+    r8_unknown = {}                  # {bot: 上次记下的「无法确认」原因}·同一原因只记一次
     bridge_seen_alive = False
     bridge_alerted = False
     tick = 0
@@ -1288,17 +1290,21 @@ def cmd_run(auto=True):
                 now = time.time()  # a new prompt may arrive while the pane/rollout scan runs
 
                 # ---- R8 · 回合进行中静默 ≥ STALL_MIN → 按 Esc + 注「查原因·继续推进」+ DM ----
-                activity = silence.sample(STATE_DIR, bot_name) if bot_name else {}
+                activity = silence.sample(STATE_DIR, bot_obj) if bot_obj else {}
                 sm = activity.get("minutes")
-                if bot_name:
+                if bot_obj:
                     activity_checks[bot_name] = {"state": activity["state"],
                                                  "minutes": round(sm, 1) if sm is not None else None}
-                if bot_name and activity.get("state") == "unknown":
-                    log(f"[R8] {bot_name} {activity['reason']} → 不自动打断")
+                    # Log a state change, not every 2-minute patrol of the same unknown.
+                    unknown = activity["reason"] if activity["state"] == "unknown" else None
+                    if unknown != r8_unknown.get(bot_name):
+                        log(f"[R8] {bot_name} {unknown} → 不自动打断" if unknown
+                            else f"[R8] {bot_name} 状态恢复可判定：{activity['state']}")
+                        r8_unknown[bot_name] = unknown
                 if sm is not None and sm >= STALL_MIN:
                     mins = int(sm)
                     ep = activity["key"]                    # 按真实回合去重，不把新回传当成新故障
-                    confirmed, current = bridge_activity.confirm_stall(STATE_DIR, bot_name, activity)
+                    confirmed, current = bridge_activity.confirm_stall(STATE_DIR, bot_obj, activity)
                     if not confirmed:
                         if current["state"] != "active" or current["key"] != ep:
                             silence.reset(bot_name)
@@ -1808,10 +1814,11 @@ def cmd_stall_check(stall_min=STALL_MIN):
     if not pty_by_bot:
         print("  名册里没有带面板的 bot")
         return 0
+    bots = {b["name"]: b for b in _iter_bots()}
     for name in sorted(pty_by_bot):
         pty = pty_by_bot[name]
         text = read_pane(pty) or ""
-        activity = bridge_activity.read_activity(STATE_DIR, name)
+        activity = bridge_activity.read_activity(STATE_DIR, bots.get(name))
         if at_picker(text, name):
             activity = {"state": "waiting", "reason": "等待用户回答"}
         verdict = ("由常驻看门狗连续计时，满阈值再复核" if activity["state"] == "active" else "不计时、不自动打断")

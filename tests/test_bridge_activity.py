@@ -14,6 +14,8 @@ import bridge_activity as a
 import bridge_watchdog as w
 import codex_app_server_worker as worker
 
+CODEX = {"name": "bot", "agent": "codex"}
+
 
 def active(turn="turn-1"):
     return {"state": "active", "key": ("thread-1", turn), "reason": "执行中"}
@@ -68,13 +70,13 @@ def rpc(monkeypatch):
 ])
 def test_runtime_status_has_priority_over_working_display(rpc, status, expected):
     rpc.live["status"] = status
-    assert a.read_activity("state", "bot")["state"] == expected
+    assert a.read_activity("state", CODEX)["state"] == expected
     assert all(method in {"initialize", "initialized", "thread/read"} for method, _ in rpc.calls)
     assert rpc.closed
 
 
 def test_active_probe_is_read_only_and_omits_history(rpc):
-    assert a.read_activity("state", "bot")["key"] == ("thread-1", "turn-1")
+    assert a.read_activity("state", CODEX)["key"] == ("thread-1", "turn-1")
     calls = dict(rpc.calls)
     assert calls["thread/read"]["includeTurns"] is False
     assert calls["thread/turns/list"]["limit"] == 1
@@ -84,10 +86,10 @@ def test_active_probe_is_read_only_and_omits_history(rpc):
 
 def test_mismatched_thread_or_completed_turn_is_unknown(rpc):
     rpc.live["id"] = "another-thread"
-    assert a.read_activity("state", "bot")["state"] == "unknown"
+    assert a.read_activity("state", CODEX)["state"] == "unknown"
     rpc.live["id"] = "thread-1"
     rpc.turn["status"] = "completed"
-    assert a.read_activity("state", "bot")["state"] == "unknown"
+    assert a.read_activity("state", CODEX)["state"] == "unknown"
 
 
 def test_endpoint_is_the_workers_own_app_server_not_the_events_mirror(tmp_path, monkeypatch):
@@ -111,30 +113,30 @@ def test_endpoint_is_the_workers_own_app_server_not_the_events_mirror(tmp_path, 
     assert budgets and budgets[0] >= 15          # the old 3s budget timed out under load
     rows.append({"ProcessId": 13, "ParentProcessId": 10,
                  "CommandLine": "codex.exe app-server --listen ws://127.0.0.1:4321"})
-    assert a.read_activity(tmp_path, "bot")["state"] == "unknown"   # ambiguous → never guess
+    assert a.read_activity(tmp_path, CODEX)["state"] == "unknown"   # ambiguous → never guess
     rows.pop()
     (tmp_path / "bridge-codex-app-startup-bot.json").write_text(
         json.dumps({"thread_id": "stale-thread", "startup_id": "s0", "worker_pid": 10}))
-    assert a.read_activity(tmp_path, "bot")["state"] == "unknown"
+    assert a.read_activity(tmp_path, CODEX)["state"] == "unknown"
 
 
 @pytest.mark.parametrize("item_type", ["commandExecution", "mcpToolCall", "dynamicToolCall", "fileChange"])
 def test_long_tool_is_never_interrupted(rpc, monkeypatch, item_type):
     monkeypatch.setattr(a, "progress_time", lambda *args: 0)
     rpc.turn["items"] = [{"type": item_type, "status": "inProgress"}]
-    confirmed, result = a.confirm_stall("state", "bot", active(), now=20000)
+    confirmed, result = a.confirm_stall("state", CODEX, active(), now=20000)
     assert confirmed is False
     assert result["tool_running"] is True
 
 
 def test_recheck_rejects_new_turn_new_output_and_waiting(rpc, monkeypatch):
     monkeypatch.setattr(a, "progress_time", lambda *args: 0)
-    assert a.confirm_stall("state", "bot", active(), now=20000)[0]
-    assert not a.confirm_stall("state", "bot", active("old-turn"), now=20000)[0]
+    assert a.confirm_stall("state", CODEX, active(), now=20000)[0]
+    assert not a.confirm_stall("state", CODEX, active("old-turn"), now=20000)[0]
     monkeypatch.setattr(a, "progress_time", lambda *args: 19999)
-    assert not a.confirm_stall("state", "bot", active(), now=20000)[0]
+    assert not a.confirm_stall("state", CODEX, active(), now=20000)[0]
     rpc.live["status"] = {"type": "idle"}
-    assert not a.confirm_stall("state", "bot", active(), now=20000)[0]
+    assert not a.confirm_stall("state", CODEX, active(), now=20000)[0]
 
 
 @pytest.mark.parametrize("state,minutes,confirmed,esc_count", [
@@ -199,8 +201,114 @@ def test_bridge_silence_alert_uses_same_clock(monkeypatch, state, picker, should
     monkeypatch.setattr(a.time, "time", lambda: 13600)
     context = dict(asyncio=asyncio, time=a.time, bridge_activity=a, _silence=clock,
                    bridge_outbox=SimpleNamespace(picker_load=lambda *args: picker),
-                   ad="state", bname="bot", _silent_alerted={"at": 0}, blog=lambda *args: None,
+                   ad="state", bname="bot", bot={"name": "bot"}, _silent_alerted={"at": 0}, blog=lambda *args: None,
                    mirror_target=lambda *args: "owner", card_send=send, ch=None)
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bridge-callback", "exec"), context)
     asyncio.run(context["_silent_escalate"]("test"))
     assert bool(sent) is should_send
+
+
+# ---- 2026-09-26：R8 三平台一视同仁 ----
+
+def test_every_registered_platform_has_an_activity_reader():
+    import agent_runtime
+    assert set(a._READERS) == {spec.name for spec in agent_runtime.runtime_adapter_specs()}
+
+
+def _claude(tmp_path, *records):
+    transcript = tmp_path / "session-1.jsonl"
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    (tmp_path / "bridge-session-cl.json").write_text(json.dumps({"jsonl": str(transcript)}), encoding="utf-8")
+    return a.read_activity(tmp_path, {"name": "cl", "agent": "claude"})
+
+
+def _user(text, uuid="u1", **extra):
+    return {"type": "user", "uuid": uuid, "message": {"role": "user", "content": text}, **extra}
+
+
+def _assistant(*blocks, stop="tool_use", **extra):
+    return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks),
+                                             "stop_reason": stop}, **extra}
+
+
+def _tool(tid, name="Bash"):
+    return {"type": "tool_use", "id": tid, "name": name, "input": {}}
+
+
+def _result(tid):
+    return {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}}
+
+
+def test_claude_transcript_gives_turn_state_without_reading_the_screen(tmp_path):
+    prompt = _user("hi [飞书 route=p2a]")
+    running = _claude(tmp_path, prompt, _assistant(_tool("t1")))
+    assert (running["state"], running["tool_running"], running["key"]) == ("active", True, ("session-1.jsonl", "u1"))
+    thinking = _claude(tmp_path, prompt, _assistant(_tool("t1")), _result("t1"))
+    assert (thinking["state"], thinking["tool_running"]) == ("active", False)
+    done = [prompt, _assistant(_tool("t1")), _result("t1"), _assistant({"type": "text", "text": "ok"}, stop="end_turn")]
+    assert _claude(tmp_path, *done)["state"] == "idle"
+    # Local command echoes and hook-injected meta entries never open a turn.
+    assert _claude(tmp_path, *done, _user("<command-name>/model</command-name>", "u2"),
+                   _user("context", "u3", isMeta=True))["state"] == "idle"
+    assert _claude(tmp_path, *done, _user("next", "u4"))["key"] == ("session-1.jsonl", "u4")
+    for closing in (_user("[Request interrupted by user]", "u5"),
+                    _assistant({"type": "text", "text": "API Error"}, stop=None, isApiErrorMessage=True)):
+        assert _claude(tmp_path, prompt, _assistant(_tool("t1")), closing)["state"] == "idle"
+    assert _claude(tmp_path, prompt, _assistant(_tool("q", "AskUserQuestion")))["state"] == "waiting"
+
+
+def test_kimi_wire_gives_turn_state_for_the_main_agent_only(tmp_path, monkeypatch):
+    import agent_runtime
+    session = "session_abc"
+    wire = tmp_path / "sessions" / "w" / session / "agents" / "main" / "wire.jsonl"
+    wire.parent.mkdir(parents=True)
+    (tmp_path / "bridge-kimi-thread-km.json").write_text(
+        json.dumps({"session": session, "profile": "kp"}), encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "profile_spec", lambda *args: SimpleNamespace(home_path=tmp_path))
+
+    def state(*records):
+        wire.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        return a.read_activity(tmp_path, {"name": "km", "agent": "kimi"})
+
+    def event(kind, **fields):
+        return {"type": "context.append_loop_event", "agentId": "main", "event": {"type": kind, **fields}}
+
+    head = [{"type": "metadata", "protocol_version": "1.5"},
+            {"type": "turn.prompt", "agentId": "main", "input": [{"type": "text", "text": "hi"}]}]
+    running = state(*head, event("tool.call", uuid="c1", name="Bash"))
+    assert (running["state"], running["tool_running"]) == ("active", True)
+    assert state(*head, event("tool.call", uuid="c1"), event("tool.result", parentUuid="c1"))["tool_running"] is False
+    assert state(*head, {"type": "turn.ended", "agentId": "main", "reason": "completed"})["state"] == "idle"
+    sub = {"type": "turn.prompt", "agentId": "sub-1", "input": []}
+    assert state(*head, {"type": "turn.ended", "agentId": "main"}, sub)["state"] == "idle"
+
+
+def test_same_unknown_is_logged_once_not_every_patrol(tmp_path, monkeypatch):
+    class Done(BaseException):
+        pass
+    logs = []
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(w, "ALERTS_PATH", tmp_path / "alerts.json")
+    monkeypatch.setattr(w, "scan_topology", lambda: ({"pty": "workspace"}, ["pty"]))
+    monkeypatch.setattr(w, "live_bot_by_pty", lambda: {"pty": "bot"})
+    monkeypatch.setattr(w, "read_pane", lambda *args: "")
+    monkeypatch.setattr(w, "_iter_bots", lambda: [{"name": "bot"}])
+    monkeypatch.setattr(w, "_profile_of", lambda *args: None)
+    monkeypatch.setattr(w, "at_picker", lambda *args: False)
+    monkeypatch.setattr(w.agent_quota, "collect", lambda: [])
+    monkeypatch.setattr(w, "codex_dead_turn", lambda *args: (None, False))
+    monkeypatch.setattr(w, "bridge_alive", lambda: True)
+    monkeypatch.setattr(w, "_heartbeat_write", lambda *args: None)
+    monkeypatch.setattr(w, "log", lambda text: logs.append(text))
+    monkeypatch.setattr(a.SilenceClock, "sample", lambda *args: {
+        "state": "unknown", "key": None, "minutes": None, "reason": "状态无法确认：FileNotFoundError"})
+    ticks = 0
+    def sleep(seconds):
+        nonlocal ticks
+        ticks += 1
+        if ticks == 4:
+            raise Done()
+    monkeypatch.setattr(w.time, "sleep", sleep)
+    with pytest.raises(Done):
+        w.cmd_run()
+    assert sum("[R8]" in line for line in logs) == 1
