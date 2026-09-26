@@ -12,6 +12,7 @@ env-scope：只对桥 spawn 的会话生效（FEISHU_BRIDGE_SESSION 未设=普�
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -95,12 +96,53 @@ def main():
         pass
     # 机械触发 repo-owned skill。Claude/Codex 接 JSON additionalContext；
     # Kimi 的 exit-0 stdout 会直接进入上下文。
-    context = _work_context(bot, sd, active)
+    context = "\n\n".join(filter(None, [_work_context(bot, sd, active), _delivery_context(bot, sd)]))
     if is_kimi and context:
         print(context)
     elif context:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "additionalContext": context}}, ensure_ascii=False))
+
+
+DELIVERY_STUCK_SEC = 120      # 最早一条未发出的记录等了这么久还没发 = 卡住（正常 drain 在几秒内）
+
+
+def _delivery_context(bot, sd, now=None):
+    """每轮开头机械报一次：之前写进 outbox 的回复有没有真正交给飞书。
+
+    2026-09-26 tb24-link16：发送队列卡了 4.7 小时（16:25–21:05），期间智能体照常收消息、
+    照常干活，却不知道自己的回复一条都没发出去；桥的"需人工"只写日志。这里只读 outbox
+    大小、HWM 书签和书签处那条记录的时间，不写任何状态、不重试，只让智能体先知道。
+    """
+    try:
+        import bridge_outbox as ob
+        path = ob.outbox_path(str(sd), bot)
+        size = os.path.getsize(path)
+        offset = int(json.loads(Path(ob.hwm_path(str(sd), bot)).read_text(encoding="utf-8")).get("offset", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ""                                         # 新 bot / 书签坏了：交给 drainer 的 fail-closed
+    if size <= offset:
+        return "Delivery check: ok — earlier replies have all been handed to Feishu."
+    written = None
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            written = float(json.loads(f.readline()).get("ts"))
+    except (OSError, ValueError, TypeError):
+        pass
+    now = time.time() if now is None else now
+    waited = now - written if written else None
+    if waited is not None and waited < DELIVERY_STUCK_SEC:
+        return "Delivery check: ok — earlier replies are being sent now."
+    since = (datetime.fromtimestamp(written, timezone(timedelta(hours=8))).strftime("%m-%d %H:%M:%S")
+             if written else "?")
+    return (
+        f"Delivery check: STUCK — {(size - offset) // 1024} KB of earlier replies have NOT reached "
+        f"the owner (oldest unsent record written {since} Beijing). Before continuing this turn, find "
+        f"out why and get them delivered: compare feishu/_state/bridge-outbox-hwm-{bot}.json with the "
+        f"outbox size, check that record's turn_key in feishu/_state/session-work-gate-{bot}.json, read "
+        f"feishu/_logs/bridge-{bot}.log. Then tell the owner what was stuck and what you did."
+    )
 
 
 def _work_context(bot, sd, active=None):

@@ -165,6 +165,41 @@ class WorklineGateTests(unittest.TestCase):
                 self.bot, "new", "replace", project="P", task="新任务", state_dir=self.state,
             )
 
+    def test_newest_commit_releases_older_pending_turns_in_same_burst(self):
+        # 2026-09-26 tb24-link16: owner follow-up + two task notices arrived within 3 s.
+        for key, t in (("notice-a", 10), ("owner", 11), ("notice-b", 12)):
+            session_work.begin_turn(self.bot, key, session="s1", runtime="claude",
+                                    project_hint="Link16", state_dir=self.state, now=t)
+        queued = {"turn_key": "notice-a", "workline_gate": session_work.GATE_CONTRACT}
+        self.assertIs(session_work.delivery_work(self.bot, queued, self.state), False)
+        with self.assertRaisesRegex(ValueError, "已过期"):
+            session_work.decide_work(self.bot, "notice-a", "replace", project="P",
+                                     task="旧任务", state_dir=self.state)
+        session_work.decide_work(self.bot, "notice-b", "replace", project="Link16",
+                                 task="查清回复为什么没送到并补发", progress="核对 🔄",
+                                 state_dir=self.state, now=13)
+        for key in ("notice-a", "owner"):
+            record = {"turn_key": key, "workline_gate": session_work.GATE_CONTRACT}
+            work = session_work.delivery_work(self.bot, record, self.state)
+            self.assertEqual(work["task"], "查清回复为什么没送到并补发", key)
+
+    def test_failed_newest_turn_still_releases_older_pending_turns(self):
+        session_work.begin_turn(self.bot, "older", state_dir=self.state, now=10)
+        session_work.begin_turn(self.bot, "newest", state_dir=self.state, now=11)
+        session_work.request_stop_repair(self.bot, "newest", state_dir=self.state, now=20)
+        session_work.request_stop_repair(self.bot, "newest", state_dir=self.state, now=21)
+        record = {"turn_key": "older", "workline_gate": session_work.GATE_CONTRACT}
+        work = session_work.delivery_work(self.bot, record, self.state)
+        self.assertIn("标题生成失败", work["task"])                  # 放行，而不是永远 False
+
+    def test_commit_does_not_release_a_later_pending_turn(self):
+        session_work.begin_turn(self.bot, "first", state_dir=self.state, now=10)
+        session_work.decide_work(self.bot, "first", "replace", project="P", task="第一件事",
+                                 state_dir=self.state, now=11)
+        session_work.begin_turn(self.bot, "second", state_dir=self.state, now=20)
+        record = {"turn_key": "second", "workline_gate": session_work.GATE_CONTRACT}
+        self.assertIs(session_work.delivery_work(self.bot, record, self.state), False)
+
     def test_stop_blocks_once_then_creates_visible_failure_title(self):
         self.begin()
         reason = session_work.request_stop_repair(self.bot, "turn-1", state_dir=self.state, now=20)
@@ -362,6 +397,64 @@ class HookContextTests(unittest.TestCase):
                 state, "tb25-test",
                 "执行验收\n[飞书 from=host route=p2a]", "session-kimi",
             )
+
+
+class DeliveryCheckTests(unittest.TestCase):
+    """每轮开头告诉智能体：之前的回复有没有真正发出去（2026-09-26 tb24-link16 卡了 4.7 小时没人知道）。"""
+
+    def setUp(self):
+        import bridge_outbox
+        self.ob = bridge_outbox
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name)
+        self.bot = "tb25-test"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, *records, hwm_at=0):
+        path = Path(self.ob.outbox_path(str(self.state), self.bot))
+        lines = [json.dumps(r, ensure_ascii=False).encode() + b"\n" for r in records]
+        path.write_bytes(b"".join(lines))
+        self.ob.save_hwm(str(self.state), self.bot, sum(len(x) for x in lines[:hwm_at]))
+
+    def test_all_sent_is_ok(self):
+        import bridge_userprompt
+        self.write({"kind": "answer", "ts": 100.0}, hwm_at=1)
+        self.assertIn("ok", bridge_userprompt._delivery_context(self.bot, self.state, now=10_000))
+
+    def test_fresh_backlog_is_still_sending(self):
+        import bridge_userprompt
+        self.write({"kind": "answer", "ts": 100.0}, {"kind": "progress", "ts": 9_990.0}, hwm_at=1)
+        self.assertIn("being sent", bridge_userprompt._delivery_context(self.bot, self.state, now=10_000))
+
+    def test_old_unsent_record_is_reported_stuck_with_where_to_look(self):
+        import bridge_userprompt
+        self.write({"kind": "progress", "ts": 1_790_411_108.0, "turn_key": "old"},
+                   {"kind": "answer", "ts": 1_790_411_200.0}, hwm_at=0)
+        ctx = bridge_userprompt._delivery_context(self.bot, self.state, now=1_790_428_000.0)
+        self.assertIn("STUCK", ctx)
+        self.assertIn("09-26 16:25:08", ctx)
+        self.assertIn(f"session-work-gate-{self.bot}.json", ctx)
+
+    def test_new_bot_without_outbox_adds_nothing(self):
+        import bridge_userprompt
+        self.assertEqual(bridge_userprompt._delivery_context(self.bot, self.state), "")
+
+    def test_hook_appends_delivery_check_even_when_work_line_is_off(self):
+        import bridge_userprompt
+        self.write({"kind": "answer", "ts": 100.0}, hwm_at=0)
+        payload = {"prompt": "hi", "thread_id": "t1"}
+        env = {"FEISHU_BRIDGE_SESSION": self.bot, "FEISHU_BRIDGE_OUTBOX_DIR": str(self.state),
+               "LINK16_WORK_LINE": "off"}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(bridge_userprompt, "_read_stdin_json", return_value=payload), \
+                mock.patch.object(bridge_userprompt.bridge_inbox, "confirm_prompt"), \
+                redirect_stdout(out):
+            bridge_userprompt.main()
+        ctx = json.loads(out.getvalue().strip())["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("Delivery check: STUCK"))
 
 
 class CliTests(unittest.TestCase):

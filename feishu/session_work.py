@@ -267,8 +267,38 @@ def decide_work(bot: str, turn_key: str, action: str, *, project="", task="", pr
             "work": _work_snapshot(record),
             "decided_at": time.time() if now is None else now,
         })
+        _release_superseded(gate, turn_key, row)
         bridge_injection.atomic_write_json(gate_path(bot, state_dir), gate)
         return row
+
+
+def _release_superseded(gate: dict, turn_key: str, row: dict) -> list[str]:
+    """Release older pending turns that the newest committed turn replaced.
+
+    Several messages can reach one running session within seconds (an owner
+    follow-up plus background-task notices).  Each gets its own pending row,
+    but only the newest one is current, and decide refuses the older keys as
+    stale.  Their queued outbox records then wait forever and block every later
+    reply behind them (tb24-link16, 2026-09-26 16:25-21:05).  The newest
+    commit already describes the work those turns merged into, so reuse it.
+    """
+    started = float(row.get("started_at") or 0)
+    released = []
+    for key, other in (gate.get("turns") or {}).items():
+        if key == turn_key or not isinstance(other, dict) or other.get("status") != "pending":
+            continue
+        if float(other.get("started_at") or 0) > started:
+            continue
+        other.update({
+            "status": "ready",
+            "decision": "superseded",
+            "superseded_by": turn_key,
+            "committed_revision": row.get("committed_revision"),
+            "work": row.get("work"),
+            "decided_at": row.get("decided_at"),
+        })
+        released.append(key)
+    return released
 
 
 def record_turn_key(record: dict) -> str:
@@ -346,6 +376,7 @@ def request_stop_repair(bot: str, turn_key: str, *, state_dir=None, now=None) ->
             "work": _work_snapshot(failed),
             "failed_at": time.time() if now is None else now,
         })
+        _release_superseded(gate, turn_key, row)
         bridge_injection.atomic_write_json(gate_path(bot, state_dir), gate)
         return None
 
