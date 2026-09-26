@@ -40,12 +40,13 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 | 查看/切换本机全局在线产物开关 | `python feishu/artifact_delivery.py status`；`set-online on|off` |
 | 给另一只 bot 派活、回结果或续轮 | `python feishu/send_feishu_msg.py --bot <我> --to-agent <对方> --text "…"` |
 | 查看可发送的 agent | `python feishu/send_feishu_msg.py --list-agents` |
-| 发图片、视频或媒体 | `python feishu/send_feishu_media.py --bot <我> --media <路径> --title "…"` |
+| 发图片、视频、音频、PDF 等媒体（默认唯一入口：在线文档） | `python feishu/send_feishu_media.py --bot <我> --media <路径> --title "…"` |
 | 新建媒体审阅文档并验证真实预览 | 上述入口加 `--publish-only --receipt <新的JSON> --verify-out <新目录>`；自动逐项检查真实页面，见 SOP-141 |
 | 往已有文档插入图片／音频／视频 | 同一 `send_feishu_media.py` 加 `--document <docx链接或token>`；默认末尾，指定位置加 `--parent-block <父块> --index <从0起的位置>`；保留原正文和权限，仍加 `--verify-out` |
 | 读全文、解析wiki链接、表格写回、查文档权限 | `python feishu/docio_cli.py --bot <我> inspect/read/write/doctor ...`；依 SOP-140，媒体插入走上一行 |
-| 发可播放语音 | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"` |
-| 发布飞书在线文档 | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
+| 发聊天语音条（仅用户本轮明确说“语音条”时） | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"`；其余音频走 `send_feishu_media.py` |
+| 图片直发私聊（仅用户本轮明确说“直接发图片”时） | `python feishu/feishu_bridge.py send --bot <我> --image <路径> [--text "…"]`；其余图片走 `send_feishu_media.py` |
+| 发布 Markdown / HTML 在线文档（默认唯一入口） | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
 | 参照现有表格新建同类型飞书Sheet | 读 [原生Sheet参考表复刻流程](references/SOP-020-native-sheet-from-reference.md)，再按`lark-shared`与`lark-sheets`调用飞书API；先只读参考表，声明式新建，最后回读工作簿、单元格、样式、合并、冻结、下拉和条件格式 |
 | 将已有 HTML、视频交互或三维查看器发布为妙搭应用链接 | 读 [HTML→妙搭流程](references/SOP-010-html-to-miaoda.md)，复用 `lark-apps`，保留已有应用入口；资源清单和发布核验用 `python feishu/miaoda_delivery.py --help` |
 | 把 bot 建的在线文档交给主人（主人说“这份给我/交接给我/要发给别人看”，或 PRD 交付稿） | `python feishu/docio_cli.py transfer-owner <url>`（默认 dry-run，确认后加 `--apply`）；用**创建它的那只 bot** 身份跑，主人 = 该 bot 的 owner 文件，bot 保留可管理；不挂群、不改其他协作者与分享设置 |
@@ -93,7 +94,7 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 - Markdown创建的机械闸在 `feishu/doc_structure.py`：非PRD表格编译为原生字段列表并保留链接；PRD简单原生表格先检查全篇预算，复杂表格/媒体转 `lark-doc` 专用资源流程。写入后完整分页回读正文、链接、样式和结构，`structure_verified=true`才准返回成功。失败不再纯文本降级，也不得用import绕过检查。
 - 更新已有在线文档先读 `lark-doc` 的XML与资源规范，再走 `python feishu/docio_cli.py write <url> --patch <json>`；补丁 `docx.format=xml`，写入前绑定当前revision，已获授权则加 `--apply`。整篇覆盖/追加自动构造全文核验目标；局部替换必须提供 `expected_document` 完整XML。`doc_xml_structure.py`逐项核对全文、链接、原生列表/表格、样式与资源标识后才报告成功。不要直接调用裸 `lark-cli +update` 绕过回读闸；保留已有评论/资源，局部内容变化不能擅自整篇覆盖。
 - 这两道闸覆盖受管文字创建及XML更新；HTML/Office导入、媒体播放和手机视觉效果仍须按对应流程另外验证，不能把文字结构通过称作所有格式均已验证。
-- 只有用户明确说“文件”“附件”或“原文件”时，才使用 `send_feishu_file.py --file`。在线开关、在线 URL 或 `$open-local` 成功都不能外推出附件授权。旧的 `send --file` 已机械拒绝，不能再用。
+- 发送入口没有旁路：图片、视频、音频、PDF 等媒体一律 `send_feishu_media.py`，Markdown / HTML 一律 `send --doc`。只有用户本轮明确说“文件”“附件”或“原文件”时，才使用 `send_feishu_file.py --file`；明确说“直接发图片”时才用 `send --image`；明确说“语音条”时才用 `send_feishu_voice.py`。在线开关、在线 URL 或 `$open-local` 成功都不能外推出这三种例外的授权。旧的 `send --file` 已机械拒绝，不能再用。
 - 飞书在线文档和关键网页 URL 必须裸写或写成 `[标签](https://...)`，不得套反引号或代码围栏。
 - 本地路径是默认电脑定位信息；需要手机访问时，用户可以开启全局在线开关或在当前轮明确要求在线稿。
 - owner `p2a` 的成型可审阅产物在路径核对和回执后，默认立即调用用户级 `$open-local` 在这台配对电脑逐份打开；不要求 owner 每轮重复说“请打开”，也不以“是否在桌前”推断授权。本轮明确说“后台/无人值守/不要打开”时跳过；`p2a-ext`、cron 与 a2a 默认不启动 GUI，除非 owner 当前任务明确授权。Link16 bridge/drainer 不替 agent 启动本地应用。
