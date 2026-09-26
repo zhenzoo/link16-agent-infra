@@ -66,6 +66,51 @@ class WorklineStopHookTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), "")
 
 
+class StuckDeliveryAtStopTests(unittest.TestCase):
+    """2026-09-26：回复在 outbox 卡了 4.7 小时，模型一轮轮结束都没发现。结束前要先看一眼。"""
+
+    def run_hook(self, state: Path):
+        env = os.environ.copy()
+        env.update({"FEISHU_BRIDGE_SESSION": "test-bot", "FEISHU_BRIDGE_OUTBOX_DIR": str(state),
+                    "PYTHONIOENCODING": "utf-8"})
+        return subprocess.run([sys.executable, str(ROOT / "feishu/hooks/bridge_workline_stop.py")],
+                              input=json.dumps({"session_id": "s1"}), text=True,
+                              capture_output=True, env=env, check=False)
+
+    def ready_turn(self, state):
+        turn_delivery_guard.activate(state, "test-bot", {"kind": "p2a"}, turn_key="turn-1",
+                                     metadata={"workline_gate": session_work.GATE_CONTRACT})
+        session_work.begin_turn("test-bot", "turn-1", state_dir=state)
+        session_work.decide_work("test-bot", "turn-1", "replace", project="Link16",
+                                 task="验证结束前送达检查", state_dir=state)
+
+    def outbox(self, state, age_sec):
+        import bridge_outbox
+        line = json.dumps({"kind": "answer", "ts": __import__("time").time() - age_sec}).encode() + b"\n"
+        Path(bridge_outbox.outbox_path(str(state), "test-bot")).write_bytes(line)
+        bridge_outbox.save_hwm(str(state), "test-bot", 0)
+
+    def test_stuck_earlier_reply_holds_the_turn_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            self.ready_turn(state)
+            self.outbox(state, age_sec=600)
+            first = self.run_hook(state)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            out = json.loads(first.stdout)
+            self.assertEqual(out["decision"], "block")
+            self.assertIn("Before ending this turn", out["reason"])
+            second = self.run_hook(state)
+            self.assertEqual(second.stdout.strip(), "")                   # 只拦一次，不死循环
+
+    def test_fresh_backlog_does_not_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            self.ready_turn(state)
+            self.outbox(state, age_sec=5)
+            self.assertEqual(self.run_hook(state).stdout.strip(), "")
+
+
 class NestedAgentTests(unittest.TestCase):
     """2026-09-25: two `codex exec` runs launched from inside tb25-link16 inherited
     FEISHU_BRIDGE_SESSION, opened turns as the bot and left its card on

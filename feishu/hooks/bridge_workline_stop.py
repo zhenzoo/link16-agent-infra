@@ -24,6 +24,25 @@ def _read_stdin_json():
     return json.loads(text.lstrip("\ufeff")) if text.strip() else {}
 
 
+def _stuck_delivery(bot, turn_key, state_dir):
+    """本轮结束前再看一次：之前的回复有没有卡在 outbox 里没发出去。
+
+    本轮最终回复要等模型停下后才由 hook 写出、再由 drainer 发送，模型自己看不到它的送达；
+    但在它之前的回复（进度卡、上一轮的回复）此刻应当早已发完。有卡住的就拦一次，让模型
+    当场查清再结束；同一轮只拦一次，第二次照常放行。
+    """
+    try:
+        from bridge_userprompt import _delivery_context
+        ctx = _delivery_context(bot, state_dir)
+    except Exception:  # noqa: BLE001 — 检查挂了不能挡住回合结束
+        return ""
+    if not ctx.startswith("Delivery check: STUCK"):
+        return ""
+    if not session_work.hold_for_delivery(bot, turn_key, state_dir=state_dir):
+        return ""
+    return ctx.replace("Before continuing this turn", "Before ending this turn")
+
+
 def main():
     bot = os.environ.get("FEISHU_BRIDGE_SESSION")
     if not bot or not session_work.enabled():
@@ -40,9 +59,10 @@ def main():
     route = turn_delivery_guard.read_route(state_dir, bot)
     if not isinstance(route, dict) or route.get("workline_gate") != session_work.GATE_CONTRACT:
         return
-    reason = session_work.request_stop_repair(
-        bot, str(route.get("turn_key") or ""), state_dir=state_dir,
-    )
+    turn_key = str(route.get("turn_key") or "")
+    reason = session_work.request_stop_repair(bot, turn_key, state_dir=state_dir)
+    if not reason:
+        reason = _stuck_delivery(bot, turn_key, state_dir)
     if reason:
         print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 

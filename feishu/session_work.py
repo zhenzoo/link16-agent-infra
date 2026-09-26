@@ -381,6 +381,24 @@ def request_stop_repair(bot: str, turn_key: str, *, state_dir=None, now=None) ->
         return None
 
 
+def hold_for_delivery(bot: str, turn_key: str, *, state_dir=None) -> bool:
+    """True only the first time this turn is held at Stop because earlier replies are stuck.
+
+    Lets the model look into it before the turn ends, without an endless Stop loop.
+    """
+    if not turn_key:
+        return False
+    state_dir = Path(state_dir or STATE_DIR)
+    with bridge_injection.injection_lock(state_dir, "session-work", bot):
+        gate = _load_gate(bot, state_dir)
+        row = (gate.get("turns") or {}).get(turn_key)
+        if not isinstance(row, dict) or row.get("delivery_held"):
+            return False
+        row["delivery_held"] = True
+        bridge_injection.atomic_write_json(gate_path(bot, state_dir), gate)
+        return True
+
+
 def clear(bot: str, state_dir=None) -> bool:
     state_dir = Path(state_dir or STATE_DIR)
     with bridge_injection.injection_lock(state_dir, "session-work", bot):
