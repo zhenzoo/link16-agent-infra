@@ -19,6 +19,13 @@ last_reviewed: 2026-09-26
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.35.0 — 2026-09-26 · 跨租户 a2a：企业租户与个人租户的 bot 经群自定义机器人 webhook 互发
+
+- **问题**：TB26 的 OBSBOT 企业 bot 与 TB24/TB25/TUF19 的个人租户 bot 分属两个飞书租户，企业自建应用跨租户发消息要企业管理员审批，`send_feishu_msg --to-agent` 找不到共享群、三次被拒（09-08）。
+- **做法**：两个租户的共享 a2a 群各加一个自定义机器人（免审）。名册 agent 新增 `tenant_key`，tenant 新增 `webhook_env`；`send_feishu_msg --to-agent` 发现两边租户不同就改走收件方群的 webhook，原样投递文字 + 真 @ 标签 + 发件人戳，路由记 `a2a-webhook`，缺配置当场报错不猜。收件桥不改：自定义机器人的 @ 照样唤醒应用机器人。ARCH-140 §8。
+- **验证**：新增 `tests/test_send_feishu_msg_cross_tenant.py`（同租户不变、未登记不猜、缺地址拒绝、原样投递带真 @ 标签、主流程走 webhook 并记账）；tb26 真机：企业群投信口 @ tb26-link16 4 秒注入，`--to-agent tb25-link16` 自动走个人群投信口成功；tb24-link16 收到 TB26 的信后 37 秒回信进企业群（手写 @ 没唤醒，改用本工具即可）。
+- **升级**：拉 link16 与 claude-config（名册）。各机 `.env` 加对方租户群的投信口：TB24/TB25/TUF19 加 `FEISHU_XT_WEBHOOK_OBS_URL`（企业群），TB26 加 `FEISHU_XT_WEBHOOK_P_URL`（个人群）。无需重启桥。
+
 ## v0.34.3 — 2026-09-26 · 每轮结束前再查一次之前的回复有没有发出去
 
 - **为什么**：v0.34.2 的送达检查只在下一轮开头做。本轮最终回复要等模型停下后才写出、发送，模型看不到自己最后一条的送达；但在它之前的回复到结束时应当早已发完，这时就能查。

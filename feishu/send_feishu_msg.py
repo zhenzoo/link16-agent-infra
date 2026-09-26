@@ -35,6 +35,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -122,6 +123,58 @@ def send_msg(bot, target, text, ats):
         return False, f"code={d.get('code')} {d.get('msg')}"
     except urllib.error.HTTPError as e:
         return False, f"http={e.code} {e.read().decode('utf-8', 'ignore')[:200]}"
+
+
+def cross_tenant_route(sender, target):
+    """发送方与目标 bot 分属两个飞书租户时，返回目标租户共享群的 webhook 路由；否则 None。
+
+    企业自建应用不能跨租户发消息（对外共享要企业管理员审批），但群里的自定义机器人 webhook
+    免审、任何网络都能投，其 @ 会像 peer bot 一样唤醒群里的应用机器人（2026-09-26 tb26 实测）。
+    两边都必须在名册里显式登记 tenant_key；缺任一 / 相同 → 走原来的共享群路径，绝不按名字猜。
+    目标租户没登记 webhook_env、或本机 .env 没有那个地址 → 当场拒绝，不静默退回别的群。
+    """
+    try:
+        import registry
+        tenants = registry.load_registry().get("tenants", [])
+        sender_key = (registry.find(sender) or {}).get("tenant_key")
+        target_key = (registry.find(target) or {}).get("tenant_key")
+    except Exception:  # noqa: BLE001 — 名册读不到 = 不判跨租户，维持原路径
+        return None
+    if not sender_key or not target_key or sender_key == target_key:
+        return None
+    tenant = next((t for t in tenants if t.get("tenant_key") == target_key), None) or {}
+    url_env = tenant.get("webhook_env")
+    if not url_env:
+        raise SystemExit(f"❌ {target} 在另一个飞书租户（{target_key}），名册没给该租户登记 webhook_env，发不了。")
+    url = _env(url_env).get(url_env) or os.environ.get(url_env)
+    if not url:
+        raise SystemExit(f"❌ {target} 在另一个飞书租户，本机 .env 缺 {url_env}"
+                         f"（「{tenant.get('group_name') or target_key}」群自定义机器人的 webhook 地址）。")
+    return {"url": url, "tenant_key": target_key,
+            "chat_id": tenant.get("group_chat_id") or f"webhook:{target_key}"}
+
+
+def send_webhook(url, text, ats):
+    """经群自定义机器人 webhook 原样投一条纯文字(+真 @ 标签) → (ok, 回执 id|err)。
+
+    @ 必须是 `<at user_id>` 标签：手写 "@tb26-link16" 只是文字，mentions 为空，对面桥不会注入
+    （09-26 23:46 tb24-link16 手写回信实证）。
+    """
+    prefix = "".join(f'<at user_id="{a}"></at> ' for a in (ats or []))
+    body = {"msg_type": "text", "content": {"text": prefix + (text or "")}}
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        return False, f"http={e.code} {e.read().decode('utf-8', 'ignore')[:200]}"
+    except (urllib.error.URLError, OSError) as e:
+        return False, f"webhook 请求失败：{e}"
+    code = d.get("code", d.get("StatusCode"))
+    if code == 0:
+        return True, f"webhook-{int(time.time() * 1000)}"   # webhook 不回 message_id，用本地回执号记账
+    return False, f"code={code} {d.get('msg') or d.get('StatusMessage')}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,9 +403,10 @@ def main():
 
     ats = list(a.at) + [resolve_open_id(nm) for nm in a.at_agent]
     target = a.to
+    xt = cross_tenant_route(a.bot, a.to_agent) if a.to_agent and not a.in_chat else None
     if a.to_agent:
         ats.append(resolve_open_id(a.to_agent))
-        target = shared_group(a.bot, a.to_agent, a.in_chat)
+        target = xt["chat_id"] if xt else shared_group(a.bot, a.to_agent, a.in_chat)
     if not target:
         target = a.in_chat or _session_chat(a.bot)
     if not target:
@@ -373,8 +427,14 @@ def main():
     send_text = f"{a.text} [飞书_from_{a.bot}_to_{a.to_agent}]" if a.to_agent else a.text
 
     # 发完即返回：a2a 回信由【桥自动投进发起方会话】(见 ARCH-140 新模型)，不再守望/轮询/--wait。
-    ok, info = send_msg(a.bot, target, send_text, ats)
-    if a.to_agent:
+    if xt:
+        ok, info = send_webhook(xt["url"], send_text, ats)
+    else:
+        ok, info = send_msg(a.bot, target, send_text, ats)
+    if xt:
+        route = {"kind": "a2a-webhook", "dest": target, "at": ats[-1] if ats else None,
+                 "tenant_key": xt["tenant_key"]}
+    elif a.to_agent:
         route = {"kind": "a2a", "dest": target, "at": ats[-1] if ats else None}
     else:
         route = {"kind": "direct", "dest": target}
@@ -386,6 +446,7 @@ def main():
             proactive_override=a.proactive,
         )
     out = {"ok": ok, "bot": a.bot, "to": target, "to_agent": a.to_agent, "at": ats,
+           "via": "webhook" if xt else "app",
            "message_id": info if ok else None, "err": None if ok else info,
            "proactive_override": a.proactive, "guard": guard,
            "history_recorded": history_recorded if ok else False}
@@ -393,6 +454,7 @@ def main():
         print(json.dumps(out, ensure_ascii=False))
     else:
         tgt = f"{a.to_agent}（{target}）" if a.to_agent else target
+        tgt += "（跨租户·群 webhook）" if xt else ""
         print(f"{'✅ 已发' if ok else '❌ 失败'} → {tgt}"
               + (f" @{len(ats)}个" if ats else "") + (f" · {info}" if not ok else ""))
         if ok and not history_recorded:
