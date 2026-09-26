@@ -150,8 +150,10 @@ def cross_tenant_route(sender, target):
     if not url:
         raise SystemExit(f"❌ {target} 在另一个飞书租户，本机 .env 缺 {url_env}"
                          f"（「{tenant.get('group_name') or target_key}」群自定义机器人的 webhook 地址）。")
+    own = next((t for t in tenants if t.get("tenant_key") == sender_key), None) or {}
     return {"url": url, "tenant_key": target_key,
-            "chat_id": tenant.get("group_chat_id") or f"webhook:{target_key}"}
+            "chat_id": tenant.get("group_chat_id") or f"webhook:{target_key}",
+            "mirror_chat_id": own.get("group_chat_id")}
 
 
 def send_webhook(url, text, ats):
@@ -427,8 +429,14 @@ def main():
     send_text = f"{a.text} [飞书_from_{a.bot}_to_{a.to_agent}]" if a.to_agent else a.text
 
     # 发完即返回：a2a 回信由【桥自动投进发起方会话】(见 ARCH-140 新模型)，不再守望/轮询/--wait。
+    mirror = None
     if xt:
         ok, info = send_webhook(xt["url"], send_text, ats)
+        # 原样抄一份到发件方自己租户的群（不 @ 任何人 → 不唤醒、不成环）：两个群都能看到完整往来，
+        # 主人任一账号都能看全（09-26 主人：跨租户后群里只剩半边对话，看不懂在聊什么）。抄送失败不影响本次投递。
+        if ok and xt.get("mirror_chat_id"):
+            mirror_ok, mirror_info = send_msg(a.bot, xt["mirror_chat_id"], send_text, [])
+            mirror = {"chat_id": xt["mirror_chat_id"], "ok": mirror_ok, "info": mirror_info}
     else:
         ok, info = send_msg(a.bot, target, send_text, ats)
     if xt:
@@ -446,7 +454,7 @@ def main():
             proactive_override=a.proactive,
         )
     out = {"ok": ok, "bot": a.bot, "to": target, "to_agent": a.to_agent, "at": ats,
-           "via": "webhook" if xt else "app",
+           "via": "webhook" if xt else "app", "mirror": mirror,
            "message_id": info if ok else None, "err": None if ok else info,
            "proactive_override": a.proactive, "guard": guard,
            "history_recorded": history_recorded if ok else False}
@@ -457,6 +465,8 @@ def main():
         tgt += "（跨租户·群 webhook）" if xt else ""
         print(f"{'✅ 已发' if ok else '❌ 失败'} → {tgt}"
               + (f" @{len(ats)}个" if ats else "") + (f" · {info}" if not ok else ""))
+        if mirror and not mirror["ok"]:
+            print(f"⚠️ 已投进对方群，但抄送到本方群失败（{mirror['info']}）；对方已收到，不要重发。")
         if ok and not history_recorded:
             print("⚠️ 消息已发出，但本地历史账本写入失败；不要重发，请修复账本后按 message_id 补记。")
     sys.exit(0 if ok else 1)

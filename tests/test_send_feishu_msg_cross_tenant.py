@@ -55,7 +55,8 @@ def test_missing_tenant_key_never_guesses(registry):
 def test_cross_tenant_picks_target_tenant_webhook(registry, monkeypatch):
     monkeypatch.setenv("FEISHU_XT_WEBHOOK_P_URL", "https://hook/p")
     route = sender.cross_tenant_route("tb26-link16", "tb25-link16")
-    assert route == {"url": "https://hook/p", "tenant_key": PERSONAL, "chat_id": "oc_personal"}
+    assert route == {"url": "https://hook/p", "tenant_key": PERSONAL, "chat_id": "oc_personal",
+                     "mirror_chat_id": "oc_enterprise"}
 
 
 def test_cross_tenant_without_local_webhook_fails_closed(registry, monkeypatch):
@@ -90,7 +91,7 @@ def test_main_routes_cross_tenant_agent_through_webhook(registry, tmp_path, monk
     monkeypatch.delenv("FEISHU_BRIDGE_SESSION", raising=False)
     with mock.patch.object(sender, "STATE_DIR", tmp_path), \
          mock.patch.object(sender, "assert_sender_identity"), \
-         mock.patch.object(sender, "send_msg") as app_send, \
+         mock.patch.object(sender, "send_msg", return_value=(True, "om_mirror")) as app_send, \
          mock.patch.object(sender, "shared_group") as shared, \
          mock.patch.object(sender, "send_webhook", return_value=(True, "webhook-1")) as hook, \
          mock.patch.object(sender.bridge_outbound, "append_delivery", return_value=True) as append, \
@@ -101,10 +102,24 @@ def test_main_routes_cross_tenant_agent_through_webhook(registry, tmp_path, monk
         with pytest.raises(SystemExit) as stopped:
             sender.main()
     assert stopped.value.code == 0
-    app_send.assert_not_called()
     shared.assert_not_called()
+    app_send.assert_called_once()
+    bot, chat, mirrored, mirror_ats = app_send.call_args.args
+    assert (bot, chat, mirror_ats) == ("tb26-link16", "oc_enterprise", [])
     url, text, ats = hook.call_args.args
     assert url == "https://hook/p" and ats == ["ou_tb25"]
     assert text.endswith("[飞书_from_tb26-link16_to_tb25-link16]")
     assert append.call_args.kwargs["route"]["kind"] == "a2a-webhook"
     assert append.call_args.kwargs["target"] == "oc_personal"
+
+
+def test_mirror_failure_does_not_fail_cross_tenant_delivery(registry, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FEISHU_XT_WEBHOOK_P_URL", "https://hook/p")
+    monkeypatch.delenv("FEISHU_BRIDGE_SESSION", raising=False)
+    with mock.patch.object(sender, "STATE_DIR", tmp_path),          mock.patch.object(sender, "assert_sender_identity"),          mock.patch.object(sender, "send_msg", return_value=(False, "code=230002")),          mock.patch.object(sender, "send_webhook", return_value=(True, "webhook-1")),          mock.patch.object(sender.bridge_outbound, "append_delivery", return_value=True),          mock.patch.object(sys, "argv", [
+             "send_feishu_msg.py", "--bot", "tb26-link16", "--to-agent", "tb25-link16", "--text", "拉一下",
+         ]):
+        with pytest.raises(SystemExit) as stopped:
+            sender.main()
+    assert stopped.value.code == 0
+    assert "抄送到本方群失败" in capsys.readouterr().out
