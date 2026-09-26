@@ -107,6 +107,7 @@ last_reviewed: 2026-09-22
   - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。先跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
   - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进当前 profile 会话**（verbatim·**绝不缀 `[飞书]` 标记**）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
+- **飞书补发的过期命令不执行（2026-09-26）**：桥不在线时，飞书按 15 秒、5 分钟、1 小时、6 小时补发没送到的消息（最长约 7 小时）。实证：09-25 20:59 重启撞上 DNS 失败，桥停到 22:48；主人 22:42 发的 `/close` 在 09-26 04:48 才补发到，桥照样执行，关掉了 00:02 新开的会话。现在 `handle_slash` 最先比对飞书发送时间（`bridge_inbound.event_ts`）与桥收到时间：`/close /clear /stop /new /cd /account /handoff` 及其别名迟到超过 120 秒（至少第二轮补发）就不执行，回一句「这条是几点发的、隔了多久才到，没有执行，要执行请再发一次」，也不撤销排队中的消息。普通消息和 `/screen` `/help` 照常处理。判据是 `_stale_slash_lag`，回归测试在 `tests/test_slash_gate.py::StaleSlashTest`。
 
 ---
 

@@ -37,6 +37,59 @@ class UnmangleSlashTest(unittest.TestCase):
         self.assertEqual(feishu_bridge._unmangle_slash("D:/repo/deploy"), "D:/repo/deploy")
 
 
+class StaleSlashTest(unittest.TestCase):
+    """飞书补发的过期控制命令不执行（2026-09-26）。
+
+    实证：桥 09-25 20:59～22:48 不在线，主人 22:42:45 发的 /close 被飞书在 09-26 04:48:03 补发到，
+    桥照样执行，关掉了 00:02 新开的会话。
+    """
+    CREATED = 1790347365.169   # 09-25 22:42:45（飞书记录的发送时间）
+    ARRIVED = 1790369283.736   # 09-26 04:48:03（桥收到）
+
+    def test_real_incident_close_is_ignored(self):
+        lag = feishu_bridge._stale_slash_lag("/close", self.CREATED, self.ARRIVED)
+        self.assertIsNotNone(lag)
+        notice = feishu_bridge._stale_slash_notice("/close", self.CREATED, lag)
+        self.assertIn("6 小时 5 分钟", notice)
+        self.assertIn("没有执行", notice)
+
+    def test_normal_and_first_retry_still_execute(self):
+        for lag in (1.5, 15.2, feishu_bridge._STALE_SLASH_AFTER):
+            self.assertIsNone(feishu_bridge._stale_slash_lag("/close", self.ARRIVED - lag, self.ARRIVED))
+
+    def test_every_state_changing_command_is_covered(self):
+        for cmd in ("/close", "/clear", "/stop", "/new", "/cd", "/account", "/acc", "/账号",
+                    "/handoff", "/交接", "/接手"):
+            self.assertIsNotNone(feishu_bridge._stale_slash_lag(cmd, self.CREATED, self.ARRIVED), cmd)
+
+    def test_read_only_commands_and_missing_time_pass_through(self):
+        for cmd in ("/screen", "/help"):
+            self.assertIsNone(feishu_bridge._stale_slash_lag(cmd, self.CREATED, self.ARRIVED))
+        self.assertIsNone(feishu_bridge._stale_slash_lag("/close", 0.0, self.ARRIVED))
+        self.assertIsNone(feishu_bridge._stale_slash_lag("/close", self.CREATED, None))
+
+    def test_bridge_checks_before_any_state_change(self):
+        """handle_slash 是嵌套闭包无法单独驱动 → AST 核对：先判过期，再过授权闸、改状态；on_message 传入发送时间。"""
+        import ast
+        tree = ast.parse((ROOT / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8"))
+        funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+        def call_lines(fn, name):
+            return sorted(c.lineno for c in ast.walk(fn) if isinstance(c, ast.Call)
+                          and (getattr(c.func, "attr", None) or getattr(c.func, "id", None)) == name)
+
+        slash = funcs["handle_slash"]
+        stale = call_lines(slash, "_stale_slash_lag")
+        self.assertTrue(stale, "handle_slash 没调 _stale_slash_lag")
+        for later in ("_gate_verdict", "cancel_before", "pending_clear", "load_session"):
+            first = call_lines(slash, later)
+            self.assertTrue(first and stale[0] < first[0], f"{later} 跑在过期判断之前")
+        passes_created = [c for c in ast.walk(funcs["on_message"]) if isinstance(c, ast.Call)
+                          and getattr(c.func, "id", None) == "handle_slash"
+                          and any(k.arg == "created" for k in c.keywords)]
+        self.assertTrue(passes_created, "on_message 调 handle_slash 时没传 created（飞书发送时间）")
+
+
 class GateVerdictTest(unittest.TestCase):
     BOT = {"name": "victim"}
 

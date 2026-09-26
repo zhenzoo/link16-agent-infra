@@ -803,6 +803,34 @@ _GATED_CAPS = {"close", "clear", "cd", "account", "acc", "账号", "new", "stop"
 _CAP_ALIAS = {"acc": "account", "账号": "account"}       # /acc /账号 都归一到 account 这一项权限
 
 
+# ---------- 飞书补发的过期控制命令（2026-09-26）----------
+# 桥不在线时，飞书按 15 秒、5 分钟、1 小时、6 小时补发没送到的消息（官方最长约 7 小时）。
+# 实证：09-25 20:59 重启撞上 DNS 解析失败，桥停到 22:48；主人 22:42 发的 /close 在 09-26 04:48 才补发到，
+#   把 00:02 新开的会话关了，账号和目录也回了默认。桥只看「收到时间」，不看「发送时间」。
+# 正常送达只差 1～2 秒；差 2 分钟以上 = 至少是第二轮补发，这时再执行改状态的命令多半已不是发送者的意思。
+# 只拦会改会话/上下文/账号/目录的命令（受闸那几条 + /handoff）；普通消息与 /screen /help 照常处理。
+_STALE_SLASH_AFTER = 120
+_HANDOFF_CMDS = ("/handoff", "/交接", "/接手")
+
+
+def _stale_slash_lag(cmd, created, arrived):
+    """改状态的斜杠命令若是飞书补发来的，返回迟到秒数；正常送达或拿不到发送时间返回 None。"""
+    if not (cmd.lstrip("/") in _GATED_CAPS or cmd in _HANDOFF_CMDS):
+        return None
+    if not created or not arrived:
+        return None
+    lag = float(arrived) - float(created)
+    return lag if lag > _STALE_SLASH_AFTER else None
+
+
+def _stale_slash_notice(cmd, created, lag):
+    mins = int(lag // 60)
+    late = f"{mins // 60} 小时 {mins % 60} 分钟" if mins >= 60 else f"{mins} 分钟"
+    sent = time.strftime("%m-%d %H:%M", time.localtime(float(created)))
+    return (f"⏰ 这条 `{cmd}` 是 {sent} 发的，飞书隔了 {late} 才补发过来（当时桥不在线），我没有执行。"
+            f"还要执行的话，请现在再发一次。")
+
+
 def _gate_verdict(bot, sender, cmd, text=None):
     """群内破坏性命令放不放行 → (bool, 原因)。三条放行路径，其余一律拒：
       ① 主人本人在群里下的（sender == 本 bot 的 owner）——他本来就是老大。
@@ -2310,9 +2338,16 @@ def _run_bot(bot_name=None):
             _acc = agent_runtime.current_account(bot)
             await reply(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
-        async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None, inbound_id=None):
+        async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None, inbound_id=None,
+                               created=None):
             cmd = text.split()[0].lower()
             arg = text[len(cmd):].strip()
+            # ⏰ 飞书补发的过期命令不执行（见 _stale_slash_lag）：先于授权闸与任何状态改动，也不 cancel 排队消息。
+            _lag = _stale_slash_lag(cmd, created, arrived)
+            if _lag is not None:
+                blog(bot["name"], f"⏰ 忽略飞书补发的 {cmd}：发出于 "
+                                  f"{time.strftime('%m-%d %H:%M:%S', time.localtime(float(created)))}，迟到 {int(_lag)}s")
+                await reply(chat_id, _stale_slash_notice(cmd, created, _lag)); return
             # 🚧 破坏性命令授权闸（PLAN-930 · 2026-08-03）。
             # 背景：群消息【完全跳过鉴权】(见 on_message 的 `not is_group and not is_allowed`)，
             #   而任何 `/` 开头文本都会走到这里 ⇒ 同群任一 bot/真人本来就能对我下 6 个破坏性命令
@@ -2755,7 +2790,8 @@ def _run_bot(bot_name=None):
                 if text.startswith("/"):
                     durable_inbox.boundary(msg.id)
                     await handle_slash(msg.chat_id, text, sender=sender, from_group=is_group,
-                                       arrived=arrived_at, inbound_id=msg.id)
+                                       arrived=arrived_at, inbound_id=msg.id,
+                                       created=bridge_inbound.event_ts(getattr(msg, "create_time", None), 0.0))
                     return
                 # /cd 编号待选：上条 `/cd` 列了编号清单 → 本条若是纯数字就切目录；非数字=改主意，清掉待选照常处理
                 _cdp = await asyncio.to_thread(load_cd_pending, bot["name"])

@@ -24,7 +24,8 @@ def ledger_path(state_dir: Path, bot: str) -> Path:
     return Path(state_dir) / f"bridge-inbound-{_safe(bot)}.jsonl"
 
 
-def _event_ts(create_time, received_ts: float) -> float:
+def event_ts(create_time, received_ts: float) -> float:
+    """飞书消息发送时间（秒）；拿不到就退回 received_ts。"""
     try:
         value = float(create_time or 0)
     except (TypeError, ValueError):
@@ -53,7 +54,7 @@ def build_record(bot: str, msg, *, raw_text: str, text: str,
         "kind": "inbound",
         "source": source,
         "received_ts": received,
-        "ts": _event_ts(getattr(msg, "create_time", None), received),
+        "ts": event_ts(getattr(msg, "create_time", None), received),
         "bot": str(bot),
         "message_id": str(getattr(msg, "id", "") or "") or None,
         "chat_id": str(getattr(msg, "chat_id", "") or "") or None,

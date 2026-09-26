@@ -19,6 +19,16 @@ last_reviewed: 2026-09-26
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.34.1 — 2026-09-26 · 飞书补发的过期控制命令不再执行；Codex 非默认账号保留自己的模型；桥每轮注入北京时间
+
+- **Codex 非默认账号保留自己的模型**（31fdd8f）：从用户目录启动时 `~/.codex/config.toml` 被当成项目层配置，盖住 cxp／cxp2 自己保存的 `model` / `model_reasoning_effort`。`agent_runtime.codex_saved_model_args` 只在确实被遮住时用 `-c` 重放所选账号的保存值，CLI、app-server、远程 TUI 三条启动路都带上。
+- **桥每轮注入北京时间**（f5aecfc）：`bridge_userprompt` 的 Mechanical fields 追加 `now=<YYYY-MM-DD HH:MM:SS 周> Beijing`，Claude/Codex/Kimi 桥会话都生效，hook 每轮新进程、无需重启。
+
+- **问题**：桥不在线时，飞书按 15 秒、5 分钟、1 小时、6 小时补发没送到的消息（最长约 7 小时），桥只看收到时间。09-25 20:59 tb24 桥重启撞上 DNS 解析失败，停到 22:48；主人 22:42 发的 `/close` 在 09-26 04:48 才补发到，关掉了 00:02 新开的 tb24-link16 会话，账号和目录也回了默认。
+- **修复**：`handle_slash` 最先比对飞书发送时间与桥收到时间。`/close /clear /stop /new /cd /account /handoff` 及其别名迟到超过 120 秒就不执行，在飞书里回一句几点发的、隔了多久、没有执行、要执行请再发一次；也不撤销排队中的消息。普通消息和 `/screen` `/help` 照常处理。`bridge_inbound._event_ts` 改名为公开的 `event_ts` 供桥复用。ARCH-110 §2 斜杠命令一节补上说明。
+- **验证**：`tests/test_slash_gate.py::StaleSlashTest` 用 04:48 这次的真实时间戳回放，全仓 1047 passed。
+- **升级**：重启桥生效。
+
 ## v0.34.0 — 2026-09-26 · 三平台一视同仁：平台检测与检查 skill、看门狗 R8 覆盖 Claude/Kimi、bot 不绑定平台
 
 - **平台检测**：`python feishu/agent_profile_cli.py platforms` 列出 Link16 支持的全部智能体平台（唯一清单 `agent_runtime._RUNTIME_ADAPTER_SPECS`）与本机安装、版本、账号。新增只读 skill `link16-platforms`，登记进 `profile_bootstrap` 分发到 Claude 账号目录与 Codex/Kimi 共享 `.agents/skills`；`CLAUDE.md`/`AGENTS.md`「开工先读」第 4 条、ARCH-120 §2 唯一真相源表同步。改共享机制前先跑它，每个平台都要设计，本机已装的才能真机验证。
