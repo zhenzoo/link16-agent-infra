@@ -42,6 +42,10 @@ AGENTS = [
 def registry(monkeypatch):
     monkeypatch.setitem(sys.modules, "registry", fake_registry(AGENTS, TENANTS))
     monkeypatch.setattr(sender, "_env", lambda *keys: {})
+    monkeypatch.setattr(
+        sender, "resolve_open_id",
+        lambda name: next(agent["open_id"] for agent in AGENTS if agent["name"] == name),
+    )
 
 
 def test_same_tenant_keeps_shared_group_path(registry):
