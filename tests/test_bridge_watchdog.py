@@ -97,19 +97,22 @@ def _row(p, runtime, weekly, verdict):
             "weekly_percent": weekly, "verdict": verdict, "status": "ok", "severity": "normal"}
 
 
-def test_选号_排除刚撞的号():
+def test_选号_排除刚撞的号(monkeypatch):
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: None)
     rows = [_row("ccp2", "claude", 100, "满"), _row("ccp", "claude", 13, "够用")]
     assert q.pick(rows, exclude=["ccp2"], prefer_runtime="claude")["profile"] == "ccp"
 
 
-def test_选号_同runtime优先():
+def test_选号_同runtime优先(monkeypatch):
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: None)
     rows = [_row("ccp", "claude", 40, "够用"), _row("cxp", "codex", 0, "够用")]
     # cxp 余量更大，但同 runtime 的 ccp 优先（能续同一份 transcript）
     assert q.pick(rows, exclude=[], prefer_runtime="claude")["profile"] == "ccp"
 
 
-def test_选号_跨runtime兜底():
+def test_选号_跨runtime兜底(monkeypatch):
     """主人 2026-08-20 拍板：claude 都满了直接自动切 codex，不用问。"""
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: None)
     rows = [_row("ccp", "claude", 100, "满"), _row("ccp2", "claude", 100, "满"),
             _row("cxp", "codex", 0, "够用")]
     assert q.pick(rows, exclude=[], prefer_runtime="claude")["profile"] == "cxp"
