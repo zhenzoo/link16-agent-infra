@@ -116,6 +116,7 @@ import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持�
 import bridge_inbox  # noqa: E402
 import bridge_control  # noqa: E402
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
+import agent_quota  # noqa: E402  (本机 profile 实时额度唯一真源)
 import artifact_delivery  # noqa: E402  (本机全局在线产物交付策略)
 import session_work  # noqa: E402  (每 bot「📌 项目 · 任务」工作行·钉在每张卡片顶部+摘要)
 from outbound_links import sanitize_outbound_links  # noqa: E402  (飞书出站链接安全·卡片/回退/群共用)
@@ -825,6 +826,51 @@ def _handoff_target(arg, current, aliases):
     if target not in known:
         raise KeyError(target)
     return target
+
+
+def _quota_percent(value):
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):g}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _handoff_quota_block_message(target_profile, target_row, usable_rows, recommendation=None):
+    """Render a secret-free handoff refusal with locally usable alternatives."""
+    target_row = target_row if isinstance(target_row, dict) else {}
+    verdict = str(target_row.get("verdict") or "问不到")
+    reason = "实时额度已满" if verdict == "满" else "实时额度无法确认"
+    target_usage = (
+        f"5h {_quota_percent(target_row.get('session_percent'))} / "
+        f"周 {_quota_percent(target_row.get('weekly_percent'))}"
+    )
+    lines = [
+        f"⛔ profile `{target_profile}` {reason}（{target_usage}，判定：{verdict}），"
+        "未关闭当前会话，也没有切换 profile。",
+    ]
+    rows = [row for row in (usable_rows or []) if agent_quota.is_usable(row)]
+    if rows:
+        available = "；".join(
+            f"`{row.get('profile')}`（{row.get('runtime') or '?'}，"
+            f"5h {_quota_percent(row.get('session_percent'))} / "
+            f"周 {_quota_percent(row.get('weekly_percent'))}，{row.get('verdict')}）"
+            for row in rows
+        )
+        lines.append(f"本机已登记、doctor 通过且有额度：{available}。")
+    else:
+        lines.append("本机暂时没有同时通过 doctor 且额度可用的其它账号。")
+    if recommendation:
+        lines.append(
+            f"推荐：`/handoff {recommendation['profile']}`。"
+            "推荐只使用本机允许自动切入的候选；你显式指定其它已登记账号时，不受该开关限制。"
+        )
+    elif rows:
+        lines.append(
+            "当前没有可切入的自动推荐项；你仍可显式选择上面任一已登记账号。"
+        )
+    return "\n".join(lines)
 
 
 def _stale_slash_lag(cmd, created, arrived):
@@ -2488,6 +2534,55 @@ def _run_bot(bot_name=None):
                     await reply(
                         chat_id,
                         f"⛔ profile `{target_profile}` 还没登录，未关闭当前会话。先按 doctor 提示登录后再交接。",
+                    ); return
+                # 主人显式指定的 target 只受 registry + doctor + 实时额度约束；
+                # auto_failover_target 只参与下方“推荐哪个”，绝不充当显式目标允许列表。
+                try:
+                    target_rows = await asyncio.to_thread(agent_quota.collect, [target_profile])
+                    target_row = next(
+                        (row for row in target_rows if row.get("profile") == target_profile), None
+                    )
+                except Exception as _qe:                                # noqa: BLE001
+                    await reply(
+                        chat_id,
+                        f"⛔ profile `{target_profile}` 的实时额度核验失败，未关闭当前会话：{_qe}",
+                    ); return
+                if not agent_quota.is_usable(target_row):
+                    try:
+                        other_names = [name for name in aliases if name != target_profile]
+                        other_rows = await asyncio.to_thread(agent_quota.collect, other_names)
+                        all_rows = ([target_row] if target_row else []) + other_rows
+                        usable_rows = []
+                        for row in all_rows:
+                            if not agent_quota.is_usable(row):
+                                continue
+                            candidate_doctor = await asyncio.to_thread(
+                                agent_runtime.profile_doctor, row["profile"],
+                                check_execution_env=False,
+                            )
+                            if (candidate_doctor.get("ok")
+                                    and (candidate_doctor.get("login") or {}).get("status") != "missing"):
+                                usable_rows.append(row)
+                        try:
+                            prefer_runtime = agent_runtime.profile_spec(current_profile).runtime
+                        except Exception:                               # noqa: BLE001
+                            prefer_runtime = None
+                        recommendation = agent_quota.pick(
+                            usable_rows,
+                            exclude=[current_profile],
+                            prefer_runtime=prefer_runtime,
+                        )
+                    except Exception as _qe:                            # noqa: BLE001
+                        await reply(
+                            chat_id,
+                            f"⛔ profile `{target_profile}` 的实时额度不可用；"
+                            f"其它账号额度汇总失败，未关闭当前会话：{_qe}",
+                        ); return
+                    await reply(
+                        chat_id,
+                        _handoff_quota_block_message(
+                            target_profile, target_row, usable_rows, recommendation
+                        ),
                     ); return
                 if recovering:
                     await reply(

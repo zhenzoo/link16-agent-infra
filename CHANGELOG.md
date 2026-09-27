@@ -19,6 +19,14 @@ last_reviewed: 2026-09-27
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.36.2 — 2026-09-27 · `/handoff` 关闭旧会话前先核验目标实时额度
+
+- **问题**：v0.36.0 的显式目标只检查 effective registry、静态 doctor 与登录证据，没有调用实时额度真源。目标账号已经满额或额度接口问不到时，桥仍会持久化目标、关闭旧会话，直到新会话启动或调用失败才暴露问题。
+- **修复**：`/handoff [profile]` 现在先只查目标账号；额度判定为“够用/紧张”才进入快照、写 profile 和关闭旧会话。“满/问不到”一律 fail closed，保留当前会话，再查询本机其余已登记账号，只列 doctor 通过且实时有额度的候选，并用现有 `agent_quota.pick` 给出推荐命令。
+- **边界**：effective registry 仍是唯一账号名单；`auto_failover_target` 只约束推荐与自主选号，不限制主人显式目标。因而 `cx` 即使关闭自动切入，只要已登记、doctor 与额度通过，显式 `/handoff cx` 仍可执行。Claude/Codex 共用此闸；Kimi 在额度接口尚未验收时判“问不到”，不会冒险关闭旧会话。
+- **验证**：新增满额、问不到、显式目标不受自动开关限制、空 profile 过滤和顺序回归；全仓 1082 passed、126 subtests passed。TB25 实时只读核验中 `ccp` 为“问不到”，`cx/cxp` 周额度各 10% 且“够用”，`pick --exclude ccp --prefer-runtime claude` 推荐 `cxp`；未执行真实 handoff。
+- **升级**：拉取后，在维护窗口重启需要使用新 `/handoff` 的单 bot bridge；无需重启 watchdog，也不要为验收强制执行真实 handoff。
+
 ## v0.36.1 — 2026-09-27 · 看门狗自动换号也真正消费有界祖先会话链
 
 - **纠正**：v0.36.0 已在快照阶段生成有界祖先链，但当时只有主人手动 `/handoff` 的对齐 prompt 会先读它；看门狗自动换号的接管 prompt 仍只让新会话读单个 transcript 尾部。v0.36.0 的升级条目把“重启 watchdog 后使用新链”写早了一步。

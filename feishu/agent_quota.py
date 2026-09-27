@@ -62,6 +62,7 @@ CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
 # 判定阈值：weekly/5h 任一超过 CRIT 视为不可用；超过 WARN 视为紧张（能用但别往上堆活）
 CRIT_PERCENT = 95
 WARN_PERCENT = 80
+USABLE_VERDICTS = frozenset(("够用", "紧张"))
 
 
 # ---------- .env / 代理 ----------
@@ -279,9 +280,10 @@ def _verdict(row):
 
 
 def collect(names=None):
+    selected = None if names is None else set(names)
     rows = []
     for spec in agent_runtime.profile_specs():
-        if names and spec.name not in names:
+        if selected is not None and spec.name not in selected:
             continue
         home = spec.home_path                          # @property，不是方法
         base = {"profile": spec.name, "runtime": spec.runtime,
@@ -304,6 +306,11 @@ def collect(names=None):
         base["verdict"] = _verdict(base)
         rows.append(base)
     return rows
+
+
+def is_usable(row):
+    """额度行能否承接新会话；阈值只由 ``_verdict`` 决定。"""
+    return isinstance(row, dict) and row.get("verdict") in USABLE_VERDICTS
 
 
 def auto_failover_profiles():
@@ -345,7 +352,7 @@ def pick(rows, exclude=(), prefer_runtime=None):
        返回 row 或 None。"""
     allowed = auto_failover_profiles()
     excluded = set(exclude)
-    ok = [r for r in rows if r["verdict"] in ("够用", "紧张")
+    ok = [r for r in rows if is_usable(r)
           and r["profile"] not in excluded
           and (allowed is None or r["profile"] in allowed)]
     if not ok:

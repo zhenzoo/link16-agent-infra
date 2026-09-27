@@ -523,6 +523,66 @@ def test_handoff_命令先快照再关旧会话并在指定时切账号():
     assert "ensure_session" in body, "必须主动起新会话（不像 /close 那样懒启动）"
 
 
+def test_handoff_额度闸必须先于快照持久化和关闭旧会话():
+    src = (HERE.parent / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8")
+    i = src.index('if cmd in ("/handoff"')
+    body = src[i:src.index('if cmd == "/new"', i)]
+    quota = body.index("agent_quota.collect")
+    assert quota < body.index("snapshot_handoff")
+    assert quota < body.index("persist_handoff_pack")
+    assert quota < body.index("persist_account")
+    assert quota < body.index("wmux_session.close")
+    assert "agent_quota.is_usable(target_row)" in body
+    assert body.index("agent_quota.is_usable(target_row)") < body.index("agent_quota.pick")
+
+
+def test_handoff_显式目标有额度就放行且不看自动候选开关(monkeypatch):
+    target = {"profile": "cx", "runtime": "codex", "status": "ok",
+              "session_percent": 12, "weekly_percent": 22, "verdict": "够用"}
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: frozenset({"cxp"}))
+    assert q.is_usable(target) is True
+    assert q.pick([target]) is None, "cx 不应成为自动候选"
+
+
+def test_quota_collect_空名单就是不查而不是退回全量(monkeypatch, tmp_path):
+    specs = [
+        SimpleNamespace(name="kp", runtime="kimi", home_path=tmp_path / "kp", label=""),
+        SimpleNamespace(name="kp2", runtime="kimi", home_path=tmp_path / "kp2", label=""),
+    ]
+    for spec in specs:
+        spec.home_path.mkdir()
+    monkeypatch.setattr(q.agent_runtime, "profile_specs", lambda: specs)
+    assert q.collect([]) == []
+    assert [row["profile"] for row in q.collect(["kp2"])] == ["kp2"]
+
+
+def test_handoff_目标满额时列可用账号并给推荐且不泄露note():
+    import feishu_bridge as fb
+    target = {"profile": "ccp", "runtime": "claude", "status": "ok",
+              "session_percent": 100, "weekly_percent": 100, "verdict": "满",
+              "note": "SECRET_TARGET_NOTE"}
+    cxp = {"profile": "cxp", "runtime": "codex", "status": "ok",
+           "session_percent": 9, "weekly_percent": 22, "verdict": "够用",
+           "note": "SECRET_CANDIDATE_NOTE"}
+    msg = fb._handoff_quota_block_message("ccp", target, [cxp], cxp)
+    assert "未关闭当前会话，也没有切换 profile" in msg
+    assert "`cxp`（codex，5h 9% / 周 22%，够用）" in msg
+    assert "推荐：`/handoff cxp`" in msg
+    assert "SECRET_TARGET_NOTE" not in msg and "SECRET_CANDIDATE_NOTE" not in msg
+
+
+def test_handoff_额度问不到且无自动推荐时仍列显式可选账号():
+    import feishu_bridge as fb
+    target = {"profile": "cxp", "runtime": "codex", "status": "unknown",
+              "session_percent": None, "weekly_percent": None, "verdict": "问不到"}
+    cx = {"profile": "cx", "runtime": "codex", "status": "ok",
+          "session_percent": 10, "weekly_percent": 20, "verdict": "够用"}
+    msg = fb._handoff_quota_block_message("cxp", target, [cx], None)
+    assert "实时额度无法确认" in msg
+    assert "`cx`" in msg
+    assert "仍可显式选择" in msg
+
+
 def _jsonl(path, rows):
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
                     encoding="utf-8")
