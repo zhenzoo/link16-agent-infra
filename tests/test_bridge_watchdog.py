@@ -231,6 +231,24 @@ def test_交接包_必须说明后台句柄拿不到():
     assert "bash_id" in p, "必须告诉新会话：旧会话的后台句柄它拿不到，只能用进程表 + 文件 mtime 认领"
 
 
+def test_自动换号也先读有界祖先链但仍直接推进():
+    pack = {
+        "old_profile": "ccp", "transcript": "C:/current.jsonl", "session_id": "current",
+        "cwd": "D:/work", "at": "now", "context_excerpt": "C:/handoff-context.md",
+        "transcript_chain": [
+            {"runtime": "claude", "profile": "ccp", "session_id": "current",
+             "transcript": "C:/current.jsonl"},
+            {"runtime": "codex", "profile": "cxp", "session_id": "parent",
+             "transcript": "C:/parent.jsonl"},
+        ],
+        "background": {"procs": [], "files": [], "note": "n"},
+    }
+    p = w.build_handoff_prompt(pack, "cxp")
+    for expected in ("C:/handoff-context.md", "C:/current.jsonl", "C:/parent.jsonl",
+                     "先完整读有界上下文文件", "禁止一次性通读", "直接接着推进"):
+        assert expected in p
+
+
 # ─────────────────────── 闸 ───────────────────────
 
 def test_换号次数闸(tmp_path, monkeypatch):
