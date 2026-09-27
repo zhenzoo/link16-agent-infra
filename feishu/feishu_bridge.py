@@ -15,7 +15,7 @@
   单进程多 channel 会撞 "This event loop is already running"）。所以 **run 只跑一个 bot**；
   **start 为 bridge-bots.json 里每个 bot 各起一个 `run --bot <name>` 隐藏进程**（管理仍是一套命令）。
 
-斜杠命令：/handoff(=/交接) 换全新 context 但让它先读懂历史再跟你对齐 · /clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（从 agent-profiles.json 动态列出/切换 profile，原子更新该 bot 名册项并关旧会话重起）· /screen 看现场 · /stop 打断 · /close 关会话
+斜杠命令：/handoff [profile](=/交接) 换全新 context、可指定接手账号，并让它先读懂历史再跟你对齐 · /clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（从 agent-profiles.json 动态列出/切换 profile，原子更新该 bot 名册项并关旧会话重起）· /screen 看现场 · /stop 打断 · /close 关会话
 per-bot 会话注册表：feishu/_state/bridge-session-<bot>.json（各进程自写自读 · 无多进程 race）
 配置：feishu/bridge-bots.local.json（本机覆盖）或 feishu/bridge-bots.json（每 bot 只持久 profile + 传输/业务字段）
 子命令：start（默认·裸跑 `python feishu_bridge.py` 即把所有 bot 各起一隐藏进程） / run [--bot X]（前台调试单 bot） / stop（停全部） / status / workspaces
@@ -811,6 +811,20 @@ _CAP_ALIAS = {"acc": "account", "账号": "account"}       # /acc /账号 都归
 # 只拦会改会话/上下文/账号/目录的命令（受闸那几条 + /handoff）；普通消息与 /screen /help 照常处理。
 _STALE_SLASH_AFTER = 120
 _HANDOFF_CMDS = ("/handoff", "/交接", "/接手")
+
+
+def _handoff_target(arg, current, aliases):
+    """Resolve `/handoff [profile]`; no argument preserves legacy behavior."""
+    parts = str(arg or "").strip().lower().split()
+    if len(parts) > 1:
+        raise ValueError("用法：/handoff [profile]，例如 /handoff cxp")
+    if not parts:
+        return current
+    target = parts[0]
+    known = {str(alias).strip().lower() for alias in (aliases or [])}
+    if target not in known:
+        raise KeyError(target)
+    return target
 
 
 def _stale_slash_lag(cmd, created, arrived):
@@ -2430,7 +2444,7 @@ def _run_bot(bot_name=None):
                 # 让新会话先读懂历史、汇报、然后停下等你**。
                 #
                 # 与 `/close` 的差别（三处，缺一不可）：
-                #   ① **不切账号、不回默认目录** —— 你只是要换个干净 context，不是要换号搬家
+                #   ① **不回默认目录**；无参数保持账号，带 profile 时原子切到指定本机账号
                 #   ② **关之前先快照交接包**（transcript 路径 / session id / cwd / 屏尾 / 在途后台任务）
                 #      —— 关了就没了，这一步的顺序不能反
                 #   ③ **主动起新会话并注入接手 prompt**（不像 /close 那样等你下条消息才懒启动）
@@ -2444,32 +2458,94 @@ def _run_bot(bot_name=None):
                 except Exception as _e:                                    # noqa: BLE001
                     await reply(chat_id, f"⛔ 交接失败：载不进 bridge_watchdog（{_e}）"); return
                 recovering = False
+                pack = None
                 if not alive:
                     pack = _load_retryable_handoff(bot["name"])
                     if not pack:
                         await reply(chat_id, "🛌 当前没有会话可交接，也没有最近失败的交接包。直接发消息我就起一个新的。"); return
                     recovering = True
                     keep_dir = str(pack.get("cwd") or current_cwd(bot))
+                current_profile = agent_runtime.current_account(bot)
+                aliases = agent_runtime.account_aliases()
+                requested = arg or ((pack or {}).get("target_profile") if recovering else "")
+                try:
+                    target_profile = _handoff_target(requested, current_profile, aliases)
+                except ValueError as _e:
+                    await reply(chat_id, f"❓ {_e}"); return
+                except KeyError as _e:
+                    lst = " · ".join(f"`{name}`" for name in aliases)
+                    await reply(chat_id, f"❓ 没有 profile `{_e.args[0]}`。可选：{lst}"); return
+                doctor = await asyncio.to_thread(
+                    agent_runtime.profile_doctor, target_profile, check_execution_env=False
+                )
+                if not doctor["ok"]:
+                    await reply(
+                        chat_id,
+                        f"⛔ profile `{target_profile}` 本机不可用，未关闭当前会话："
+                        + "；".join(doctor["errors"]),
+                    ); return
+                if (doctor.get("login") or {}).get("status") == "missing":
+                    await reply(
+                        chat_id,
+                        f"⛔ profile `{target_profile}` 还没登录，未关闭当前会话。先按 doctor 提示登录后再交接。",
+                    ); return
+                if recovering:
                     await reply(
                         chat_id,
                         f"🔁 检测到上一轮 `/handoff` 已完成快照、但新会话没有起成功。"
-                        f"正在复用 session `{pack.get('session_id')}` 的交接包重试，不会再关一次旧会话……",
+                        f"正在复用 session `{pack.get('session_id')}` 的交接包，改由 `{target_profile}` 重试，"
+                        "不会再关一次旧会话……",
                     )
                 else:
                     await reply(chat_id, "🔄 正在交接：快照上一轮 → 关会话 → 起全新 context → 让它先读懂历史……")
-                    pack = await asyncio.to_thread(bw.snapshot_handoff, bot["name"], "主人手动 /handoff")
+                    try:
+                        pack = await asyncio.to_thread(
+                            bw.snapshot_handoff, bot["name"], "主人手动 /handoff"
+                        )
+                    except Exception as _se:
+                        await reply(
+                            chat_id,
+                            f"⛔ 无法唯一定位当前会话记录，未关闭当前会话：{_se}",
+                        ); return
+                if not pack.get("transcript"):
+                    await reply(
+                        chat_id,
+                        "⛔ 交接包没有当前 session 的精确 transcript，未关闭当前会话；"
+                        "请先修复 session binding 再重试。",
+                    ); return
+                pack["target_profile"] = target_profile
+                try:
+                    await asyncio.to_thread(bw.persist_handoff_pack, pack)
+                except Exception as _pe:
+                    await reply(
+                        chat_id,
+                        f"⛔ 交接包无法持久化目标 profile，未关闭当前会话：{_pe}",
+                    ); return
+                if target_profile != current_profile:
+                    try:
+                        await asyncio.to_thread(
+                            agent_runtime.persist_account, bot["name"], target_profile,
+                            "飞书 /handoff 显式目标 profile",
+                        )
+                    except Exception as _pe:
+                        await reply(
+                            chat_id,
+                            f"⛔ profile `{target_profile}` 名册写入失败，未关闭当前会话：{_pe}",
+                        ); return
+                    agent_runtime.apply_account(bot, target_profile)
+                    account_default.clear()
+                    account_default.update(agent_runtime.account_snapshot(bot))
+                if not recovering:
                     durable_inbox.cancel_before(inbound_id)
                     bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
                     keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
                     await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
-                if not pack.get("transcript"):
-                    await reply(chat_id, "⚠️ 没找到上一个会话的 transcript —— 交接会缺历史，仍继续（它只能靠屏尾和 code base）。")
                 clear_codex_thread(bot["name"])                            # codex：清 thread 指针，确保真·新会话
                 _merge_session(bot["name"], {"cwd": keep_dir, "pty": None, "workspace_id": None,
                                              "jsonl": None, "daemon_fp": None})   # 只清 runtime 指针·留账号与目录
                 _record_handoff_attempt(bot["name"], pack, "pending")
                 try:
-                    ws2, pty2, _created, _ = await asyncio.to_thread(ensure_session, bot)   # ③ 主动起
+                    ws2, pty2, _created, _new_jsonl = await asyncio.to_thread(ensure_session, bot)   # ③ 主动起
                 except Exception as _e:                                    # noqa: BLE001
                     _record_handoff_attempt(bot["name"], pack, "failed", str(_e))
                     await reply(
@@ -2477,6 +2553,10 @@ def _run_bot(bot_name=None):
                         f"⛔ 新会话起不来：{_e}\n"
                         "交接包仍保留；发 `/screen` 可看失败现场，修复后再次发 `/handoff` 会直接复用它。",
                     ); return
+                _merge_session(bot["name"], {
+                    "handoff_chain": pack.get("transcript_chain") or [],
+                    "handoff_chain_workspace_id": ws2,
+                })
                 marker = (bw.build_align_prompt(pack)
                           + f"\n[飞书 from=host to={bot['name']} via=handoff · route=p2a]")
                 ok = await asyncio.to_thread(_inject, pty2, ws2, marker)
@@ -2487,8 +2567,10 @@ def _run_bot(bot_name=None):
                     + len((pack.get("background") or {}).get("files") or [])
                 await reply(chat_id, md=(
                     f"{'✅' if ok else '⚠️'} **{'已恢复交接并启动全新会话' if recovering else '已交接给全新会话'}**"
-                    f"（账号 `{agent_runtime.current_account(bot)}` 不变 · 目录 `{keep_dir}`）\n"
+                    f"（账号 `{current_profile}` → `{agent_runtime.current_account(bot)}` · 目录 `{keep_dir}`）\n"
                     f"· 上一轮 session `{pack.get('session_id')}` 的记录已交给它\n"
+                    f"· 已串联 {len(pack.get('transcript_chain') or [])} 个 session；每个最多最近 "
+                    f"{bw.HANDOFF_PUBLIC_MESSAGES_PER_SESSION} 条公开消息\n"
                     f"· 在途工作线索 {_bgn} 条一并带过去了\n"
                     f"· 它会**先读历史 + 调研 code base → 汇报 → 停下等你**，不会自作主张往下做\n"
                     + ("· ⚠️ prompt 卡在输入框没提交，去面板按一下回车" if not ok else
@@ -2566,8 +2648,8 @@ def _run_bot(bot_name=None):
                     "· `/screen` — 看现场\n"
                     "· `/stop` — 打断当前任务（顺手清空输入框）\n"
                     "· `/close` — 关会话（顺手把临时切的账号切回名册默认）\n"
-                    "· `/handoff`（=`/交接`）— **`/close` 的进阶版**：关掉当前会话 → 开一个**全新 context**\n"
-                    "   → 让它先读懂上一轮聊天记录 + 调研 code base → **汇报后停下等你**（账号、目录都不变）。\n"
+                    "· `/handoff [profile]`（=`/交接`）— **`/close` 的进阶版**：关掉当前会话 → 开一个**全新 context**\n"
+                    "   → 让它先读懂最近会话链 + 调研 code base → **汇报后停下等你**。无参数保持账号；如 `/handoff cxp` 会切到 cxp，目录不变。\n"
                     "   💡 用在「当前 context 快满了，但要在这条线上开一个全新的重要任务」——\n"
                     "      既拿到干净上下文，又不丢前面聊出来的结论（尤其最后几轮那份还没定的方案）。\n"
                     "· `/new` — 起一个【全新空会话】·不注入任何文本（起在名册默认账号+目录·有活会话先关旧的）→ 停在就绪态，你自己发消息注入\n"

@@ -9,9 +9,12 @@
 改判据之前先读懂它们为什么在这儿；改完必须让这里全绿。
 """
 
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -476,16 +479,155 @@ def test_两版prompt口径必须相反():
     assert "停下来，等主人" in align and "停下来，等主人" not in auto
 
 
-def test_handoff_命令已接进桥且不切账号():
-    """/handoff 与 /close 的三处差别，缺一不可。"""
+def test_handoff_命令支持显式目标profile且无参数仍保持账号():
+    assert w.HANDOFF_PUBLIC_MESSAGES_PER_SESSION == 20
+    import feishu_bridge as fb
+    assert fb._handoff_target("", "ccp", ["ccp", "cxp"]) == "ccp"
+    assert fb._handoff_target(" CXP ", "ccp", ["ccp", "cxp"]) == "cxp"
+    assert fb._handoff_target("cxp", "ccp", ["CCP", "CXP"]) == "cxp"
+    with pytest.raises(KeyError):
+        fb._handoff_target("cxpr", "ccp", ["ccp", "cxp"])
+    with pytest.raises(ValueError):
+        fb._handoff_target("cxp extra", "ccp", ["ccp", "cxp"])
+
+
+def test_handoff_命令先快照再关旧会话并在指定时切账号():
+    """/handoff 与 /close 的边界：先快照；只有显式目标才切账号；目录保留。"""
     src = (HERE.parent / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8")
     i = src.index('if cmd in ("/handoff"')
     body = src[i:src.index('if cmd == "/new"', i)]
-    assert "reset_account" not in body, "/handoff 绝不能切账号（那是 /close 干的）"
+    assert "reset_account" not in body, "/handoff 不得回默认账号"
+    assert "persist_account" in body and "apply_account" in body
+    assert "target_profile != current_profile" in body, "无参数/同 profile 必须保持旧行为"
     assert "snapshot_handoff" in body, "必须在关会话【之前】快照交接包"
     assert body.index("snapshot_handoff") < body.index("wmux_session.close"), "快照必须在关会话之前"
     assert "build_align_prompt" in body, "必须注入对齐版 prompt"
     assert "ensure_session" in body, "必须主动起新会话（不像 /close 那样懒启动）"
+
+
+def _jsonl(path, rows):
+    path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                    encoding="utf-8")
+    return path
+
+
+def test_handoff有界上下文_三平台只取公开对话且不带推理工具或developer():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        claude = _jsonl(root / "claude.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "CLAUDE_USER"}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "CLAUDE_TOOL_SECRET"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "thinking", "thinking": "CLAUDE_THOUGHT_SECRET"},
+                {"type": "text", "text": "CLAUDE_ANSWER"},
+            ]}},
+        ])
+        codex = _jsonl(root / "codex.jsonl", [
+            {"type": "response_item", "payload": {"type": "message", "role": "developer",
+                                                       "content": [{"type": "input_text", "text": "CODEX_DEV_SECRET"}]}},
+            {"type": "response_item", "payload": {"type": "reasoning", "summary": ["CODEX_REASON_SECRET"]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                       "content": [{"type": "input_text", "text": "CODEX_USER"}]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                                       "content": [{"type": "output_text", "text": "CODEX_ANSWER"}]}},
+        ])
+        kimi = _jsonl(root / "kimi.jsonl", [
+            {"type": "turn.prompt", "agentId": "main", "input": [{"type": "text", "text": "KIMI_USER"}]},
+            {"type": "context.append_loop_event", "agentId": "main", "event": {
+                "type": "content.part", "part": {"type": "think", "think": "KIMI_THOUGHT_SECRET"}}},
+            {"type": "context.append_loop_event", "agentId": "child", "event": {
+                "type": "content.part", "part": {"type": "text", "text": "KIMI_CHILD_SECRET"}}},
+            {"type": "context.append_loop_event", "agentId": "main", "event": {
+                "type": "content.part", "part": {"type": "text", "text": "KIMI_ANSWER"}}},
+        ])
+        text, sessions = w.render_handoff_context([
+            {"transcript": str(claude), "runtime": "claude", "profile": "ccp", "session_id": "c"},
+            {"transcript": str(codex), "runtime": "codex", "profile": "cxp", "session_id": "x"},
+            {"transcript": str(kimi), "runtime": "kimi", "profile": "kp", "session_id": "k"},
+        ])
+    for public in ("CLAUDE_USER", "CLAUDE_ANSWER", "CODEX_USER", "CODEX_ANSWER", "KIMI_USER", "KIMI_ANSWER"):
+        assert public in text
+    for private in ("CLAUDE_TOOL_SECRET", "CLAUDE_THOUGHT_SECRET", "CODEX_DEV_SECRET",
+                    "CODEX_REASON_SECRET", "KIMI_THOUGHT_SECRET", "KIMI_CHILD_SECRET"):
+        assert private not in text
+    assert len(sessions) == 3
+
+
+def test_handoff有界上下文_每个session最近20条且祖先最多三个():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        chain = []
+        for session in range(4):
+            path = _jsonl(root / f"s{session}.jsonl", [
+                {"type": "response_item", "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": f"S{session}_M{i}"}]}}
+                for i in range(25)
+            ])
+            chain.append({"transcript": str(path), "runtime": "codex", "profile": "cxp",
+                          "session_id": f"s{session}"})
+        text, sessions = w.render_handoff_context(chain)
+    assert len(sessions) == 3
+    assert all(row["included_messages"] == 20 for row in sessions)
+    assert "S0_M4" not in text and "S0_M5" in text
+    assert "S2_M24" in text and "S3_M24" not in text
+
+
+def test_handoff祖先链_当前session在前且只继承同一workspace链():
+    pack = {"transcript": "current.jsonl", "session_id": "current", "old_profile": "cxp", "at": "now"}
+    rec = {"workspace_id": "ws-new", "handoff_chain_workspace_id": "ws-new", "handoff_chain": [
+        {"transcript": "parent.jsonl", "session_id": "parent", "runtime": "claude", "profile": "ccp"},
+        {"transcript": "grand.jsonl", "session_id": "grand", "runtime": "codex", "profile": "cxp"},
+        {"transcript": "too-old.jsonl", "session_id": "old", "runtime": "claude", "profile": "ccp"},
+    ]}
+    chain = w._handoff_chain(rec, pack)
+    assert [row["session_id"] for row in chain] == ["current", "parent", "grand"]
+    rec["handoff_chain_workspace_id"] = "stale-workspace"
+    assert [row["session_id"] for row in w._handoff_chain(rec, pack)] == ["current"]
+
+
+def test_codex_handoff只认当前bot绑定的精确thread(monkeypatch):
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        home = root / "cxp"
+        rollout = home / "sessions" / "2026" / "09" / "27" / "rollout-x-thread-1.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text("{}\n", encoding="utf-8")
+        (root / "bridge-codex-app-ready-bot.json").write_text(json.dumps({
+            "thread_id": "thread-1", "profile": "cxp", "cwd": str(root / "repo"),
+        }), encoding="utf-8")
+        monkeypatch.setattr(w, "STATE_DIR", root)
+        monkeypatch.setattr(w.agent_runtime, "profile_spec",
+                            lambda name: SimpleNamespace(name=name, runtime="codex", home_path=home))
+        w._ROLLOUT_CACHE.clear()
+        source = w.codex_handoff_source("bot", "cxp", root / "repo")
+        assert source == {"transcript": str(rollout), "session_id": "thread-1",
+                          "transcript_runtime": "codex"}
+        with pytest.raises(ValueError, match="不一致"):
+            w.codex_handoff_source("bot", "cx", root / "repo")
+
+
+def test_claude_handoff必须先拿到当前session精确transcript(monkeypatch):
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        transcript = _jsonl(root / "exact-session.jsonl", [
+            {"type": "user", "message": {"content": "hello"}},
+        ])
+        rec = {
+            "profile": "ccp", "jsonl": str(transcript), "cwd": str(root),
+            "workspace_id": "ws", "pty": None,
+        }
+        monkeypatch.setattr(w, "STATE_DIR", root)
+        monkeypatch.setattr(w, "session_record", lambda _bot: dict(rec))
+        monkeypatch.setattr(w, "scan_background", lambda _cwd: {"procs": [], "files": []})
+        monkeypatch.setattr(w.agent_runtime, "profile_spec",
+                            lambda _profile: SimpleNamespace(runtime="claude"))
+        pack = w.snapshot_handoff("bot", "主人手动 /handoff")
+        assert pack["transcript"] == str(transcript)
+        assert pack["session_id"] == "exact-session"
+        assert pack["transcript_runtime"] == "claude"
+        rec["jsonl"] = str(root / "missing.jsonl")
+        with pytest.raises(ValueError, match="精确 transcript"):
+            w.snapshot_handoff("bot", "主人手动 /handoff")
 
 
 def test_r2_第三态_屏命中但额度问不到_必须告警而不是静默():

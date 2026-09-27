@@ -58,6 +58,9 @@ ALERT_COOLDOWN = 1800        # 状态类告警（撞限流）每 bot 30min 最�
 FAILOVER_MAX_PER_DAY = 2     # 同一 bot 24h 内最多自动换号次数
 HEARTBEAT_EVERY = 15         # 每这么多轮打一行心跳（约 30min · 减噪）
 TAIL_LINES = 40
+HANDOFF_CHAIN_MAX_SESSIONS = 3
+HANDOFF_PUBLIC_MESSAGES_PER_SESSION = 20
+HANDOFF_CONTEXT_CHARS_PER_SESSION = 24_000
 HEARTBEAT_PATH_NAME = "watchdog-heartbeat.json"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # 别闪黑窗抢焦点（4956aae 同款 bug 类）
 
@@ -414,9 +417,8 @@ def codex_thread_id(bot_name):
     return None
 
 
-def codex_rollout_tail(bot_obj, thread_id, bot_name=None, tail=ROLLOUT_TAIL_BYTES):
-    """`<codex_home>/sessions/**/rollout-*-<thread>.jsonl` 的尾巴。找不到返 None（不退而求其次找别的文件——
-    同一个 cwd 上可能挂着好几个 bot，猜错文件就是给别人的故障记在这个 bot 头上）。"""
+def codex_rollout_path(bot_obj, thread_id, bot_name=None):
+    """Resolve the exact rollout bound to one Codex thread; never pick newest."""
     key = (bot_name, thread_id)
     path = _ROLLOUT_CACHE.get(key)
     if path is None or not path.exists():
@@ -425,10 +427,19 @@ def codex_rollout_tail(bot_obj, thread_id, bot_name=None, tail=ROLLOUT_TAIL_BYTE
         except Exception:                 # noqa: BLE001
             return None
         hits = sorted(root.glob(f"**/rollout-*-{thread_id}.jsonl"))
-        if not hits:
+        if len(hits) != 1:
             return None
-        path = hits[-1]
+        path = hits[0]
         _ROLLOUT_CACHE[key] = path
+    return path
+
+
+def codex_rollout_tail(bot_obj, thread_id, bot_name=None, tail=ROLLOUT_TAIL_BYTES):
+    """`<codex_home>/sessions/**/rollout-*-<thread>.jsonl` 的尾巴。找不到返 None（不退而求其次找别的文件——
+    同一个 cwd 上可能挂着好几个 bot，猜错文件就是给别人的故障记在这个 bot 头上）。"""
+    path = codex_rollout_path(bot_obj, thread_id, bot_name=bot_name)
+    if path is None:
+        return None
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -437,6 +448,24 @@ def codex_rollout_tail(bot_obj, thread_id, bot_name=None, tail=ROLLOUT_TAIL_BYTE
             return f.read().decode("utf-8", "replace")
     except Exception:                     # noqa: BLE001
         return None
+
+
+def codex_handoff_source(bot_name, profile, cwd):
+    """Resolve Codex history from the exact live app-server binding."""
+    ready_path = STATE_DIR / f"bridge-codex-app-ready-{bot_name}.json"
+    try:
+        ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError("Codex handoff 缺精确 app-server binding") from exc
+    thread = str(ready.get("thread_id") or "")
+    if (not thread or str(ready.get("profile") or "") != str(profile or "")
+            or Path(str(ready.get("cwd") or "")).resolve() != Path(str(cwd or "")).resolve()):
+        raise ValueError("Codex handoff binding 与当前 profile/workspace 不一致")
+    bot_obj = {"name": bot_name, "profile": profile}
+    path = codex_rollout_path(bot_obj, thread, bot_name=bot_name)
+    if path is None:
+        raise ValueError("Codex handoff 找不到该 thread 的唯一 rollout")
+    return {"transcript": str(path), "session_id": thread, "transcript_runtime": "codex"}
 
 
 def _is_codex(bot_obj):
@@ -753,6 +782,173 @@ def scan_background(cwd):
             "note": "进程探针只匹配命令行，会漏掉 nohup + 相对路径起的脚本；文件探针补这块。两个都不完整。"}
 
 
+_NON_CONVERSATION_USER_PREFIXES = (
+    "<task-notification>", "<system-reminder>", "<command-message>",
+    "<local-command", "<bash-",
+)
+
+
+def _text_blocks(content, kinds):
+    if isinstance(content, str):
+        return [content]
+    if not isinstance(content, list):
+        return []
+    return [str(block.get("text") or "") for block in content
+            if isinstance(block, dict) and block.get("type") in kinds and block.get("text")]
+
+
+def _public_transcript_messages(path, runtime):
+    """Extract only public user/assistant prose from one provider transcript.
+
+    Tool arguments/results, reasoning, system/developer prompts and child-agent
+    records stay out of the handoff excerpt.  Full provider history remains at
+    ``path`` for on-demand local inspection.
+    """
+    messages = []
+    try:
+        lines = Path(path).open(encoding="utf-8-sig")
+    except OSError:
+        return messages
+    with lines:
+        for line_number, line in enumerate(lines, 1):
+            try:
+                record = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            role = text = None
+            if runtime == "claude":
+                if record.get("isSidechain") or record.get("isMeta") or record.get("isCompactSummary"):
+                    continue
+                role = record.get("type")
+                if role not in {"user", "assistant"}:
+                    continue
+                content = (record.get("message") or {}).get("content")
+                if role == "user" and isinstance(content, list) and any(
+                        isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in content):
+                    continue
+                text = "\n".join(_text_blocks(content, {"text"})).strip()
+            elif runtime == "codex":
+                if record.get("type") != "response_item":
+                    continue
+                payload = record.get("payload") or {}
+                if payload.get("type") != "message" or payload.get("role") not in {"user", "assistant"}:
+                    continue
+                role = payload["role"]
+                text = "\n".join(_text_blocks(
+                    payload.get("content"), {"input_text", "output_text", "text"}
+                )).strip()
+            elif runtime == "kimi":
+                if record.get("agentId") != "main":
+                    continue
+                if record.get("type") == "turn.prompt":
+                    role = "user"
+                    text = "\n".join(_text_blocks(record.get("input"), {"text"})).strip()
+                elif record.get("type") == "context.append_loop_event":
+                    event = record.get("event") or {}
+                    part = event.get("part") or {}
+                    if event.get("type") != "content.part" or part.get("type") != "text":
+                        continue
+                    role, text = "assistant", str(part.get("text") or "").strip()
+                else:
+                    continue
+            if not text:
+                continue
+            if role == "user" and text.lstrip().startswith(_NON_CONVERSATION_USER_PREFIXES):
+                continue
+            messages.append({"line": line_number, "role": role, "text": text})
+    return messages
+
+
+def _bounded_public_tail(path, runtime):
+    all_messages = _public_transcript_messages(path, runtime)
+    selected = list(all_messages[-HANDOFF_PUBLIC_MESSAGES_PER_SESSION:])
+    while len(selected) > 1 and sum(len(row["text"]) for row in selected) > HANDOFF_CONTEXT_CHARS_PER_SESSION:
+        selected.pop(0)
+    if selected and len(selected[0]["text"]) > HANDOFF_CONTEXT_CHARS_PER_SESSION:
+        text = selected[0]["text"]
+        half = HANDOFF_CONTEXT_CHARS_PER_SESSION // 2
+        selected[0] = {**selected[0], "text": text[:half] + "\n…（单条消息中段省略）…\n" + text[-half:]}
+    return selected, len(all_messages)
+
+
+def render_handoff_context(chain):
+    """Build a bounded, provider-neutral context file for up to three sessions."""
+    parts = [
+        "# Link16 handoff context",
+        "",
+        ("只含各 session 最近的公开 user/assistant 文字；不含 reasoning、system/developer prompt、"
+         "工具参数或工具输出。完整记录路径仍列在每节，需更早证据时再按需回查。"),
+    ]
+    sessions = []
+    for index, entry in enumerate((chain or [])[:HANDOFF_CHAIN_MAX_SESSIONS], 1):
+        path = str(entry.get("transcript") or "")
+        runtime = str(entry.get("runtime") or "")
+        selected, available = _bounded_public_tail(path, runtime) if path else ([], 0)
+        parts += [
+            "",
+            f"## Session {index}（{'当前上一轮' if index == 1 else '更早祖先'}）",
+            f"- runtime/profile: {runtime or 'unknown'} / {entry.get('profile') or 'unknown'}",
+            f"- session: {entry.get('session_id') or 'unknown'}",
+            f"- full transcript: {path or 'unavailable'}",
+            (f"- excerpt: 最近 {len(selected)} 条公开消息 / 该记录共 {available} 条公开消息"
+             f"（每 session 上限 {HANDOFF_PUBLIC_MESSAGES_PER_SESSION} 条、"
+             f"{HANDOFF_CONTEXT_CHARS_PER_SESSION} 字符）"),
+        ]
+        for row in selected:
+            parts += ["", f"### {row['role'].upper()} · line {row['line']}", "", row["text"]]
+        sessions.append({
+            "session_id": entry.get("session_id"), "runtime": runtime,
+            "available_messages": available, "included_messages": len(selected),
+            "included_chars": sum(len(row["text"]) for row in selected),
+        })
+    return "\n".join(parts).rstrip() + "\n", sessions
+
+
+def _handoff_chain(rec, pack):
+    current_profile = str(pack.get("old_profile") or "")
+    try:
+        current_runtime = str(pack.get("transcript_runtime")
+                              or agent_runtime.profile_spec(current_profile).runtime)
+    except Exception:  # noqa: BLE001 — 缺 profile 元数据时仍保留路径供人工回查
+        current_runtime = str(pack.get("transcript_runtime") or "unknown")
+    chain = []
+    if pack.get("transcript"):
+        chain.append({
+            "transcript": str(pack["transcript"]), "session_id": pack.get("session_id"),
+            "runtime": current_runtime, "profile": current_profile, "at": pack.get("at"),
+        })
+    if rec.get("handoff_chain_workspace_id") == rec.get("workspace_id"):
+        chain.extend(row for row in (rec.get("handoff_chain") or []) if isinstance(row, dict))
+    result, seen = [], set()
+    for row in chain:
+        identity = str(row.get("transcript") or row.get("session_id") or "").lower()
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        result.append(dict(row))
+        if len(result) >= HANDOFF_CHAIN_MAX_SESSIONS:
+            break
+    return result
+
+
+def _write_handoff_context(bot_name, chain):
+    if not chain:
+        return None, []
+    text, sessions = render_handoff_context(chain)
+    path = STATE_DIR / f"watchdog-handoff-context-{bot_name}.md"
+    path.write_text(text, encoding="utf-8")
+    return str(path), sessions
+
+
+def persist_handoff_pack(pack):
+    """Persist the retry source after target/profile metadata is finalized."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = STATE_DIR / f"watchdog-handoff-{pack['bot']}.json"
+    path.write_text(json.dumps(pack, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
 def snapshot_handoff(bot_name, reason=""):
     """**必须在关掉旧会话之前调** —— 关了 session 记录就没了。"""
     rec = session_record(bot_name)
@@ -771,14 +967,36 @@ def snapshot_handoff(bot_name, reason=""):
         "screen_tail": tail or "",
         "background": scan_background(rec.get("cwd")),
     }
-    if rec.get("profile") and agent_runtime.profile_spec(rec["profile"]).runtime == "kimi":
+    runtime = agent_runtime.profile_spec(rec["profile"]).runtime if rec.get("profile") else None
+    if runtime == "claude":
+        transcript = Path(str(rec.get("jsonl") or ""))
+        if not rec.get("jsonl") or not transcript.is_file():
+            raise ValueError("Claude handoff 缺当前 session 绑定的精确 transcript")
+        pack.update({
+            "transcript": str(transcript),
+            "session_id": transcript.stem,
+            "transcript_runtime": "claude",
+        })
+    elif runtime == "kimi":
         from kimi_native_worker import handoff_source
         # Fail before closing a pane if its exact history cannot be identified.
         pack.update(handoff_source(bot_name, rec["profile"], rec.get("cwd"), STATE_DIR))
+    elif runtime == "codex":
+        # Codex does not pin `jsonl` in bridge-session; resolve its exact app-server
+        # thread instead.  A newest-file guess could hand another bot's chat to this one.
+        pack.update(codex_handoff_source(bot_name, rec["profile"], rec.get("cwd")))
+    else:
+        raise ValueError(f"handoff 不支持当前 runtime：{runtime or 'unknown'}")
+    pack["transcript_chain"] = _handoff_chain(rec, pack)
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        (STATE_DIR / f"watchdog-handoff-{bot_name}.json").write_text(
-            json.dumps(pack, ensure_ascii=False, indent=1), encoding="utf-8")
+        pack["context_excerpt"], pack["context_sessions"] = _write_handoff_context(
+            bot_name, pack["transcript_chain"]
+        )
+    except Exception as e:                             # noqa: BLE001
+        pack["context_excerpt"], pack["context_sessions"] = None, []
+        log(f"交接公开上下文生成失败（仍保留完整 transcript 路径）：{e}")
+    try:
+        persist_handoff_pack(pack)
     except Exception as e:                             # noqa: BLE001
         log(f"交接包落盘失败（不致命）：{e}")
     return pack
@@ -790,6 +1008,28 @@ def _transcript_format_hint(pack):
                 "只按 turn.prompt、context.append_loop_event 和 turn.ended 定位用户输入、公开文字与结果；"
                 "思考、系统提示、工具参数/输出只留本地，不转发。\n")
     return ""
+
+
+def _handoff_history_hint(pack):
+    chain = pack.get("transcript_chain") or []
+    rows = []
+    if pack.get("context_excerpt"):
+        rows.append(
+            f"机械整理的有界上下文：{pack['context_excerpt']}\n"
+            f"（最多 {HANDOFF_CHAIN_MAX_SESSIONS} 个 session；每个取最近 "
+            f"{HANDOFF_PUBLIC_MESSAGES_PER_SESSION} 条公开 user/assistant 消息，"
+            f"上限 {HANDOFF_CONTEXT_CHARS_PER_SESSION} 字符；不含 reasoning/工具内容）"
+        )
+    if chain:
+        rows.append("完整记录链（当前上一轮 → 更早祖先；需要更早证据时按需搜索，不要整份灌进 context）：")
+        for index, entry in enumerate(chain, 1):
+            rows.append(
+                f"  {index}. {entry.get('runtime')}/{entry.get('profile')} "
+                f"session {entry.get('session_id')} · {entry.get('transcript')}"
+            )
+    elif pack.get("transcript"):
+        rows.append(f"完整聊天记录：{pack.get('transcript')}")
+    return "\n".join(rows)
 
 
 def build_handoff_prompt(pack, new_profile):
@@ -866,21 +1106,36 @@ def build_align_prompt(pack):
             seg.append(f"    {f['age_min']:>6.1f} 分钟前改过  {f['path']}")
     bg_text = "\n".join(seg)
 
+    history = _handoff_history_hint(pack)
+    old_profile = pack.get("old_profile") or "unknown"
+    target_profile = pack.get("target_profile") or old_profile
+    if pack.get("context_excerpt"):
+        read_steps = (
+            f"1. **先完整读有界上下文文件**。它已机械串起当前上一轮和最多两个祖先 session，\n"
+            f"   并只保留公开 user/assistant 文字；不要先猜固定 40/50 行。\n"
+            f"2. **再按需回查完整 transcript 链** —— ⚠️ 原文件可能上百 MB，**禁止一次性通读**。\n"
+            f"   有界上下文缺决定、引用到更早内容或产物对不上时，才在列出的完整路径里定向搜索。\n"
+        )
+    else:
+        read_steps = (
+            f"1. **这次没能生成有界上下文文件**，先用上面列出的精确 transcript 路径定向读尾部。\n"
+            f"2. **按需往前搜索** —— ⚠️ 原文件可能上百 MB，**禁止一次性通读**；不要猜固定 40/50 行。\n"
+        )
     return (
         f"[接手·对齐模式] 你是这条线的新会话（**全新上下文**）。上一个会话的 context 快满了，"
         f"主人要在这里开一条**新的重要线**，但**不能丢掉前面已经聊出来的结论**。\n\n"
-        f"上一个会话的完整聊天记录：{pack.get('transcript')}\n"
+        f"本次账号：{old_profile} → {target_profile}。\n"
+        f"{history}\n"
         f"{_transcript_format_hint(pack)}"
         f"（session {pack.get('session_id')} · 工作目录 {pack.get('cwd')} · 交接于 {pack.get('at')}）"
         f"{bg_text}\n\n"
         f"请按这个顺序做：\n"
-        f"1. **读那份 transcript** —— ⚠️ 它可能上百 MB，**禁止一次性通读**（会当场把你这个新 context 也撑爆，\n"
-        f"   那就白交接了）。**先读尾部**定位「停在哪」，再按需往回翻。\n"
-        f"2. **重点看最后那几轮。** 那里通常躺着一份**刚聊出来、还没打磨完的方案 / 架构 / 结论**，\n"
+        f"{read_steps}"
+        f"3. **重点看最后那几轮。** 那里通常躺着一份**刚聊出来、还没打磨完的方案 / 架构 / 结论**，\n"
         f"   主人接下来大概率就是要接着它谈。**别只看「做了什么」，要看「最后聊到哪、有哪些还没定」。**\n"
-        f"3. **不要只读聊天记录 —— 去调研 code base。** 聊天记录说的是「打算怎么做」，\n"
+        f"4. **不要只读聊天记录 —— 去调研 code base。** 聊天记录说的是「打算怎么做」，\n"
         f"   代码和文档才是「实际做成了什么」。两者对不上的地方，正是最值得报给主人的。\n"
-        f"4. **梳理成一份汇报**，至少讲清四样：\n"
+        f"5. **梳理成一份汇报**，至少讲清四样：\n"
         f"   · 上一条线原本在做什么（任务 / 目标）\n"
         f"   · 已经做完了什么（有代码 / 文档 / 产物为证的那些）\n"
         f"   · **当前进度停在哪、为什么停**\n"
