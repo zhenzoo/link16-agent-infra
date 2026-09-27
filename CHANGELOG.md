@@ -11,13 +11,22 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-26
+last_reviewed: 2026-09-27
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.36.0 — 2026-09-27 · `/handoff` 可指定接手 profile，并沿精确 session 祖先链交接有界公开上下文
+
+- **问题**：旧 `/handoff` 会忽略后面的账号名，`/handoff cxp` 仍在原 profile 起新会话；它只把单个 transcript 路径交给新会话，让模型自己从尾部猜读多少。连续交接时没有显式祖先链，短暂的新 session 可能遮住真正承载完整上下文的上两轮记录；代码里的 `TAIL_LINES=40` 只用于屏幕诊断，不是聊天交接量。
+- **新能力**：`/handoff [profile]` 无参数保持原账号，显式 profile 先跑 doctor、确认已登录，再持久化目标并在原目录起全新 session；未知 profile、额外参数、缺登录或无法唯一定位 transcript 都在关闭旧会话前拒绝。Claude 使用当前 session 钉住的 JSONL，Codex 使用 app-server 的精确 thread→唯一 rollout，Kimi 使用 Wire binding，不按 cwd 猜最新文件。
+- **上下文口径**：每个 session 只抽取最近 20 条公开 user/assistant 消息、最多 24,000 字符；排除 reasoning、system/developer prompt、工具参数/结果、Claude sidechain 与 Kimi child agent。当前上一轮加最多两个祖先，共最多 3 个 session；链只在同一 workspace 继承，完整精确路径仍保留给新会话按需定向回查。
+- **真实样本**：TB25 Lab 2 当前 Claude transcript 共 78 条公开消息；有界窗口取最近 20 条、19,239 字符，主人点名的 YuNet/SFace 照片筛选段落完整命中，生成上下文 20,226 字符。只读模拟确认目标 `cxp` doctor/login 正常，未执行真实 handoff。
+- **测试与隔离**：补齐 Claude/Codex/Kimi 公开内容过滤、20 条/3 session 上限、workspace 祖先链、Claude/Codex 精确绑定、profile 参数与先快照后关会话回归；跨租户发信测试改用名册假 `open_id`，不再误读真实 `.env` 或访问网络。全仓 1076 passed、126 subtests passed。
+- **升级**：拉取后重启要使用新命令的单 bot bridge；要让看门狗自动换号也使用新的有界交接链，再重启 watchdog。无需真实 handoff 验收，也不改 slash `/account`。
 
 ## v0.35.0 — 2026-09-26 · 跨租户 a2a：企业租户与个人租户的 bot 经群自定义机器人 webhook 互发
 
