@@ -307,10 +307,25 @@ def collect(names=None):
 
 
 def auto_failover_profiles():
-    """本机 effective registry 中允许自动换入的 profile；缺字段沿用旧行为。"""
-    configured = agent_runtime._profile_document().get("auto_failover_profiles")
+    """只允许切入显式开启的 profile；旧名单仅供迁移中的机器使用。"""
+    document = agent_runtime._profile_document()
+    enabled = []
+    tagged = False
+    for name, profile in document["profiles"].items():
+        if "auto_failover_target" not in profile:
+            continue
+        tagged = True
+        value = profile["auto_failover_target"]
+        if type(value) is not bool:
+            raise ValueError(f"profile {name} 的 auto_failover_target 必须是布尔值")
+        if value:
+            enabled.append(name)
+    if tagged:
+        return frozenset(enabled)
+
+    configured = document.get("auto_failover_profiles")
     if configured is None:
-        return None
+        return frozenset()
     if (not isinstance(configured, list)
             or any(not isinstance(name, str) or not name for name in configured)
             or len(configured) != len(set(configured))):

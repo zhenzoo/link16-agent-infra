@@ -167,7 +167,7 @@ Codex 走 `chatgpt.com/backend-api/codex/usage`（走 `.env` 的 `PROXY_URL`）�
 
 换号八步，第 3 步之后每一步失败都发 DM 喊人、绝不静默：
 
-1. 选号（先按本机 effective registry 的可选 `auto_failover_profiles` 限定自动候选，再排除刚撞的 → 同 runtime 优先 → 余量大优先；**「问不到」的号绝不选**）。字段缺失时保留原有全注册号候选；字段存在但为空时不自动切号，未知 profile 或格式错误时拒绝选号。看门狗的显式 `failover --to` 同样受此范围约束；主人直接 `/account` 切号仍是独立的手动操作。
+1. 选号（先按本机 effective registry 中各 `profiles.<name>.auto_failover_target: true` 限定**可自动切入**的账号，再排除刚撞的 → 同 runtime 优先 → 余量大优先；**「问不到」的号绝不选**）。只要有 profile 写了该开关，未写和 `false` 都不入选；值必须是布尔值。本机尚无任何开关时，迁移期沿用旧 `auto_failover_profiles` 名单；两种配置都没有则不自动换号，避免新机器默认切入 `cx` 等未授权账号。不同机器只标记实际已注册的 profile，不为缺席账号补空记录。看门狗显式 `failover --to` 同样受此范围约束；主人直接 `/account` 切号仍是独立的手动操作。
 2. 过闸（连续 2 轮静止 · 该 bot 24h 内自动换号 < 2 次）
 3. **交接包快照**（必须在关会话之前——关了会话记录就没了）
 4. DM 播报「要切了」

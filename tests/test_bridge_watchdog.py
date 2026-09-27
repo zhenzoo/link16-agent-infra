@@ -126,11 +126,36 @@ def test_自动候选范围_额度再高也不切到被排除的cx或kimi(monkey
     assert q.pick(rows, exclude=["cxp"], prefer_runtime="codex") is None
 
 
+def test_每profile开关_优先于迁移期旧名单且缺席账号不报错(monkeypatch):
+    document = {"profiles": {
+        "ccp": {"auto_failover_target": True},
+        "cx": {"auto_failover_target": False},
+        "cxp": {"auto_failover_target": True},
+    }, "auto_failover_profiles": ["cx"]}
+    monkeypatch.setattr(q.agent_runtime, "_profile_document", lambda path=None: document)
+    assert q.auto_failover_profiles() == frozenset({"ccp", "cxp"})
+    rows = [_row("cx", "codex", 0, "够用"), _row("cxp", "codex", 20, "够用")]
+    assert q.pick(rows, prefer_runtime="codex")["profile"] == "cxp"
+
+
+def test_每profile开关_新机器未配置时不自动选任何号(monkeypatch):
+    monkeypatch.setattr(q.agent_runtime, "_profile_document",
+                        lambda path=None: {"profiles": {"cx": {}, "cxp": {}}})
+    assert q.auto_failover_profiles() == frozenset()
+
+
+def test_每profile开关_只接受布尔值(monkeypatch):
+    monkeypatch.setattr(q.agent_runtime, "_profile_document",
+                        lambda path=None: {"profiles": {"cx": {"auto_failover_target": "false"}}})
+    with pytest.raises(ValueError, match="必须是布尔值"):
+        q.auto_failover_profiles()
+
+
 def test_自动候选范围_拼错profile时拒绝选号(monkeypatch):
     known = q.agent_runtime.profile_specs()
     monkeypatch.setattr(q.agent_runtime, "profile_specs", lambda: known)
     monkeypatch.setattr(q.agent_runtime, "_profile_document",
-                        lambda path=None: {"auto_failover_profiles": ["cxpr"]})
+                        lambda path=None: {"profiles": {}, "auto_failover_profiles": ["cxpr"]})
     with pytest.raises(ValueError, match="未知 profile"):
         q.auto_failover_profiles()
 
