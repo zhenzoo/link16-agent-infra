@@ -2449,11 +2449,17 @@ def _run_bot(bot_name=None):
                         except (OSError, ValueError) as exc:
                             await reply(chat_id, f"⛔ effort 状态读取失败：{exc}"); return
                         label = state["effort"] or "未设置（跟随 Codex 当前会话／profile）"
+                        model_label = state.get("model") or "profile 当前模型"
                         proof = "上一新回合已由 Codex 接受" if state["accepted"] else "尚无新回合接受记录"
-                        await reply(chat_id, f"🧠 当前桥覆盖：`{label}`；{proof}。用 `/effort medium`、`/effort high`、`/effort xhigh` 切换后续新回合。"); return
+                        live_label = "当前没有运行中的 Codex 会话"
+                        if alive:
+                            import bridge_effort_control
+                            live = bridge_effort_control.live_footer(await asyncio.to_thread(read_screen, rec["pty"], None))
+                            live_label = (f"底栏实时状态 `{live[0]}` / `{live[1]}`" if live
+                                          else "底栏实时状态暂未读到，不能确认当前档位")
+                        await reply(chat_id, f"🧠 这只 bot 保存的模型/effort：`{model_label}` / `{label}`；{proof}；{live_label}。"
+                                             "用 `/effort medium`、`/effort high`、`/effort extra high` 设置当前会话后续任务和新会话首回合。"); return
                     await reply(chat_id, "🧠 Claude 会话使用原生 `/effort <档位>`；例如 `/effort medium` 或 `/effort xhigh`。"); return
-                if len(arg.split()) != 1:
-                    await reply(chat_id, "❓ 用法：/effort medium|high|xhigh（单独发一条，下一次新回合生效）"); return
                 try:
                     level = bridge_effort.normalize(arg)
                 except ValueError as exc:
@@ -2465,12 +2471,39 @@ def _run_bot(bot_name=None):
                     await asyncio.to_thread(wmux, "enter", rec["pty"], "--allow-ws", rec["workspace_id"])
                     await reply(chat_id, f"⏎ 已把 `/effort {level}` 转给 Claude 原生命令；以 Claude 回显为准。"); return
                 profile = agent_runtime.current_account(bot)
-                await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level)
+                try:
+                    model = await asyncio.to_thread(
+                        bridge_effort.profile_model, agent_runtime.profile_spec(profile).home_path)
+                except (OSError, ValueError) as exc:
+                    await reply(chat_id, f"⛔ 没有改 effort：{exc}"); return
+                if not alive:
+                    await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
+                    await reply(chat_id, f"🧠 已为这只 bot 保存 `{model}` / `{level}`；下次新建 Codex 会话时，"
+                                         "首条任务会带上这组设置；会话尚未启动，暂不报切换完成。"); return
                 ready = codex_startup.read_state(STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json")
-                if alive and not (ready.get("effort_control") and ready.get("profile") == profile
-                                  and codex_startup.process_alive(ready.get("worker_pid"))):
-                    await reply(chat_id, f"🧠 已记录 `{level}`，但当前 Codex 会话由旧版 worker 托管，暂不能保证生效；下次新建会话后，从首个任务回合起使用。当前会话没有被关闭。"); return
-                await reply(chat_id, f"🧠 已为这只 bot 的 `{profile}` 会话设置 `{level}`；从下一次新回合起生效。当前正在执行的回合保持原档位。"); return
+                if not (ready.get("effort_control") and ready.get("profile") == profile
+                        and codex_startup.process_alive(ready.get("worker_pid"))):
+                    await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
+                    await reply(chat_id, f"🧠 已保存 `{model}` / `{level}`，但当前会话由旧版 worker 托管；"
+                                         "下次正常重建后从首个任务回合使用。当前会话没有被关闭。"); return
+                import bridge_effort_control
+                try:
+                    verification = await asyncio.to_thread(
+                        bridge_effort_control.switch_current,
+                        model=model, effort=level,
+                        profile_home=agent_runtime.profile_spec(profile).home_path,
+                        read_screen=lambda: read_screen(rec["pty"], None),
+                        send=lambda value: wmux("send", rec["pty"], value, "--allow-ws", rec["workspace_id"]),
+                        key=lambda value: wmux("key", rec["pty"], value, "--allow-ws", rec["workspace_id"]),
+                    )
+                except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
+                    await reply(chat_id, f"⛔ 当前会话的模型切换未通过核验：{exc}；没有报切换完成。"
+                                         "请等会话空闲后重发这条命令。"); return
+                await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
+                await reply(chat_id, f"✅ 已切换当前 Codex 会话为 `{model}` / `{level}`；"
+                                     f"Codex 切换回显、模型/effort 选择器、底栏与实时 `/status` 均已核对。"
+                                     f"切换前为 `{verification['before'][0]}` / `{verification['before'][1]}`；"
+                                     "下一条任务仍在同一会话执行。"); return
             if cmd == "/clear":
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 控制命令=撤销投递契约→清账（§2.13·防 doctor 误判重投）
@@ -2776,7 +2809,7 @@ def _run_bot(bot_name=None):
                     "· 💡 `/cd` 选目录、`/account` 选账号都【只是选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录+账号冷启）\n"
                     "· `/clear` — 清空当前会话上下文\n"
                     "· `/screen` — 看现场\n"
-                    "· `/effort medium|high|xhigh` — 设置这只 bot 后续新回合的思考档位；Codex 不改 profile 默认\n"
+                    "· `/effort medium|high|xhigh` — Codex 自动配对 Link16 profile 已保存的模型，设置这只 bot 当前会话后续任务与新会话首回合\n"
                     "· `/stop` — 打断当前任务（顺手清空输入框）\n"
                     "· `/close` — 关会话（顺手把临时切的账号切回名册默认）\n"
                     "· `/handoff [profile]`（=`/交接`）— **`/close` 的进阶版**：关掉当前会话 → 开一个**全新 context**\n"
@@ -3110,6 +3143,46 @@ def _run_bot(bot_name=None):
                             # 诚实：闭环校验没确认提交(可能卡确认屏/驱动没走完)→ 不再谎报「已提交」(2026-06-19 issue②c)。
                             await reply(msg.chat_id, "⚠️ 替你按了键但**没能确认提交成功**（可能卡在 Submit answers 确认屏）·去终端看一眼·或直接把答案重发一次")
                         return
+                    # Explicit "choose your own effort" runs a separate short Codex
+                    # classification turn before this task is handed to the TUI.
+                    # An active turn cannot change its own effort through turn/steer.
+                    if agent_runtime.runtime_name(bot) == "codex":
+                        import bridge_effort
+                        import bridge_effort_auto
+                        if bridge_effort_auto.requested(text):
+                            profile = agent_runtime.current_account(bot)
+                            ready = codex_startup.read_state(
+                                STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json")
+                            if not (ready.get("effort_control") and ready.get("profile") == profile
+                                    and codex_startup.process_alive(ready.get("worker_pid"))):
+                                durable_inbox.boundary(msg.id)
+                                await reply(msg.chat_id, "⛔ 当前 Codex worker 尚不支持已验证的自动 effort 切换。"
+                                                         "这条任务没有注入；正常重启飞书桥后，请重发原消息。")
+                                return
+                            try:
+                                model = await asyncio.to_thread(
+                                    bridge_effort.profile_model, agent_runtime.profile_spec(profile).home_path)
+                                level = await asyncio.to_thread(bridge_effort_auto.choose, profile, model, text)
+                                import bridge_effort_control
+                                verification = await asyncio.to_thread(
+                                    bridge_effort_control.switch_current,
+                                    model=model, effort=level,
+                                    profile_home=agent_runtime.profile_spec(profile).home_path,
+                                    read_screen=lambda: read_screen(pty, None),
+                                    send=lambda value: wmux("send", pty, value, "--allow-ws", ws),
+                                    key=lambda value: wmux("key", pty, value, "--allow-ws", ws),
+                                )
+                            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                                durable_inbox.boundary(msg.id)
+                                await reply(msg.chat_id, f"⛔ 自动选档或当前会话核验失败：{exc}。"
+                                                         "这条任务没有注入；请检查会话空闲状态后重发。")
+                                return
+                            await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
+                            blog(bot["name"], f"[{tid}] 🧠 自动选档 {model}/{level}，"
+                                              f"会话切换已由 /status、选择器和回显确认；"
+                                              f"原档位 {verification['before'][0]}/{verification['before'][1]}")
+                            await reply(msg.chat_id, f"🧠 已先选 `{level}`，并核对当前会话为 `{model}` / `{level}`；"
+                                                     "现在开始处理这条任务。")
                     # 普通/长/多行文本一律由 _inject 直接注入（实测长消息不截断·不转文件）。**两类**必须落盘 byte-exact：
                     #   ① 含 TAB 的结构化数据（cookies/TSV）——Claude 输入框把 TAB 转空格、内联无法保原样
                     #      （实测 3 TAB→0·对 cookie 致命）。
@@ -3475,12 +3548,17 @@ def _start_locked(bot_filter=None):
         if not bots:
             print(f"❌ bridge-bots.json 里没有名为 '{bot_filter}' 的 bot", file=sys.stderr)
             sys.exit(2)
-    # Query before any stop/spawn; failed observation leaves the fleet untouched.
-    pids = bridge_process.require_known(_bridge_pids(bot=bot_filter))
-    bridge_control.stop_bridges(STATE_DIR, pids, _kill)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    script = str(Path(__file__).resolve())
-    detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
+    # Observe the whole fleet before any mutation. A watchdog left running while
+    # bots are replaced can revive a just-stopped bot in the middle of start.
+    rows = bridge_process.require_known(bridge_process.query_processes(_PIDS_QUERY_TIMEOUTS))
+    pids = bridge_process.select_pids(rows, Path(__file__), bot_filter)
+    guardians = [] if bot_filter else [
+        (name, bridge_process.select_pids(rows, Path(__file__).parent / name))
+        for name in ("bridge_watchdog.py", "bridge_cron.py")]
+    if pids or any(ids for _, ids in guardians):
+        print(f"♻️ 自动重启：旧 bot PID={pids}；"
+              f"cron/watchdog PID={[pid for _, ids in guardians for pid in ids]}，无需另跑 stop。", flush=True)
+    problems = []
     started = []
     children = []
     total = len(bots)
@@ -3488,28 +3566,51 @@ def _start_locked(bot_filter=None):
     # 34 个 bot 要起约 17 秒，一次性在末尾打一大串 = 这十几秒主人不知道有没有在动、卡在谁身上。
     # 每起一个就 flush 一行（序号/名字/PID），把「正在发生」变成看得见的。flush=True 不能省：
     # stdout 被管道接走时是块缓冲，不 flush 仍会攒到最后一次性吐，等于没改。
-    print(f"⏳ 正在启动 {total} 个 bot（各自脱离终端·关终端不死）…", flush=True)
-    for i, b in enumerate(bots, 1):
-        nm = b["name"]
-        # append 模式：保留历史（旧版 "w" 每次 start 截断 → 出问题无从复盘 · 2026-06-15 修）
-        logf = open(LOG_DIR / f"bridge-{nm}.log", "a", encoding="utf-8")  # noqa: SIM115 — 句柄交给子进程
-        logf.write(f"\n========== restart {time.strftime('%Y-%m-%d %H:%M:%S')} ==========\n")
-        logf.flush()
-        proc = subprocess.Popen(
-            [sys.executable, script, "run", "--bot", nm],
-            stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            creationflags=detached, cwd=str(PROJECT),
-        )
-        started.append(nm)
-        children.append((nm, proc))
-        logf.close()
-        print(f"  [{i:>2}/{total}] ✅ {nm:<26} pid={proc.pid}", flush=True)
-        if i < total:
-            time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地（最后一个不用再等）
+    try:
+        for name, ids in guardians:
+            _kill(ids)
+            if ids:
+                print(f"  已停止旧 {name}: {ids}", flush=True)
+        bridge_control.stop_bridges(STATE_DIR, pids, _kill)
+        if pids:
+            print(f"  已确认旧 bot 退出：{pids}", flush=True)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        script = str(Path(__file__).resolve())
+        detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
+        print(f"⏳ 正在启动 {total} 个 bot（各自脱离终端·关终端不死）…", flush=True)
+        for i, b in enumerate(bots, 1):
+            nm = b["name"]
+            # append 模式：保留历史（旧版 "w" 每次 start 截断 → 出问题无从复盘 · 2026-06-15 修）
+            logf = open(LOG_DIR / f"bridge-{nm}.log", "a", encoding="utf-8")  # noqa: SIM115 — 句柄交给子进程
+            try:
+                logf.write(f"\n========== restart {time.strftime('%Y-%m-%d %H:%M:%S')} ==========\n")
+                logf.flush()
+                proc = subprocess.Popen(
+                    [sys.executable, script, "run", "--bot", nm],
+                    stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                    creationflags=detached, cwd=str(PROJECT),
+                )
+            finally:
+                logf.close()
+            started.append(nm)
+            children.append((nm, proc))
+            print(f"  [{i:>2}/{total}] ✅ {nm:<26} pid={proc.pid}", flush=True)
+            if i < total:
+                time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地（最后一个不用再等）
+    finally:
+        # Recover the watchdog even when Ctrl+C or a spawn error interrupts the
+        # stop/start sequence. Readiness waits happen only after both guardians.
+        if not bot_filter:
+            _here = Path(__file__).resolve().parent
+            for _name, _hint in (("bridge_watchdog.py", "看门狗"), ("bridge_cron.py", "cron 守护进程")):
+                try:
+                    subprocess.run([sys.executable, str(_here / _name), "start"],
+                                   cwd=str(PROJECT), timeout=150, check=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                except (OSError, subprocess.SubprocessError) as _e:  # noqa: BLE001
+                    problems.append(f"{_hint}启动未完成：{_e}")
     deadline = time.monotonic() + sum(_PIDS_QUERY_TIMEOUTS) + 15
-    # 失败先记下、最后再报：看门狗是唯一会复活死桥的部件，某只桥或 cron 起不来也绝不能连累它不起
-    # （09-25 20:59 开机早于联网：桥超时退出 → start 当场抛错 → 看门狗没起，全体 bot 失联 1 小时 48 分）。
-    problems = []
+    next_report = time.monotonic() + 5
     while children:
         for name, child in list(children):
             if child.poll() is not None:
@@ -3528,24 +3629,14 @@ def _start_locked(bot_filter=None):
             # 进程在跑、只是还没连上飞书（断网时 SDK 会一直重连）：不当失败，照常拉起看门狗和 cron。
             print(f"⏳ 还没连上飞书，进程在自动重连：{[name for name, _ in children]}", flush=True)
             break
+        if time.monotonic() >= next_report:
+            print(f"⏳ 已替换旧进程，等待飞书连接：{[name for name, _ in children]}"
+                  "（网络不通时各 bot 会继续后台重连）", flush=True)
+            next_report = time.monotonic() + 5
         time.sleep(0.1)
     _stop_hint = f"`stop --bot {bot_filter}` 停它" if bot_filter else "`stop` 停全部"
     print(f"\n已后台启动 {len(started)} 个 bot 进程。"
           f"\n日志：{LOG_DIR}\\bridge-<bot>.log · 用 `status` 查 · {_stop_hint}。")
-    # 两个全局守护进程随「整体 start」一起起（单 bot `start --bot X` 不带它们 ——
-    # 它们是全机级的，不属于某一个 bot；每次单起都多拉一个就成灾了）。
-    #   · bridge_cron     定时派活
-    #   · bridge_watchdog 全机保活 + 撞限流自动换号（PLAN-931：**它不再有自己的计划任务**，
-    #     生命周期完全绑桥 —— 这样它也不需要知道自己装在哪，跨机的路径问题从源头消失）
-    if not bot_filter:
-        _here = Path(__file__).resolve().parent
-        for _name, _hint in (("bridge_cron.py", "cron 守护进程"), ("bridge_watchdog.py", "看门狗")):
-            try:
-                subprocess.run([sys.executable, str(_here / _name), "start"],
-                               cwd=str(PROJECT), timeout=150, check=True,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢焦点
-            except (OSError, subprocess.SubprocessError) as _e:  # noqa: BLE001
-                problems.append(f"{_hint}启动未完成：{_e}")
     if problems:
         raise bridge_process.ProcessControlError('；'.join(problems))
 
@@ -3949,7 +4040,12 @@ def main():
     if args.cmd == "run":
         run(args.bot)
     elif args.cmd == "start":
-        cmd_start(args.bot)
+        try:
+            cmd_start(args.bot)
+        except KeyboardInterrupt:
+            print("\n⏸ 重启等待被 Ctrl+C 中断；已启动的 bot 仍在后台，"
+                  "全局守护恢复已尝试。用 `status` 查看实际连接状态。", file=sys.stderr)
+            raise SystemExit(130) from None
     elif args.cmd == "stop":
         cmd_stop(args.bot)
     elif args.cmd == "status":

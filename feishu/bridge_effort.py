@@ -3,6 +3,7 @@
 import json
 import os
 import time
+import tomllib
 from pathlib import Path
 
 
@@ -10,7 +11,9 @@ EFFORTS = frozenset({"medium", "high", "xhigh"})
 
 
 def normalize(value):
-    value = str(value or "").strip().lower().replace("-", "")
+    value = str(value or "").strip().lower().replace("-", "").replace(" ", "")
+    if value == "extrahigh":
+        value = "xhigh"
     if value in EFFORTS:
         return value
     raise ValueError("档位只接受 medium、high、xhigh（也可写 x-high）")
@@ -35,12 +38,25 @@ def accepted(state_dir, bot, profile):
 def status(state_dir, bot, profile):
     selection = selection_record(state_dir, bot, profile)
     if selection is None:
-        return {"effort": None, "accepted": False}
+        return {"model": None, "effort": None, "accepted": False}
     receipt = accepted(state_dir, bot, profile)
     applied = bool(receipt and receipt.get("effort") == selection["effort"] and
                    float(receipt.get("accepted_at") or 0) >= float(selection.get("updated_at") or 0))
-    return {"effort": selection["effort"], "accepted": applied,
+    return {"model": selection.get("model"), "effort": selection["effort"], "accepted": applied,
             "turn_id": receipt.get("turn_id") if applied else None}
+
+
+def profile_model(profile_home):
+    """Use Link16's selected profile model, never Codex's unrelated catalog default."""
+    config = Path(profile_home) / "config.toml"
+    try:
+        saved = tomllib.loads(config.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"无法读取当前 Codex profile 的默认模型：{config}: {exc}") from exc
+    model = saved.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError(f"当前 Codex profile 未保存默认模型：{config}")
+    return model.strip()
 
 
 def record_accepted(state_dir, bot, profile, effort, turn_id):
@@ -71,12 +87,28 @@ def load(state_dir, bot, profile):
     return record["effort"] if record else None
 
 
-def save(state_dir, bot, profile, effort):
+def launch_args(state_dir, bot, profile):
+    """Make a saved bot override visible from a new Codex TUI's first frame."""
+    try:
+        record = selection_record(state_dir, bot, profile)
+    except (OSError, ValueError, UnicodeError):
+        return []
+    if not record or not record.get("model"):
+        return []
+    return ["--model", record["model"], "-c", f'model_reasoning_effort="{record["effort"]}"']
+
+
+def save(state_dir, bot, profile, effort, model=None):
     """Set a bot-local override without changing the profile's config.toml."""
     effort = normalize(effort)
+    if model is not None and (not isinstance(model, str) or not model.strip() or
+                              any(char.isspace() for char in model)):
+        raise ValueError("profile 默认模型无效")
     target = path(state_dir, bot)
     target.parent.mkdir(parents=True, exist_ok=True)
     record = {"profile": profile, "effort": effort, "updated_at": time.time()}
+    if model:
+        record["model"] = model
     temporary = target.with_name(target.name + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(temporary, target)
@@ -88,14 +120,17 @@ def apply_turn(raw, state_dir, bot, profile):
     if message.get("method") != "turn/start":
         return raw
     try:
-        effort = load(state_dir, bot, profile)
+        selected = selection_record(state_dir, bot, profile)
     except (OSError, ValueError, UnicodeError):
         # A damaged local override must not disconnect the active Codex TUI.
         return raw
-    if effort is None:
+    if selected is None:
         return raw
     params = message.get("params")
     if not isinstance(params, dict):
         raise ValueError("turn/start 缺少 params")
-    params["effort"] = effort
+    params["effort"] = selected["effort"]
+    model = selected.get("model")
+    if model:
+        params["model"] = model
     return json.dumps(message, ensure_ascii=False)

@@ -694,7 +694,9 @@ def run(args) -> int:
     url = f"ws://127.0.0.1:{port}"
     log_path = state_dir / f"codex-app-server-{args.bot}.log"
     env = worker_environment(args.bot, args.codex_home, state_dir)
-    model_args = agent_runtime.codex_saved_model_args(args.codex_home, cwd)
+    import bridge_effort
+    model_args = (agent_runtime.codex_saved_model_args(args.codex_home, cwd)
+                  + bridge_effort.launch_args(state_dir, args.bot, profile_name))
     with open(log_path, "a", encoding="utf-8") as log:
         server = None
         rpc = None
@@ -732,7 +734,6 @@ def run(args) -> int:
                 observer = _wait_observer(state_dir, args.bot, startup_id, observer_box, thread_id=thread["id"])
                 progress.record["observer_pid"] = observer["observer_pid"]
 
-            import bridge_effort
             gateway = codex_startup.TuiGateway(url, session_received, on_request=lambda method: progress.update(
                 "tui_session_requested", "官方终端正在" + ("创建新会话" if method == "thread/start" else "恢复已有会话")),
                 turn_modifier=lambda raw: bridge_effort.apply_turn(raw, state_dir, args.bot, profile_name),

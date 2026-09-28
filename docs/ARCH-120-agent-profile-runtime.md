@@ -162,17 +162,23 @@ python feishu/agent_profile_cli.py command --profile cxp --cwd . --json -- --mod
 Windows 有显式 provider 参数时，在该次启动环境设置 `MSYS2_ARG_CONV_EXCL=*`，
 防止 Git Bash 把 `/model` 改成 Git 安装目录下的文件路径；传入路径应使用原生 Windows 路径。
 
-飞书桥的新 thread 不传模型或 effort；唯一预热消息为 `Reply exactly LINK16_APP_SERVER_READY.`，
-只是生成供官方 TUI 恢复的会话记录。普通消息只加回址标记，`/model` 原样转发。
-`/effort medium|high|xhigh` 是桥的显式指令：只把档位写进该 bot、该 profile 的本地状态，
-Codex worker 在随后 `turn/start` 转发前填入官方 `effort` 字段；当前正在执行的 `turn/steer`
-不会改变。覆盖持续到下一次 `/effort`，跨 bot、跨 profile 不继承，也不改 profile 的
-`config.toml`。档位是否受当前模型支持，最终由 Codex app-server 验证。旧 worker 不具备此能力时，
-桥只记录请求并明确提示须等新会话，不能声称当前会话已生效。
-`/effort` 无参数读取该 bot/profile 的选择；只有 app-server 接受了新回合，桥才记一条
-`bridge-effort-applied-<bot>.json` 回执，并显示“上一新回合已由 Codex 接受”。
+飞书桥的新 thread 只以 `Reply exactly LINK16_APP_SERVER_READY.` 预热，供官方 TUI 恢复。
+没有 bot 覆盖时使用所选 profile 的模型与 effort；已有 `/effort` 覆盖时，启动参数从该
+profile 读取模型，并给该 bot 的首回合传所选档位。普通消息只加回址标记，`/model` 原样转发。
+`/effort medium|high|xhigh` 是桥的显式指令。当前 Codex 会话空闲时，桥驱动原生 `/model`
+选中该 profile 的模型与指定 effort；切换回显、选择器的 current 标记、`/status` 和底部
+实时状态都符合才报完成。原生选择器会短暂写入共享 profile 配置，桥立即恢复原模型与
+effort，避免改变兄弟 bot 的默认值。无会话时只保存该 bot/profile 的新会话首回合覆盖，
+明确说明尚未完成实时切换；旧 worker 不具备受验切换能力时也只保存并如实回报。
+Codex worker 在随后 `turn/start` 转发前同时填入官方 `model` 和 `effort` 字段；正在执行的
+`turn/steer` 不支持中途换档。覆盖跨 bot、跨 profile 不继承。`/effort` 无参数读取选择与
+app-server 接受回执；只有新回合被接受才记 `bridge-effort-applied-<bot>.json`。
+用户在任务内明确要求“选用合适 effort，自己调整”时，桥先用所选 Codex profile 运行
+只读、短时预判断（按边界条件与核验难度选择 medium/xhigh），再切换并核验当前空闲会话，
+最后才注入原任务。判断或切换失败时告知任务没有注入、请重发，不以错误档位继续。智能体自行调用
+`bridge_effort_cli.py` 只能设置下一回合，不能把当前正在执行的回合说成已升档。
 Claude 会话继续使用原生 `/effort`；Kimi 暂无经 Link16 验证的逐回合切换路径，桥明确拒绝。
-普通文本里的档位词不触发切换，避免讨论模型时误改执行设置。
+普通文本里的档位词不触发切换；只有明确的自选要求触发预判断，避免讨论模型时误改执行设置。
 
 依据：[官方配置优先级](https://developers.openai.com/codex/config-basic/)、
 [官方默认模型规则](https://developers.openai.com/codex/models/)、

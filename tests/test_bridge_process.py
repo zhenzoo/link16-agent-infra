@@ -159,9 +159,51 @@ def test_whole_start_still_starts_guardians_when_a_bridge_or_cron_fails(tmp_path
     monkeypatch.setattr(fb, 'LOG_DIR', tmp_path)
     monkeypatch.setattr(fb.subprocess, 'Popen', lambda *args, **kw: Exited())
     monkeypatch.setattr(fb.subprocess, 'run', run)
-    with pytest.raises(p.ProcessControlError, match='unit-bot 启动失败.*cron 守护进程启动未完成'):
+    with pytest.raises(p.ProcessControlError, match='cron 守护进程启动未完成.*unit-bot 启动失败'):
         fb.cmd_start()
-    assert guardians == ['bridge_cron.py', 'bridge_watchdog.py']
+    assert guardians == ['bridge_watchdog.py', 'bridge_cron.py']
+
+
+def test_whole_start_stops_old_guardians_before_replacing_bridge(tmp_path, monkeypatch):
+    events = []
+    class Exited:
+        pid, returncode = 4242, 1
+        def poll(self):
+            return 1
+    monkeypatch.setattr(fb, 'load_bots', lambda: [{'name': 'unit-bot'}])
+    monkeypatch.setattr(p, 'query_processes', lambda *args: [
+        row(101), row(102, 'bridge_cron.py'), row(103, 'bridge_watchdog.py')])
+    monkeypatch.setattr(fb, 'LOG_DIR', tmp_path)
+    monkeypatch.setattr(fb, '_kill', lambda ids: events.append(('stop', ids)))
+    monkeypatch.setattr(fb.bridge_control, 'stop_bridges',
+                        lambda sd, ids, kill: events.append(('stop-bot', ids)))
+    monkeypatch.setattr(fb.subprocess, 'Popen', lambda *args, **kw: Exited())
+    monkeypatch.setattr(fb.subprocess, 'run', lambda cmd, **kw: events.append(('start', Path(cmd[1]).name)))
+    with pytest.raises(p.ProcessControlError, match='unit-bot 启动失败'):
+        fb.cmd_start()
+    assert events == [
+        ('stop', ['103']), ('stop', ['102']), ('stop-bot', ['101']),
+        ('start', 'bridge_watchdog.py'), ('start', 'bridge_cron.py')]
+
+
+def test_whole_start_recovers_guardians_when_spawn_is_interrupted(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr(fb, 'load_bots', lambda: [{'name': 'unit-bot'}])
+    monkeypatch.setattr(p, 'query_processes', lambda *args: [
+        row(101), row(102, 'bridge_cron.py'), row(103, 'bridge_watchdog.py')])
+    monkeypatch.setattr(fb, 'LOG_DIR', tmp_path)
+    monkeypatch.setattr(fb, '_kill', lambda ids: events.append(('stop', ids)))
+    monkeypatch.setattr(fb.bridge_control, 'stop_bridges',
+                        lambda sd, ids, kill: events.append(('stop-bot', ids)))
+    def interrupted_spawn(*args, **kwargs):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(fb.subprocess, 'Popen', interrupted_spawn)
+    monkeypatch.setattr(fb.subprocess, 'run', lambda cmd, **kw: events.append(('start', Path(cmd[1]).name)))
+    with pytest.raises(KeyboardInterrupt):
+        fb.cmd_start()
+    assert events == [
+        ('stop', ['103']), ('stop', ['102']), ('stop-bot', ['101']),
+        ('start', 'bridge_watchdog.py'), ('start', 'bridge_cron.py')]
 
 
 def test_run_releases_lease_on_unknown_query(monkeypatch):

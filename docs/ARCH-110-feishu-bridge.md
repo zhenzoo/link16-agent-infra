@@ -47,6 +47,8 @@ last_reviewed: 2026-09-28
 
 `stop` / `start` 立即生效（2026-09-24 主人定：让关就关、让重启就重启）。空闲或正在处理的桥收到 `bridge_control.py` 写入的停止请求后自行退出，3 秒内没退就直接结束进程；启动中、重连中或没有协作接口的桥直接结束。收件箱在确认接收前已落盘，强停不丢消息，未完成的待办由新桥续接；停止后控制记录标为 `stopped`，看门狗不会把它当崩溃拉起。
 
+不带子命令的 `python feishu/feishu_bridge.py` 是全舰队重启：先停止现有 bot 桥、cron、watchdog，再启动全部并恢复两种守护；逐个报告启动进度，并持续报告飞书连接等待状态。等待中按 Ctrl+C 时也要恢复两种守护，不把半途启动的 bot 当成整舰队已就绪。`--bot X` 仍只刷新该 bot。
+
 连不上飞书（DNS、网络、握手失败）时桥不设超时、不自己 stop 重开，交给飞书 SDK 无限重连：首次连接和运行中断线都一样，间隔为 SDK 默认 120 秒加 0–30 秒随机抖动，连上后改用服务端下发的间隔。桥进程在等待和重连期间一直不退出；`start` 超过验收时限仍未连上时只提示“进程在自动重连”，照常拉起看门狗和 cron。桥只订阅 SDK 的 `reconnecting` / `reconnected` 事件：断开超过 60 秒，且抢到全机提醒名额（`bridge-outage-alert-*.lock`，整台机器 30 分钟一次）时，用 REST 纯文字发一条断开通知，恢复后由同一个桥再发一条；每次重试和其他 bot 都不发。自己 stop 再重开同一个 channel 会让 SDK 旧线程留下第二条长连接（09-24 baseball-6 实证），所以不这样做。主循环其他未预期异常立刻 `os._exit(1)` 并记 `failed`，不再让 SDK 线程把进程吊成收不到消息的僵尸；看门狗 R4 每轮对本机名册里没有进程、最新记录又不是 `stopped` 的 bot 单独重启，5 分钟冷却，30 分钟内 3 次仍起不来就停手只报一次。
 
 整体 `stop` 先持有桥和两种守护的控制锁，取得合法快照，再停止桥，最后停守护；查询失败没有服务变动，桥停止失败保留守护。部分停止失败必须报错，不能声称全停成功。单 bot 启停不动其他 bot 或守护。进程匹配检查脚本参数与 `run`，不以命令行包含文件名来误杀测试或查询进程。
@@ -106,7 +108,7 @@ last_reviewed: 2026-09-28
   - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
   - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。先跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
-  - **`/effort medium|high|xhigh`** → Codex 在该 bot/profile 的后续新回合设置 effort，不改 profile 默认；Claude 转交原生命令；Kimi 无已验证逐回合路径时明确拒绝。群聊受主人/授权闸约束，迟到超过 120 秒的命令不执行。
+  - **`/effort medium|high|xhigh`** → Codex 使用所选 Link16 profile 保存的模型，桥驱动当前空闲会话的 `/model`，核对底部实时状态、`/status`、选择器 current 标记和切换回显后才报告成功；无会话则保存为新会话首回合设置。用户明确要求“选用合适 effort，自己调整”时，桥在注入任务前运行只读 Codex 预判断并执行同一切换核验。Claude 转交原生命令；Kimi 无已验证逐回合路径时明确拒绝。群聊受主人/授权闸约束，迟到超过 120 秒的命令不执行。
   - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进当前 profile 会话**（verbatim·**绝不缀 `[飞书]` 标记**）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
 - **飞书补发的过期命令不执行（2026-09-26）**：桥不在线时，飞书按 15 秒、5 分钟、1 小时、6 小时补发没送到的消息（最长约 7 小时）。实证：09-25 20:59 重启撞上 DNS 失败，桥停到 22:48；主人 22:42 发的 `/close` 在 09-26 04:48 才补发到，桥照样执行，关掉了 00:02 新开的会话。现在 `handle_slash` 最先比对飞书发送时间（`bridge_inbound.event_ts`）与桥收到时间：`/close /clear /stop /new /cd /account /effort /handoff` 及其别名迟到超过 120 秒（至少第二轮补发）就不执行，回一句「这条是几点发的、隔了多久才到，没有执行，要执行请再发一次」，也不撤销排队中的消息。普通消息和 `/screen` `/help` 照常处理。判据是 `_stale_slash_lag`，回归测试在 `tests/test_slash_gate.py::StaleSlashTest`。
 
