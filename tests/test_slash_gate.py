@@ -58,7 +58,7 @@ class StaleSlashTest(unittest.TestCase):
             self.assertIsNone(feishu_bridge._stale_slash_lag("/close", self.ARRIVED - lag, self.ARRIVED))
 
     def test_every_state_changing_command_is_covered(self):
-        for cmd in ("/close", "/clear", "/stop", "/new", "/cd", "/account", "/acc", "/账号",
+        for cmd in ("/close", "/clear", "/stop", "/new", "/cd", "/account", "/acc", "/账号", "/effort",
                     "/handoff", "/交接", "/接手"):
             self.assertIsNotNone(feishu_bridge._stale_slash_lag(cmd, self.CREATED, self.ARRIVED), cmd)
 

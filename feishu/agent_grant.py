@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # 受闸的破坏性命令（与 feishu_bridge.handle_slash 里的命令名一一对应）
-DESTRUCTIVE_CAPS = ("close", "clear", "cd", "account", "new", "stop")
+DESTRUCTIVE_CAPS = ("close", "clear", "cd", "account", "new", "stop", "effort")
 DEFAULT_WINDOW_SEC = 1800          # 主人私聊后 30 分钟内可 claim
 GRANT_TTL_SEC = 24 * 3600          # 授权默认 24h 过期（别让权限无限期挂着）
 

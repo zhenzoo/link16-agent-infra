@@ -787,7 +787,7 @@ def _load_turn_route(bot_name):
 # ⚠️ 路径段【允许含空格】——真实形态就是 `C:/Program Files/Git/close`（Git 默认装在 Program Files）。
 # 用 [^/\\]+ 而不是 [^/\\\s]+：后者遇到 "Program Files" 的空格直接不匹配（2026-08-03 被单测抓到）。
 _MANGLED_SLASH_RE = re.compile(
-    r"^[A-Za-z]:[/\\](?:[^/\\]+[/\\])*(close|clear|cd|account|acc|new|stop|screen|help)(?=\s|$)")
+    r"^[A-Za-z]:[/\\](?:[^/\\]+[/\\])*(close|clear|cd|account|acc|new|stop|screen|help|effort)(?=\s|$)")
 
 
 def _unmangle_slash(text):
@@ -800,7 +800,7 @@ def _unmangle_slash(text):
 
 # ---------- 破坏性斜杠命令的授权闸（PLAN-930 · 2026-08-03 · 详见 feishu/agent_grant.py）----------
 # 受闸命令 = 会改变对方【会话/上下文/身份/位置】的那些。/screen /help 不闸（只读·不破坏）。
-_GATED_CAPS = {"close", "clear", "cd", "account", "acc", "账号", "new", "stop"}
+_GATED_CAPS = {"close", "clear", "cd", "account", "acc", "账号", "new", "stop", "effort"}
 _CAP_ALIAS = {"acc": "account", "账号": "account"}       # /acc /账号 都归一到 account 这一项权限
 
 
@@ -2436,6 +2436,41 @@ def _run_bot(bot_name=None):
                     await reply(chat_id, "🛌 你现在没有会话（发句话我就给你起一个）"); return
                 shot = await asyncio.to_thread(read_screen, rec["pty"], 40)
                 await reply(chat_id, md="```\n" + shot[-1500:] + "\n```"); return
+            if cmd == "/effort":
+                import bridge_effort
+                runtime = agent_runtime.runtime_name(bot)
+                if runtime == "kimi":
+                    await reply(chat_id, "⛔ 当前 Kimi 会话没有经 Link16 验证的逐回合 effort 切换接口；没有修改配置。"); return
+                if not arg:
+                    if runtime == "codex":
+                        profile = agent_runtime.current_account(bot)
+                        try:
+                            state = await asyncio.to_thread(bridge_effort.status, STATE_DIR, bot["name"], profile)
+                        except (OSError, ValueError) as exc:
+                            await reply(chat_id, f"⛔ effort 状态读取失败：{exc}"); return
+                        label = state["effort"] or "未设置（跟随 Codex 当前会话／profile）"
+                        proof = "上一新回合已由 Codex 接受" if state["accepted"] else "尚无新回合接受记录"
+                        await reply(chat_id, f"🧠 当前桥覆盖：`{label}`；{proof}。用 `/effort medium`、`/effort high`、`/effort xhigh` 切换后续新回合。"); return
+                    await reply(chat_id, "🧠 Claude 会话使用原生 `/effort <档位>`；例如 `/effort medium` 或 `/effort xhigh`。"); return
+                if len(arg.split()) != 1:
+                    await reply(chat_id, "❓ 用法：/effort medium|high|xhigh（单独发一条，下一次新回合生效）"); return
+                try:
+                    level = bridge_effort.normalize(arg)
+                except ValueError as exc:
+                    await reply(chat_id, f"❓ {exc}"); return
+                if runtime == "claude":
+                    if not alive:
+                        await reply(chat_id, "🛌 当前没有 Claude 会话；先发句话起会话，再发 `/effort <档位>`。"); return
+                    await asyncio.to_thread(wmux, "send", rec["pty"], f"/effort {level}", "--allow-ws", rec["workspace_id"])
+                    await asyncio.to_thread(wmux, "enter", rec["pty"], "--allow-ws", rec["workspace_id"])
+                    await reply(chat_id, f"⏎ 已把 `/effort {level}` 转给 Claude 原生命令；以 Claude 回显为准。"); return
+                profile = agent_runtime.current_account(bot)
+                await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level)
+                ready = codex_startup.read_state(STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json")
+                if alive and not (ready.get("effort_control") and ready.get("profile") == profile
+                                  and codex_startup.process_alive(ready.get("worker_pid"))):
+                    await reply(chat_id, f"🧠 已记录 `{level}`，但当前 Codex 会话由旧版 worker 托管，暂不能保证生效；下次新建会话后，从首个任务回合起使用。当前会话没有被关闭。"); return
+                await reply(chat_id, f"🧠 已为这只 bot 的 `{profile}` 会话设置 `{level}`；从下一次新回合起生效。当前正在执行的回合保持原档位。"); return
             if cmd == "/clear":
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 控制命令=撤销投递契约→清账（§2.13·防 doctor 误判重投）
@@ -2741,6 +2776,7 @@ def _run_bot(bot_name=None):
                     "· 💡 `/cd` 选目录、`/account` 选账号都【只是选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录+账号冷启）\n"
                     "· `/clear` — 清空当前会话上下文\n"
                     "· `/screen` — 看现场\n"
+                    "· `/effort medium|high|xhigh` — 设置这只 bot 后续新回合的思考档位；Codex 不改 profile 默认\n"
                     "· `/stop` — 打断当前任务（顺手清空输入框）\n"
                     "· `/close` — 关会话（顺手把临时切的账号切回名册默认）\n"
                     "· `/handoff [profile]`（=`/交接`）— **`/close` 的进阶版**：关掉当前会话 → 开一个**全新 context**\n"

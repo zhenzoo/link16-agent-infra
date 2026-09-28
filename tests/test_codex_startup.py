@@ -107,6 +107,45 @@ class ReadyContractTests(unittest.TestCase):
 
 
 class GatewayTests(unittest.TestCase):
+    def test_turn_modifier_reaches_upstream_without_touching_steer(self):
+        calls = []
+        accepted = []
+        def upstream(ws):
+            for raw in ws:
+                msg = json.loads(raw)
+                calls.append(msg)
+                if msg.get("method") == "thread/start":
+                    ws.send(json.dumps({"id": msg["id"], "result": {"thread": {"id": "root", "cwd": str(Path.cwd())}}}))
+                elif msg.get("method") == "turn/start":
+                    if msg["id"] == 4:
+                        ws.send(json.dumps({"id": 4, "error": {"message": "unsupported effort"}}))
+                    else:
+                        ws.send(json.dumps({"id": msg["id"], "result": {"turn": {"id": "turn-2"}}}))
+                else:
+                    ws.send(json.dumps({"id": msg["id"], "result": {}}))
+        with serve(upstream, "127.0.0.1", 0) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            gateway = startup.TuiGateway(
+                f"ws://127.0.0.1:{server.socket.getsockname()[1]}", mock.Mock(),
+                turn_modifier=lambda raw: json.dumps({**json.loads(raw), "params": {**json.loads(raw)["params"], "effort": "xhigh"}}),
+                on_turn_accepted=lambda effort, turn_id: accepted.append((effort, turn_id)),
+            )
+            try:
+                with connect(gateway.start(), proxy=None) as tui:
+                    tui.send(json.dumps({"id": 1, "method": "thread/start", "params": {}}))
+                    tui.recv(timeout=2)
+                    tui.send(json.dumps({"id": 2, "method": "turn/start", "params": {"threadId": "root"}}))
+                    tui.recv(timeout=2)
+                    tui.send(json.dumps({"id": 3, "method": "turn/steer", "params": {"threadId": "root"}}))
+                    tui.recv(timeout=2)
+                    tui.send(json.dumps({"id": 4, "method": "turn/start", "params": {"threadId": "root"}}))
+                    tui.recv(timeout=2)
+                self.assertEqual(calls[1]["params"]["effort"], "xhigh")
+                self.assertNotIn("effort", calls[2]["params"])
+                self.assertEqual(accepted, [("xhigh", "turn-2")])
+            finally:
+                gateway.close()
+
     def test_mirror_rejects_other_threads_and_private_raw_fields(self):
         gateway = startup.TuiGateway("unused", mock.Mock())
         gateway._set_session({"id": "root", "cwd": str(Path.cwd())})

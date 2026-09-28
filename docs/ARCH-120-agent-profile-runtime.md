@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-28
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -164,7 +164,15 @@ Windows 有显式 provider 参数时，在该次启动环境设置 `MSYS2_ARG_CO
 
 飞书桥的新 thread 不传模型或 effort；唯一预热消息为 `Reply exactly LINK16_APP_SERVER_READY.`，
 只是生成供官方 TUI 恢复的会话记录。普通消息只加回址标记，`/model` 原样转发。
-因此默认继承通过配置隔离解决，不需要在消息里要求模型换身份，也不需要重启整座桥。
+`/effort medium|high|xhigh` 是桥的显式指令：只把档位写进该 bot、该 profile 的本地状态，
+Codex worker 在随后 `turn/start` 转发前填入官方 `effort` 字段；当前正在执行的 `turn/steer`
+不会改变。覆盖持续到下一次 `/effort`，跨 bot、跨 profile 不继承，也不改 profile 的
+`config.toml`。档位是否受当前模型支持，最终由 Codex app-server 验证。旧 worker 不具备此能力时，
+桥只记录请求并明确提示须等新会话，不能声称当前会话已生效。
+`/effort` 无参数读取该 bot/profile 的选择；只有 app-server 接受了新回合，桥才记一条
+`bridge-effort-applied-<bot>.json` 回执，并显示“上一新回合已由 Codex 接受”。
+Claude 会话继续使用原生 `/effort`；Kimi 暂无经 Link16 验证的逐回合切换路径，桥明确拒绝。
+普通文本里的档位词不触发切换，避免讨论模型时误改执行设置。
 
 依据：[官方配置优先级](https://developers.openai.com/codex/config-basic/)、
 [官方默认模型规则](https://developers.openai.com/codex/models/)、

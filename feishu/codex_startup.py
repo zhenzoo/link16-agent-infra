@@ -102,16 +102,19 @@ class StartupProgress:
 
 
 class TuiGateway:
-    """Forward native frames unchanged; correlate only initial session RPC receipts.
+    """Forward native frames, optionally override new-turn effort, and correlate receipts.
 
     before_session runs before the successful response reaches the TUI, allowing
     the independent observer to bind to this exact stream without losing turn 1.
     No prompts, tool arguments, credentials or raw notifications are persisted.
     """
-    def __init__(self, upstream_url, before_session, on_request=None):
+    def __init__(self, upstream_url, before_session, on_request=None, turn_modifier=None,
+                 on_turn_accepted=None):
         self.upstream_url = upstream_url
         self.before_session = before_session
         self.on_request = on_request or (lambda method: None)
+        self.turn_modifier = turn_modifier or (lambda raw: raw)
+        self.on_turn_accepted = on_turn_accepted or (lambda effort, turn_id: None)
         self.attached = threading.Event()
         self.failed = threading.Event()
         self.error = ""
@@ -203,6 +206,7 @@ class TuiGateway:
             return
         from websockets.sync.client import connect
         pending = {}
+        pending_turns = {}
         try:
             with connect(self.upstream_url, proxy=None, max_size=None, open_timeout=5, close_timeout=2) as upstream:
                 def responses():
@@ -210,6 +214,14 @@ class TuiGateway:
                         for raw in upstream:
                             msg = json.loads(raw)
                             method = pending.pop(msg.get("id"), None)
+                            accepted_effort = pending_turns.pop(msg.get("id"), None)
+                            if accepted_effort and not msg.get("error"):
+                                turn_id = ((msg.get("result") or {}).get("turn") or {}).get("id")
+                                if turn_id:
+                                    try:
+                                        self.on_turn_accepted(accepted_effort, turn_id)
+                                    except OSError:
+                                        pass  # Receipt write failure must not disconnect the live TUI.
                             session = None
                             if method and not self.attached.is_set():
                                 if msg.get("error"):
@@ -239,7 +251,14 @@ class TuiGateway:
                             raise RuntimeError("TUI 会话请求缺少 request id")
                         pending[msg["id"]] = msg["method"]
                         self.on_request(msg["method"])
-                    upstream.send(raw)
+                    if msg.get("method") == "turn/start":
+                        forwarded = self.turn_modifier(raw)
+                        effort = (json.loads(forwarded).get("params") or {}).get("effort")
+                        if effort is not None and "id" in msg:
+                            pending_turns[msg["id"]] = effort
+                        upstream.send(forwarded)
+                    else:
+                        upstream.send(raw)
         except Exception as exc:
             self.fail(str(exc))
         finally:

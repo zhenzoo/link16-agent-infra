@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-09-22
+last_reviewed: 2026-09-28
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -106,8 +106,9 @@ last_reviewed: 2026-09-22
   - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
   - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。先跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
+  - **`/effort medium|high|xhigh`** → Codex 在该 bot/profile 的后续新回合设置 effort，不改 profile 默认；Claude 转交原生命令；Kimi 无已验证逐回合路径时明确拒绝。群聊受主人/授权闸约束，迟到超过 120 秒的命令不执行。
   - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进当前 profile 会话**（verbatim·**绝不缀 `[飞书]` 标记**）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
-- **飞书补发的过期命令不执行（2026-09-26）**：桥不在线时，飞书按 15 秒、5 分钟、1 小时、6 小时补发没送到的消息（最长约 7 小时）。实证：09-25 20:59 重启撞上 DNS 失败，桥停到 22:48；主人 22:42 发的 `/close` 在 09-26 04:48 才补发到，桥照样执行，关掉了 00:02 新开的会话。现在 `handle_slash` 最先比对飞书发送时间（`bridge_inbound.event_ts`）与桥收到时间：`/close /clear /stop /new /cd /account /handoff` 及其别名迟到超过 120 秒（至少第二轮补发）就不执行，回一句「这条是几点发的、隔了多久才到，没有执行，要执行请再发一次」，也不撤销排队中的消息。普通消息和 `/screen` `/help` 照常处理。判据是 `_stale_slash_lag`，回归测试在 `tests/test_slash_gate.py::StaleSlashTest`。
+- **飞书补发的过期命令不执行（2026-09-26）**：桥不在线时，飞书按 15 秒、5 分钟、1 小时、6 小时补发没送到的消息（最长约 7 小时）。实证：09-25 20:59 重启撞上 DNS 失败，桥停到 22:48；主人 22:42 发的 `/close` 在 09-26 04:48 才补发到，桥照样执行，关掉了 00:02 新开的会话。现在 `handle_slash` 最先比对飞书发送时间（`bridge_inbound.event_ts`）与桥收到时间：`/close /clear /stop /new /cd /account /effort /handoff` 及其别名迟到超过 120 秒（至少第二轮补发）就不执行，回一句「这条是几点发的、隔了多久才到，没有执行，要执行请再发一次」，也不撤销排队中的消息。普通消息和 `/screen` `/help` 照常处理。判据是 `_stale_slash_lag`，回归测试在 `tests/test_slash_gate.py::StaleSlashTest`。
 
 ---
 

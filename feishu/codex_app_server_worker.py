@@ -732,8 +732,12 @@ def run(args) -> int:
                 observer = _wait_observer(state_dir, args.bot, startup_id, observer_box, thread_id=thread["id"])
                 progress.record["observer_pid"] = observer["observer_pid"]
 
+            import bridge_effort
             gateway = codex_startup.TuiGateway(url, session_received, on_request=lambda method: progress.update(
-                "tui_session_requested", "官方终端正在" + ("创建新会话" if method == "thread/start" else "恢复已有会话")))
+                "tui_session_requested", "官方终端正在" + ("创建新会话" if method == "thread/start" else "恢复已有会话")),
+                turn_modifier=lambda raw: bridge_effort.apply_turn(raw, state_dir, args.bot, profile_name),
+                on_turn_accepted=lambda effort, turn_id: bridge_effort.record_accepted(
+                    state_dir, args.bot, profile_name, effort, turn_id))
             tui_url = gateway.start()
             progress.update("observer_connecting", "正在接入飞书回传观察连接")
             # 速记员搬进自己的进程（不再是本进程里的线程）：这样「重启回程」不必掐掉主人的会话。
@@ -775,7 +779,8 @@ def run(args) -> int:
                     raise RuntimeError(f"Codex 本地服务退出，退出码 {server.returncode}")
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f"{progress.record['detail']}：没有收到会话成功响应")
-            progress.update("ready", "Codex 会话与飞书回传均已就绪", tui_pid=tui.pid, **gateway.session)
+            progress.update("ready", "Codex 会话与飞书回传均已就绪", tui_pid=tui.pid,
+                            effort_control=True, **gateway.session)
             codex_startup.atomic_write_json(ready_path, progress.record)
             return tui.wait()
         except Exception as exc:
