@@ -93,9 +93,10 @@ def launch_args(state_dir, bot, profile):
         record = selection_record(state_dir, bot, profile)
     except (OSError, ValueError, UnicodeError):
         return []
-    if not record or not record.get("model"):
+    if not record:
         return []
-    return ["--model", record["model"], "-c", f'model_reasoning_effort="{record["effort"]}"']
+    model_args = ["--model", record["model"]] if record.get("model") else []
+    return [*model_args, "-c", f'model_reasoning_effort="{record["effort"]}"']
 
 
 def save(state_dir, bot, profile, effort, model=None):

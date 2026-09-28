@@ -47,6 +47,13 @@ def test_new_session_launch_uses_the_bot_override_without_changing_profile(tmp_p
     assert bridge_effort.launch_args(tmp_path, "one", "cxp2") == []
 
 
+def test_legacy_effort_only_record_applies_to_new_session_without_pinning_model(tmp_path):
+    bridge_effort.save(tmp_path, "legacy", "cxp", "medium")
+    assert bridge_effort.launch_args(tmp_path, "legacy", "cxp") == [
+        "-c", 'model_reasoning_effort="medium"']
+    assert bridge_effort.launch_args(tmp_path, "legacy", "cxp2") == []
+
+
 def test_live_picker_parses_medium_with_default_and_current_markers():
     screen = """  Select Reasoning Level for gpt-6-sol
   1. Low                   Fast
