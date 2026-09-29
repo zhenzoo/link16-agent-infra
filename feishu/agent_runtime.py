@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -988,7 +989,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
             return (
                 env
                 + f"CODEX_HOME={_q(codex_home)} FEISHU_CODEX_EVENT_STREAM=1 "
-                + f"python {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} "
+                + f'"{sys.executable}" {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} '
                 + f"--state-dir {_q(autopilot.as_posix())} --codex-home {_q(codex_home)}"
             )
         return (
@@ -1001,7 +1002,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
     if spec.name == "kimi":
         worker = (project / "feishu" / "kimi_native_worker.py").as_posix()
         return (
-            env + f"python {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} "
+            env + f'"{sys.executable}" {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} '
             + f"--state-dir {_q(autopilot.as_posix())}"
         )
     if spec.name == "custom" and isinstance(bot, dict) and bot.get("agent_cmd"):
