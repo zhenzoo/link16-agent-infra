@@ -94,7 +94,9 @@ def _quoted_executable(path: Path) -> str:
 
 def desired_state(repo: Path, user: str, pythonw: Path, wmux_exe: Path, bot_count: int) -> dict:
     repo = Path(repo).resolve()
-    pythonw = Path(pythonw).resolve()
+    # pythonw 不 resolve：venv 的 bin/python 是指向 base 的软链，resolve 后会变成
+    # 没有仓库依赖的 base 解释器（macOS 实测：launchd 起桥报「缺依赖」）。
+    pythonw = Path(pythonw)
     wmux_exe = Path(wmux_exe).resolve()
     return {
         "wmux_run": {
@@ -179,7 +181,7 @@ def build_plan(before: dict, desired: dict, *, machine: str, user: str, repo: Pa
         "machine": machine,
         "user": user,
         "repo": str(Path(repo).resolve()),
-        "pythonw": str(Path(pythonw).resolve()),
+        "pythonw": str(Path(pythonw)),  # 不 resolve：venv 软链会变成无依赖的 base 解释器
         "wmux_exe": str(Path(wmux_exe).resolve()),
         "bot_count": int(bot_count),
         "actions": actions,
@@ -554,7 +556,13 @@ def _identity(repo: Path):
     else:
         machine = socket.gethostname() or "unknown-machine"
         user = getpass.getuser() or os.environ.get("USER") or "unknown-user"
+        # uv venv 的 bin/python 是指向 base 解释器的软链，sys.executable 可能已
+        # 解析成 base（没有仓库依赖）。venv 内运行时钉回 venv 入口。
         pythonw = Path(sys.executable)
+        if sys.prefix != sys.base_prefix:
+            venv_python = Path(sys.prefix) / "bin" / "python"
+            if venv_python.is_file():
+                pythonw = venv_python
         wmux = None
         for candidate in (Path("/Applications/wmux.app"),
                           Path.home() / "Applications" / "wmux.app",
