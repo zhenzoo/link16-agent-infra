@@ -50,10 +50,15 @@ __link16_python() {
   if [ -n "$appdata" ] && command -v cygpath >/dev/null 2>&1; then
     appdata="$(cygpath -u "$appdata")"
   fi
-  while IFS= read -r candidate; do
-    [ -x "$candidate" ] || continue
-    "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && resolved="$candidate"
-  done < <(printf '%s\n' "$appdata"/Programs/Python/Python*/python.exe | sort -V)
+  # Windows 官方 Python 的 Programs/Python 布局；仅 LOCALAPPDATA 存在时探测，
+  # 且关闭 zsh 的 nomatch（无匹配时 zsh 默认直接报错中断函数）。
+  if [ -n "$appdata" ]; then
+    [ -n "${ZSH_VERSION:-}" ] && setopt local_options no_nomatch
+    while IFS= read -r candidate; do
+      [ -x "$candidate" ] || continue
+      "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1 && resolved="$candidate"
+    done < <(printf '%s\n' "$appdata"/Programs/Python/Python*/python.exe | sort -V)
+  fi
   if [ -n "$resolved" ]; then
     printf '%s\n' "$resolved"
     return 0
