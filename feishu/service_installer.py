@@ -426,10 +426,20 @@ class MacOSBackend:
     def set_bridge_task(self, state: dict) -> None:
         arguments = shlex.split(str(state.get("arguments") or ""))
         embedded = {key: value for key, value in state.items() if key != "raw_xml"}
+        # LaunchAgent 默认 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin；桥要按裸名
+        # 调 node（wmux RPC）与各 agent CLI，把常见用户级安装位置一并带上。
+        path_dirs = [
+            str(Path.home() / ".local" / "node" / "bin"),
+            str(Path.home() / ".local" / "bin"),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin:/bin:/usr/sbin:/sbin",
+        ]
         self._install(MAC_BRIDGE_LABEL, {
             "Label": MAC_BRIDGE_LABEL,
             "ProgramArguments": [str(state["execute"]), *arguments],
             "WorkingDirectory": str(state.get("working_directory") or REPO),
+            "EnvironmentVariables": {"PATH": ":".join(path_dirs)},
             "RunAtLoad": True,
             "StandardOutPath": str(STATE_DIR / f"{MAC_BRIDGE_LABEL}.out.log"),
             "StandardErrorPath": str(STATE_DIR / f"{MAC_BRIDGE_LABEL}.err.log"),
