@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,7 +27,9 @@ def default_codex_home() -> Path:
 
 
 def _hook_cmd(path: Path) -> str:
-    return f'python "{path.as_posix()}"'
+    # 钉解释器绝对路径：mac 没有 `python` 别名，裸 `python` 会让 hook 静默失效。
+    # 双引号在 cmd.exe 与 POSIX shell 下都成立；且下游按 '"' 切分出脚本路径。
+    return f'"{sys.executable}" "{path.as_posix()}"'
 
 
 def bridge_hooks(repo: Path) -> dict:
@@ -135,12 +139,16 @@ def merge_hooks(existing: dict, additions: dict) -> dict:
 
 
 def _missing_hook_scripts(additions: dict) -> list[str]:
+    def script_of(command: str) -> str:
+        quoted = re.findall(r'"([^"]+)"', command)
+        return quoted[-1] if quoted else command.rsplit(" ", 1)[-1]
+
     return [
         hook["command"]
         for entries in additions.values()
         for entry in entries
         for hook in entry.get("hooks") or []
-        if not Path(hook["command"].split('"', 2)[1]).is_file()
+        if not Path(script_of(hook["command"])).is_file()
     ]
 
 

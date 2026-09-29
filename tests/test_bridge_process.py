@@ -92,11 +92,13 @@ def row(pid, script='feishu_bridge.py', bot='unit-bot'):
     {'ok': True, 'processes': [{'ProcessId': 1, 'CommandLine': None}]},
     {'ok': True, 'processes': [row(123), row(123)]}])
 def test_invalid_snapshot_is_unknown(value, monkeypatch):
+    monkeypatch.setattr(p, '_is_nt', lambda: True)  # 这条喂的是 PowerShell JSON 包络，走 Windows 分支
     monkeypatch.setattr(p, '_powershell', lambda *args: result(value))
     assert p.query_processes() is None
 
 
 def test_zero_exit_with_stderr_is_unknown(monkeypatch):
+    monkeypatch.setattr(p, '_is_nt', lambda: True)
     monkeypatch.setattr(p, '_powershell', lambda *args: result({'ok': True, 'processes': []}, 'query failed'))
     assert p.query_processes() is None
 
@@ -230,6 +232,7 @@ def test_real_stop_confirms_harmless_process_exit():
 
 
 def test_stop_rejects_missing_confirmation(monkeypatch):
+    monkeypatch.setattr(p, '_is_nt', lambda: True)
     monkeypatch.setattr(p, '_powershell', lambda *args: result({'ok': True}))
     with pytest.raises(p.ProcessControlError):
         p.stop_pids(['123'])

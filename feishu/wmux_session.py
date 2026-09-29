@@ -163,7 +163,7 @@ def _wait_first_pty(ws_id, tries=20):
 SHELL_READY_TIMEOUT = 8.0    # 单行最多探 8s shell 提示符就绪（冷机够·慢盘兜底）
 SHELL_POLL_SEC = 0.3         # 探屏间隔（也天然节流 read 的 node 子进程数）
 SEND_SETTLE_SEC = 0.15       # 探到就绪后、发下一行前的微沉淀（防 TUI 半帧）
-_PROMPT_TAIL_RE = re.compile(r"(?:\$|>|❯)\s*$")   # 行尾 git-bash `$ ` / PowerShell `> ` / claude `❯`
+_PROMPT_TAIL_RE = re.compile(r"(?:\$|>|❯|%)\s*$")   # 行尾 git-bash `$ ` / PowerShell `> ` / claude `❯` / zsh `% `
 
 
 def _read_screen(pty, tail=20):
@@ -179,7 +179,7 @@ def _read_screen(pty, tail=20):
 
 
 def _shell_ready(screen, echoed_hint=None):
-    """shell 回到可接收输入的提示符态：最后一个非空行以 $ / > / ❯ 收尾；
+    """shell 回到可接收输入的提示符态：最后一个非空行以 $ / > / ❯ / % 收尾；
     若给 echoed_hint（如 cd 目标目录尾段）还要求它出现在屏上（git-bash 提示符含 cwd → cd 落地铁证）。"""
     if not screen:
         return False

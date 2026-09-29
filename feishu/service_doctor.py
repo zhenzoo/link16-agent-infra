@@ -73,9 +73,60 @@ def _dotenv_keys(path: Path) -> set[str]:
     return keys
 
 
+def _etime_seconds(text):
+    """ps 的 etime= 列（[[dd-]hh:]mm:ss）→ 启动至今秒数；认不出回 None。"""
+    text = (text or "").strip()
+    days = 0
+    if "-" in text:
+        d, _, text = text.partition("-")
+        if not d.isdigit():
+            return None
+        days = int(d)
+    parts = text.split(":")
+    if not parts or len(parts) > 3 or not all(p.isdigit() for p in parts):
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return days * 86400 + seconds
+
+
 def _process_snapshot() -> list[dict]:
     if os.name != "nt":
-        return []
+        # POSIX：ps 快照；created_at 用 etime（启动至今时长）折算 epoch，字段名与 WMI 分支一致。
+        # 用 etime 而不是 etimes：BSD ps（macOS）不认 etimes 关键字。
+        try:
+            done = subprocess.run(
+                ["ps", "-axo", "pid=,etime=,command="],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=15, check=False,
+            )
+            if done.returncode != 0:
+                return []
+            now = time.time()
+            rows = []
+            for line in (done.stdout or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(None, 2)
+                if len(parts) < 3:
+                    continue
+                command = parts[2]
+                exe = command.split(" ", 1)[0].rsplit("/", 1)[-1]
+                if not exe.startswith("python"):
+                    continue
+                elapsed = _etime_seconds(parts[1])
+                if elapsed is None:
+                    continue
+                try:
+                    rows.append({"pid": int(parts[0]), "command_line": command,
+                                 "created_at": int(now - elapsed)})
+                except ValueError:
+                    continue
+            return rows
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return []
     script = r'''
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
 @(Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
@@ -249,7 +300,7 @@ def collect_raw(now=None) -> dict:
     processes = _process_snapshot()
     rpc_ok, rpc_evidence = _wmux_rpc_ok()
     try:
-        backend = service_installer.WindowsBackend()
+        backend = service_installer.get_backend()
         startup_plan, _before, _desired = service_installer.make_plan(backend)
         startup_error = ""
     except Exception as exc:  # noqa: BLE001

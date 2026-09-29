@@ -107,6 +107,19 @@ class ProxyDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].source, "PROXY_URL")
 
+    def test_system_proxy_source_label_follows_platform(self):
+        from unittest import mock
+        with mock.patch.object(nr.os, "name", "nt"):
+            self.assertEqual(nr._platform_label(), "Windows")
+            self.assertEqual(nr._proxy_app_name(), "v2rayN")
+        with mock.patch.object(nr.os, "name", "posix"), \
+             mock.patch.object(nr.sys, "platform", "darwin"):
+            self.assertEqual(nr._platform_label(), "macOS")
+            self.assertNotIn("v2rayN", nr._proxy_app_name())
+        rows = nr.discover_proxy_candidates(
+            "http://127.0.0.1:8080", {"https": "http://127.0.0.1:10808"}, common_ports=())
+        self.assertIn(f"{nr._platform_label()}/https", [row.source for row in rows])
+
     def test_doctor_functionally_selects_working_candidate(self):
         candidates = (
             nr.ProxyCandidate("http://127.0.0.1:7897", "configured"),

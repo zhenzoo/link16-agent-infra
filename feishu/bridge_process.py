@@ -1,7 +1,9 @@
-"""Verified Windows process observation and cross-process service ownership.
+"""Verified process observation and cross-process service ownership.
 
 Unknown observations never become empty inventories. Service leases are held
 for the process lifetime; control locks serialize explicit start/stop commands.
+Windows reads processes through PowerShell/WMI; POSIX uses ``ps``. Both produce
+the same validated row shape.
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -47,9 +50,7 @@ def _envelope(result):
     return value
 
 
-def query_processes(timeouts=None):
-    """Return a validated Python process snapshot, or None with a diagnostic."""
-    script = """
+_WMI_QUERY_SCRIPT = """
 $ErrorActionPreference = 'Stop'
 try {
   $rows = @(Get-CimInstance Win32_Process -Filter "Name like 'python%'" -ErrorAction Stop |
@@ -57,21 +58,65 @@ try {
   @{ok=$true; processes=$rows} | ConvertTo-Json -Depth 4 -Compress
 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 """
+
+
+def _is_nt():
+    return os.name == 'nt'
+
+
+def _validate_rows(rows):
+    if not isinstance(rows, list):
+        raise ProcessControlError('processes must be an array, including when empty')
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict) or type(row.get('ProcessId')) is not int
+                or row['ProcessId'] <= 0 or not isinstance(row.get('CommandLine'), str)
+                or not row['CommandLine'].strip() or row['ProcessId'] in seen):
+            raise ProcessControlError('process row is missing a valid PID/command line')
+        seen.add(row['ProcessId'])
+    return rows
+
+
+def _looks_python(command):
+    exe = command.split(' ', 1)[0].rsplit('/', 1)[-1]
+    return exe.startswith('python')
+
+
+def _ps_python_processes(timeout):
+    """POSIX python snapshot via ps; same row shape as the WMI query."""
+    result = subprocess.run(
+        ['ps', '-axo', 'pid=,command='],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise ProcessControlError((result.stderr or f'ps exit={result.returncode}')[:300])
+    rows = []
+    for line in (result.stdout or '').splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_text, _, command = line.partition(' ')
+        command = command.strip()
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            raise ProcessControlError('ps output has a non-numeric PID column') from None
+        if not _looks_python(command):
+            continue
+        rows.append({'ProcessId': pid, 'CommandLine': command})
+    return rows
+
+
+def query_processes(timeouts=None):
+    """Return a validated Python process snapshot, or None with a diagnostic."""
     error = None
     for timeout in timeouts or QUERY_TIMEOUTS:
         try:
-            value = _envelope(_powershell(script, timeout))
-            rows = value.get('processes')
-            if not isinstance(rows, list):
-                raise ProcessControlError('processes must be an array, including when empty')
-            seen = set()
-            for row in rows:
-                if (not isinstance(row, dict) or type(row.get('ProcessId')) is not int
-                        or row['ProcessId'] <= 0 or not isinstance(row.get('CommandLine'), str)
-                        or not row['CommandLine'].strip() or row['ProcessId'] in seen):
-                    raise ProcessControlError('process row is missing a valid PID/command line')
-                seen.add(row['ProcessId'])
-            return rows
+            if not _is_nt():
+                return _validate_rows(_ps_python_processes(timeout))
+            value = _envelope(_powershell(_WMI_QUERY_SCRIPT, timeout))
+            return _validate_rows(value.get('processes'))
         except (OSError, subprocess.SubprocessError, ProcessControlError) as exc:
             error = exc
     print(f'❌ 进程查询失败，运行状态未知（不等于没有进程）：{error}', file=sys.stderr)
@@ -80,8 +125,9 @@ try {
 
 def service_args(command, script):
     """Match the Python script argument, never a substring inside -c code."""
+    # Windows 命令行不做 POSIX 反斜杠转义（posix=False 保引号成对）；POSIX 走标准 shlex 语义。
     try:
-        args = [part.strip('"\'') for part in shlex.split(command, posix=False)]
+        args = [part.strip('"\'') for part in shlex.split(command, posix=not _is_nt())]
     except ValueError:
         return None
     i = 1
@@ -125,6 +171,64 @@ def require_known(pids):
     return pids
 
 
+def _posix_pid_gone(pid):
+    """os.kill(pid, 0) 探活；自己 fork 的子进程要先 reap，否则僵尸态永远『活着』。"""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False                             # 别人的进程还在，但轮不到我们确认
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+    try:
+        os.kill(pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
+def _stop_pids_posix(pids):
+    """SIGTERM → 轮询等退出 → 超时 SIGKILL；纯 stdlib，逐一确认才许报成功。"""
+    ids = [int(pid) for pid in pids]
+    alive = []
+    for pid in ids:
+        if _posix_pid_gone(pid):
+            continue
+        alive.append(pid)
+    stopped = []
+    for pid in alive:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            stopped.append(pid)
+        except PermissionError as exc:
+            raise ProcessControlError(f'没有权限停止 PID={pid}：{exc}') from exc
+    deadline = time.monotonic() + 15 * len(alive) + 5
+    waiting = [pid for pid in alive if pid not in stopped]
+    while waiting and time.monotonic() < deadline:
+        waiting = [pid for pid in waiting if not _posix_pid_gone(pid)]
+        if waiting:
+            time.sleep(0.1)
+    for pid in waiting:                          # 还在的 → SIGKILL 兜底
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    kill_deadline = time.monotonic() + 10
+    waiting = [pid for pid in waiting if not _posix_pid_gone(pid)]
+    while waiting and time.monotonic() < kill_deadline:
+        time.sleep(0.1)
+        waiting = [pid for pid in waiting if not _posix_pid_gone(pid)]
+    if waiting:
+        raise ProcessControlError(f'停止未全部完成；PID={waiting} 在 SIGKILL 后仍未退出')
+    return
+
+
 def stop_pids(pids):
     """Open every process before mutation; wait for exit, never report fire-and-forget success."""
     pids = require_known(pids)
@@ -132,6 +236,9 @@ def stop_pids(pids):
         return
     if any(not str(pid).isdigit() or int(pid) <= 0 or int(pid) == os.getpid() for pid in pids):
         raise ProcessControlError('invalid stop PID')
+    if not _is_nt():
+        _stop_pids_posix(pids)
+        return
     ids = ','.join(str(int(pid)) for pid in pids)
     script = """
 $ErrorActionPreference = 'Stop'
@@ -215,11 +322,15 @@ def start_daemon(script, log_path, identity, cwd):
     with control_lock(identity):
         stop_pids(require_known(service_pids(script)))
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        popen_kwargs = {}
+        if _is_nt():
+            popen_kwargs['creationflags'] = NO_WINDOW | getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+        else:
+            popen_kwargs['start_new_session'] = True
         with open(log_path, 'a', encoding='utf-8') as log:
             proc = subprocess.Popen(
                 [sys.executable, str(script), 'run'], stdout=log, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, cwd=str(cwd),
-                creationflags=NO_WINDOW | getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0),
+                stdin=subprocess.DEVNULL, cwd=str(cwd), **popen_kwargs,
             )
         deadline = time.monotonic() + sum(QUERY_TIMEOUTS) + 10
         while time.monotonic() < deadline:

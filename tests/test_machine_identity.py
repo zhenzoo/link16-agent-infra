@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "feishu"))
@@ -47,6 +49,74 @@ class PrefixSuggestionTests(unittest.TestCase):
         row = mi.suggest_prefix(identity(), year="25", explicit_prefix="Desk-26")
         self.assertEqual(row.prefix, "desk-26")
         self.assertEqual(row.year_source, "user prefix")
+
+
+MAC_SYSTEM_PROFILER = json.dumps({
+    "SPHardwareDataType": [{
+        "machine_name": "MacBook Pro",
+        "machine_model": "Mac14,7",
+        "chip_type": "Apple M2 Pro",
+        "model_number": "Z17G000W0CH/A",
+    }],
+})
+
+
+def _fake_run(stdout, returncode=0):
+    return mock.Mock(returncode=returncode, stdout=stdout, stderr="")
+
+
+class MacOSIdentityTests(unittest.TestCase):
+    def test_system_profiler_json_shape(self):
+        with mock.patch.object(mi.subprocess, "run",
+                               return_value=_fake_run(MAC_SYSTEM_PROFILER)), \
+             mock.patch.object(mi.socket, "gethostname", return_value="kinto-mac"):
+            identity = mi.collect_macos_identity()
+        self.assertEqual(identity.manufacturer, "Apple")
+        self.assertEqual(identity.model, "Mac14,7")
+        self.assertEqual(identity.product_name, "MacBook Pro")
+        self.assertEqual(identity.version, "Apple M2 Pro")
+        self.assertEqual(identity.bios_release_date, "")
+        self.assertEqual(identity.hostname, "kinto-mac")
+
+    def test_sysctl_fallback_when_profiler_fails(self):
+        def run(cmd, **kwargs):
+            if cmd[0] == "system_profiler":
+                return _fake_run("", returncode=1)
+            return _fake_run({"hw.model": "Mac14,7", "kern.osproductversion": "14.5"}[cmd[-1]])
+
+        with mock.patch.object(mi.subprocess, "run", side_effect=run), \
+             mock.patch.object(mi.socket, "gethostname", return_value="kinto-mac"):
+            identity = mi.collect_macos_identity()
+        self.assertEqual(identity.model, "Mac14,7")
+        self.assertEqual(identity.version, "macOS 14.5")
+
+    def test_mac_without_bios_year_is_low_confidence_until_user_overrides(self):
+        mac = mi.MachineIdentity("Apple", "Mac14,7", "MacBook Pro", "Apple M2 Pro", "", "kinto-mac")
+        row = mi.suggest_prefix(mac)
+        self.assertEqual(row.prefix, "mb")
+        self.assertEqual(row.year_source, "unknown")
+        self.assertEqual(row.confidence, "low")
+        row = mi.suggest_prefix(mac, year="2026")
+        self.assertEqual(row.prefix, "mb26")
+        self.assertEqual(row.year_source, "user")
+        self.assertEqual(row.confidence, "high")
+
+    def test_collect_identity_dispatches_by_platform(self):
+        with mock.patch.object(mi.os, "name", "nt"), \
+             mock.patch.object(mi, "collect_windows_identity",
+                               return_value="win") as win:
+            self.assertEqual(mi.collect_identity(), "win")
+            win.assert_called_once()
+        with mock.patch.object(mi.os, "name", "posix"), \
+             mock.patch.object(mi.sys, "platform", "darwin"), \
+             mock.patch.object(mi, "collect_macos_identity",
+                               return_value="mac") as mac:
+            self.assertEqual(mi.collect_identity(), "mac")
+            mac.assert_called_once()
+        with mock.patch.object(mi.os, "name", "posix"), \
+             mock.patch.object(mi.sys, "platform", "linux"):
+            with self.assertRaises(OSError):
+                mi.collect_identity()
 
 
 if __name__ == "__main__":

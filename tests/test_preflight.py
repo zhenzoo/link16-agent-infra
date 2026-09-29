@@ -63,7 +63,44 @@ class TerminalDefaultsChecks(unittest.TestCase):
             fake_bash.touch()
             session.write_text(json.dumps({"defaultShell": str(fake_bash)}), encoding="utf-8")
             with mock.patch.dict(os.environ, {"APPDATA": tmp}, clear=False):
-                self.assertEqual(preflight.check_wmux_default_shell().status, preflight.OK)
+                self.assertEqual(preflight.check_wmux_default_shell(platform="nt").status, preflight.OK)
+
+
+class PosixChecks(unittest.TestCase):
+    def test_darwin_checks_drop_git_bash_and_windows_terminal(self):
+        names = [fn.__name__ for fn in preflight._default_checks("darwin")]
+        self.assertIn("check_posix_shell", names)
+        for dropped in ("check_git_bash", "check_bash_on_path", "check_windows_terminal_default"):
+            self.assertNotIn(dropped, names)
+
+    def test_nt_checks_keep_git_bash_and_windows_terminal(self):
+        names = [fn.__name__ for fn in preflight._default_checks("nt")]
+        for kept in ("check_git_bash", "check_bash_on_path", "check_windows_terminal_default"):
+            self.assertIn(kept, names)
+        self.assertNotIn("check_posix_shell", names)
+
+    def test_posix_shell_accepts_zsh_or_bash(self):
+        with mock.patch.object(preflight, "_fresh_which",
+                               side_effect=lambda name: "/bin/zsh" if name == "zsh" else None):
+            self.assertEqual(preflight.check_posix_shell().status, preflight.OK)
+        with mock.patch.object(preflight, "_fresh_which", return_value=None):
+            self.assertEqual(preflight.check_posix_shell().status, preflight.FAIL)
+
+    def test_wmux_default_shell_mac_paths_and_missing_file_is_warn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with mock.patch.object(preflight.Path, "home", return_value=home):
+                self.assertEqual(preflight.check_wmux_default_shell(platform="posix").status, preflight.WARN)
+                session = home / "Library" / "Application Support" / "wmux" / "session.json"
+                session.parent.mkdir(parents=True)
+                session.write_text(json.dumps({"defaultShell": "/bin/zsh"}), encoding="utf-8")
+                row = preflight.check_wmux_default_shell(platform="posix")
+                self.assertEqual(row.status, preflight.OK)
+                session.unlink()
+                legacy = home / ".wmux" / "session.json"
+                legacy.parent.mkdir(parents=True)
+                legacy.write_text(json.dumps({"defaultShell": "/nonexistent/sh"}), encoding="utf-8")
+                self.assertEqual(preflight.check_wmux_default_shell(platform="posix").status, preflight.WARN)
 
 
 class PortableSetupChecks(unittest.TestCase):

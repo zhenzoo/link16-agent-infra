@@ -258,6 +258,8 @@ def test_陈旧检测_源码比进程新就必须报警(monkeypatch, tmp_path):
         (tmp_path / "bridge_watchdog.py").stat().st_mtime, _dt.timezone.utc)
     monkeypatch.setattr(w, "HERE", tmp_path)
     monkeypatch.setattr(w, "_pids", lambda: [12345])
+    # 本用例喂的是 PowerShell WMI 的 ISO 时间输出，钉 Windows 分支（POSIX 分支另有用例）
+    monkeypatch.setattr(w.bridge_process, "_is_nt", lambda: True)
 
     def _at(delta_h):
         return (src_mtime + _dt.timedelta(hours=delta_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -275,6 +277,7 @@ def test_陈旧检测_源码比进程新就必须报警(monkeypatch, tmp_path):
 def test_陈旧检测_查不出启动时间时不误报(monkeypatch):
     """宁可漏报也别误报 —— 查不到就闭嘴。"""
     monkeypatch.setattr(w, "_pids", lambda: [12345])
+    monkeypatch.setattr(w.bridge_process, "_is_nt", lambda: True)
     monkeypatch.setattr(w.subprocess, "run",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("ps 挂了")))
     assert w._running_stale()[0] is False

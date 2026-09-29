@@ -108,11 +108,13 @@ def test_powershell自己报错也不能当成没进程(monkeypatch):
 
 
 def test_一个都没在跑时仍然返回空表而不是None(monkeypatch):
+    monkeypatch.setattr(bp, '_is_nt', lambda: True)  # 喂的是 PowerShell JSON 包络，走 Windows 分支
     monkeypatch.setattr(fb.subprocess, "run", lambda *a, **k: _R(returncode=0, stdout=json.dumps({"ok": True, "processes": []})))
     assert fb._bridge_pids() == [], "真的没进程时要返回 []，别把它也升级成 None"
 
 
 def test_第一次超时会用更宽的窗口重试一次(monkeypatch):
+    monkeypatch.setattr(bp, '_is_nt', lambda: True)  # 喂的是 PowerShell JSON 包络，走 Windows 分支
     seen = []
 
     def flaky(*a, **k):

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import socket
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -65,6 +67,59 @@ def collect_windows_identity() -> MachineIdentity:
     )
 
 
+def _sysctl(key: str) -> str:
+    try:
+        done = subprocess.run(["sysctl", "-n", key], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=8)
+    except OSError:
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def collect_macos_identity() -> MachineIdentity:
+    """macOS 机型探测：system_profiler -json 为主，sysctl 兜底。
+
+    mac 没有 BIOS 年份 → bios_release_date 恒空，suggest_prefix 会得到
+    year_source="unknown" / confidence=low，由用户 --year 覆盖。
+    """
+    machine_name = machine_model = chip = ""
+    rows = []
+    try:
+        done = subprocess.run(
+            ["system_profiler", "SPHardwareDataType", "-json"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+        )
+        if done.returncode == 0:
+            rows = json.loads(done.stdout).get("SPHardwareDataType") or []
+    except (OSError, ValueError):
+        rows = []
+    if rows:
+        row = rows[0]
+        machine_name = str(row.get("machine_name") or "")
+        machine_model = str(row.get("machine_model") or "")
+        chip = str(row.get("chip_type") or row.get("cpu_type") or "")
+    machine_model = machine_model or _sysctl("hw.model")
+    machine_name = machine_name or machine_model
+    os_version = _sysctl("kern.osproductversion")
+    return MachineIdentity(
+        "Apple",
+        machine_model,
+        machine_name,
+        chip or (f"macOS {os_version}" if os_version else ""),
+        "",
+        socket.gethostname(),
+    )
+
+
+def collect_identity() -> MachineIdentity:
+    """平台分派：nt → WMI/PowerShell，darwin → system_profiler/sysctl。"""
+    if os.name == "nt":
+        return collect_windows_identity()
+    if sys.platform == "darwin":
+        return collect_macos_identity()
+    raise OSError(f"machine identity 暂不支持该平台：{sys.platform}")
+
+
 def _family(identity: MachineIdentity) -> str:
     text = " ".join(asdict(identity).values()).lower()
     if "thinkbook" in text:
@@ -75,6 +130,10 @@ def _family(identity: MachineIdentity) -> str:
         return "tp"
     if "legion" in text or "拯救者" in text:
         return "legion"
+    if "macbook" in text:
+        return "mb"
+    if "mac" in text or "apple" in text:
+        return "mac"
     maker = re.sub(r"[^a-z0-9]", "", identity.manufacturer.lower())
     return (maker[:4] or "pc")
 
@@ -149,7 +208,7 @@ def main(argv=None) -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    identity = collect_windows_identity()
+    identity = collect_identity()
     suggestion = suggest_prefix(
         identity, year=args.year, explicit_prefix=args.prefix,
         existing=_registry_machines(args.registry),
@@ -163,6 +222,8 @@ def main(argv=None) -> int:
     print(f"建议前缀：{suggestion.prefix} · confidence={suggestion.confidence}")
     if suggestion.year_source == "BIOS release year":
         print("提醒：BIOS 年份不等于购买年份；用户明确告知时用 --year 覆盖。")
+    if suggestion.year_source == "unknown":
+        print("提醒：未能推断年份（macOS 没有 BIOS 年份）；请用 --year 2026 显式指定。")
     if suggestion.collision:
         print("⚠️ 该前缀已在当前 registry 中；若不是同一台机，请用 --prefix 明确取新名。")
         return 1

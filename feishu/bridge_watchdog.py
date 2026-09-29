@@ -614,6 +614,46 @@ _SELF_NOISE = ("bridge_watchdog", "feishu_bridge", "Win32_Process", "ConvertTo-J
 _SELF_AGE_SEC = 180          # 比我启动还晚的进程，几乎必然是我自己拉起来的
 
 
+def _ps_time_seconds(text):
+    """ps 的 time= 列（[[dd-]hh:]mm:ss）→ 累计 CPU 秒；认不出回 None。"""
+    text = (text or "").strip()
+    days = 0
+    if "-" in text:
+        d, _, text = text.partition("-")
+        if not d.isdigit():
+            return None
+        days = int(d)
+    parts = text.split(":")
+    if not parts or len(parts) > 3 or not all(p.isdigit() for p in parts):
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return days * 86400 + seconds
+
+
+def _ps_rows(*columns, timeout=30):
+    """一次 ps 快照 → [列拆分后的行]；失败/返回码非零 → None（查不到 ≠ 没有）。"""
+    try:
+        r = subprocess.run(["ps", "-axo", ",".join(f"{c}=" for c in columns)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout)
+    except Exception:                                    # noqa: BLE001
+        return None
+    if r.returncode != 0:
+        return None
+    rows = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, len(columns) - 1)
+        if len(parts) < len(columns):
+            continue
+        rows.append(parts)
+    return rows
+
+
 def scan_background(cwd):
     """交接给新会话的「上个会话留下了什么在跑」。**两个互补探针，都不完整，所以都报。**
 
@@ -639,35 +679,60 @@ def scan_background(cwd):
 
     # ---- 探针 1：进程（命令行匹配 · 会漏相对路径起的，已在 note 里明说）----
     procs = []
-    ps = (
-        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '"
-        + leaf.replace("'", "''")
-        + "' } | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; name=$_.Name;"
-        " started=$_.CreationDate.ToString('yyyy-MM-dd HH:mm:ss');"
-        " cpu_s=[int]($_.KernelModeTime/10000000 + $_.UserModeTime/10000000);"
-        " cmd=$_.CommandLine } } | ConvertTo-Json -Compress -Depth 3"
-    )
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=60, creationflags=NO_WINDOW)
-        data = json.loads(r.stdout or "[]")
-        if isinstance(data, dict):
-            data = [data]
-        for p in data:
-            cmd = (p.get("cmd") or "")[:200]
-            if any(n in cmd for n in _SELF_NOISE):
+    if not bridge_process._is_nt():
+        rows = _ps_rows("pid", "etime", "time", "command", timeout=60)
+        if rows is None:
+            log("后台进程扫描失败（不致命）：ps 查询失败")
+            rows = []
+        for pid_s, etime_s, time_s, cmd in rows:
+            if leaf not in cmd:
+                continue
+            cmd_full = cmd[:200]
+            if any(n in cmd_full for n in _SELF_NOISE):
+                continue
+            elapsed = _ps_time_seconds(etime_s)
+            if elapsed is None:
                 continue
             try:
-                started = datetime.strptime(p.get("started", ""), "%Y-%m-%d %H:%M:%S")
-                if now - started.timestamp() < _SELF_AGE_SEC:
-                    continue                            # 刚起的 = 我自己扫描时拉起来的
-            except Exception:                           # noqa: BLE001
-                pass
-            procs.append({"pid": p.get("pid"), "name": p.get("name"),
-                          "started": p.get("started"), "cpu_s": p.get("cpu_s"), "cmd": cmd})
-    except Exception as e:                              # noqa: BLE001
-        log(f"后台进程扫描失败（不致命）：{e}")
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            if elapsed < _SELF_AGE_SEC:
+                continue                            # 刚起的 = 我自己扫描时拉起来的
+            procs.append({"pid": pid,
+                          "name": cmd_full.split(" ", 1)[0].rsplit("/", 1)[-1],
+                          "started": datetime.fromtimestamp(now - elapsed).strftime("%Y-%m-%d %H:%M:%S"),
+                          "cpu_s": _ps_time_seconds(time_s), "cmd": cmd_full})
+    else:
+        ps = (
+            "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '"
+            + leaf.replace("'", "''")
+            + "' } | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; name=$_.Name;"
+            " started=$_.CreationDate.ToString('yyyy-MM-dd HH:mm:ss');"
+            " cpu_s=[int]($_.KernelModeTime/10000000 + $_.UserModeTime/10000000);"
+            " cmd=$_.CommandLine } } | ConvertTo-Json -Compress -Depth 3"
+        )
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=60, creationflags=NO_WINDOW)
+            data = json.loads(r.stdout or "[]")
+            if isinstance(data, dict):
+                data = [data]
+            for p in data:
+                cmd = (p.get("cmd") or "")[:200]
+                if any(n in cmd for n in _SELF_NOISE):
+                    continue
+                try:
+                    started = datetime.strptime(p.get("started", ""), "%Y-%m-%d %H:%M:%S")
+                    if now - started.timestamp() < _SELF_AGE_SEC:
+                        continue                            # 刚起的 = 我自己扫描时拉起来的
+                except Exception:                           # noqa: BLE001
+                    pass
+                procs.append({"pid": p.get("pid"), "name": p.get("name"),
+                              "started": p.get("started"), "cpu_s": p.get("cpu_s"), "cmd": cmd})
+        except Exception as e:                              # noqa: BLE001
+            log(f"后台进程扫描失败（不致命）：{e}")
 
     # ---- 探针 2：文件活动（通用 · 不认识任何具体项目）----
     files = []
@@ -1568,6 +1633,24 @@ def _holds(script, cmd):
 def _python_procs():
     """[(pid, started_epoch, cmdline)]。查不到就返回空表 —— 查不到【不等于】没陈旧，
     调用方必须把空表当「这次没测到」，不能当「全新」。绝不抛。"""
+    if not bridge_process._is_nt():
+        rows = _ps_rows("pid", "etime", "command")
+        if rows is None:
+            return []
+        now = time.time()
+        out = []
+        for pid_s, etime_s, cmd in rows:
+            exe = cmd.split(" ", 1)[0].rsplit("/", 1)[-1]
+            if not exe.startswith("python"):
+                continue
+            elapsed = _ps_time_seconds(etime_s)
+            if elapsed is None:
+                continue                               # 读不到启动时间 → 宁可漏报也别误报
+            try:
+                out.append((int(pid_s), now - elapsed, cmd))
+            except ValueError:
+                continue                               # 读不到启动时间 → 宁可漏报也别误报
+        return out
     ps = ("Get-CimInstance Win32_Process | Where-Object {$_.Name -like 'python*'} | "
           "Select-Object ProcessId,CreationDate,CommandLine | ConvertTo-Json -Depth 3")
     try:
@@ -1608,15 +1691,26 @@ def _running_stale():
         return False, ""
     watched = [HERE / "bridge_watchdog.py", HERE / "agent_quota.py"]
     newest = max((p.stat().st_mtime for p in watched if p.exists()), default=0)
-    ps = (f"@(Get-CimInstance Win32_Process -Filter \"ProcessId={pids[0]}\")"
-          ".CreationDate.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')")
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
-        raw = (r.stdout or "").strip().splitlines()[-1].strip()
-        started = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-    except Exception:                                    # noqa: BLE001
-        return False, ""                                 # 查不了就别乱报（宁可漏报不误报）
+    if not bridge_process._is_nt():
+        try:
+            r = subprocess.run(["ps", "-o", "etime=", "-p", str(int(pids[0]))],
+                               capture_output=True, text=True, timeout=30)
+            elapsed = _ps_time_seconds((r.stdout or "").strip())
+            if elapsed is None:
+                raise ValueError("ps etime 解析失败")
+            started = time.time() - elapsed
+        except Exception:                                # noqa: BLE001
+            return False, ""                             # 查不了就别乱报（宁可漏报不误报）
+    else:
+        ps = (f"@(Get-CimInstance Win32_Process -Filter \"ProcessId={pids[0]}\")"
+              ".CreationDate.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')")
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
+            raw = (r.stdout or "").strip().splitlines()[-1].strip()
+            started = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except Exception:                                    # noqa: BLE001
+            return False, ""                                 # 查不了就别乱报（宁可漏报不误报）
     if newest > started:
         gap = (newest - started) / 60.0
         return True, (f"⚠️ **跑着的进程还在用旧代码**：源码比它新 {gap:.0f} 分钟"

@@ -39,6 +39,16 @@ NO_PROXY_KEYS = ("NO_PROXY", "no_proxy")
 COMMON_MIXED_PORTS = (7897, 7890, 10808, 10809)
 
 
+def _platform_label() -> str:
+    if os.name == "nt":
+        return "Windows"
+    return "macOS" if sys.platform == "darwin" else sys.platform
+
+
+def _proxy_app_name() -> str:
+    return "v2rayN" if os.name == "nt" else "本地代理客户端（Clash Verge / Surge 等）"
+
+
 @dataclass(frozen=True)
 class ProbeResult:
     route: str
@@ -145,7 +155,7 @@ def discover_proxy_candidates(configured: str | None = None, system=None,
     add(configured if configured is not None else proxy_url(), "PROXY_URL")
     proxies = urllib.request.getproxies() if system is None else system
     for scheme in ("https", "http", "all"):
-        add((proxies or {}).get(scheme), f"Windows/{scheme}", loopback_only=True)
+        add((proxies or {}).get(scheme), f"{_platform_label()}/{scheme}", loopback_only=True)
     for port in common_ports:
         add(f"http://127.0.0.1:{int(port)}", "common mixed port")
     return tuple(rows)
@@ -329,7 +339,7 @@ def main(argv=None):
             else:
                 print(f"  [FAIL] {label} · {row.error}")
         if not decision.usable:
-            print("❌ 直连和所有候选代理都不可用；请先打开 v2rayN，再查「本地混合端口」。")
+            print(f"❌ 直连和所有候选代理都不可用；请先打开 {_proxy_app_name()}，再查「本地混合端口」。")
             return 2
         if decision.selected == "direct":
             print(f"✅ 建议本次直连 · {decision.reason}")
@@ -337,7 +347,10 @@ def main(argv=None):
             selected = route_map[decision.selected]
             safe_url = _proxy_display(selected.url)
             print(f"✅ 建议 PROXY_URL={safe_url} · {decision.reason}")
-            print(f"   PowerShell 用户级：[Environment]::SetEnvironmentVariable('PROXY_URL','{safe_url}','User')")
+            if os.name == "nt":
+                print(f"   PowerShell 用户级：[Environment]::SetEnvironmentVariable('PROXY_URL','{safe_url}','User')")
+            else:
+                print(f"   zsh 持久化：echo 'export PROXY_URL={safe_url}' >> ~/.zshrc")
         return 0
     configured = (os.environ.get("LINK16_ROUTE_DEFAULT") or "").strip().lower()
     prefer = args.prefer or (configured if configured in {"direct", "proxy"} else None)

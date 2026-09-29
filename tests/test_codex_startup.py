@@ -195,5 +195,44 @@ class GatewayTests(unittest.TestCase):
                 gateway.close()
 
 
+@unittest.skipIf(os.name == "nt", "POSIX 僵尸子进程回收语义")
+class ProcessAlivePosixTests(unittest.TestCase):
+    def test_exited_child_is_reaped_and_reported_dead(self):
+        import subprocess
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        deadline = time.monotonic() + 5
+        while child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # poll() 已经回收；重新 spawn 一个不再 wait 的，制造真正的僵尸。
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait = lambda *a, **k: None  # 防止 GC/清理路径提前回收
+        deadline = time.monotonic() + 5
+        while child.returncode is None and time.monotonic() < deadline:
+            # 不调用 wait/waitpid，只等它真正退出
+            try:
+                os.kill(child.pid, 0)
+            except OSError:
+                break
+            time.sleep(0.01)
+        try:
+            self.assertFalse(startup.process_alive(child.pid))
+        finally:
+            try:
+                os.waitpid(child.pid, 0)
+            except (ChildProcessError, OSError):
+                pass
+
+    def test_live_child_and_non_child_pids_still_report_alive(self):
+        import subprocess
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            self.assertTrue(startup.process_alive(child.pid))
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+        # 非子进程（waitpid 抛 ChildProcessError）退回 os.kill 探测：本进程恒活。
+        self.assertTrue(startup.process_alive(os.getpid()))
+
+
 if __name__ == "__main__":
     unittest.main()

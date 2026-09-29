@@ -101,6 +101,20 @@ class ClaudeDesktopTests(unittest.TestCase):
         self.assertFalse(row["import_default"])
         self.assertIn("导出数据", row["note"])
 
+    def test_macos_application_support_root(self):
+        """mac 桌面版落点 ~/Library/Application Support/Claude（无 LOCALAPPDATA/APPDATA 时）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / "Library" / "Application Support" / "Claude"
+            root.mkdir(parents=True)
+            with mock.patch.object(cs, "_is_macos", return_value=True), \
+                 mock.patch.object(cs.Path, "home", return_value=home), \
+                 mock.patch.dict(os.environ, {"LOCALAPPDATA": "", "APPDATA": "", "USERPROFILE": ""}):
+                roots = cs.claude_desktop_roots()
+                row = cs.scan_claude_desktop(root, 7)
+        self.assertEqual(roots, [root])
+        self.assertIn("macOS", row["label"])
+
 
 class ExportsTests(unittest.TestCase):
     def test_classify_claude_and_chatgpt_zips(self):
@@ -167,6 +181,27 @@ class ActiveProjectsTests(unittest.TestCase):
             hints = [{"cwd": str(outside), "sessions": 2, "latest": "x", "latest_ts": time.time(), "recent": True}]
             rows = cs.active_projects([root], 7, 3, hints)
         self.assertEqual([r["name"] for r in rows], ["proj"])
+
+    def test_symlinked_hint_cwd_dedupes_against_resolved_scan_paths(self):
+        """macOS /var → /private/var 软链：hint cwd（jsonl 原文·未 resolve）必须与
+        扫描路径（root.resolve() 之后）命中同一个 dedup 键，不能一个项目出两行。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real"
+            proj = real / "proj"
+            proj.mkdir(parents=True)
+            for i in range(5):
+                touch(proj / f"f{i}.md")
+            link = Path(tmp) / "link"
+            try:
+                link.symlink_to(real)
+            except OSError:
+                self.skipTest("平台不支持符号链接")
+            hinted = link / "proj"   # 未经 resolve 的软链形态
+            hints = [{"cwd": str(hinted), "sessions": 2, "latest": "x", "latest_ts": time.time(), "recent": True}]
+            rows = cs.active_projects([real], 7, 3, hints)
+        matches = [r for r in rows if r["name"] == "proj"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["claude_sessions"], 2)
 
 
 class BotNamingTests(unittest.TestCase):

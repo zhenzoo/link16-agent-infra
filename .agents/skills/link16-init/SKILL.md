@@ -37,7 +37,13 @@ python feishu/windows_bootstrap.py            # 展示 8 项清单 + post-instal
 python feishu/windows_bootstrap.py --apply --yes [--skip codex,kimi]
 pip install -r feishu/requirements.txt
 ```
-装完 **让用户新开一个终端 / 重启 wmux**（旧窗口 PATH 是旧的）。从桌面快捷方式打开 wmux。
+macOS 对偶（bash/zsh · 9 项清单含 brew；wmux 只打开下载页、人工拖进 /Applications）：
+```bash
+python3 feishu/macos_bootstrap.py
+python3 feishu/macos_bootstrap.py --apply --yes [--skip codex,kimi]
+pip3 install -r feishu/requirements.txt
+```
+装完 **让用户新开一个终端 / 重启 wmux**（旧窗口 PATH 是旧的）。从桌面快捷方式（mac：/Applications）打开 wmux。
 
 ### 2.2 机器代号 + 隔离 profile + 登录（SOP-100 §1）
 ```powershell
@@ -46,8 +52,10 @@ python feishu/profile_bootstrap.py --init-registry --claude-profile <名> --clau
 python feishu/profile_bootstrap.py --init-registry ... --apply
 python feishu/profile_bootstrap.py --apply && python feishu/profile_bootstrap.py --doctor
 ```
-然后让用户**新开 PowerShell 跑 `<profile 名>`** 完成浏览器登录（看到正常输入框再 `/exit`）。
-跑 `python feishu/preflight.py`：「profile 登录态」「bash 在 PATH」必须 OK；「wmux 默认 Shell」允许 WARN。
+macOS 同一组命令，把 `python` 换成 `python3` 即可（`machine_identity.py` 在 mac 用 system_profiler/sysctl，
+没有 BIOS 年份 → 提示 `--year 2026` 显式指定）；profile 函数写进 `~/.zshrc`。
+然后让用户**新开 PowerShell 跑 `<profile 名>`**（mac：新开终端跑同一函数名）完成浏览器登录（看到正常输入框再 `/exit`）。
+跑 `python feishu/preflight.py`：「profile 登录态」「bash 在 PATH」（mac：「登录 Shell」）必须 OK；「wmux 默认 Shell」允许 WARN。
 
 ### 2.3 盘点（只读，零写入）
 ```powershell
@@ -83,6 +91,8 @@ python feishu/service_installer.py plan          # 给用户看 before/after，�
 python feishu/service_installer.py apply --yes --expect <digest>
 python feishu/service_doctor.py
 ```
+macOS 用 `python3` 跑同四条命令；`service_installer.py` 在 mac 自动选 launchd 后端
+（`~/Library/LaunchAgents/com.link16.*.plist`），plan/apply/rollback 语义不变。
 让用户**私聊**每只 bot 发「在吗」认主（群里 @ 不算）。冷启动约 1～2 分钟，桥每 30 秒报进度，**别发 /close**。
 最后一问定成败：私聊 bot「我最近在做什么项目？我有什么工作偏好？」——答得出、引用到导入的记忆 = 完成。
 

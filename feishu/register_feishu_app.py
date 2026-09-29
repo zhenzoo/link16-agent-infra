@@ -39,7 +39,7 @@ for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy
 os.environ["NO_PROXY"] = os.environ["no_proxy"] = "feishu.cn,larksuite.com,larkoffice.com,localhost,127.0.0.1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bridge_env import resolve_env_path  # noqa: E402
+from bridge_env import is_legacy_env_fallback, resolve_env_path  # noqa: E402
 import agent_runtime  # noqa: E402
 
 for _s in (sys.stdout, sys.stderr):
@@ -75,16 +75,19 @@ def _set_key(text, key, value):
 def write_env(app_id, secret, id_key, sec_key, env_path=None):
     """原子更新本机 .env。
 
-    已存在的 .env 可按旧规则向上查找；首次创建必须由
-    XHS_ENV_FILE 或 VIBECODING_ROOT 明确指定，禁止在新同事电脑上默写历史 E: 盘。
+    已存在的 .env 可按旧规则向上查找；首次创建必须由 XHS_ENV_FILE 或
+    VIBECODING_ROOT 明确指定 —— 判据是「目标落点是否 legacy 兜底路径」
+    （bridge_env.is_legacy_env_fallback），禁止在新同事电脑上默写历史 E: 盘
+    （macOS 上对应 ~/.vibecoding/.env），其余显式/上溯命中的落点照常放行。
     """
     target = Path(env_path) if env_path is not None else ENV_PATH
     if not target.exists() and not (
         os.environ.get("XHS_ENV_FILE") or os.environ.get("VIBECODING_ROOT") or env_path is not None
-    ):
+    ) and is_legacy_env_fallback(target):
         raise RuntimeError(
-            "首次注册前请先设置 VIBECODING_ROOT（例如 C:\\410_VibeCoding），"
-            "或用 XHS_ENV_FILE 明确指定 .env。"
+            "首次注册前请先设置 VIBECODING_ROOT 指向 .env 所在目录"
+            "（Windows 例如 C:\\410_VibeCoding，macOS 例如 ~/vibecoding），"
+            "或用 XHS_ENV_FILE 明确指定 .env 全路径。"
         )
     target.parent.mkdir(parents=True, exist_ok=True)
     text = target.read_text(encoding="utf-8", errors="ignore") if target.exists() else ""

@@ -21,7 +21,7 @@ class CodexProfileDiscoveryTests(unittest.TestCase):
     def test_discovers_live_profiles_without_backup_directories(self):
         configurator = load_configurator()
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
+            home = Path(tmp).resolve()   # macOS 的 /var→/private/var 软链：与函数内部的 resolve() 对齐
             for name in (".codex", ".codex-personal", ".codex-kimi"):
                 profile = home / name
                 profile.mkdir()

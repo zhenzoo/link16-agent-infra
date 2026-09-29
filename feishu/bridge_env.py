@@ -17,7 +17,18 @@ import sys
 from pathlib import Path
 
 # legacy 兜底（老机器从没设 VIBECODING_ROOT 时的最后一根稻草 · 绝不破坏另一台机已跑通的行为）
-_LEGACY_ENV = Path(r"E:\410_VibeCoding\.env")
+# macOS 没有 E: 盘语义，兜底换成语义化的 ~/.vibecoding/.env（同样是「永不命中就算礼貌」的位置）
+_LEGACY_ENV = (Path(r"E:\410_VibeCoding\.env") if os.name == "nt"
+               else Path.home() / ".vibecoding" / ".env")
+
+
+def is_legacy_env_fallback(path) -> bool:
+    """该路径是否就是 legacy 兜底（即解析时没有任何显式/上溯来源命中）。
+
+    register 的首次写入闸用它：只在「要新建的文件落点是兜底」时拒绝，
+    显式 mock/指定的其他路径不拦。
+    """
+    return os.path.normcase(str(path)) == os.path.normcase(str(_LEGACY_ENV))
 
 
 def resolve_env_path(start=None):
@@ -27,7 +38,7 @@ def resolve_env_path(start=None):
       2) 环境变量 VIBECODING_ROOT → <root>/.env（用户每台机一次性设 · 即便文件还没建也返回它 · 供 register 写）
       3) 从本模块/调用方所在仓库逐级上溯找到的第一个 .env
          （兼容 Post/xhs-card-gen 与 Post/tools/xhs-card-gen 两种仓库布局 · 无需任何 env var）
-      4) legacy 兜底 E:\\410_VibeCoding\\.env
+      4) legacy 兜底（Windows: E:\\410_VibeCoding\\.env · macOS: ~/.vibecoding/.env）
 
     返回 Path（不保证 .exists() · 写入场景需要先于文件存在拿到目标路径）。
     """

@@ -12,6 +12,7 @@
 """
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +42,7 @@ class CursorIdentityGate(unittest.TestCase):
         self.assertEqual(self._read(cur, "AAA", "/x/b.jsonl"), 0)
         self.assertEqual(self._read(cur, "", "/x/b.jsonl"), 0)
 
+    @unittest.skipUnless(os.name == "nt", "Windows 大小写/斜杠混写归一化；POSIX 上 normcase 不折叠大小写，同一份文件不可能有两种写法")
     def test_path_spelling_does_not_split_one_file_into_two(self):
         """Windows 大小写/斜杠混写不该让同一份文件被判成两份（否则每轮都白白作废）。"""
         cur = {"session": "AAA", "tp": bs._norm_tp("C:/X/A.jsonl"), "line": 99}

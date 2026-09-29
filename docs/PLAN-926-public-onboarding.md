@@ -75,6 +75,7 @@ last_reviewed: 2026-08-17
 
 **非目标**（明确不做，防止摊大）：
 - 不做跨平台（macOS / Linux）适配——本仓依赖 wmux 桌面端与 Windows 计划任务，现阶段是 Windows-only，**写清楚即可**。
+  - **翻案记录（2026-09-29）**：此非目标已被 [PLAN-1140](PLAN-1140-macos-support.md) 推翻——macOS 适配以「单一代码路径双平台」落地（launchd 替代计划任务、brew 替代 winget、wmux 官方 Apple Silicon .dmg）。Linux 仍不支持。
 - 不做「PowerShell 版 + Bash 版」两套平行文档（理由见 S3）。
 - 不重写 `docs/` 里任何一篇深档——它们是资产，只补索引与入口。
 - 不把 `~/.claude-personal`（个人治理母版）一起公开——本仓要能**脱离它独立跑**。

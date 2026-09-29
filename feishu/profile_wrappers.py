@@ -10,6 +10,7 @@ drift.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -57,6 +58,17 @@ __link16_python() {
     printf '%s\n' "$resolved"
     return 0
   fi
+  # macOS/Linux：先 python3（含 Homebrew 常见位置），最后才退回 python。
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
   if command -v python >/dev/null 2>&1; then
     command -v python
     return 0
@@ -190,18 +202,26 @@ Remove-Variable link16ProfileCli, link16Python, profileName, body -ErrorAction S
 '''
 
 
-def target_plan(home_root: Path) -> list[dict]:
-    targets = (
-        (home_root / ".bashrc", bash_block()),
-        (
-            home_root / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1",
-            powershell_block(),
-        ),
-        (
-            home_root / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1",
-            powershell_block(),
-        ),
-    )
+def target_plan(home_root: Path, platform: str | None = None) -> list[dict]:
+    platform = platform or ("nt" if os.name == "nt" else "posix")
+    if platform == "nt":
+        targets = (
+            (home_root / ".bashrc", bash_block()),
+            (
+                home_root / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1",
+                powershell_block(),
+            ),
+            (
+                home_root / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1",
+                powershell_block(),
+            ),
+        )
+    else:
+        # macOS：zsh 兼容现有 bash 函数语法；保留 .bashrc 让用 bash 的面板也受益。
+        targets = (
+            (home_root / ".zshrc", bash_block()),
+            (home_root / ".bashrc", bash_block()),
+        )
     rows = []
     for path, block in targets:
         current = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""

@@ -85,12 +85,25 @@ def _count_files(root: Path, exts=None, limit=5000) -> tuple[int, float]:
     return n, latest
 
 
+def _is_macos() -> bool:
+    """测试 seam：os.name 被 mock 会让 pathlib 炸，平台分支统一走这个函数。"""
+    return sys.platform == "darwin"
+
+
 def _real_local_appdata() -> Path | None:
-    """绕开 MSIX 容器重定向（与 windows_bootstrap._real_local_appdata 同判据）。"""
+    """绕开 MSIX 容器重定向（与 windows_bootstrap._real_local_appdata 同判据）。
+
+    macOS 没有 LOCALAPPDATA/MSIX 概念，语义等价物是 ~/Library/Application Support；
+    显式设了 LOCALAPPDATA（测试/兼容）时优先尊重它，Windows 行为不变。
+    """
     local = os.environ.get("LOCALAPPDATA") or ""
     if "\\packages\\" in local.replace("/", "\\").casefold():
         return Path(os.environ.get("USERPROFILE") or str(Path.home())) / "AppData" / "Local"
-    return Path(local) if local else None
+    if local:
+        return Path(local)
+    if _is_macos():
+        return Path.home() / "Library" / "Application Support"
+    return None
 
 
 def _appdata() -> Path | None:
@@ -98,7 +111,11 @@ def _appdata() -> Path | None:
     if raw and "\\packages\\" not in raw.replace("/", "\\").casefold():
         return Path(raw)
     profile = os.environ.get("USERPROFILE")
-    return Path(profile) / "AppData" / "Roaming" if profile else None
+    if profile:
+        return Path(profile) / "AppData" / "Roaming"
+    if _is_macos():
+        return Path.home() / "Library" / "Application Support"
+    return None
 
 
 def _has_secret_files(root: Path, limit=3000) -> list[str]:
@@ -192,6 +209,9 @@ def scan_claude_code_home(home: Path, days: int) -> dict:
 # ---------------------------------------------------------------- ② Claude 桌面版 Cowork
 def claude_desktop_roots() -> list[Path]:
     roots = []
+    if _is_macos():
+        # mac 桌面版（非 MSIX）：~/Library/Application Support/Claude
+        roots.append(Path.home() / "Library" / "Application Support" / "Claude")
     appdata = _appdata()
     if appdata:
         roots.append(appdata / "Claude")
@@ -213,7 +233,9 @@ def claude_desktop_roots() -> list[Path]:
 
 
 def scan_claude_desktop(root: Path, days: int) -> dict:
-    flavor = "MSIX（应用商店/winget）" if "\\packages\\" in str(root).replace("/", "\\").casefold() else "exe 安装"
+    flavor = ("MSIX（应用商店/winget）" if "\\packages\\" in str(root).replace("/", "\\").casefold()
+              else ("macOS" if "/Library/Application Support/" in str(root).replace("\\", "/")
+                    else "exe 安装"))
     row = {"id": f"claude-desktop:{root.parent.name if flavor.startswith('MSIX') else 'exe'}",
            "kind": "claude-desktop", "label": f"Claude 桌面版 Cowork 记忆（{flavor}）", "path": str(root),
            "found": True, "items": {}, "memory_dirs": [], "latest": "", "secrets_present": [],
@@ -450,12 +472,25 @@ def _walk_candidates(roots: list[Path], max_depth=3):
                     stack.append((child, depth + 1))
 
 
+def _scan_key(path) -> str:
+    """dedup 键：resolve 后再 casefold。
+
+    macOS 的 /var 是 /private/var 的软链（tempfile 给的临时目录都在其下）：扫描根在
+    _walk_candidates 里 resolve 过，而会话 hint 的 cwd 是 jsonl 原文（未 resolve），
+    两边键不一致会把同一目录计成两行。Windows 上 resolve 对普通路径是恒等，行为不变。
+    """
+    try:
+        return str(Path(path).resolve()).casefold()
+    except OSError:
+        return str(Path(path)).casefold()
+
+
 def active_projects(roots: list[Path], days: int, top: int, session_hints: list[dict]) -> list[dict]:
     cutoff = time.time() - days * 86400
     hints = {}
     for s in session_hints:
         if s.get("cwd"):
-            hints[str(Path(s["cwd"])).casefold()] = s
+            hints[_scan_key(s["cwd"])] = s
     rows = {}
     for path, is_git in _walk_candidates(roots):
         key = str(path).casefold()
@@ -487,7 +522,11 @@ def active_projects(roots: list[Path], days: int, top: int, session_hints: list[
         if key in rows or not hint.get("recent"):
             continue
         p = Path(hint["cwd"])
-        if p.is_dir() and not any(str(p).casefold().startswith(str(r.resolve()).casefold()) for r in roots):
+        try:
+            p = p.resolve()
+        except OSError:
+            pass
+        if p.is_dir() and not any(str(p).casefold().startswith(_scan_key(r)) for r in roots):
             rows[key] = {"path": str(p), "name": p.name, "is_git": (p / ".git").exists(), "commits": 0,
                          "changed_files": 0, "claude_sessions": hint["sessions"], "score": 5 + min(hint["sessions"], 10),
                          "reason": f"Claude 会话 {hint['sessions']} 次（最近 {hint['latest']}）"}
@@ -509,7 +548,7 @@ def machine_prefix() -> dict:
     host = re.sub(r"[^a-z0-9]+", "", socket.gethostname().lower()) or "pc"
     try:
         import machine_identity as mi
-        identity = mi.collect_windows_identity()
+        identity = mi.collect_identity()
         existing = None
         try:
             existing = mi._registry_machines()
@@ -608,9 +647,11 @@ def scan(roots=None, days=7, top=3, exports=None, profile=None) -> dict:
     for root in claude_desktop_roots():
         sources.append(scan_claude_desktop(root, days))
     if not any(s["kind"] == "claude-desktop" for s in sources):
+        note = ("未安装（~/Library/Application Support/Claude 不存在）" if _is_macos()
+                else "未安装（exe 与 MSIX 两种落点都没有）")
         sources.append({"id": "claude-desktop", "kind": "claude-desktop", "label": "Claude 桌面版 Cowork 记忆",
                         "path": "", "found": False, "items": {}, "latest": "", "secrets_present": [],
-                        "import_default": False, "note": "未安装（exe 与 MSIX 两种落点都没有）"})
+                        "import_default": False, "note": note})
     sources.append(scan_codex_home(home / ".codex", days))
     sources.append(scan_chatgpt_desktop())
     export_dirs = [home / "Downloads"] + [Path(e) for e in (exports or [])]

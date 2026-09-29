@@ -92,6 +92,7 @@ def test_压力3_桥挂查不出来时不喊(monkeypatch):
 
 
 def test_压力3b_桥活死状态判定(monkeypatch):
+    monkeypatch.setattr(w.bridge_process, '_is_nt', lambda: True)   # 喂的是 PowerShell JSON 包络，走 Windows 分支
     class R:
         def __init__(self, o):
             self.stdout = json.dumps({'ok': True, 'processes': o})

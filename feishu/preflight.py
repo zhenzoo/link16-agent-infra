@@ -142,8 +142,9 @@ def _gh_path():
 def check_github_cli():
     gh = _gh_path()
     if not gh:
-        return Result("GitHub CLI", FAIL, "找不到 gh",
-                      "winget install --id GitHub.cli -e；装完重开终端")
+        fix = ("winget install --id GitHub.cli -e；装完重开终端" if os.name == "nt"
+               else "brew install gh；装完重开终端")
+        return Result("GitHub CLI", FAIL, "找不到 gh", fix)
     try:
         done = subprocess.run(
             [str(gh), "auth", "status", "--hostname", "github.com"],
@@ -236,6 +237,16 @@ def check_bash_on_path():
                   "改完【重启 wmux】才继承新 PATH")
 
 
+def check_posix_shell():
+    """macOS/Linux 上桥面板用系统 POSIX shell：zsh 或 bash 任一可执行即可。"""
+    for name in ("zsh", "bash"):
+        exe = _fresh_which(name)
+        if exe:
+            return Result("登录 Shell", OK, f"{exe} 可用")
+    return Result("登录 Shell", FAIL, "PATH 里没有 zsh 或 bash",
+                  "macOS 自带 /bin/zsh；确认它存在，或 `xcode-select --install` 修复命令行工具")
+
+
 def check_windows_terminal_default():
     """Windows Terminal 不是桥硬依赖，但本机操作标准要求新窗口默认进入 Git Bash。"""
     local = os.environ.get("LOCALAPPDATA")
@@ -281,8 +292,41 @@ def check_wmux():
     return Result("wmux", OK, f"daemon 在跑（{port_file.name} 存在）· RPC 客户端就位")
 
 
-def check_wmux_default_shell():
+def _check_wmux_default_shell_posix():
+    """mac 版 wmux 默认 shell 检查：宽松处理——找不到配置文件给 WARN 而不是 FAIL。
+
+    mac 上桥开面板后直接敲 shell 命令（同 Windows 的 bash 切换语义），
+    默认 shell 不是硬条件；wmux mac 配置位置以 ~/Library/Application Support/wmux/
+    为主，~/.wmux/ 兜底兼容。
+    """
+    candidates = [
+        Path.home() / "Library" / "Application Support" / "wmux" / "session.json",
+        Path.home() / ".wmux" / "session.json",
+    ]
+    session = next((p for p in candidates if p.is_file()), None)
+    if not session:
+        return Result("wmux 默认 Shell", WARN,
+                      "找不到 wmux session.json（~/Library/Application Support/wmux/ 或 ~/.wmux/）",
+                      "先打开一次 wmux 生成配置；不阻塞：桥开面板后会自己敲 shell 命令")
+    try:
+        shell = str(json.loads(session.read_text(encoding="utf-8-sig")).get("defaultShell") or "")
+    except Exception as exc:  # noqa: BLE001
+        return Result("wmux 默认 Shell", WARN, f"{session} 解析失败：{exc}",
+                      "在 wmux Settings 重新选择默认 Shell 后重开 wmux")
+    if not shell:
+        return Result("wmux 默认 Shell", WARN, f"{session} 里 defaultShell 未设置",
+                      "wmux → Settings → Default Shell → zsh/bash；不阻塞：桥开面板后会自己敲 shell 命令")
+    if Path(shell).is_file() or shutil.which(shell):
+        return Result("wmux 默认 Shell", OK, shell)
+    return Result("wmux 默认 Shell", WARN, f"defaultShell = {shell} 不可执行",
+                  "wmux → Settings → Default Shell 选一个存在的 shell（如 /bin/zsh）")
+
+
+def check_wmux_default_shell(platform=None):
     """wmux GUI/store 的默认 shell 真源；不是 ~/.wmux/config.json，也不是 .bashrc alias。"""
+    platform = platform or ("nt" if os.name == "nt" else "posix")
+    if platform != "nt":
+        return _check_wmux_default_shell_posix()
     appdata = os.environ.get("APPDATA")
     if not appdata:
         return Result("wmux 默认 Shell", FAIL, "APPDATA 不可用，无法读取 wmux session.json")
@@ -327,14 +371,21 @@ def check_encoding():
     if pref in ok and out in ok:
         return Result("输出编码", OK,
                       f"getpreferredencoding = {pref_raw} · stdout = {_ORIGINAL_STDOUT_ENCODING}")
-    fix = chr(10).join([
-        "设 UTF-8 模式（改完**重开终端**；已在跑的桥/计划任务要重启才继承）：",
-        "        PowerShell:  [Environment]::SetEnvironmentVariable('PYTHONUTF8','1','User')",
-        "        Git Bash  :  setx PYTHONUTF8 1",
-        "      验收：python -c 'import locale;print(locale.getpreferredencoding(False))' 要回 UTF-8",
-        "      （tb24 实证：真 GBK 机器只靠这一个用户级变量就完全免疫，连计划任务里的 pythonw 都继承得到）",
-        "      不要求修改 Windows 的「Beta: 使用 Unicode UTF-8」系统区域选项；避免影响旧软件。",
-    ])
+    if os.name == "nt":
+        fix = chr(10).join([
+            "设 UTF-8 模式（改完**重开终端**；已在跑的桥/计划任务要重启才继承）：",
+            "        PowerShell:  [Environment]::SetEnvironmentVariable('PYTHONUTF8','1','User')",
+            "        Git Bash  :  setx PYTHONUTF8 1",
+            "      验收：python -c 'import locale;print(locale.getpreferredencoding(False))' 要回 UTF-8",
+            "      （tb24 实证：真 GBK 机器只靠这一个用户级变量就完全免疫，连计划任务里的 pythonw 都继承得到）",
+            "      不要求修改 Windows 的「Beta: 使用 Unicode UTF-8」系统区域选项；避免影响旧软件。",
+        ])
+    else:
+        fix = chr(10).join([
+            "设 UTF-8 模式（改完**重开终端**；launchd 自启的桥要重新 bootstrap 才继承）：",
+            "        zsh:  echo 'export PYTHONUTF8=1' >> ~/.zshrc",
+            "      验收：python3 -c 'import locale;print(locale.getpreferredencoding(False))' 要回 UTF-8",
+        ])
     return Result("输出编码", FAIL,
                   f"getpreferredencoding = {pref_raw} · stdout = {_ORIGINAL_STDOUT_ENCODING or '未知'}"
                   f" —— 非 UTF-8。这不是「打字难看」，是**桥会静默吞掉回复**（进度条照动、消息收不到）",
@@ -360,9 +411,13 @@ def check_env_file():
                 return Result(".env 凭据文件", OK, f"{p}（{where}）")
         except Exception:  # noqa: BLE001
             continue
-    return Result(".env 凭据文件", WARN, "没找到（首次注册 bot 时会创建）",
-                  "建议设 VIBECODING_ROOT 指向 .env 所在目录：\n"
-                  "        [Environment]::SetEnvironmentVariable('VIBECODING_ROOT','D:\\你的目录','User')")
+    if os.name == "nt":
+        hint = ("建议设 VIBECODING_ROOT 指向 .env 所在目录：\n"
+                "        [Environment]::SetEnvironmentVariable('VIBECODING_ROOT','D:\\你的目录','User')")
+    else:
+        hint = ("建议设 VIBECODING_ROOT 指向 .env 所在目录：\n"
+                "        echo 'export VIBECODING_ROOT=~/你的目录' >> ~/.zshrc")
+    return Result(".env 凭据文件", WARN, "没找到（首次注册 bot 时会创建）", hint)
 
 
 def check_proxy_config():
@@ -386,8 +441,9 @@ def check_proxy_config():
             with socket.create_connection((host, port), timeout=0.5):
                 pass
         except OSError:
+            proxy_app = "v2rayN" if os.name == "nt" else "本地代理客户端（Clash Verge / Surge 等）"
             return Result("下载代理", WARN, f"{label} 当前未监听",
-                          "打开 v2rayN，确认「本地混合端口」，再运行 proxy-doctor")
+                          f"打开 {proxy_app}，确认「本地混合端口」，再运行 proxy-doctor")
     return Result("下载代理", OK, f"{label} 已配置；真实可用性由 proxy-doctor 验证")
 
 
@@ -513,10 +569,21 @@ def check_profile_login():
                   "" if not idle else "这些 profile 若本机要用，先登录；不用可从 agent-profiles.local.json 移除")
 
 
-CHECKS = (check_python, check_deps, check_node, check_github_cli, check_repository_main, check_git_bash,
-          check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_default_shell,
-          check_encoding, check_env_file, check_proxy_config, check_local_roster, check_registry,
-          check_agent_cli, check_profile_login)
+def _default_checks(platform=None):
+    """按平台组装检查集：mac 剔除 Git Bash / Windows Terminal，换 POSIX shell 检查。"""
+    platform = platform or ("nt" if os.name == "nt" else "posix")
+    rows = [check_python, check_deps, check_node, check_github_cli, check_repository_main]
+    if platform == "nt":
+        rows += [check_git_bash, check_bash_on_path, check_windows_terminal_default]
+    else:
+        rows.append(check_posix_shell)
+    rows += [check_wmux, check_wmux_default_shell, check_encoding, check_env_file,
+             check_proxy_config, check_local_roster, check_registry, check_agent_cli,
+             check_profile_login]
+    return tuple(rows)
+
+
+CHECKS = _default_checks()
 
 
 def run_checks(checks=CHECKS):

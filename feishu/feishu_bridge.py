@@ -3110,7 +3110,11 @@ def _start_locked(bot_filter=None):
     bridge_control.stop_bridges(STATE_DIR, pids, _kill)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     script = str(Path(__file__).resolve())
-    detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
+    popen_kwargs = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
+    else:
+        popen_kwargs["start_new_session"] = True   # POSIX：脱离终端会话，关终端不死（registration_monitor 同款）
     started = []
     children = []
     total = len(bots)
@@ -3128,7 +3132,7 @@ def _start_locked(bot_filter=None):
         proc = subprocess.Popen(
             [sys.executable, script, "run", "--bot", nm],
             stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            creationflags=detached, cwd=str(PROJECT),
+            cwd=str(PROJECT), **popen_kwargs,
         )
         started.append(nm)
         children.append((nm, proc))

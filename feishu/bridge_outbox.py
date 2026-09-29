@@ -14,6 +14,7 @@ import json
 import hashlib
 import os
 import re
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -493,6 +494,9 @@ def write_hooks_settings(state_dir, hooks_dir):
     post = (Path(hooks_dir) / "bridge_posttool.py").as_posix()
     pre = (Path(hooks_dir) / "bridge_pretool.py").as_posix()
     ups = (Path(hooks_dir) / "bridge_userprompt.py").as_posix()
+    # hook 命令必须钉解释器绝对路径：mac 没有 `python` 别名，裸 `python` 会让 hook 静默失效。
+    # 双引号包路径在 cmd.exe 与 POSIX shell 下都成立（shlex.quote 的单引号 cmd 不认）。
+    py = f'"{sys.executable}"'
     cfg = {
         # 🚫 飞书桥【禁用 AskUserQuestion】（2026-06-22 用户决议·根治）：裸工具名 deny = 把它从模型上下文整个拿掉，
         # 模型压根看不到、不会调 → 自然改用「普通文字 + 编号选项」(用户回数字即可)。一刀砍掉 picker 整条问题链：
@@ -506,15 +510,15 @@ def write_hooks_settings(state_dir, hooks_dir):
         "UserPromptSubmit": [{"matcher": "*", "hooks": [
             # Must finish before the model can call proactive send tools; this
             # active-turn record is the mechanical duplicate-send guard.
-            {"type": "command", "command": f'python "{ups}"', "timeout": 10}]}],
+            {"type": "command", "command": f'{py} "{ups}"', "timeout": 10}]}],
         "Stop": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": f'python "{stop}"', "timeout": 15, "async": True}]}],
+            {"type": "command", "command": f'{py} "{stop}"', "timeout": 15, "async": True}]}],
         "PostToolUse": [{"matcher": PROGRESS_TOOLS, "hooks": [
-            {"type": "command", "command": f'python "{post}"', "timeout": 10, "async": True}]}],
+            {"type": "command", "command": f'{py} "{post}"', "timeout": 10, "async": True}]}],
         # PreToolUse(AskUserQuestion→写 kind:"ask")保留但【现已 dormant】：上面 deny 后 AskUserQuestion 永不触发
         # → 此 hook 不再开火（留着是为「删 deny 即恢复」·不删它）。async 不阻塞。
         "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [
-            {"type": "command", "command": f'python "{pre}"', "timeout": 10, "async": True}]}],
+            {"type": "command", "command": f'{py} "{pre}"', "timeout": 10, "async": True}]}],
     }}
     Path(state_dir).mkdir(parents=True, exist_ok=True)   # fresh repo(link16/新机 clone)首跑状态目录还不存在·先建（xhs 里桥借住的 _autopilot 早有·故旧桥从没暴露这缺口）
     p = Path(state_dir) / "bridge-hooks.json"

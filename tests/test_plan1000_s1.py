@@ -172,6 +172,7 @@ class S13BashOnPathTests(unittest.TestCase):
              mock.patch.object(preflight, "_git_bash_path", return_value=None):
             self.assertEqual(preflight.check_bash_on_path().status, preflight.OK)
 
+    @unittest.skipUnless(os.name == "nt", "Windows user-PATH 配置；用例自身 patch os.name='nt'，POSIX 上 pathlib 无法实例化 WindowsPath")
     def test_configure_user_path_plan_lists_missing_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
             git_bin = Path(tmp) / "Git" / "bin"
@@ -200,7 +201,7 @@ class S14WmuxDefaultShellTests(unittest.TestCase):
             (Path(tmp) / "wmux" / "session.json").write_text(
                 json.dumps({"defaultShell": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"}), encoding="utf-8")
             with mock.patch.dict(os.environ, {"APPDATA": tmp}):
-                r = preflight.check_wmux_default_shell()
+                r = preflight.check_wmux_default_shell(platform="nt")
         self.assertEqual(r.status, preflight.WARN)
         self.assertIn("bash", r.detail)
 

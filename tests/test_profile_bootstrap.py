@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import os
 import sys
 import subprocess
 import shutil
@@ -33,8 +34,13 @@ class ProfileBootstrapTests(unittest.TestCase):
             self.assertNotIn("cc ccp ccp2", bashrc)
             self.assertIn("__link16_run_profile", bashrc)
             self.assertNotIn("alias ccp", bashrc)
-            ps5 = home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
-            self.assertIn("Function:global:$profileName", ps5.read_text(encoding="utf-8"))
+            if os.name == "nt":
+                ps5 = home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+                self.assertIn("Function:global:$profileName", ps5.read_text(encoding="utf-8"))
+            else:
+                zshrc = (home / ".zshrc").read_text(encoding="utf-8")
+                self.assertIn("__link16_run_profile", zshrc)
+                self.assertFalse((home / "Documents").exists())
 
     def test_never_creates_or_copies_auth_files(self):
         with tempfile.TemporaryDirectory() as tmp:

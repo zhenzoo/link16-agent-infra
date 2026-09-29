@@ -225,7 +225,9 @@ class RegistrationLifecycleTests(unittest.TestCase):
             self.assertNotIn("secret-private", json.dumps(state))
             self.assertNotIn("device-private", json.dumps(state))
             self.assertEqual(roster.call_args.args[4], "cxp")
-            self.assertEqual(roster.call_args.kwargs["cwd"], root.as_posix())
+            # register 落名册前会 resolve --cwd；macOS 的 /var → /private/var 软链会让
+            # 未 resolve 的比较失败，断言同样按 resolve 后的真路径比（Windows 上是恒等）。
+            self.assertEqual(roster.call_args.kwargs["cwd"], root.resolve().as_posix())
             self.assertEqual(post.call_count, 3)
             stack.enter_context(mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}))
             stack.enter_context(mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}))

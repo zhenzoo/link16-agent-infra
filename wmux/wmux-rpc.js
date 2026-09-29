@@ -91,7 +91,7 @@ async function rpc(method, params = {}) {
   const targets = [];
   if (process.env.WMUX_SOCKET_PATH) targets.push(process.env.WMUX_SOCKET_PATH);
   targets.push(pipeName());
-  const port = process.platform === "win32" ? tcpPort() : undefined;
+  const port = tcpPort();   // Unix socket 失败时的逃生通道，非 win32 也要能走
   let lastErr;
   for (const t of targets) {
     try { return await attempt(t, token, method, params); } catch (e) { lastErr = e; }

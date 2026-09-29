@@ -144,6 +144,38 @@ python feishu/windows_bootstrap.py --skip claude,codex --apply --yes
 
 ---
 
+## macOS 增量（PLAN-1140 · 只列与上文 Windows 流程的差异点，不重写全文）
+
+macOS 部署走同一套 §1–§8 顺序，差异集中在四处：
+
+1. **Stage 0 用 brew 替代 winget**（brew 本身不存在时先装它，官方脚本需交互输入开机密码）：
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash)"
+   brew install git gh python@3.13 node@22
+   ```
+   git 也可以用 `xcode-select --install`（Xcode CLT 自带）；清单统一走 brew 保证同源。
+   检测/执行器是 `feishu/macos_bootstrap.py`（`windows_bootstrap.py` 的 mac 对偶，默认只预览）：
+   ```bash
+   python3 feishu/macos_bootstrap.py
+   python3 feishu/macos_bootstrap.py --apply --yes
+   ```
+2. **wmux 只发 Apple Silicon .dmg，无包管理器渠道**：`macos_bootstrap --apply` 只会打开官方
+   下载页，由人把 `wmux.app` 拖进 `/Applications` 并打开一次；detect 看 `/Applications/wmux.app`。
+   非 arm64 的 Mac 装不了 wmux，整机不满足硬依赖。
+3. **profile 函数进 `~/.zshrc`**（zsh 兼容现有 bash 函数语法），不是 PowerShell profile；
+   PATH 收尾也写 `~/.zshrc`（brew bin / node@22 keg / `~/.local/bin`）。macOS 默认 UTF-8 locale，
+   `PYTHONUTF8` 一项恒绿，无需设置。
+4. **§9 开机自启对应 launchd LaunchAgent**：同一入口 `python3 feishu/service_installer.py plan /
+   apply --yes --expect <digest> / rollback` 在 mac 上自动选 MacOSBackend，写
+   `~/Library/LaunchAgents/com.link16.*.plist`（`launchctl bootstrap/bootout/enable/disable`），
+   before/after、digest、receipt、rollback 语义与 Windows 版一致。同理不要追求「未登录自启」：
+   wmux 是 GUI 应用，仍需登录后的窗口会话。
+
+其余（`.env` 跨机解析、bot 名册语义、注册流程、preflight 验收）两平台完全一致。
+
+---
+
+
 ## 0 · 心智模型（先懂为什么有这些步骤）
 
 桥 = **Python 半边**（lark SDK 连飞书云）+ **wmux 半边**（在本机托管 agent 会话）。两半之间靠仓库自带的 `wmux/wmux-rpc.js` 通信。新机器要补的东西分四类：

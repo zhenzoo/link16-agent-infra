@@ -54,6 +54,13 @@ def process_alive(pid):
                 return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
             finally:
                 kernel.CloseHandle(handle)
+        # 僵尸子进程（已退出但父进程还没 wait）对 os.kill(pid, 0) 恒报活；
+        # 先 waitpid(WNOHANG) 尝试回收，非本进程子进程会抛 ChildProcessError，退回信号探测。
+        try:
+            reaped, _status = os.waitpid(pid, os.WNOHANG)
+            return reaped == 0
+        except ChildProcessError:
+            pass
         os.kill(pid, 0)
         return True
     except (OSError, ValueError, TypeError):

@@ -1157,6 +1157,13 @@ def is_live(bot, screen: str) -> bool:
         return True
     tail = screen.rstrip()
     last = tail.rsplit("\n", 1)[-1].strip() if tail else ""
-    if last.startswith("$") and "MINGW64" in tail[-500:]:
+    if os.name == "nt":
+        if last.startswith("$") and "MINGW64" in tail[-500:]:
+            return False
+        return True
+    # POSIX 裸壳：zsh 提示符以 % 收尾、bash 以 $ 收尾（mac 上 wmux spawn 的是 zsh/bash，
+    # 形如 `bash-3.2$` / `user@host ~ %`）。仍保持保守：末行整行必须是「提示符词 + %/$
+    # 收尾」的形状才判死，忙碌 agent 的屏底是 spinner/状态栏，不会长成这样。
+    if re.fullmatch(r"(?:\S+\s+)*\S*[%$]", last):
         return False
     return True

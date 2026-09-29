@@ -119,7 +119,7 @@ last_reviewed: 2026-09-09
 
 | 依赖 | 说明 |
 |---|---|
-| **Windows** | 桥依赖 Windows 计划任务做开机自启。macOS 未适配（wmux 本身支持 macOS，是本仓这一侧还没做）。 |
+| **Windows 或 macOS** | 双平台单一代码路径（PLAN-1140）。Windows 侧开机自启 = 计划任务；macOS 侧 = launchd LaunchAgent（`service_installer.py` 自动选后端）。macOS 额外要求：**Apple Silicon**（wmux 只发 arm64 .dmg）与 **Homebrew**。 |
 | **GitHub CLI (`gh`)** | 验证每位 collaborator 自己的 GitHub 账号，再 clone private `main`；不共享 token。 |
 | **Python 3.12+** | `pip install -r feishu/requirements.txt`（lark-oapi + lark-channel-sdk） |
 | **Node.js** | 桥用一个 node 脚本跟 wmux daemon 通信（脚本仓库自带，见 `wmux/wmux-rpc.js`） |
@@ -472,7 +472,7 @@ python feishu/docio_cli.py coverage <产出目录>/manifest.json   # 判它到�
 
 ## 边界与现状
 
-- **Windows only**（开机自启依赖计划任务）。macOS 没适配。
+- **Windows + macOS 双平台**（Windows 开机自启 = 计划任务，macOS = launchd LaunchAgent）。macOS 侧需 Apple Silicon（wmux 依赖）与 Homebrew；Linux 未适配。
 - 核心场景是**每人的多台电脑**；团队可在 private collaborator 边界下共享代码，但每人的 `.env`、provider 登录、飞书组织和本机 roster 必须隔离。
 - 飞书端走**国内直连**（自动剥代理环境变量）。
 - 目前在 4 台 Windows 机器上运行。

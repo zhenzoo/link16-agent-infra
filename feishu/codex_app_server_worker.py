@@ -368,14 +368,21 @@ class MilestoneObserver:
 
 
 def _codex_native_default() -> Path:
-    candidates = [
-        # 旧：npm 全局安装的 @openai/codex
-        Path.home()
-        / "AppData/Roaming/npm/node_modules/@openai/codex/node_modules/"
-        "@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
-        # 新：Codex 官方原生安装
-        Path.home() / "AppData/Local/Programs/OpenAI/Codex/bin/codex.exe",
-    ]
+    if os.name == "nt":
+        candidates = [
+            # 旧：npm 全局安装的 @openai/codex
+            Path.home()
+            / "AppData/Roaming/npm/node_modules/@openai/codex/node_modules/"
+            "@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+            # 新：Codex 官方原生安装
+            Path.home() / "AppData/Local/Programs/OpenAI/Codex/bin/codex.exe",
+        ]
+    else:
+        candidates = [
+            Path.home() / ".codex" / "bin" / "codex",
+            Path("/opt/homebrew/bin/codex"),
+            Path("/usr/local/bin/codex"),
+        ]
     for path in candidates:
         if path.is_file():
             return path

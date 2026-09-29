@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Plan/apply/rollback the two Link16 Windows startup entries.
+"""Plan/apply/rollback the Link16 startup entries.
 
 The installer owns persistent configuration only:
 
-* HKCU Run ``wmux``
-* Task Scheduler ``FeishuBridge-Autostart``
+* Windows: HKCU Run ``wmux`` + Task Scheduler ``FeishuBridge-Autostart``
+* macOS: ``~/Library/LaunchAgents/com.link16.*.plist``（launchd LaunchAgent）
 * disabling the legacy ``AutopilotWatchdog-Autostart`` task
 
 It never starts/stops production processes.  Apply is bound to the exact plan
@@ -14,10 +14,14 @@ digest the user reviewed; rollback is compare-and-swap against the receipt.
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
+import plistlib
+import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -33,6 +37,9 @@ RECEIPT_DIR = STATE_DIR / "receipts"
 BRIDGE_TASK = "FeishuBridge-Autostart"
 LEGACY_TASK = "AutopilotWatchdog-Autostart"
 RUN_VALUE = "wmux"
+MAC_WMUX_LABEL = "com.link16.wmux"
+MAC_BRIDGE_LABEL = "com.link16.feishu-bridge"
+MAC_LEGACY_LABEL = "com.link16.autopilot-watchdog"
 SCHEMA = 1
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -120,8 +127,11 @@ def desired_state(repo: Path, user: str, pythonw: Path, wmux_exe: Path, bot_coun
 
 
 def _looks_managed_wmux(state: dict) -> bool:
-    value = str(state.get("value") or "").strip().strip('"').replace("/", "\\").casefold()
-    return state.get("exists") and value.endswith("\\wmux.exe") and "\\wmux\\" in value
+    value = str(state.get("value") or "").strip().strip('"')
+    if os.name == "nt":
+        normalized = value.replace("/", "\\").casefold()
+        return bool(state.get("exists")) and normalized.endswith("\\wmux.exe") and "\\wmux\\" in normalized
+    return bool(state.get("exists")) and "wmux" in value.casefold()
 
 
 def _looks_managed_bridge(state: dict) -> bool:
@@ -180,6 +190,15 @@ def build_plan(before: dict, desired: dict, *, machine: str, user: str, repo: Pa
     }
     body["digest"] = _digest(body)
     return body
+
+
+def get_backend():
+    """按平台选启动项后端：nt → WindowsBackend，darwin → MacOSBackend（launchd）。"""
+    if os.name == "nt":
+        return WindowsBackend()
+    if sys.platform == "darwin":
+        return MacOSBackend()
+    raise OSError(f"service installer 暂不支持该平台：{sys.platform}")
 
 
 class WindowsBackend:
@@ -303,6 +322,143 @@ else { Disable-ScheduledTask -TaskName $env:LINK16_TASK_NAME | Out-Null }
                          env={"LINK16_TASK_NAME": name})
 
 
+class MacOSBackend:
+    """launchd LaunchAgent 后端：~/Library/LaunchAgents/com.link16.*.plist。
+
+    get_* 只读 plist 文件（plan 必须零副作用，不调 launchctl）；
+    bootstrap/bootout/enable/disable 只在 set/delete/restore 等写操作里执行。
+    语义状态（value/enabled/arguments…）嵌进 plist 的 ``Link16State`` 键，
+    回读时原样取出，保证 apply 写后回读与 desired 严格相等。
+    """
+
+    _TASK_LABELS = {BRIDGE_TASK: MAC_BRIDGE_LABEL, LEGACY_TASK: MAC_LEGACY_LABEL}
+
+    def __init__(self, agents_dir: Path | None = None):
+        if sys.platform != "darwin":
+            raise OSError(f"MacOSBackend 只支持 macOS（当前 {sys.platform}）")
+        self.agents_dir = (Path(agents_dir) if agents_dir
+                           else Path.home() / "Library" / "LaunchAgents")
+
+    def _plist_path(self, label: str) -> Path:
+        return self.agents_dir / f"{label}.plist"
+
+    def _domain(self) -> str:
+        return f"gui/{os.getuid()}"
+
+    def _launchctl(self, *args: str, check: bool = True) -> None:
+        done = subprocess.run(
+            ["launchctl", *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15, check=False,
+        )
+        if check and done.returncode != 0:
+            raise OSError((done.stderr or done.stdout or "launchctl failed").strip())
+
+    def _write_plist(self, label: str, payload: dict) -> Path:
+        self.agents_dir.mkdir(parents=True, exist_ok=True)
+        path = self._plist_path(label)
+        data = plistlib.dumps(payload, sort_keys=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                                        dir=self.agents_dir)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        return path
+
+    def _install(self, label: str, payload: dict, enabled: bool) -> None:
+        path = self._write_plist(label, payload)
+        domain = self._domain()
+        self._launchctl("bootout", f"{domain}/{label}", check=False)  # 未加载不算错
+        self._launchctl("bootstrap", domain, str(path))
+        self._launchctl("enable" if enabled else "disable", f"{domain}/{label}")
+
+    def _remove(self, label: str) -> None:
+        self._launchctl("bootout", f"{self._domain()}/{label}", check=False)
+        self._plist_path(label).unlink(missing_ok=True)
+
+    def _read_plist(self, label: str) -> tuple[dict, str] | None:
+        path = self._plist_path(label)
+        if not path.is_file():
+            return None
+        raw = path.read_bytes()
+        return plistlib.loads(raw), raw.decode("utf-8", errors="replace")
+
+    def get_run(self) -> dict:
+        found = self._read_plist(MAC_WMUX_LABEL)
+        if not found:
+            return {"exists": False, "value": "", "type": "REG_SZ"}
+        payload, _raw = found
+        meta = payload.get("Link16State") or {}
+        return {"exists": True, "value": str(meta.get("value") or ""),
+                "type": str(meta.get("type") or "REG_SZ")}
+
+    def set_run(self, state: dict) -> None:
+        wmux = str(state["value"]).strip().strip('"')
+        program = ["/usr/bin/open", wmux] if wmux.casefold().endswith(".app") else [wmux]
+        self._install(MAC_WMUX_LABEL, {
+            "Label": MAC_WMUX_LABEL,
+            "ProgramArguments": program,
+            "RunAtLoad": True,
+            "Link16State": {"value": str(state["value"]),
+                            "type": str(state.get("type") or "REG_SZ")},
+        }, enabled=True)
+
+    def delete_run(self) -> None:
+        self._remove(MAC_WMUX_LABEL)
+
+    def get_task(self, name: str) -> dict:
+        found = self._read_plist(self._TASK_LABELS.get(name, name))
+        if not found:
+            return {"exists": False}
+        payload, raw = found
+        state = dict(payload.get("Link16State") or {})
+        state["exists"] = True
+        state.setdefault("enabled", True)
+        state["raw_xml"] = raw
+        return state
+
+    def set_bridge_task(self, state: dict) -> None:
+        arguments = shlex.split(str(state.get("arguments") or ""))
+        embedded = {key: value for key, value in state.items() if key != "raw_xml"}
+        self._install(MAC_BRIDGE_LABEL, {
+            "Label": MAC_BRIDGE_LABEL,
+            "ProgramArguments": [str(state["execute"]), *arguments],
+            "WorkingDirectory": str(state.get("working_directory") or REPO),
+            "RunAtLoad": True,
+            "StandardOutPath": str(STATE_DIR / f"{MAC_BRIDGE_LABEL}.out.log"),
+            "StandardErrorPath": str(STATE_DIR / f"{MAC_BRIDGE_LABEL}.err.log"),
+            "Link16State": embedded,
+        }, enabled=bool(state.get("enabled", True)))
+
+    def restore_task(self, name: str, raw_xml: str, enabled: bool) -> None:
+        label = self._TASK_LABELS.get(name, name)
+        payload = plistlib.loads(raw_xml.encode("utf-8"))
+        meta = dict(payload.get("Link16State") or {})
+        meta["enabled"] = bool(enabled)
+        payload["Link16State"] = meta
+        self._install(label, payload, enabled=bool(enabled))
+
+    def unregister_task(self, name: str) -> None:
+        self._remove(self._TASK_LABELS.get(name, name))
+
+    def set_task_enabled(self, name: str, enabled: bool) -> None:
+        label = self._TASK_LABELS.get(name, name)
+        self._launchctl("enable" if enabled else "disable", f"{self._domain()}/{label}")
+        found = self._read_plist(label)
+        if found:
+            payload, _raw = found
+            meta = dict(payload.get("Link16State") or {})
+            meta["enabled"] = bool(enabled)
+            payload["Link16State"] = meta
+            self._write_plist(label, payload)
+
+
 def inspect_state(backend) -> dict:
     return {
         "wmux_run": backend.get_run(),
@@ -371,19 +527,31 @@ def rollback_receipt(receipt: dict, backend) -> list[str]:
 
 
 def _identity(repo: Path):
-    machine = os.environ.get("COMPUTERNAME") or "unknown-machine"
-    domain = os.environ.get("USERDOMAIN") or machine
-    username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
-    user = f"{domain}\\{username}"
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    if not pythonw.is_file():
-        found = shutil.which("pythonw")
-        pythonw = Path(found) if found else pythonw
-    try:
-        from windows_bootstrap import wmux_executable
-        wmux = wmux_executable()
-    except Exception:  # noqa: BLE001
+    if os.name == "nt":
+        machine = os.environ.get("COMPUTERNAME") or "unknown-machine"
+        domain = os.environ.get("USERDOMAIN") or machine
+        username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
+        user = f"{domain}\\{username}"
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        if not pythonw.is_file():
+            found = shutil.which("pythonw")
+            pythonw = Path(found) if found else pythonw
+        try:
+            from windows_bootstrap import wmux_executable
+            wmux = wmux_executable()
+        except Exception:  # noqa: BLE001
+            wmux = None
+    else:
+        machine = socket.gethostname() or "unknown-machine"
+        user = getpass.getuser() or os.environ.get("USER") or "unknown-user"
+        pythonw = Path(sys.executable)
         wmux = None
+        for candidate in (Path("/Applications/wmux.app"),
+                          Path.home() / "Applications" / "wmux.app",
+                          shutil.which("wmux")):
+            if candidate and Path(candidate).exists():
+                wmux = Path(candidate)
+                break
     roster = HERE / "bridge-bots.local.json"
     try:
         bot_count = len(json.loads(roster.read_text(encoding="utf-8")).get("bots") or [])
@@ -394,12 +562,14 @@ def _identity(repo: Path):
 
 def make_plan(backend, repo=REPO):
     machine, user, pythonw, wmux, bot_count = _identity(Path(repo))
-    if not pythonw.is_file() or not wmux or not Path(wmux).is_file():
+    wmux_ok = bool(wmux) and (Path(wmux).is_file()
+                              or (os.name != "nt" and Path(wmux).exists()))  # mac 允许 .app 目录
+    if not pythonw.is_file() or not wmux_ok:
         missing = []
         if not pythonw.is_file():
-            missing.append("pythonw")
-        if not wmux or not Path(wmux).is_file():
-            missing.append("wmux stable executable")
+            missing.append("pythonw" if os.name == "nt" else "python")
+        if not wmux_ok:
+            missing.append("wmux stable executable" if os.name == "nt" else "wmux.app / wmux CLI")
         raise OSError("缺少 service installer 前置：" + ", ".join(missing))
     before = inspect_state(backend)
     desired = materialize_desired(
@@ -412,7 +582,7 @@ def make_plan(backend, repo=REPO):
 
 def _print_plan(plan: dict) -> None:
     print(f"Link16 启动项计划 · digest={plan['digest']}")
-    print(f"  Windows 用户：{plan['user']}")
+    print(f"  {'Windows 用户' if os.name == 'nt' else '用户'}：{plan['user']}")
     print(f"  仓库：{plan['repo']}")
     print(f"  Python：{plan['pythonw']}")
     print(f"  本机 bot：{plan['bot_count']} 只")
@@ -427,7 +597,7 @@ def _print_plan(plan: dict) -> None:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Link16 Windows 启动项 plan/apply/rollback")
+    parser = argparse.ArgumentParser(description="Link16 启动项 plan/apply/rollback（Windows 计划任务 / macOS launchd）")
     sub = parser.add_subparsers(dest="command", required=True)
     plan_p = sub.add_parser("plan")
     plan_p.add_argument("--json", action="store_true")
@@ -441,7 +611,7 @@ def main(argv=None) -> int:
     rollback_p.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
-        backend = WindowsBackend()
+        backend = get_backend()
         if args.command == "rollback":
             if not args.yes:
                 parser.error("rollback 需要 --yes")
