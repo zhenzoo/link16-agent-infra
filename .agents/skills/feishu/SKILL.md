@@ -60,6 +60,7 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 发聊天语音条（仅用户本轮明确说“语音条”时） | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"`；其余音频走 `send_feishu_media.py` |
 | 图片直发私聊（仅用户本轮明确说“直接发图片”时） | `python feishu/feishu_bridge.py send --bot <我> --image <路径> [--text "…"]`；其余图片走 `send_feishu_media.py` |
 | 发布 Markdown / HTML 在线文档（默认唯一入口） | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
+| 本地 Markdown 改了，同步到已有在线文档（链接不变） | `python feishu/feishu_bridge.py send --bot <文档所属 bot> --doc <文件.md> --update <docx/wiki 链接>`：按块比对，只删改有变化的块，未变块及其评论保留；线上有本地没有的图片等块时拒绝，确认以本地为准才加 `--overwrite`；读取后文档被他人改动即中止。表格形态 `--table-layout auto|native|vertical`（创建也可用；更新时 auto 沿用线上形态）。不要自写比对脚本或直调 feishu_docs 内部函数 |
 | 参照现有表格新建同类型飞书Sheet | 读 [原生Sheet参考表复刻流程](references/SOP-020-native-sheet-from-reference.md)，再按 `lark-cli skills read lark-shared` 与 `lark-cli skills read lark-sheets` 调用飞书API；先只读参考表，声明式新建，最后回读工作簿、单元格、样式、合并、冻结、下拉和条件格式 |
 | 将已有 HTML、视频交互或三维查看器发布为妙搭应用链接 | 读 [HTML→妙搭流程](references/SOP-010-html-to-miaoda.md)，复用 `lark-apps`，保留已有应用入口；资源清单和发布核验用 `python feishu/miaoda_delivery.py --help` |
 | 把 bot 建的在线文档交给主人（主人说“这份给我/交接给我/要发给别人看”，或 PRD 交付稿） | `python feishu/docio_cli.py transfer-owner <url>`（默认 dry-run，确认后加 `--apply`）；用**创建它的那只 bot** 身份跑，主人 = 该 bot 的 owner 文件，bot 保留可管理；不挂群、不改其他协作者与分享设置 |

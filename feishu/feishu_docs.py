@@ -32,7 +32,7 @@ if str(_ORCH) not in sys.path:
     sys.path.insert(0, str(_ORCH))
 from feishu_rest import api  # noqa: E402
 from doc_structure import (DocStructureError, source_body, compile_blocks,
-                           table_cells, verify as verify_structure)
+                           table_cells, contract, verify as verify_structure)
 
 BASE = "https://open.feishu.cn/open-apis"
 
@@ -681,6 +681,58 @@ def _insert_real_table(token, doc_id, index, rows, cols, texts, cell_elements=No
     return True, filled, failed
 
 
+def _write_roots(token, doc_id, by_id, roots, index=0):
+    """Write compiled root blocks into the page from ``index``; tables cell by cell.
+
+    Shared by create and in-place update so both land blocks the same way.
+    """
+    i = 0
+    tables_real = batches = 0
+    table_cells_attempted = table_cells_filled = table_cells_failed = 0
+    while i < len(roots):
+        bid = roots[i]
+        if (by_id.get(bid) or {}).get("block_type") == 31:
+            rows, cols, runs = table_cells(by_id, by_id[bid])
+            texts = ["".join(el["text_run"].get("content", "") for el in cell) for cell in runs]
+            if rows and cols:
+                table_cells_attempted += rows * cols
+                ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts, runs)
+                table_cells_filled += filled
+                table_cells_failed += len(failed)
+                if ok and not failed:
+                    tables_real += 1
+                    index += 1
+                    i += 1
+                    continue
+            raise DocStructureError(f"表格写入未完成，文档 {doc_id} 未通过交付检查；禁止竖线降级")
+        part = []
+        while i < len(roots) and (by_id.get(roots[i]) or {}).get("block_type") != 31:
+            candidate = part + [roots[i]]
+            if len(_subtree(by_id, candidate)) > _BLOCK_BATCH_LIMIT and part:
+                break
+            part = candidate
+            i += 1
+        if not part:
+            continue
+        try:
+            d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/descendant?document_revision_id=-1",
+                    token=token,
+                    body={"children_id": part, "index": index,
+                          "descendants": _subtree(by_id, part)})
+        except json.JSONDecodeError:  # 不重试非幂等请求，也不把未知结果当成功
+            d = None
+        if not d or d.get("code") != 0:
+            raise DocStructureError(f"原生块写入未完成，文档 {doc_id} 未通过交付检查；禁止纯文本降级")
+        else:
+            index += len(part)
+            batches += 1
+
+    return {"tables_real": tables_real, "batches": batches,
+            "table_cells_attempted": table_cells_attempted,
+            "table_cells_filled": table_cells_filled,
+            "table_cells_failed": table_cells_failed}
+
+
 def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                         markdown: str = None, title: str = None,
                         grant_open_id: str = None, perm: str = "edit",
@@ -723,46 +775,12 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     by_id = {b["block_id"]: b for b in blocks}
     doc_id = _create_docx(token, doc_title)
 
-    index = i = 0
-    tables_real = tables_degraded = batches = 0
-    table_cells_attempted = table_cells_filled = table_cells_failed = 0
-    while i < len(first_level):
-        bid = first_level[i]
-        if (by_id.get(bid) or {}).get("block_type") == 31:
-            rows, cols, runs = table_cells(by_id, by_id[bid])
-            texts = ["".join(el["text_run"].get("content", "") for el in cell) for cell in runs]
-            if rows and cols:
-                table_cells_attempted += rows * cols
-                ok, filled, failed = _insert_real_table(token, doc_id, index, rows, cols, texts, runs)
-                table_cells_filled += filled
-                table_cells_failed += len(failed)
-                if ok and not failed:
-                    tables_real += 1
-                    index += 1
-                    i += 1
-                    continue
-            raise DocStructureError(f"表格写入未完成，文档 {doc_id} 未通过交付检查；禁止竖线降级")
-        part = []
-        while i < len(first_level) and (by_id.get(first_level[i]) or {}).get("block_type") != 31:
-            candidate = part + [first_level[i]]
-            if len(_subtree(by_id, candidate)) > _BLOCK_BATCH_LIMIT and part:
-                break
-            part = candidate
-            i += 1
-        if not part:
-            continue
-        try:
-            d = api("POST", f"{_DOCX}/{doc_id}/blocks/{doc_id}/descendant?document_revision_id=-1",
-                    token=token,
-                    body={"children_id": part, "index": index,
-                          "descendants": _subtree(by_id, part)})
-        except json.JSONDecodeError:  # 不重试非幂等请求，也不把未知结果当成功
-            d = None
-        if not d or d.get("code") != 0:
-            raise DocStructureError(f"原生块写入未完成，文档 {doc_id} 未通过交付检查；禁止纯文本降级")
-        else:
-            index += len(part)
-            batches += 1
+    written = _write_roots(token, doc_id, by_id, first_level)
+    tables_real, batches = written["tables_real"], written["batches"]
+    tables_degraded = 0
+    table_cells_attempted = written["table_cells_attempted"]
+    table_cells_filled = written["table_cells_filled"]
+    table_cells_failed = written["table_cells_failed"]
 
     actual, roots = _read_doc_blocks(token, doc_id)
     verification = verify_structure(blocks, first_level, actual, roots)
@@ -781,6 +799,119 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
             "table_cells_failed": table_cells_failed,
             "granted": granted, "grant_error": grant_error,
             "visibility": vis_ok, "visibility_error": vis_err}
+
+
+def _docx_id(token, doc):
+    """Resolve a docx/wiki URL or bare token to the docx document id."""
+    match = re.search(r"/(docx|wiki)/([A-Za-z0-9]+)", doc or "")
+    kind, value = (match.group(1), match.group(2)) if match else ("docx", (doc or "").strip())
+    if kind == "wiki":
+        d = api("GET", f"{BASE}/wiki/v2/spaces/get_node?token={value}", token=token)
+        node = (d.get("data") or {}).get("node") or {}
+        if node.get("obj_type") != "docx":
+            raise DocStructureError(f"wiki 节点不是 docx（{node.get('obj_type') or d.get('msg')}），不能按 Markdown 原位更新")
+        return node["obj_token"]
+    if not re.fullmatch(r"[A-Za-z0-9]{20,}", value):
+        raise DocStructureError(f"不是飞书 docx 链接或 token：{doc}")
+    return value
+
+
+def _doc_revision(token, doc_id):
+    d = api("GET", f"{_DOCX}/{doc_id}", token=token)
+    revision = ((d.get("data") or {}).get("document") or {}).get("revision_id")
+    if d.get("code") != 0 or revision is None:
+        raise DocStructureError(f"读不到文档版本 {d.get('code')} {d.get('msg')}")
+    return revision
+
+
+def _root_signatures(blocks, roots):
+    """One comparable fingerprint per root under the same contract as verify()."""
+    signatures, foreign = [], []
+    for rid in roots:
+        try:
+            signatures.append(json.dumps(contract(blocks, [rid]), sort_keys=True, ensure_ascii=False))
+        except DocStructureError:
+            signatures.append(f"foreign:{rid}")
+            foreign.append(rid)
+    return signatures, foreign
+
+
+def update_text_doc(app_id: str, app_secret: str, doc: str, file_path=None, *,
+                    markdown: str = None, table_layout: str = "auto",
+                    overwrite: bool = False, dry_run: bool = False) -> dict:
+    """Bring an existing docx in line with local Markdown, keeping unchanged blocks.
+
+    Same convert/compile/write/verify chain as ``publish_text_as_doc``. Root blocks
+    are compared under ``doc_structure.contract``; only differing ranges are deleted
+    and rewritten (from the end backwards so earlier indexes stay valid), so blocks
+    that did not change keep their ids and the comments anchored on them. Online
+    blocks outside the text contract (images, files, boards added in Feishu) stop
+    the diff: removing them needs an explicit ``overwrite``. The revision is
+    re-read before the first write; a concurrent edit aborts without writing.
+    """
+    import difflib
+
+    src = Path(file_path) if file_path else None
+    if markdown is None:
+        if not src or not src.exists():
+            raise DocImportError(f"找不到源文件：{file_path}")
+        markdown = src.read_text(encoding="utf-8", errors="replace")
+    token = _tenant_token(app_id, app_secret)
+    doc_id = _docx_id(token, doc)
+    revision_before = _doc_revision(token, doc_id)
+    live, live_roots = _read_doc_blocks(token, doc_id)
+    live_by_id = {b["block_id"]: b for b in live}
+    if table_layout == "auto" and any((live_by_id.get(r) or {}).get("block_type") == 31 for r in live_roots):
+        table_layout = "native"  # keep the layout the document was published with
+    body, layout = source_body(markdown, table_layout)
+    blocks, first_level = _convert_markdown(token, body)
+    blocks, first_level, _vertical = compile_blocks(blocks, first_level, layout)
+    by_id = {b["block_id"]: b for b in blocks}
+
+    live_sigs, foreign = _root_signatures(live, live_roots)
+    source_sigs, _ = _root_signatures(blocks, first_level)
+    if overwrite:
+        opcodes = [("replace", 0, len(live_roots), 0, len(first_level))] if live_roots else                   [("insert", 0, 0, 0, len(first_level))]
+    else:
+        if foreign:
+            kinds = sorted({str((live_by_id.get(r) or {}).get("block_type")) for r in foreign})
+            raise DocStructureError(
+                f"线上有 {len(foreign)} 个本地源里没有的非文字块（block_type {', '.join(kinds)}，如在线插入的图片/附件），"
+                "比对更新会删掉它们；确认要以本地为准整篇重写时加 --overwrite")
+        opcodes = [op for op in difflib.SequenceMatcher(None, live_sigs, source_sigs, autojunk=False).get_opcodes()
+                   if op[0] != "equal"]
+    deleted = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag in ("delete", "replace"))
+    inserted = sum(j2 - j1 for tag, _i1, _i2, j1, j2 in opcodes if tag in ("insert", "replace"))
+    plan = {"doc_id": doc_id, "table_layout": layout, "revision_before": revision_before,
+            "live_roots": len(live_roots), "source_roots": len(first_level),
+            "kept_roots": len(live_roots) - deleted, "deleted_roots": deleted, "inserted_roots": inserted,
+            "deleted_preview": [_plain_text_of(live_by_id, live_roots[k])[:40]
+                                for tag, i1, i2, _j1, _j2 in opcodes if tag in ("delete", "replace")
+                                for k in range(i1, i2)][:10],
+            "mode": "overwrite" if overwrite else "diff"}
+    if dry_run or not opcodes:
+        return {**plan, "dry_run": dry_run, "changed": bool(opcodes),
+                "url": _doc_url(token, doc_id), "token": doc_id, "type": "docx"}
+    if _doc_revision(token, doc_id) != revision_before:
+        raise DocStructureError("读取后文档已被改动，未写入；请重新运行以基于最新版本比对")
+    stats = {"tables_real": 0, "batches": 0, "table_cells_attempted": 0,
+             "table_cells_filled": 0, "table_cells_failed": 0}
+    for tag, i1, i2, j1, j2 in reversed(opcodes):
+        if tag in ("delete", "replace"):
+            d = _throttled_write("DELETE", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children/batch_delete"
+                                 "?document_revision_id=-1", token, {"start_index": i1, "end_index": i2})
+            if not d or d.get("code") != 0:
+                raise DocStructureError(f"删除旧块失败 {(d or {}).get('code')} {(d or {}).get('msg')}；文档可能处于部分更新状态，请重跑")
+        if tag in ("insert", "replace"):
+            written = _write_roots(token, doc_id, by_id, first_level[j1:j2], i1)
+            for key in stats:
+                stats[key] += written[key]
+    actual, roots = _read_doc_blocks(token, doc_id)
+    verification = verify_structure(blocks, first_level, actual, roots)
+    kept_ids = len(set(live_roots) & set(roots))
+    return {**plan, **stats, **verification, "changed": True, "kept_root_ids": kept_ids,
+            "revision_after": _doc_revision(token, doc_id),
+            "url": _doc_url(token, doc_id), "token": doc_id, "type": "docx", "tables_degraded": 0}
 
 
 def _read_doc_blocks(token, doc_id):

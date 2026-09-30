@@ -3723,8 +3723,12 @@ def _read_send_text(*, text=None, file_as_text=None, legacy_file=None):
     return Path(file_as_text).read_text(encoding="utf-8") if file_as_text else text
 
 
-def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
+def _publish_online_doc(bot, path, *, grant_open_id=None, name=None,
+                        update=None, overwrite=False, table_layout="auto"):
     """Publish verified text natively; use import only for HTML/Office.
+
+    ``update`` names an existing docx/wiki URL: local Markdown is diffed into it in
+    place (``feishu_docs.update_text_doc``) instead of creating a new document.
 
     The native path is the no-``drive:drive`` production path discovered in
     PLAN-980.  A returned URL is accepted only when the document was made
@@ -3733,11 +3737,22 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None):
     import feishu_docs
 
     errors = []
+    if update:
+        if Path(path).suffix.lower() not in _NATIVE_TEXT_DOC_SUFFIXES:
+            raise RuntimeError("--update 只支持 Markdown/TXT 原位更新；HTML/Office 请新建")
+        result = feishu_docs.update_text_doc(
+            bot["app_id"], bot["app_secret"], update, path,
+            table_layout=table_layout, overwrite=overwrite,
+        )
+        if result.get("structure_verified") is True or result.get("changed") is False:
+            return result, "online_doc_updated"
+        raise RuntimeError("原位更新后未通过结构核验")
     if Path(path).suffix.lower() in _NATIVE_TEXT_DOC_SUFFIXES:
         try:
             result = feishu_docs.publish_text_as_doc(
                 bot["app_id"], bot["app_secret"], path,
                 grant_open_id=grant_open_id, title=name, visibility="tenant",
+                table_layout=table_layout,
             )
             accessible = bool(result.get("visibility") is True
                               or (grant_open_id and result.get("granted") is True))
@@ -3833,7 +3848,7 @@ def _send_size_label(text, doc_stats):
 
 
 def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_name=None,
-             online_override=False):
+             online_override=False, update=None, overwrite=False, table_layout="auto"):
     """独立短进程主动推送一条到飞书 DM（REST·不依赖常驻桥进程）。
     目标优先级：--to > 会话 chat_id > owner open_id（私聊）。文字复用 guaranteed_send 四级兜底。
     --image <path>：把本地图发到 DM（封面/截图/图表/架构图直达手机·SDK upload_media→OutboundImage）。
@@ -3841,7 +3856,11 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
     如实失败并保留 receipt，绝不自动发送本地原文件附件。file-as-text 也不参与自动降级。
     给「Claude 在终端会话里主动发飞书」用——不是群喇叭 notify.py，是 bot 自己的 DM 通道。"""
     assert_sender_identity(bot_name)
-    if doc:
+    if (update or overwrite) and not doc:
+        print("❌ --update/--overwrite 需要配合 --doc <本地 Markdown>", file=sys.stderr); sys.exit(2)
+    # --update names an existing online URL, so it is an explicit online action by itself;
+    # the global switch only governs whether new online copies get created.
+    if doc and not update:
         try:
             artifact_delivery.require_online_publication(
                 explicit_online=online_override
@@ -3870,7 +3889,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
     doc_stats = _doc_source_stats(doc)
     # 文档授权对象 = 显式 open_id 目标 > owner > 会话 open_id（bot 建的文档必授权否则 owner 打不开）
     grant_oid = None
-    if doc:
+    if doc and not update:
         grant_oid = ((to if (to or "").startswith("ou_") else None)
                      or load_owner(bot_name) or (load_session(bot_name) or {}).get("open_id"))
     try:
@@ -3896,8 +3915,13 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             try:
                 res, doc_delivery_mode = await asyncio.to_thread(
                     _publish_online_doc, bot, doc, grant_open_id=grant_oid, name=doc_name,
+                    update=update, overwrite=overwrite, table_layout=table_layout,
                 )
                 doc_url, doc_ok = res.get("url"), True
+                if doc_delivery_mode == "online_doc_updated":
+                    blog(bot_name, f"send --doc --update 原位更新（{res.get('mode')}）：保留 {res.get('kept_roots')} "
+                                   f"/ 删 {res.get('deleted_roots')} / 插 {res.get('inserted_roots')} 个顶层块，"
+                                   f"revision {res.get('revision_before')}→{res.get('revision_after', '未变')}")
                 if doc_delivery_mode == "online_doc_native":
                     blog(bot_name, "send --doc 已由同 bot 原生 docx 链发布"
                                    f"（真表格 {res.get('tables_real', 0)} / 降级 {res.get('tables_degraded', 0)}）")
@@ -4031,6 +4055,12 @@ def main():
     ap.add_argument("--name", default=None, help="send：--doc 的飞书文档标题（不给=取文件名）")
     ap.add_argument("--explicit-online", action="store_true",
                     help="send --doc：用户本轮明确要求在线副本时，单次覆盖关闭的全局开关；不修改全局值")
+    ap.add_argument("--update", default=None,
+                    help="send --doc：把本地 Markdown 原位更新到这篇已有飞书文档（docx/wiki 链接），只改有变化的块")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="send --doc --update：线上有本地没有的图片等非文字块时，确认以本地为准整篇重写")
+    ap.add_argument("--table-layout", default="auto", choices=("auto", "native", "vertical"),
+                    help="send --doc：表格形态；auto=PRD 原生表格、其余字段列表；--update 时 auto 沿用线上已有形态")
     ap.add_argument("--to", default=None, help="send：目标 chat_id/open_id（不给=会话 chat_id → owner open_id）")
     ap.add_argument("--json", action="store_true", help="send：机器可读 JSON 输出")
     args = ap.parse_args()
@@ -4062,7 +4092,7 @@ def main():
         _bots = load_bots()
         bot_name = args.bot or (_bots[0]["name"] if _bots else "default")
         cmd_send(bot_name, body, args.to, args.json, args.image, args.doc, args.name,
-                 args.explicit_online)
+                 args.explicit_online, args.update, args.overwrite, args.table_layout)
     elif args.cmd == "doctor":
         cmd_doctor(args.bot)
 
