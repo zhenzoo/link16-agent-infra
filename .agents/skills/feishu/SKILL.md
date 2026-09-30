@@ -1,6 +1,6 @@
 ---
 name: feishu
-description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HTML、新建或编辑在线文档、在已有文档插入/嵌入图片音频视频、大文件在线审阅、发送消息和语音，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，以及 bot 注册、改名、历史、a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
+description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、表格、Wiki、多维表格或白板链接的完整内容（含别人只分享给主人的、L1–L4 密级文档；优先于 lark-* 官方技能和网页抓取），按在线链接查本地 HTML、新建或编辑在线文档、在已有文档插入/嵌入图片音频视频、大文件在线审阅、发送消息和语音，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，以及 bot 注册、改名、历史、a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
 ---
 
 # Feishu — Link16 核心工具入口
@@ -32,7 +32,18 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 
 找不到时停止并提示用户运行 Link16 profile/bootstrap 安装流程；不要猜用户名、盘符或私人配置目录。下面所有命令均在 `<root>` 下执行。
 
-## 2. 常用工具
+## 2. 读飞书链接（唯一路径）
+
+收到飞书文档、表格、Wiki、多维表格或白板链接要读内容时，只走这一条，一直走到覆盖率判定：
+
+1. `python feishu/docio_cli.py read "<URL>" --into <目录>`：先用当前 bot 身份读；
+2. 报 `denied(resource)`（没分享给 bot，常见于别人只分享给主人的文档）→ 同一命令加 `--as-user`，用主人账号读；它会播报用户与授权到期时间。仍没有可用用户授权时，才请主人执行 `lark-cli auth login --profile <bot>` 点一次确认；
+3. 报 `denied(scope)` → `docio doctor <URL>` 按 SOP-140 §2 补权限；
+4. 读结果看 `manifest.json` 与 `docio coverage`：正文 `content.html`、表格 `sheet-*.json`、图片附件在 `assets/`。L3/L4 下载受限时图片会自动走预览，不算失败。
+
+不要改用网页抓取（WebFetch、Jina、浏览器登录态）、直接调 `lark-cli docs +fetch` 或按 `lark-doc` 等 vendor 技能自选身份、或自写开放平台脚本。vendor `lark-*` 只作字段与 XML 说明书。已经走了这些路或它们报错时，回到上面第 1 步；docio 本身报错先 `docio doctor`，不要另造读取工具。
+
+## 3. 常用工具
 
 | 用户要做什么 | 确定性入口 |
 |---|---|
@@ -76,7 +87,7 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 
 注册公司租户 bot 时，默认传 `--tenant-kind enterprise`（或给出能由 registry 唯一识别的公司群），让注册器自动附加 `docs-consume`：`sheets:spreadsheet:read`、`docs:document.media:download`、`board:whiteboard:node:read`。注册个人租户 bot 时传 `--tenant-kind personal`，默认不扩这三项；只有该 bot 确实承担在线文档完整解析时才显式加 `--capability docs-consume`。不要按 bot 名、机器名或 Codex/Claude profile 猜飞书租户。
 
-## 3. 自动回址与主动发送
+## 4. 自动回址与主动发送
 
 - `p2a`：真人私聊 bot。普通回复由桥自动回原 DM，渲染为互动卡片。
 - `p2a-ext`：真人在群里 @bot。普通回复由桥自动回原群并 @发起人，最终答案按卡片容量发一张或多张互动卡片。
@@ -86,7 +97,7 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 
 最终答案过长可以拆成多张卡；“不重复”指同一 answer 的同一内容分片不得被手动、自动或重试链再次投递，不是强制每轮只能一张卡。不要把隐藏推理、命令全文或工具输入/输出塞进最终卡片；用户可见进度只走桥定义的安全摘要。
 
-## 4. 交付规则
+## 5. 交付规则
 
 持续任务的可见成果何时交付，遵循用户级共享沟通段；本 skill 只处理成果形成后的在线策略、回执与本机打开，不另设一套 Stage／Step 或时间节奏。
 

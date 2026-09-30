@@ -402,7 +402,7 @@ def classify_failure(text, bot):
     etype = str(error.get("type") or "").lower()
     code = error.get("code")
     scope_hint = "按 SPEC-220 基线开通；需审批的 scope 换免审批替代"
-    resource_hint = f"把 {bot} 加为该资源的协作者。加再多 scope 都没用"
+    resource_hint = f"主人能看就加 --as-user 用主人账号读；bot 自己的文档才把 {bot} 加为协作者。加再多 scope 都没用"
 
     if subtype in SCOPE_DENIED or error.get("missing_scopes"):
         missing = ", ".join(error.get("missing_scopes") or []) or "见原始报错"

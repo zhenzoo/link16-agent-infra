@@ -68,7 +68,7 @@ tenant token；进程结束即失效，不落盘、不进日志、不进 keychai
 ## 4 · 读一个飞书链接
 
 1. `docio inspect <url>` — 先确认资源类型、canonical token 与本次需要的 scope。
-2. `docio read <url> --into <dir>` — 产出 `content.md`、`assets/`、`manifest.json`。
+2. `docio read <url> --into <dir>` — 产出 `manifest.json`，文档正文 `content.html`、表格 `sheet-*.json`，图片附件在 `assets/`。
 3. `docio coverage <dir>/manifest.json` — **必须跑**。正文成功不等于读全；
    覆盖率对不上就是没读全，按 manifest 里 `missing` 的原因回到第 6 节处置。
 
@@ -103,7 +103,7 @@ L4 低于可管理时直接下载图片/附件会被拒，`docio read` 自动改
 | 报告 | 含义 | 下一步 |
 |---|---|---|
 | `denied(scope)` | 权限清单不够（会列出缺哪几条） | level 3 → 生成开通链接；level 4 → 换 SPEC-220 的免审批替代 |
-| `denied(resource)` | 资源没分享给这个身份 | `docio share <url> --apply` 把协作群挂上。**加 scope 无效** |
+| `denied(resource)` | 资源没分享给这个身份 | 主人本人能看（含别人只分享给主人的）→ `docio read <url> --into <dir> --as-user`；bot 自己建的文档才用 `docio share <url> --apply` 挂协作群。**加 scope 无效** |
 | `denied(role)` | 能访问，但这次操作需要更高角色 | 让 `full_access` 的人提升角色或代为操作 |
 | `参数/用法错误` | 与权限无关 | 按 `inspect` 的真实类型与接口契约修正 |
 | `网络失败` | 与权限无关 | 已自动重试三次；持续失败查 DNS / 代理 |
