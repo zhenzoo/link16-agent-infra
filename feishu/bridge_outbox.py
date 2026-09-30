@@ -852,6 +852,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         labels = [label for label in labels if label]
         snapshot = snapshot or steps
         plan = next((step for step in reversed(snapshot) if step.get("kind") == "plan"), None)
+        replay = not labels
         if not labels:
             # A tool-only refresh is not a heartbeat.  When a card must be
             # replaced, repeat the latest real plan/commentary context instead
@@ -880,7 +881,21 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         if plan and _safe_count(plan.get("plan_total")):
             header += f" · 计划 {_safe_count(plan.get('plan_completed'))}/{_safe_count(plan.get('plan_total'))}"
         header += f" · 工具 {tool_total} 次"
-        return _card_text(header, labels)
+        text = _card_text(header, labels)
+        if replay and len(text) > CARD_BUDGET:
+            # The replayed context was already delivered in full; one card
+            # with its tail is enough (2026-10-01 tb26-baseball-2 re-sent an
+            # 11k-char plan as 5 messages per replay).
+            keep = CARD_BUDGET - len(header) - 4
+            tail = "\n\n".join(labels)[-keep:]
+            text = _card_text(header, ["…" + tail])
+        return text
+
+    def _has_body(steps):
+        return any(
+            step.get("kind") != "tool" and str(step.get("label") or "").strip()
+            for step in steps
+        )
 
     def _v2_dirty():
         acked = state.get("v2_acked") or {}
@@ -1020,6 +1035,15 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             # Current card is full, or has been edited in place for
             # PROGRESS_CARD_MAX_AGE_SEC: seal it and continue from unseen
             # changes so the owner gets a fresh message at the bottom.
+            if not card_aged and not _has_body(dirty):
+                # Full only because the visible context itself exceeds a card.
+                # A tool tick adds nothing readable; replaying that context as
+                # new messages on every tick floods the chat.  Wait for real
+                # commentary/plan changes (or the age rule) instead.
+                _v2_ack(dirty)
+                state["last_flush"] = clock()
+                _checkpoint_progress()
+                return
             mid, card_ids = await _v2_new_cards(dirty)
         else:
             mid, card_ids = await _v2_new_cards(card_steps)

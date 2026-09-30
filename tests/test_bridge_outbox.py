@@ -318,6 +318,51 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("NEW TOOL", replacement)
         self.assertNotIn("OLD TOOL", replacement)
 
+    async def test_oversized_commentary_is_not_resent_on_tool_ticks(self):
+        # 2026-10-01 tb26-baseball-2: an 11k-char answer+plan written mid-turn
+        # was re-sent as 5 new messages on every tool counter change.
+        state, cards = fresh_state(), FakeCards()
+        long_text = "💬 " + "\n".join(f"第{i}行：整机描述框架与当前计划" for i in range(600))
+        steps = [{"event_id": "c1", "revision": 1, "kind": "commentary", "label": long_text}]
+        await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t",
+                           "steps": steps}], state, cards)
+        first_send = len(cards.new)
+        self.assertGreater(first_send, 1)
+        for count in range(1, 6):
+            steps = steps[:1] + [{"event_id": "tools:a", "revision": count, "kind": "tool",
+                                  "tool_count": count, "label": "TOOL"}]
+            await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t",
+                               "steps": steps}], state, cards)
+        self.assertEqual(len(cards.new), first_send)
+        self.assertEqual(cards.edits, [])
+        steps = steps + [{"event_id": "c2", "revision": 1, "kind": "commentary",
+                          "label": "💬 正在写入 PRD-154"}]
+        await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t",
+                           "steps": steps}], state, cards)
+        self.assertEqual(len(cards.new), first_send + 1)
+        self.assertIn("正在写入 PRD-154", cards.new[-1][0])
+        self.assertNotIn("整机描述框架", cards.new[-1][0])
+
+    async def test_replayed_oversized_context_fits_one_card(self):
+        state, cards = fresh_state(), FakeCards()
+        long_text = "💬 " + "\n".join(f"第{i}行：计划" for i in range(600))
+        first = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "c1", "revision": 1, "kind": "commentary", "label": long_text},
+        ]}
+        second = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            *first["steps"],
+            {"event_id": "tools:a", "revision": 1, "kind": "tool", "tool_count": 1, "label": "TOOL"},
+        ]}
+        await self.drain([first], state, cards)
+        sent = len(cards.new)
+        state["v2_mid_opened_at"] = -bridge_outbox.PROGRESS_CARD_MAX_AGE_SEC  # aged card
+        await self.drain([second], state, cards)
+        self.assertEqual(len(cards.new), sent + 1)
+        replay = cards.new[-1][0]
+        self.assertLessEqual(len(replay), bridge_outbox.CARD_BUDGET)
+        self.assertIn("第599行：计划", replay)
+        self.assertNotIn("第0行：计划", replay)
+
     async def test_milestone_tool_only_snapshot_does_not_create_thinking_card(self):
         state, cards = fresh_state(), FakeCards()
         record = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
