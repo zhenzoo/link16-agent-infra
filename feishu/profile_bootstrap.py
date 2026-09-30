@@ -258,7 +258,18 @@ def migrate_legacy_adapter(home: Path) -> dict:
 
 
 def _is_link(path: Path) -> bool:
-    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None:
+        return bool(is_junction())
+    # Path.is_junction only exists from Python 3.12 (TB25 runs 3.11); on
+    # Windows a junction is the other entry os.readlink resolves.
+    try:
+        os.readlink(path)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def retired_vendor_skill_rows(home: Path, skill_dirs, *, apply=False) -> list[dict]:

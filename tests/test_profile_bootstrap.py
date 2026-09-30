@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import os
 import sys
 import subprocess
 import shutil
@@ -212,6 +213,33 @@ class ProfileBootstrapTests(unittest.TestCase):
             backups = list((home / ".agents" / "link16-disabled-skills").glob("lark-doc-*"))
             self.assertEqual(len(backups), 1)
             self.assertTrue((backups[0] / "SKILL.md").is_file())
+
+    @unittest.skipUnless(sys.platform == "win32", "directory junctions are Windows-only")
+    def test_dangling_junction_is_retired_without_path_is_junction(self):
+        """Python 3.11 has no Path.is_junction; TB25 kept 5 dangling lark-* junctions."""
+        import _winapi
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            target = home / ".agents" / "skills" / "lark-doc"
+            target.mkdir(parents=True)
+            claude_skills = home / ".claude-personal" / "skills"
+            claude_skills.mkdir(parents=True)
+            link = claude_skills / "lark-doc"
+            _winapi.CreateJunction(str(target), str(link))
+            target.rmdir()
+            saved = {cls: vars(cls)["is_junction"]
+                     for cls in type(link).__mro__ if "is_junction" in vars(cls)}
+            for cls in saved:
+                delattr(cls, "is_junction")     # behave like Python 3.11
+            try:
+                rows = pb.retired_vendor_skill_rows(home, [claude_skills], apply=False)
+                self.assertEqual([r["status"] for r in rows], ["ready-to-retire"])
+                rows = pb.retired_vendor_skill_rows(home, [claude_skills], apply=True)
+            finally:
+                for cls, method in saved.items():
+                    setattr(cls, "is_junction", method)
+            self.assertEqual([r["status"] for r in rows], ["retired"])
+            self.assertFalse(os.path.lexists(link))
 
     def test_new_registry_accepts_selected_runtimes_and_requires_isolated_unique_homes(self):
         with tempfile.TemporaryDirectory() as tmp:
