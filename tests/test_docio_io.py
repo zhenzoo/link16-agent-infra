@@ -24,6 +24,10 @@ def response(data, code=0, ok=True):
     return subprocess.CompletedProcess([], code, json.dumps({"ok": ok, "data": data}), "")
 
 
+def revision_info(revision):
+    return response({"document": {"document_id": "T", "revision_id": revision}})
+
+
 def cell_data(cells=None):
     return {"revision": 12, "has_more": False, "ranges": [{
         "actual_range": "G14:G14", "row_indices": [14], "col_indices": ["G"],
@@ -83,21 +87,79 @@ class ReadContractTests(unittest.TestCase):
                   {"block_id": "c", "block_type": 33, "view": {"view_type": 1},
                    "children": ["b"]},
                   {"block_id": "d", "block_type": 30, "sheet": {"token": "synthetic-sheet"}}]
-        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", return_value=response({"items": blocks, "has_more": False})) as run:
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", side_effect=[
+                response({"items": blocks, "has_more": False}), revision_info(12)]) as run:
             d._docx_inventory("T", 12, "bot", Path(folder), manifest)
         self.assertTrue(manifest["inventory"]["complete"])
         kinds = [row["kind"] for row in manifest["missing"]]
         self.assertIn("sheet", kinds)          # 真正还没实现的资源仍要报
         self.assertNotIn("file", kinds)        # file 由 _download_files 负责
         self.assertNotIn("view", kinds)        # view 只是承载子块的容器
-        args = run.call_args.args[0]
-        self.assertEqual(json.loads(args[args.index("--params") + 1])["document_revision_id"], 12)
+        args = run.call_args_list[0].args[0]
+        # 只读协作者不能按具体版本号取块（1770032），必须取最新版再核对版本
+        self.assertEqual(json.loads(args[args.index("--params") + 1])["document_revision_id"], -1)
+
+    def test_revision_drift_during_listing_is_incomplete(self):
+        manifest = {"resources": {}, "missing": []}
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", side_effect=[
+                response({"items": [{"block_id": "a", "block_type": 2, "text": {}}], "has_more": False}),
+                revision_info(13)]):
+            blocks = d._docx_inventory("T", 12, "bot", Path(folder), manifest)
+        self.assertEqual(len(blocks), 1)
+        self.assertFalse(manifest["inventory"]["complete"])
+        self.assertIn("revision 12", manifest["missing"][0]["verdict"])
+
+    def test_cli_error_on_stderr_keeps_real_message(self):
+        """lark-cli prints failures to stderr; they must not become 'no JSON'."""
+        failure = subprocess.CompletedProcess([], 1, "", json.dumps(
+            {"ok": False, "error": {"type": "api", "code": 1770032, "message": "forBidden"}}))
+        manifest = {"resources": {}, "missing": []}
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", return_value=failure):
+            d._docx_inventory("T", 12, "bot", Path(folder), manifest)
+        self.assertIn("forBidden", manifest["missing"][0]["verdict"])
+
+    def test_label_refused_download_falls_back_to_preview(self):
+        """L3/L4 readers cannot download media but can preview the same bytes."""
+        refused = subprocess.CompletedProcess([], 1, "", json.dumps({"ok": False, "error": {
+            "type": "authorization", "subtype": "permission_denied",
+            "message": "current identity does not have export permission for this document media"}}))
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            (out / "assets").mkdir()
+            saved = out / "assets" / "image-0001.png"
+
+            def preview(args, **kwargs):
+                if "+media-download" in args:
+                    return refused
+                saved.write_bytes(b"png-bytes")
+                return response({"saved_path": str(saved)})
+
+            with patch.object(d, "run_lark", side_effect=preview) as run:
+                record, failure = d._fetch_media("M", out / "assets" / "image-0001.bin", "bot", out, 60)
+            self.assertEqual(record["via"], "preview")
+            self.assertEqual(record["path"], "assets/image-0001.png")
+            self.assertEqual(run.call_count, 2)
+
+            with patch.object(d, "run_lark", return_value=refused):
+                record, failure = d._fetch_media("M", out / "assets" / "image-0002.bin", "bot", out, 60)
+            self.assertIsNone(record)
+            verdict = d.classify_failure(failure, "bot")
+            self.assertEqual(verdict["lane"], "role")   # 已分享、能阅读，不能误报“没分享”
+
+    def test_unrelated_download_failure_does_not_try_preview(self):
+        missing = subprocess.CompletedProcess([], 1, "", json.dumps({"ok": False, "error": {
+            "type": "api", "code": 1770032, "message": "forBidden"}}))
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", return_value=missing) as run:
+            record, _ = d._fetch_media("M", Path(folder) / "image-0001.bin", "bot", Path(folder), 60)
+        self.assertIsNone(record)
+        self.assertEqual(run.call_count, 1)
 
     def test_view_without_children_is_still_reported(self):
         """A wrapper with nothing inside means its resource could not be located."""
         manifest = {"resources": {}, "missing": []}
         blocks = [{"block_id": "c", "block_type": 33, "view": {"view_type": 1}}]
-        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", return_value=response({"items": blocks, "has_more": False})):
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", side_effect=[
+                response({"items": blocks, "has_more": False}), revision_info(1)]):
             d._docx_inventory("T", 1, "bot", Path(folder), manifest)
         self.assertEqual([row["kind"] for row in manifest["missing"]], ["view"])
 

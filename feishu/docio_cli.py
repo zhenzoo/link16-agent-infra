@@ -395,6 +395,10 @@ def classify_failure(text, bot):
                 "hint": entry.get("action") or entry.get("message") or "",
                 "lane": lane, "code": code}
 
+    if "export permission" in str(error.get("message") or ""):
+        return {"verdict": f"denied(role) · {bot} 能阅读，但密级或文档设置不给下载",
+                "hint": "L3 需给 bot 可编辑、L4 需可管理；或由所有者放开下载设置",
+                "lane": "role", "code": code}
     if subtype in RESOURCE_DENIED or (etype == "authorization" and code in RESOURCE_CODES):
         return {"verdict": f"denied(resource) · 这份资源没分享给这只 bot（code {code}）",
                 "hint": resource_hint, "lane": "resource", "code": code}
@@ -533,13 +537,16 @@ def _now():
 
 
 def _json_out(result):
-    try:
-        value = json.loads(result.stdout)
-        if not isinstance(value, dict):
-            raise ValueError("expected JSON object")
-        return value
-    except (ValueError, TypeError):
-        return {"ok": False, "error": {"type": "response", "message": "CLI未返回有效JSON对象"}}
+    # lark-cli writes its failure envelope to stderr with an empty stdout;
+    # reading stdout alone turned every real API error into "no JSON".
+    for stream in (result.stdout, result.stderr):
+        try:
+            value = json.loads(stream)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, dict):
+            return value
+    return {"ok": False, "error": {"type": "response", "message": "CLI未返回有效JSON对象"}}
 
 
 def _data(result):
@@ -615,7 +622,14 @@ _TEXT_BLOCKS.update(f"heading{n}" for n in range(1, 10))
 
 
 def _docx_inventory(token, revision, bot, out_dir, manifest):
-    """Enumerate native blocks at the fetched revision, including unsupported kinds."""
+    """Enumerate native blocks at the fetched revision, including unsupported kinds.
+
+    Blocks are listed at the latest revision (-1), then the document's current
+    revision is checked against the text's. Pinning document_revision_id
+    directly is refused (1770032) for read-only collaborators, which silently
+    dropped every image of documents shared view-only. Revisions only grow, so
+    an unchanged revision after the listing proves every page came from it.
+    """
     inventory = {"complete": False, "source": "docx.blocks", "blocks": 0}
     manifest["inventory"] = inventory
     blocks, seen, cursor = [], set(), None
@@ -623,7 +637,7 @@ def _docx_inventory(token, revision, bot, out_dir, manifest):
         if revision is None:
             raise ValueError("正文没有revision，不能绑定资源盘点版本")
         while True:
-            params = {"page_size": 500, "document_revision_id": revision}
+            params = {"page_size": 500, "document_revision_id": -1}
             if cursor:
                 params["page_token"] = cursor
             result = run_lark(["api", "GET", f"/open-apis/docx/v1/documents/{token}/blocks",
@@ -633,12 +647,16 @@ def _docx_inventory(token, revision, bot, out_dir, manifest):
                 raise ValueError("原生块列表或分页状态缺失")
             blocks.extend(data["items"])
             if not data["has_more"]:
-                inventory.update(complete=True, blocks=len(blocks))
                 break
             cursor = data.get("page_token")
             if not cursor or cursor in seen:
                 raise ValueError("原生块分页游标缺失或重复")
             seen.add(cursor)
+        info = _data(run_lark(["api", "GET", f"/open-apis/docx/v1/documents/{token}", "--as", "bot"], profile=bot))
+        current = (info.get("document") or {}).get("revision_id")
+        if current != revision:
+            raise ValueError(f"读取期间文档已改动：正文为 revision {revision}，块清单读完时为 {current}；请重读")
+        inventory.update(complete=True, blocks=len(blocks))
     except ValueError as exc:
         manifest["missing"].append({"kind": "inventory", "verdict": str(exc)})
     (out_dir / "blocks.json").write_text(json.dumps(blocks, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -661,6 +679,32 @@ def _docx_inventory(token, revision, bot, out_dir, manifest):
     return blocks
 
 
+def _fetch_media(media_token, target, bot, out_dir, timeout):
+    """Fetch one document image/attachment; return (record, failure_text).
+
+    Download needs export rights, which secure labels withhold from readers
+    (L3 below edit, L4 below full_access). Preview is the reader's own path and
+    returns the same bytes (sha256-equal on images and MP4, 2026-09-30), so a
+    download refused for export rights retries once through preview.
+    """
+    result = run_lark(["docs", "+media-download", "--token", media_token,
+                       "--output", target.relative_to(out_dir).as_posix(), "--as", "bot"],
+                      profile=bot, timeout=timeout, cwd=str(out_dir))
+    payload, via, saved = _json_out(result), "download", target
+    if payload.get("ok") is not True and "export permission" in str((payload.get("error") or {}).get("message")):
+        result = run_lark(["docs", "+media-preview", "--token", media_token,
+                           "--output", target.with_suffix("").relative_to(out_dir).as_posix(), "--as", "bot"],
+                          profile=bot, timeout=timeout, cwd=str(out_dir))
+        payload, via = _json_out(result), "preview"
+        saved = out_dir / str((payload.get("data") or {}).get("saved_path") or "")
+    if result.returncode == 0 and payload.get("ok") is True and saved.is_file() and saved.stat().st_size > 0:
+        return {"token": media_token, "via": via,
+                "path": saved.resolve().relative_to(out_dir.resolve()).as_posix(),
+                "bytes": saved.stat().st_size,
+                "sha256": hashlib.sha256(saved.read_bytes()).hexdigest()}, ""
+    return None, (result.stdout or "") + (result.stderr or "")
+
+
 def _download_files(blocks, bot, out_dir, assets, manifest):
     """Download `file` blocks (attachments: video, audio, documents).
 
@@ -677,21 +721,13 @@ def _download_files(blocks, bot, out_dir, assets, manifest):
             manifest["missing"].append({"kind": "file", "block_id": block.get("block_id"),
                                         "verdict": "file 块没有 token，无法下载"})
             continue
-        target = assets / f"file-{index + 1:04d}.bin"
-        result = run_lark(["docs", "+media-download", "--token", file_token,
-                           "--output", target.relative_to(out_dir).as_posix(), "--as", "bot"],
-                          profile=bot, timeout=900, cwd=str(out_dir))
-        if (result.returncode == 0 and _json_out(result).get("ok") is True
-                and target.exists() and target.stat().st_size > 0):
+        record, failure = _fetch_media(file_token, assets / f"file-{index + 1:04d}.bin", bot, out_dir, 900)
+        if record:
             got += 1
-            records.append({"token": file_token, "name": name,
-                            "path": target.relative_to(out_dir).as_posix(),
-                            "bytes": target.stat().st_size,
-                            "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+            records.append({**record, "name": name})
         else:
             manifest["missing"].append({
-                "kind": "file", "token": file_token, "name": name,
-                **classify_failure((result.stdout or "") + (result.stderr or ""), bot)})
+                "kind": "file", "token": file_token, "name": name, **classify_failure(failure, bot)})
     manifest["resources"]["files"] = {"declared": len(files), "fetched": got, "assets": records}
     return got
 
@@ -728,19 +764,13 @@ def _read_docx(url, token, bot, out_dir, manifest):
         if not img_token:
             manifest["missing"].append({"kind": "image", "verdict": "原生图片块缺少token"})
             continue
-        target = assets / f"image-{index + 1:04d}.bin"
-        media = run_lark(["docs", "+media-download", "--token", img_token,
-                          "--output", target.relative_to(out_dir).as_posix(), "--as", "bot"],
-                         profile=bot, timeout=300, cwd=str(out_dir))
-        if media.returncode == 0 and _json_out(media).get("ok") is True and target.exists() and target.stat().st_size > 0:
+        record, failure = _fetch_media(img_token, assets / f"image-{index + 1:04d}.bin", bot, out_dir, 300)
+        if record:
             got += 1
-            asset_records.append({"token": img_token, "path": target.relative_to(out_dir).as_posix(),
-                                  "bytes": target.stat().st_size,
-                                  "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+            asset_records.append(record)
         else:
             manifest["missing"].append({
-                "kind": "image", "token": img_token, "name": name,
-                **classify_failure((media.stdout or "") + (media.stderr or ""), bot)})
+                "kind": "image", "token": img_token, "name": name, **classify_failure(failure, bot)})
     manifest["resources"]["images"] = {"declared": len(refs), "fetched": got, "assets": asset_records}
     _download_files(blocks, bot, out_dir, assets, manifest)
 
