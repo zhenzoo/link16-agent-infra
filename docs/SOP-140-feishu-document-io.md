@@ -91,6 +91,7 @@ L4 低于可管理时直接下载图片/附件会被拒，`docio read` 自动改
 1. `python -m pytest tests/test_docio_io.py tests/test_docio_identity.py tests/test_docio_coverage.py -q`；
 2. 拿一份 bot 只有阅读权的 L3/L4 带图文档跑第 4 节，确认块清单完整、图片 `via: preview` 全数取到；
 3. 拿一份多分表的表格跑第 4 节，确认每个分表 `fetched_rows == declared_rows`。
+4. 拿一份含多张数据表、单表记录超过 500 条的多维表格跑第 4 节，确认每张表 `complete: true`。
 
 任何一项不过就回退 lark-cli 版本（`npm install -g @larksuite/cli@<旧版本>`）再修 docio。
 

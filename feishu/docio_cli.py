@@ -482,48 +482,53 @@ def cmd_inspect(args):
     return 0 if info.get("ok") else 2
 
 
+def _api_pages(path, bot, page_size):
+    """GET every page of an open-api list through lark-cli; raise on any gap."""
+    items, cursor, seen = [], None, set()
+    while True:
+        params = {"page_size": page_size, **({"page_token": cursor} if cursor else {})}
+        result = run_lark(["api", "GET", path, "--params", json.dumps(params), "--as", "bot"],
+                          profile=bot, timeout=300)
+        payload = _json_out(result)
+        data = payload.get("data")
+        if result.returncode != 0 or payload.get("ok") is not True or not isinstance(data, dict):
+            # Keep the raw envelope so classify_failure can read its code/subtype.
+            raise ValueError((result.stdout or "") + (result.stderr or ""))
+        if not isinstance(data.get("items"), list) and data.get("has_more"):
+            raise ValueError("分页数据缺失")
+        items.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            return items
+        cursor = data.get("page_token")
+        if not cursor or cursor in seen:
+            raise ValueError("分页游标缺失或重复")
+        seen.add(cursor)
+
+
 def _read_bitable(url, token, bot, out_dir, manifest):
     """多维表格：先列出所有数据表，再逐表把记录读全。
 
-    分页由接口的 has_more/page_token 控制；任何一页失败都进 missing，
-    绝不用"第一页读到了"当成整表读全。
+    走 lark-cli api 调 bitable/v1：bot 基线已有 bitable:app(:readonly)；lark-cli 新版
+    base +table-list / +record-list 要求另开 base:table:read、base:record:read，且参数
+    已改为 --base-token / --offset / --limit（2026-09-30 实测），旧写法整条失败。
+    任何一页失败都进 missing，绝不用"第一页读到了"当成整表读全。
     """
-    listed = run_lark(["base", "+table-list", "--app-token", token, "--as", "bot"],
-                      profile=bot, timeout=300)
-    payload = _json_out(listed)
-    if listed.returncode != 0 or payload.get("ok") is not True:
-        manifest["missing"].append({"kind": "bitable",
-                                    **classify_failure((listed.stdout or "") + (listed.stderr or ""), bot)})
+    base = f"/open-apis/bitable/v1/apps/{token}/tables"
+    try:
+        tables = _api_pages(base, bot, 100)
+    except ValueError as exc:
+        manifest["missing"].append({"kind": "bitable", **classify_failure(str(exc), bot)})
         return
-    tables = ((payload.get("data") or {}).get("items")) or []
-    manifest["inventory"] = {"complete": True, "source": "base.table-list", "tables": len(tables)}
+    manifest["inventory"] = {"complete": True, "source": "bitable.tables", "tables": len(tables)}
     summary = []
     for table in tables:
         table_id = table.get("table_id")
-        rows, cursor, guard, ok = [], None, set(), True
-        while True:
-            cmd = ["base", "+record-list", "--app-token", token, "--table-id", table_id,
-                   "--page-size", "500", "--as", "bot"]
-            if cursor:
-                cmd += ["--page-token", cursor]
-            got = run_lark(cmd, profile=bot, timeout=300)
-            body = (_json_out(got).get("data") or {})
-            if got.returncode != 0 or not isinstance(body.get("items"), list):
-                manifest["missing"].append({
-                    "kind": "bitable-records", "table_id": table_id,
-                    **classify_failure((got.stdout or "") + (got.stderr or ""), bot)})
-                ok = False
-                break
-            rows.extend(body["items"])
-            if not body.get("has_more"):
-                break
-            cursor = body.get("page_token")
-            if not cursor or cursor in guard:
-                manifest["missing"].append({"kind": "bitable-records", "table_id": table_id,
-                                            "verdict": "记录分页游标缺失或重复"})
-                ok = False
-                break
-            guard.add(cursor)
+        try:
+            rows, ok = _api_pages(f"{base}/{table_id}/records", bot, 500), True
+        except ValueError as exc:
+            rows, ok = [], False
+            manifest["missing"].append({"kind": "bitable-records", "table_id": table_id,
+                                        **classify_failure(str(exc), bot)})
         summary.append({"table_id": table_id, "name": table.get("name"),
                         "records": len(rows), "complete": ok})
         (out_dir / f"bitable-{table_id}.json").write_text(

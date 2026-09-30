@@ -157,6 +157,37 @@ class ReadContractTests(unittest.TestCase):
         self.assertIsNone(record)
         self.assertEqual(run.call_count, 1)
 
+    def test_bitable_reads_every_table_and_page_via_bitable_v1(self):
+        pages = [response({"items": [{"table_id": "t1", "name": "A"}, {"table_id": "t2", "name": "B"}],
+                           "has_more": False}),
+                 response({"items": [{"record_id": "r1"}], "has_more": True, "page_token": "p2"}),
+                 response({"items": [{"record_id": "r2"}], "has_more": False}),
+                 response({"has_more": False, "total": 0})]
+        manifest = {"resources": {}, "missing": []}
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", side_effect=pages) as run:
+            d._read_bitable("url", "BASE", "bot", Path(folder), manifest)
+        tables = manifest["resources"]["bitable"]["tables"]
+        self.assertEqual([(t["records"], t["complete"]) for t in tables], [(2, True), (0, True)])
+        self.assertEqual(manifest["missing"], [])
+        first = run.call_args_list[0].args[0]
+        # 走 bot 基线已有的 bitable/v1，而不是要求新 scope 的 base +table-list
+        self.assertEqual(first[:3], ["api", "GET", "/open-apis/bitable/v1/apps/BASE/tables"])
+        self.assertIn("p2", run.call_args_list[2].args[0][4])
+
+    def test_bitable_failures_keep_the_real_error_lane(self):
+        denied = subprocess.CompletedProcess([], 3, "", json.dumps({"ok": False, "error": {
+            "type": "authorization", "subtype": "missing_scope", "missing_scopes": ["bitable:app:readonly"]}}))
+        manifest = {"resources": {}, "missing": []}
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", return_value=denied):
+            d._read_bitable("url", "BASE", "bot", Path(folder), manifest)
+        self.assertEqual(manifest["missing"][0]["lane"], "scope")
+        repeat = response({"items": [{"record_id": "r"}], "has_more": True, "page_token": "same"})
+        manifest = {"resources": {}, "missing": []}
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", side_effect=[
+                response({"items": [{"table_id": "t1"}], "has_more": False}), repeat, repeat]):
+            d._read_bitable("url", "BASE", "bot", Path(folder), manifest)
+        self.assertFalse(manifest["resources"]["bitable"]["tables"][0]["complete"])
+
     def test_view_without_children_is_still_reported(self):
         """A wrapper with nothing inside means its resource could not be located."""
         manifest = {"resources": {}, "missing": []}
