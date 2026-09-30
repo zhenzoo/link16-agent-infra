@@ -41,7 +41,9 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 3. 报 `denied(scope)` → `docio doctor <URL>` 按 SOP-140 §2 补权限；
 4. 读结果看 `manifest.json` 与 `docio coverage`：正文 `content.html`、表格 `sheet-*.json`、图片附件在 `assets/`。L3/L4 下载受限时图片会自动走预览，不算失败。
 
-不要改用网页抓取（WebFetch、Jina、浏览器登录态）、直接调 `lark-cli docs +fetch` 或按 `lark-doc` 等 vendor 技能自选身份、或自写开放平台脚本。vendor `lark-*` 只作字段与 XML 说明书。已经走了这些路或它们报错时，回到上面第 1 步；docio 本身报错先 `docio doctor`，不要另造读取工具。
+不要改用网页抓取（WebFetch、Jina、浏览器登录态）、直接调 `lark-cli docs +fetch` 或按官方说明书自选身份、或自写开放平台脚本。已经走了这些路或它们报错时，回到上面第 1 步；docio 本身报错先 `docio doctor`，不要另造读取工具。
+
+官方 `lark-*` 说明书一律用 `lark-cli skills read <名字>`（子文件如 `lark-cli skills read lark-doc/references/lark-doc-xml.md`）读取，与已装引擎同版本；遇到 `../lark-drive/SKILL.md` 这类打不开的相对链接也这样读。docio 不覆盖的文档/云盘操作（文内关键词定位、历史版本、移动、评论、权限、密级、上传）按对应说明书直接用 lark-cli，显式 `--as bot`，资源没分享给 bot 且主人能看时才 `--as user`。
 
 ## 3. 常用工具
 
@@ -58,7 +60,7 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 发聊天语音条（仅用户本轮明确说“语音条”时） | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"`；其余音频走 `send_feishu_media.py` |
 | 图片直发私聊（仅用户本轮明确说“直接发图片”时） | `python feishu/feishu_bridge.py send --bot <我> --image <路径> [--text "…"]`；其余图片走 `send_feishu_media.py` |
 | 发布 Markdown / HTML 在线文档（默认唯一入口） | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
-| 参照现有表格新建同类型飞书Sheet | 读 [原生Sheet参考表复刻流程](references/SOP-020-native-sheet-from-reference.md)，再按`lark-shared`与`lark-sheets`调用飞书API；先只读参考表，声明式新建，最后回读工作簿、单元格、样式、合并、冻结、下拉和条件格式 |
+| 参照现有表格新建同类型飞书Sheet | 读 [原生Sheet参考表复刻流程](references/SOP-020-native-sheet-from-reference.md)，再按 `lark-cli skills read lark-shared` 与 `lark-cli skills read lark-sheets` 调用飞书API；先只读参考表，声明式新建，最后回读工作簿、单元格、样式、合并、冻结、下拉和条件格式 |
 | 将已有 HTML、视频交互或三维查看器发布为妙搭应用链接 | 读 [HTML→妙搭流程](references/SOP-010-html-to-miaoda.md)，复用 `lark-apps`，保留已有应用入口；资源清单和发布核验用 `python feishu/miaoda_delivery.py --help` |
 | 把 bot 建的在线文档交给主人（主人说“这份给我/交接给我/要发给别人看”，或 PRD 交付稿） | `python feishu/docio_cli.py transfer-owner <url>`（默认 dry-run，确认后加 `--apply`）；用**创建它的那只 bot** 身份跑，主人 = 该 bot 的 owner 文件，bot 保留可管理；不挂群、不改其他协作者与分享设置 |
 | 明确发送原文件附件 | `python feishu/send_feishu_file.py --bot <我> --to <oc_群/ou_人> --file <路径>` |
@@ -109,8 +111,8 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 - Markdown/TXT 优先走不依赖 `drive:drive` 的原生 docx；HTML/Office 才优先走 import。在线失败时按需运行权限审计并给修复入口，不擅自降低交付形态。
 - 用户要“像某张飞书表格一样”时，`一样`默认指原生Sheet资源类型、字段、布局和交互能力相同，不等于复制参考表正文。必须先按SOP-020回读参考表的真实结构，再用`+workbook-create`声明式新建；不得把Doc原生表、Markdown表或Excel导入冒充同类型Sheet，也不得为省事改写参考表。
 - 研究、计划和日常回复默认用纵向标题、段落与列表，手机阅读优先；正式PRD按需要使用原生表格。不要把本地Markdown里的竖线表格直接塞进飞书普通文字块，也不把用户偏好解释成禁止任何表格。用户要比较时用同一内容展示真实原生样式。
-- Markdown创建的机械闸在 `feishu/doc_structure.py`：非PRD表格编译为原生字段列表并保留链接；PRD简单原生表格先检查全篇预算，复杂表格/媒体转 `lark-doc` 专用资源流程。写入后完整分页回读正文、链接、样式和结构，`structure_verified=true`才准返回成功。失败不再纯文本降级，也不得用import绕过检查。
-- 更新已有在线文档先读 `lark-doc` 的XML与资源规范，再走 `python feishu/docio_cli.py write <url> --patch <json>`；补丁 `docx.format=xml`，写入前绑定当前revision，已获授权则加 `--apply`。整篇覆盖/追加自动构造全文核验目标；局部替换必须提供 `expected_document` 完整XML。`doc_xml_structure.py`逐项核对全文、链接、原生列表/表格、样式与资源标识后才报告成功。不要直接调用裸 `lark-cli +update` 绕过回读闸；保留已有评论/资源，局部内容变化不能擅自整篇覆盖。
+- Markdown创建的机械闸在 `feishu/doc_structure.py`：非PRD表格编译为原生字段列表并保留链接；PRD简单原生表格先检查全篇预算，复杂表格/媒体转 `lark-cli skills read lark-doc` 的专用资源流程。写入后完整分页回读正文、链接、样式和结构，`structure_verified=true`才准返回成功。失败不再纯文本降级，也不得用import绕过检查。
+- 更新已有在线文档先读 `lark-cli skills read lark-doc/references/lark-doc-xml.md` 的XML与资源规范，再走 `python feishu/docio_cli.py write <url> --patch <json>`；补丁 `docx.format=xml`，写入前绑定当前revision，已获授权则加 `--apply`。整篇覆盖/追加自动构造全文核验目标；局部替换必须提供 `expected_document` 完整XML。`doc_xml_structure.py`逐项核对全文、链接、原生列表/表格、样式与资源标识后才报告成功。不要直接调用裸 `lark-cli +update` 绕过回读闸；保留已有评论/资源，局部内容变化不能擅自整篇覆盖。
 - 这两道闸覆盖受管文字创建及XML更新；HTML/Office导入、媒体播放和手机视觉效果仍须按对应流程另外验证，不能把文字结构通过称作所有格式均已验证。
 - 发送入口没有旁路：图片、视频、音频、PDF 等媒体一律 `send_feishu_media.py`，Markdown / HTML 一律 `send --doc`。只有用户本轮明确说“文件”“附件”或“原文件”时，才使用 `send_feishu_file.py --file`；明确说“直接发图片”时才用 `send --image`；明确说“语音条”时才用 `send_feishu_voice.py`。在线开关、在线 URL 或 `$open-local` 成功都不能外推出这三种例外的授权。旧的 `send --file` 已机械拒绝，不能再用。
 - 飞书在线文档和关键网页 URL 必须裸写或写成 `[标签](https://...)`，不得套反引号或代码围栏。

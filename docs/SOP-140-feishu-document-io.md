@@ -85,8 +85,14 @@ L4 低于可管理时直接下载图片/附件会被拒，`docio read` 自动改
 
 ## 4.1 · 发布前冒烟
 
-改 `docio` 读取路径或飞书调整管控策略后，拿一份 bot 只有阅读权的 L3/L4 带图文档跑第 4 节，
-确认块清单完整、图片 `via: preview` 全数取到。
+改 `docio` 读取路径、升级 lark-cli（`lark-cli update`）或飞书调整管控策略后必须跑：
+
+0. `python feishu/profile_bootstrap.py --apply`：`lark-cli update` 会把 lark-doc / drive / sheets / wiki / base 重新装进各平台技能目录，这一步把它们移回 `~/.agents/link16-disabled-skills/`（`--doctor` 发现它们在就报非 0）；
+1. `python -m pytest tests/test_docio_io.py tests/test_docio_identity.py tests/test_docio_coverage.py -q`；
+2. 拿一份 bot 只有阅读权的 L3/L4 带图文档跑第 4 节，确认块清单完整、图片 `via: preview` 全数取到；
+3. 拿一份多分表的表格跑第 4 节，确认每个分表 `fetched_rows == declared_rows`。
+
+任何一项不过就回退 lark-cli 版本（`npm install -g @larksuite/cli@<旧版本>`）再修 docio。
 
 ## 5 · 写回一个飞书链接
 

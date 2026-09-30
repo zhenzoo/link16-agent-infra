@@ -12,7 +12,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import agent_runtime
@@ -34,6 +36,11 @@ SKILL_MANIFEST = ".link16-skill-install.json"
 SKILL_MANAGED_BY = "link16-agent-infra"
 LEGACY_CODEX_ADAPTER = "claude-compat-feishu"
 LEGACY_ADAPTER_MARKER = "<!-- link16-codex-compat-adapter -->"
+# `lark-cli update` reinstalls every official lark-* skill into each runtime's
+# skill dir (and junctions them into Claude homes). The document-reading ones
+# compete with the feishu skill for routing (ARCH-130 薄层原则); their manuals
+# stay available through `lark-cli skills read <name>`.
+RETIRED_VENDOR_SKILLS = ("lark-doc", "lark-drive", "lark-sheets", "lark-wiki", "lark-base")
 
 
 def _normalized(text: str) -> str:
@@ -250,6 +257,45 @@ def migrate_legacy_adapter(home: Path) -> dict:
     return legacy_adapter_plan(home)
 
 
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def retired_vendor_skill_rows(home: Path, skill_dirs, *, apply=False) -> list[dict]:
+    """Keep the document-reading lark-* skills out of every runtime skill dir."""
+    rows = []
+    for parent in skill_dirs:
+        for name in RETIRED_VENDOR_SKILLS:
+            path = parent / name
+            if not (path.exists() or _is_link(path)):
+                continue
+            skill = path / "SKILL.md"
+            try:
+                text = skill.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            # lark-cli junctions Claude homes to the shared copy; once that copy is
+            # retired the pointer dangles, and a pointer to the same name is ours to drop.
+            dangling = _is_link(path) and not path.exists() and Path(os.readlink(path)).name == name
+            if not dangling and (_skill_name(skill) != name or "lark-cli" not in text):
+                rows.append({"kind": "retired-vendor-skill", "path": str(path), "status": "conflict"})
+                continue
+            if apply:
+                if _is_link(path):
+                    # A junction/symlink is only a pointer; remove the pointer, never its target.
+                    (os.rmdir if not path.is_symlink() else os.unlink)(path)
+                else:
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    tag = hashlib.sha256(str(parent).encode("utf-8")).hexdigest()[:8]
+                    backup = home / ".agents" / "link16-disabled-skills" / f"{name}-{tag}-{stamp}"
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), str(backup))
+            gone = not (path.exists() or _is_link(path))
+            rows.append({"kind": "retired-vendor-skill", "path": str(path),
+                         "status": "retired" if gone else "ready-to-retire", "before": "ready-to-retire"})
+    return rows
+
+
 def _normalized_profile_home(value: str) -> str:
     home = str(value or "").strip().replace("\\", "/").rstrip("/")
     if not home.startswith("~/") or home == "~":
@@ -447,6 +493,8 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
                 _apply_skill(source, target)
             after = _skill_status(source, target)
             rows.append({**after, "before": before["status"]})
+    skill_dirs = {target.parent for target in _skill_targets(home, profile_names, registry_path=registry_path)}
+    rows.extend(retired_vendor_skill_rows(home, sorted(skill_dirs), apply=apply))
     for spec in specs:
         profile_home = profile_targets[spec.name]
         installer_name = agent_runtime.runtime_adapter_spec(
@@ -551,13 +599,15 @@ def main(argv=None) -> int:
             "planned": "⏳ 待应用",
             "ready-to-migrate": "⏳ 可迁移",
             "adoptable": "⏳ 可纳管",
+            "ready-to-retire": "⏳ 待移出",
+            "retired": "✅ 已移出",
         }
         for row in rows:
             label = status_text.get(row["status"], row["status"])
             print(f"  {label:<18} {row['kind']:<24} {row['path']}")
         if not (args.migrate_registry or args.init_registry or args.register_profile):
             print("下一步：重开 Git Bash，用所选 profile 函数启动并在各自浏览器页面登录。")
-    bad = {"missing", "outdated", "conflict", "drift", "manifest-drift", "name-conflict", "planned", "ready-to-migrate"}
+    bad = {"missing", "outdated", "conflict", "drift", "manifest-drift", "name-conflict", "planned", "ready-to-migrate", "ready-to-retire"}
     return 2 if args.doctor and any(row.get("status") in bad for row in rows) else 0
 
 

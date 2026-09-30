@@ -16,7 +16,7 @@ read_when:
   - 改动飞书文档读写路径、身份选择或降级策略
   - 判断"为什么这只 bot 读不了这份文档"
   - 新增飞书能力域并决定它该挂在哪一层
-last_reviewed: 2026-09-07
+last_reviewed: 2026-09-30
 related:
   - ARCH-110
   - ARCH-120
@@ -53,13 +53,20 @@ feishu skill（repo-owned·唯一入口）
 | 部件 | 它是什么 | 它不是什么 |
 |---|---|---|
 | `lark-cli` | vendor 提供的命令行引擎，覆盖 docs / sheets / drive / base / whiteboard / im 等域 | 不是入口。agent 不直接调它，由 `docio` 调 |
-| vendor `lark-*` skills | 每个域一份说明书，供 agent 查语义 | 不是入口，也不承载身份选择 |
+| vendor `lark-*` skills | 每个域一份说明书，经 `lark-cli skills read` 查语义 | 不是入口，也不承载身份选择 |
 | Link16 `feishu/` | 身份 registry、per-bot 应用凭据、桥、发送工具 | 不重新实现 lark-cli 已有的命令面 |
 | `feishu` skill | 对人与 agent 的唯一入口 | 不把子命令细节复制成第二份文档 |
 
 **为什么要收口**：vendor 侧现成能力散在数十个 skill 与数百条子命令上，入口一多就会出现
 "同一件事三种做法、每种都缺一半权限"。`docio` 的价值不是重造命令，而是
 **把身份、分派、覆盖率与失败归类这四件必须一致的事收进一个地方**。
+
+**薄层原则**（2026-09-30 定）：lark-cli 是唯一引擎，它内置的 `lark-cli skills read <名字>`
+是唯一说明书；docio 只装 Link16 自己的四条规则——身份顺序（本 bot → 显式 `--as-user`）、
+一次读全、覆盖率判定、失败分类。官方已有的能力（翻页、格式、预览回退等）一律调用，不在 docio
+里重写；官方改了参数或行为，靠升级闸（SOP-140 §4.1）当场暴露。读文档相关的 vendor 技能
+（lark-doc / drive / sheets / wiki / base）不再单独安装到 `~/.agents/skills`，避免与 feishu
+skill 抢路由。
 
 ## 2 · 身份模型：两种身份，永不混用
 

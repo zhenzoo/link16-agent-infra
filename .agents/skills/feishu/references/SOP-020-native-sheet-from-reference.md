@@ -4,7 +4,7 @@
 
 ## 1. 先固定身份与来源
 
-先读`lark-shared`和`lark-sheets`。每个API调用显式写`--as user`或`--as bot`，并核对返回的`identity`；资源不可达时按scope、资源ACL、角色、能力四类如实报告，禁止静默换身份。
+先用 `lark-cli skills read lark-shared` 和 `lark-cli skills read lark-sheets` 读官方说明书。每个API调用显式写`--as user`或`--as bot`，并核对返回的`identity`；资源不可达时按scope、资源ACL、角色、能力四类如实报告，禁止静默换身份。
 
 参考URL、工作簿token、revision和目标用途必须进本次PLAN或回执。创建前保持参考表只读，不用导出→导入或整表复制来“省步骤”：那会把隐藏数据、过期字段或未知格式一并带入。
 

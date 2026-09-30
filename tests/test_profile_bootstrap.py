@@ -191,6 +191,28 @@ class ProfileBootstrapTests(unittest.TestCase):
                              pb.LEGACY_CODEX_ADAPTER / "SKILL.md").is_file())
             self.assertTrue((home / ".agents" / "skills" / "feishu" / "SKILL.md").is_file())
 
+    def test_document_vendor_skills_are_retired_but_other_and_foreign_skills_stay(self):
+        """lark-cli update reinstalls lark-doc & co.; bootstrap moves them out recoverably."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skills = home / ".agents" / "skills"
+            vendor = 'requires:\n  bins: ["lark-cli"]'
+            for name, body in (("lark-doc", vendor), ("lark-calendar", vendor),
+                               ("lark-wiki", "hand written, not the vendor copy")):
+                (skills / name).mkdir(parents=True)
+                (skills / name / "SKILL.md").write_text(f"---\nname: {name}\n{body}\n---\n", encoding="utf-8")
+            rows = [r for r in pb.bootstrap(home, apply=False, profiles=("cxp",))
+                    if r["kind"] == "retired-vendor-skill"]
+            self.assertEqual({Path(r["path"]).name: r["status"] for r in rows},
+                             {"lark-doc": "ready-to-retire", "lark-wiki": "conflict"})
+            pb.bootstrap(home, apply=True, profiles=("cxp",))
+            self.assertFalse((skills / "lark-doc").exists())
+            self.assertTrue((skills / "lark-calendar" / "SKILL.md").is_file())   # 非读文档类保留
+            self.assertTrue((skills / "lark-wiki" / "SKILL.md").is_file())       # 非 lark-cli 生成物不动
+            backups = list((home / ".agents" / "link16-disabled-skills").glob("lark-doc-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertTrue((backups[0] / "SKILL.md").is_file())
+
     def test_new_registry_accepts_selected_runtimes_and_requires_isolated_unique_homes(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "agent-profiles.local.json"
