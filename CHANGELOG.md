@@ -19,6 +19,13 @@ last_reviewed: 2026-10-01
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.37.1 — 2026-10-01 · Python 3.11 下 bootstrap 也能清掉失效的 lark-* 目录联接
+
+- **问题**：TB25（Python 3.11.14）的 Claude 技能目录各留 5 个指向已移走 `~/.agents/skills/lark-*` 的目录联接；`Path.is_junction` 3.12 才有，`_is_link` 判为否，`--apply` 不清、`--doctor` 仍报 0。
+- **修复**：没有 `is_junction` 时用 `os.readlink` 能否解析判定联接；删除仍只删联接本身（190f5fd）。
+- **验证**：新增摘掉 `is_junction` 的真实 junction 回归，修复前返回空；全仓 1125 passed、126 subtests。
+- **升级**：拉取后跑 `python feishu/profile_bootstrap.py --apply` 与 `--doctor`；不需重启 bridge。
+
 ## v0.37.0 — 2026-10-01 · 读飞书文档收口 docio、Markdown 原位同步在线文档、进度卡不再刷屏
 
 - **读飞书文档**：`docio read` 能读只读分享的 L1–L4 密级文档的图片和附件（1f2975c）；`read --as-user` 用主人账号读没分享给 bot 的文档，并修表格读取参数（acf8fa6）；多维表格读取改走 `lark-cli api` 的 bitable/v1，bot 现有权限即可（13e7ae9）。
