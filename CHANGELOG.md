@@ -11,13 +11,24 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-09-27
+last_reviewed: 2026-10-01
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.37.0 — 2026-10-01 · 读飞书文档收口 docio、Markdown 原位同步在线文档、进度卡不再刷屏
+
+- **读飞书文档**：`docio read` 能读只读分享的 L1–L4 密级文档的图片和附件（1f2975c）；`read --as-user` 用主人账号读没分享给 bot 的文档，并修表格读取参数（acf8fa6）；多维表格读取改走 `lark-cli api` 的 bitable/v1，bot 现有权限即可（13e7ae9）。
+- **读文档路径唯一**：feishu skill 认领“读任何飞书链接”，走偏时引回 docio（6d5e948）；lark-doc/drive/sheets/wiki/base 退出各平台技能目录，`lark-cli update` 装回后 `profile_bootstrap --doctor` 报非 0、`--apply` 移回（8d4620c）。
+- **在线文档同步**：`send --doc <md> --update <URL>` 按块比对原位更新已有文档，未变块及评论保留，线上多出图片等块时拒绝，`--overwrite` 整篇重写，`--table-layout` 指定表格形态（9458107）。
+- **会话规则热推送**：入口 CLAUDE.md／AGENTS.md 改了，正在跑的飞书会话下一轮收到改动原文（37870df）。
+- **Codex effort**：`/effort` 在飞书里切换后续回合 effort，新开 Codex 会话沿用 bot 设定（4af11c5、bdd1577、49b1028）。
+- **进度卡刷屏修复**：回合中途写了超过一张卡的长正文后，每次工具计数都把整段拆成多条新消息重发（2026-10-01 tb26-baseball-2 3 分钟约 35 条）；现在只有工具变化时不再开新卡，换卡重放只取末尾一张卡（aab1012）。
+- **验证**：全仓 1124 passed、126 subtests；TB24、TB25 已拉到 9458107 并跑过 bootstrap 与 docio 测试。
+- **升级**：拉取后跑 `python feishu/profile_bootstrap.py --apply` 与 `--doctor`；进度卡、effort、规则热推送需在维护窗口重启 bridge 后生效。
 
 ## v0.36.2 — 2026-09-27 · `/handoff` 关闭旧会话前先核验目标实时额度
 
