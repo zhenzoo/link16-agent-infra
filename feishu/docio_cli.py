@@ -160,9 +160,20 @@ def _tenant_token_with_retry(app_id, secret, attempts=3):
                 _time.sleep(2 ** attempt)
     raise SystemExit(f"换取 tenant token 失败（网络类，与权限无关）：{type(last).__name__}: {last}")
 
+# Explicit user lane for `read --as-user` (ARCH-130 §2 rule 3): documents shared
+# with the owner but not with the bot. Set only by cmd_read; every `--as bot`
+# call of that read then runs as the user on this profile, so the resource
+# adapters stay identity-agnostic and nothing else ever falls back silently.
+_READ_AS_USER = None
+
+
 def run_lark(args, *, profile=None, stdin=None, timeout=180, cwd=None):
     argv = lark_cli()
     args = list(args)
+    if _READ_AS_USER:
+        for i in range(len(args) - 1):
+            if args[i:i + 2] == ["--as", "bot"]:
+                args[i + 1], profile = "user", _READ_AS_USER
     as_bot = any(args[i:i + 2] == ["--as", "bot"] for i in range(len(args)))
     # Bot commands use fresh SSOT credentials, not a second persisted secret.
     env = credential_environment(profile if as_bot else None,
@@ -280,6 +291,24 @@ def user_identity(profile):
         "refresh_expires_at": user.get("refreshExpiresAt"),
         "scopes": len((user.get("scope") or "").split()),
     }
+
+
+def user_read_profile(requested):
+    """Pick the registered profile that holds a live user login for `read --as-user`."""
+    if requested == "auto":
+        try:
+            logged = {row.get("appId") for row in json.loads(run_lark(["auth", "list"]).stdout)}
+        except (ValueError, TypeError, AttributeError):
+            logged = set()
+        candidates = [name for name, *_ in roster() if app_id_of(name) in logged]
+    else:
+        candidates = [requested]
+    for name in candidates:
+        user = user_identity(name)
+        if user and user.get("status") in ("ready", "needs_refresh"):
+            return name, user
+    raise SystemExit("没有可用的用户授权：先在一只 bot 的应用上登录你的账号 "
+                     "`lark-cli auth login --profile <bot>`（设备码流程，需要你本人点确认）")
 
 
 def baseline_entry(bot):
@@ -835,17 +864,27 @@ def cmd_read(args):
     这里从不下"读全了"的结论：结论由 coverage 用 manifest 里的 declared/fetched
     机械判定。正文成功不等于图片二进制、单元格和评论都到手。
     """
+    global _READ_AS_USER
     bot = resolve_bot(args.bot)
+    identity = f"bot {bot}"
+    if args.as_user:
+        profile, user = user_read_profile(args.as_user)
+        _READ_AS_USER = profile
+        identity = f"user {user['user']}（经 {profile} 的授权）"
+        print(f"  用户身份  {identity} · 刷新凭据到期 {user['refresh_expires_at']}")
+    user_hint = "  这份没分享给 bot、但你本人能看：加 --as-user 用你的账号读"
     info = inspect_url(args.url, bot)
     if not info.get("ok"):
         print(f"读取中止 · {info['verdict']}")
         if info.get("hint"):
             print(f"  {info['hint']}")
+        if info.get("lane") == "resource" and not args.as_user:
+            print(user_hint)
         return 2
     out_dir = Path(args.into).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "schema": MANIFEST_SCHEMA, "url": args.url, "bot": bot,
+        "schema": MANIFEST_SCHEMA, "url": args.url, "bot": bot, "identity": identity,
         "type": info.get("type"), "token": info.get("token"), "title": info.get("title"),
         "fetched_at": _now(), "revision": None, "inventory": {"complete": False},
         "resources": {}, "missing": [], "notes": [],
@@ -869,14 +908,17 @@ def cmd_read(args):
         manifest["missing"].append({"kind": "comments", "verdict": "调用方选择跳过评论，未覆盖全部资源"})
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"=== docio read · {bot} ===")
+    print(f"=== docio read · {identity} ===")
     print(f"  标题      {manifest['title']}")
     print(f"  类型      {manifest['type']} · revision {manifest['revision']}")
     print(f"  产物      {out_dir}")
     for name, value in manifest["resources"].items():
         print(f"  {name:<9} {json.dumps(value, ensure_ascii=False)[:150]}")
     print(f"  未取到    {len(manifest['missing'])} 项")
-    return coverage_report(manifest, quiet=False)
+    status = coverage_report(manifest, quiet=False)
+    if not args.as_user and any(row.get("lane") == "resource" for row in manifest["missing"]):
+        print(user_hint)
+    return status
 
 
 def coverage_report(manifest, quiet=False):
@@ -944,7 +986,7 @@ def _read_range_data(token, bot, sheet_ref, rng):
     selector = ["--sheet-id", sheet_ref] if not sheet_ref.startswith("name:") else \
                ["--sheet-name", sheet_ref[5:]]
     result = run_lark(["sheets", "+cells-get", "--spreadsheet-token", token,
-                       *selector, "--range", rng, "--include", "value,formula", "--skip-hidden", "false", "--as", "bot"],
+                       *selector, "--range", rng, "--include", "value,formula", "--skip-hidden=false", "--as", "bot"],
                       profile=bot, timeout=240)
     body = _data(result)
     ranges = body.get("ranges")
@@ -1453,6 +1495,8 @@ def main(argv=None):
     p_read.add_argument("url")
     p_read.add_argument("--into", required=True, help="产物目录")
     p_read.add_argument("--no-comments", action="store_true", help="跳过评论（默认取）")
+    p_read.add_argument("--as-user", nargs="?", const="auto", metavar="PROFILE",
+                        help="资源没分享给 bot 时显式改用主人账号读；缺省自动选本机已登录用户授权的 profile")
     p_read.set_defaults(func=cmd_read)
 
     p_write = sub.add_parser("write", help="写回表格；默认 dry-run，--apply 后逐格回读核验")

@@ -48,6 +48,40 @@ class IdentityResolutionTests(unittest.TestCase):
             docio_cli.resolve_bot("tb26-ghost")
 
 
+class UserReadLaneTests(unittest.TestCase):
+    """ARCH-130 §2 rule 3: the user lane is explicit and never borrows silently."""
+
+    def tearDown(self):
+        docio_cli._READ_AS_USER = None
+
+    def test_explicit_user_lane_rewrites_bot_calls_to_that_profile(self):
+        docio_cli._READ_AS_USER = "tb26-b"
+        with patch.object(docio_cli, "lark_cli", return_value=["lark-cli"]),                 patch.object(docio_cli, "require_profile_identity") as checked,                 patch.object(docio_cli.subprocess, "run") as run:
+            docio_cli.run_lark(["docs", "+fetch", "--as", "bot"], profile="tb26-a")
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--profile") + 1], "tb26-b")
+        self.assertEqual(cmd[cmd.index("--as") + 1], "user")
+        checked.assert_called_once_with("tb26-b")
+        self.assertNotIn("LARKSUITE_CLI_APP_SECRET", run.call_args.kwargs["env"])
+
+    def test_without_user_lane_bot_calls_stay_bot(self):
+        with patch.object(docio_cli, "lark_cli", return_value=["lark-cli"]),                 patch.object(docio_cli, "credential_environment", return_value={}),                 patch.object(docio_cli.subprocess, "run") as run:
+            docio_cli.run_lark(["docs", "+fetch", "--as", "bot"], profile="tb26-a")
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--as") + 1], "bot")
+        self.assertNotIn("--profile", cmd)
+
+    def test_auto_picks_the_registered_profile_holding_a_user_login(self):
+        listed = docio_cli.subprocess.CompletedProcess([], 0, json.dumps([{"appId": "cli_b"}]), "")
+        with patch.object(docio_cli, "roster", return_value=ROSTER),                 patch.object(docio_cli, "app_id_of", side_effect=lambda b: {"tb26-a": "cli_a", "tb26-b": "cli_b"}[b]),                 patch.object(docio_cli, "run_lark", return_value=listed),                 patch.object(docio_cli, "user_identity", return_value={"status": "ready", "user": "owner"}):
+            self.assertEqual(docio_cli.user_read_profile("auto")[0], "tb26-b")
+
+    def test_no_live_user_login_fails_instead_of_falling_back(self):
+        with patch.object(docio_cli, "user_identity", return_value={"status": "missing"}):
+            with self.assertRaises(SystemExit):
+                docio_cli.user_read_profile("tb26-a")
+
+
 class WindowsShimSafetyTests(unittest.TestCase):
     """A Feishu URL carries `&`; cmd.exe would split on it and run the tail."""
 

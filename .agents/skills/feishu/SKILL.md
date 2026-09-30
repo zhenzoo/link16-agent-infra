@@ -43,7 +43,7 @@ description: Link16 飞书/Lark 统一入口。用于按在线链接查本地 HT
 | 发图片、视频、音频、PDF 等媒体（默认唯一入口：在线文档） | `python feishu/send_feishu_media.py --bot <我> --media <路径> --title "…"` |
 | 新建媒体审阅文档并验证真实预览 | 上述入口加 `--publish-only --receipt <新的JSON> --verify-out <新目录>`；自动逐项检查真实页面，见 SOP-141 |
 | 往已有文档插入图片／音频／视频 | 同一 `send_feishu_media.py` 加 `--document <docx链接或token>`；默认末尾，指定位置加 `--parent-block <父块> --index <从0起的位置>`；保留原正文和权限，仍加 `--verify-out` |
-| 读全文、解析wiki链接、表格写回、查文档权限 | `python feishu/docio_cli.py --bot <我> inspect/read/write/doctor ...`；依 SOP-140，媒体插入走上一行 |
+| 读全文、解析wiki链接、表格写回、查文档权限 | `python feishu/docio_cli.py --bot <我> inspect/read/write/doctor ...`；依 SOP-140，媒体插入走上一行；链接没分享给 bot 但主人能看时 `read <url> --into <目录> --as-user` 用主人账号读 |
 | 发聊天语音条（仅用户本轮明确说“语音条”时） | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"`；其余音频走 `send_feishu_media.py` |
 | 图片直发私聊（仅用户本轮明确说“直接发图片”时） | `python feishu/feishu_bridge.py send --bot <我> --image <路径> [--text "…"]`；其余图片走 `send_feishu_media.py` |
 | 发布 Markdown / HTML 在线文档（默认唯一入口） | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |

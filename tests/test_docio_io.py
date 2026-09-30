@@ -42,6 +42,9 @@ class ReadContractTests(unittest.TestCase):
         self.assertEqual(result, data["ranges"][0]["cells"])
         args = run.call_args.args[0]
         self.assertEqual(args[args.index("--include") + 1], "value,formula")
+        # 布尔开关必须写成 --flag=false；分开写时 lark-cli 把 "false" 当位置参数拒绝整张表
+        self.assertIn("--skip-hidden=false", args)
+        self.assertNotIn("false", args)
 
     def test_failed_empty_clipped_misplaced_or_short_read_is_rejected(self):
         cases = []
