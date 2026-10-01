@@ -363,6 +363,79 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第599行：计划", replay)
         self.assertNotIn("第0行：计划", replay)
 
+    async def test_oversized_commentary_with_tool_step_sends_no_tail_card(self):
+        # Same incident: the long text and the first tool tick arrived in one
+        # snapshot; the tool step formed its own group and replayed the tail.
+        state, cards = fresh_state(), FakeCards()
+        long_text = "\n".join(f"第{i}行：整机描述框架与当前计划" for i in range(600))
+        steps = [
+            {"event_id": "c1", "revision": 1, "kind": "commentary", "label": long_text},
+            {"event_id": "tools:a", "revision": 1, "kind": "tool", "tool_count": 1, "label": "TOOL"},
+        ]
+        await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t",
+                           "steps": steps}], state, cards)
+        body = "".join(text for text, _route in cards.new)
+        self.assertEqual(body.count("第599行：整机描述框架与当前计划"), 1)
+        self.assertEqual(body.count("第0行：整机描述框架与当前计划"), 1)
+
+    async def test_mid_turn_answer_already_sent_as_new_progress_is_not_resent(self):
+        state, cards = fresh_state(), RoutedResultCards()
+        long_text = "\n".join(f"第{i}行：整机描述框架与当前计划" for i in range(600))
+        progress = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "c1", "revision": 1, "kind": "commentary", "label": long_text},
+        ]}
+        await self.drain([progress], state, cards)
+        sent = len(cards.new)
+        self.assertGreater(sent, 1)
+        await self.drain([
+            {"kind": "answer", "session": "s", "anchor": 1, "text": long_text, "mid_turn": True},
+            {"kind": "answer", "session": "s", "anchor": 1, "text": "收尾：已交付"},
+        ], state, cards)
+        self.assertEqual(len(cards.new), sent + 1)
+        self.assertIn("收尾：已交付", cards.new[-1][0])
+
+    async def test_mid_turn_answer_is_still_sent_when_not_confirmed_as_new_message(self):
+        long_text = "中途实质正文。" * 60
+        answer = {"kind": "answer", "session": "s", "anchor": 1, "text": long_text, "mid_turn": True}
+
+        # (a) the text was merged into an existing card by an in-place edit
+        state, cards = fresh_state(), FakeCards()
+        first = {"event_id": "c0", "revision": 1, "kind": "commentary", "label": "开始"}
+        await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t",
+                           "steps": [first]}], state, cards)
+        await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            first, {"event_id": "c1", "revision": 1, "kind": "commentary", "label": long_text},
+        ]}], state, cards)
+        self.assertEqual(len(cards.new), 1)
+        self.assertEqual(len(cards.edits), 1)
+        await self.drain([dict(answer)], state, cards)
+        self.assertEqual(len(cards.new), 2)
+        self.assertIn("中途实质正文。", cards.new[-1][0])
+
+        # (b) progress cards are switched off for this route
+        class SkipProgress(FakeCards):
+            async def new_card(self, text, route=None, purpose="answer", fragment=None):
+                if purpose == "progress":
+                    return "skip-progress"
+                return await super().new_card(text, route=route, purpose=purpose, fragment=fragment)
+
+        state, cards = fresh_state(), SkipProgress()
+        await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "c1", "revision": 1, "kind": "commentary", "label": long_text},
+        ]}], state, cards)
+        self.assertEqual(cards.new, [])
+        await self.drain([dict(answer)], state, cards)
+        self.assertEqual(len(cards.new), 1)
+
+        # (c) a final answer without the mid-turn mark is never suppressed
+        state, cards = fresh_state(), FakeCards()
+        await self.drain([{"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [
+            {"event_id": "c1", "revision": 1, "kind": "commentary", "label": long_text},
+        ]}], state, cards)
+        sent = len(cards.new)
+        await self.drain([{"kind": "answer", "session": "s", "anchor": 1, "text": long_text}], state, cards)
+        self.assertEqual(len(cards.new), sent + 1)
+
     async def test_milestone_tool_only_snapshot_does_not_create_thinking_card(self):
         state, cards = fresh_state(), FakeCards()
         record = {"kind": "progress", "contract": "milestone-v1", "root_turn": "t", "steps": [

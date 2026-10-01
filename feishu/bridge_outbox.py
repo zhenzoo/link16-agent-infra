@@ -171,6 +171,7 @@ def load_progress_state(state_dir, bot):
         "v2_workline": raw.get("workline"),
         "v2_pending": raw.get("pending"),
         "v2_completed": raw.get("completed") or [],
+        "v2_delivered_new": raw.get("delivered_new") or [],
     }
 
 
@@ -190,6 +191,7 @@ def save_progress_state(state_dir, bot, state):
         "workline": state.get("v2_workline"),
         "pending": state.get("v2_pending"),
         "completed": state.get("v2_completed") or [],
+        "delivered_new": state.get("v2_delivered_new") or [],
     }
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -648,6 +650,10 @@ ANSWER_SPLIT_POLICY_LEGACY = "answer-v1-hard2800"
 ANSWER_SPLIT_POLICY_GUARD10 = "answer-v2-target2790-guard10"
 
 
+def _text_sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _has_pending(state):
     legacy = len(state.get("steps") or []) > state.get("flushed", 0)
     acked = state.get("v2_acked") or {}
@@ -938,10 +944,23 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             if result != "skip-progress" and not ok:
                 raise RetrySend()
             item["acked"] = True
+            item["delivered"] = bool(ok and mid)
             state["v2_mid"] = mid
             state["v2_card_ids"] = item["card_ids"]
             n += 1
             _checkpoint_progress()
+        if all(item.get("delivered") for item in pending["chunks"]):
+            # Every chunk went out as a new message with a provider receipt, so
+            # these commentary blocks reached the owner in full.  The Stop
+            # hook's copy of the same mid-turn text is then redundant.
+            delivered = state.setdefault("v2_delivered_new", [])
+            for step in pending["steps"]:
+                label = str(step.get("label") or "").strip()
+                if step.get("kind") == "commentary" and label:
+                    digest = _text_sha(label)
+                    if digest not in delivered:
+                        delivered.append(digest)
+            state["v2_delivered_new"] = delivered[-SENT_CAP:]
         _v2_ack(pending["steps"])
         state["v2_pending"] = None
         state["last_flush"] = clock()
@@ -956,7 +975,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         groups, current = [], []
         for step in steps:
             trial = current + [step]
-            if current and len(_v2_text(trial, snapshot)) > CARD_BUDGET:
+            # A tool step adds no body text; left alone in its own group it
+            # would replay the context that the previous group just sent.
+            if current and _has_body([step]) and len(_v2_text(trial, snapshot)) > CARD_BUDGET:
                 groups.append(current)
                 current = [step]
             else:
@@ -1255,6 +1276,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             text = (r.get("text") or "").strip()
             if not text:
                 continue
+            if r.get("mid_turn") and _text_sha(text) in (state.get("v2_delivered_new") or []):
+                # Mid-turn text that already arrived in full as new progress
+                # messages (2026-10-01 tb26-baseball-2: 12.6k chars sent again
+                # as 「回复 1/5–5/5」 at Stop).  Edited-in-place or unconfirmed
+                # deliveries are not in the list and are still sent here.
+                continue
             route = r.get("route")                         # 本轮回信路由（bridge_stop 在 Stop 时钉进记录·防异步 drain 撞下一轮覆盖）
             matched_docs = [
                 doc for doc in (state.get("pending_docs") or [])
@@ -1319,6 +1346,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                     state["v2_mid"] = None
                     state["v2_card_ids"] = []
                     state["v2_acked"] = {}
+                    state["v2_delivered_new"] = []
                 state["v2_steps"] = r.get("steps") or []
                 state["v2_route"] = r.get("route")
                 state["v2_workline"] = record_workline

@@ -75,6 +75,22 @@ class TurnBoundaryPredicateTest(unittest.TestCase):
         self.assertFalse(_is_real_user_message(_u("续上下文", isCompactSummary=True)))
 
 
+class MidTurnFlagTest(unittest.TestCase):
+    """③ 中段正文带标记：drainer 才能只对「已作为新进度消息送达」的中段块去重，收尾永不受影响。"""
+
+    def test_mid_block_is_flagged_and_terminal_is_not(self):
+        r = _reply(_write([_u("做一下"), _a(LONG, stop="tool_use"), _a("收尾：做完了")]))
+        self.assertEqual(r["cards"], [LONG, "收尾：做完了"])
+        self.assertEqual(r["mid_flags"], [True])
+
+    def test_pre_ask_conclusion_is_not_flagged(self):
+        ask = {"type": "assistant", "message": {"stop_reason": "tool_use", "content": [
+            {"type": "tool_use", "name": "AskUserQuestion", "input": {}}]}}
+        r = _reply(_write([_u("做一下"), _a("问前结论", stop="tool_use"), ask, _a("收尾")]))
+        self.assertEqual(r["cards"], ["问前结论", "收尾"])
+        self.assertEqual(r["mid_flags"], [False])
+
+
 class TurnCursorTest(unittest.TestCase):
     """② 结构闸：cursor 让「已取走的正文」再也够不着。"""
 

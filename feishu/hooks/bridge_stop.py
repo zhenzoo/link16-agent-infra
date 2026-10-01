@@ -172,6 +172,7 @@ def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
     竞态超时不推进→下轮自愈补发·drainer 内容去重兜底）。复用 SSOT is_user / asst_texts · 零硬编码 · 不碰 thinking。"""
     anchor_ln = None
     scan_ln = 0
+    pre_mid = []                                      # 与 pre_blocks 同序：该块是不是 ③ 中段正文
     pre_blocks, term_texts = [], []                   # pre_blocks=非终结实质块(②问前结论+③中段正文·按文档序)·各自成卡; term=终结 wrap-up
     consumed_fallback = floor_line                    # 竞态超时路径的 cursor 落点（只推到已取走正文那一行）
     locked_anchor_ln = None                           # 本轮起点·第一遍锁死后不再随新消息移动（见循环内注释）
@@ -230,6 +231,7 @@ def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
             keep = set(subs[-_MID_TAIL_KEEP:]) if _MID_TAIL_KEEP else set(subs)
             kept = [m for j, m in enumerate(mid) if (m["always"] or j in keep) and m["text"]]
             pre_blocks = [m["text"] for m in kept]
+            pre_mid = [not m["always"] for m in kept]        # ③ 中段正文（drainer 可按「已作为新进度消息完整送达」去重）；②问前结论不标
             term_texts = [t for _ln, t in term]
             # 装配：保留的中段块各自一张卡(保序) + 终结 wrap-up 合为最后一张卡 → 不丢末尾正文·收尾不被淹没·不刷屏
             cards = list(pre_blocks)
@@ -239,7 +241,7 @@ def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
             # consumed = 本轮【真正被取走正文】的最后一行 → 下轮 cursor 只推到这·晚落盘的 wrap-up(行号更大)仍能被下轮补发
             consumed = max([m["ln"] for m in kept] + [ln for ln, _t in term] + [floor_line])
             if cards and has_terminal:                       # 等到终结态再返回（race guard·防抓在 wrap-up 落盘前）
-                return {"cards": cards, "anchor_line": anchor_ln, "scan_line": scan_ln,
+                return {"cards": cards, "mid_flags": pre_mid, "anchor_line": anchor_ln, "scan_line": scan_ln,
                         "consumed_line": consumed, "complete": True}
             consumed_fallback = consumed
         if attempt + 1 < _POLL_TRIES:
@@ -249,7 +251,7 @@ def _final_turn_reply(tp, is_user, asst_texts, floor_line=0):
     tc = "\n\n".join(term_texts).strip()
     if tc:
         cards.append(tc)
-    return {"cards": cards, "anchor_line": anchor_ln, "scan_line": scan_ln,
+    return {"cards": cards, "mid_flags": pre_mid, "anchor_line": anchor_ln, "scan_line": scan_ln,
             "consumed_line": consumed_fallback, "complete": False}
 
 
@@ -318,7 +320,11 @@ def main():
     # outdir 先算出来：cursor(上轮扫到哪行) 和 outbox 同目录（FEISHU_BRIDGE_OUTBOX_DIR = 桥给每个 bot 钉的 _state/）
     floor = _read_cursor(outdir, bot, sid, tp)
     r = _final_turn_reply(tp, _is_real_user_message, _assistant_texts, floor_line=floor)
-    cards = [c.strip() for c in (r.get("cards") or []) if c and c.strip()]
+    flags = list(r.get("mid_flags") or [])
+    pairs = [(c.strip(), i < len(flags) and bool(flags[i]))
+             for i, c in enumerate(r.get("cards") or []) if c and c.strip()]
+    cards = [c for c, _mid in pairs]
+    mid_turn = [m for _c, m in pairs]
     try:                       # tb25 2026-08-18 提的：少记这几项，a/b/c 三种因分不开
         _st = os.stat(tp)
         _tpinfo = "tp存在 size=%d mtime=%s" % (_st.st_size, time.strftime("%H:%M:%S", time.localtime(_st.st_mtime)))
@@ -360,9 +366,10 @@ def main():
     try:
         outbox.parent.mkdir(exist_ok=True)
         with open(outbox, "a", encoding="utf-8") as f:
-            for c in cards:
+            for c, is_mid in zip(cards, mid_turn):
                 rec = {"kind": "answer", "ts": int(time.time()), "session": sid,
                        "anchor": anchor, "text": c, "route": route,
+                       "mid_turn": is_mid,
                        "turn_key": (active_route or {}).get("turn_key"),
                        "workline_gate": (active_route or {}).get("workline_gate")}
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
