@@ -19,6 +19,13 @@ last_reviewed: 2026-10-01
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.37.3 — 2026-10-01 · Codex 的 wmux MCP 路径不再随 wmux 升级失效
+
+- **问题**：`configure_personal.py` 把 Codex 的 `mcp_servers.wmux` 写成 `%LOCALAPPDATA%/wmux/app-X.Y.Z/resources/mcp-bundle/index.js`。wmux 升级会删掉旧版本目录，下次跑同步之前 Codex 的 wmux MCP 启动即退出（TB24 的 Claude 账号已因同类写死路径报 CONNECTION_CLOSED）。
+- **修复**：`~/.wmux/mcp/index.js` 存在且 `.wmux-mcp-version` 等于最新已装版本时写这个稳定入口；标记缺失或落后时仍写带版本号的路径。
+- **验证**：新增 3 个回归；TB26 的 cx、cxp、cxp2 已应用，`codex mcp get wmux` 与 `wmux mcp check` 均指向稳定入口，两个入口字节相同、都能列出 87 个工具；全仓 1133 passed、126 subtests。
+- **升级**：拉取后跑 `python codex-personal/configure_personal.py --all-profiles --apply`；已在运行的 Codex 会话重启后才用新路径，不需重启 bridge。
+
 ## v0.37.2 — 2026-10-01 · 超长中途正文只送达一遍
 
 - **问题**：v0.37.0 堵住“每次工具计数重放”后，用 tb26-baseball-2 01:13–01:41 的真实记录重放仍剩两处重复：12628 字正文与工具步同批到达时多发一张末尾重放卡；回合结束时 Stop hook 把这段中途正文再作为「回复 1/5–5/5」发一遍。
