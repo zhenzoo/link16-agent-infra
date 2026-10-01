@@ -91,5 +91,46 @@ class CodexProfileDiscoveryTests(unittest.TestCase):
                 self.assertNotRegex(config, rf"(?m)^{key}\s*=")
 
 
+class WmuxMcpEntryTests(unittest.TestCase):
+    """Codex must not be pinned to an app-X.Y.Z directory that the next wmux upgrade deletes."""
+
+    def _home(self, base, *, apps=(), stable=None):
+        home = Path(base)
+        for version in apps:
+            bundle = home / "AppData" / "Local" / "wmux" / f"app-{version}" / "resources" / "mcp-bundle"
+            bundle.mkdir(parents=True)
+            (bundle / "index.js").write_text("// bundle\n", encoding="utf-8")
+        if stable is not None:
+            mcp = home / ".wmux" / "mcp"
+            mcp.mkdir(parents=True)
+            (mcp / "index.js").write_text("// stable\n", encoding="utf-8")
+            if stable:
+                (mcp / ".wmux-mcp-version").write_text(stable + "\n", encoding="utf-8")
+        return home
+
+    def test_stable_entry_is_used_when_it_matches_the_installed_app(self):
+        configurator = load_configurator()
+        with tempfile.TemporaryDirectory() as base:
+            home = self._home(base, apps=("3.46.0",), stable="3.46.0")
+            self.assertEqual(configurator.wmux_mcp_entry(home), home / ".wmux" / "mcp" / "index.js")
+
+    def test_stale_or_unmarked_stable_entry_falls_back_to_newest_app(self):
+        configurator = load_configurator()
+        for stable in ("3.8.0", ""):
+            with tempfile.TemporaryDirectory() as base:
+                home = self._home(base, apps=("3.8.0", "3.46.0"), stable=stable)
+                entry = configurator.wmux_mcp_entry(home)
+                self.assertEqual(entry.parent.parent.parent.name, "app-3.46.0")
+
+    def test_no_stable_entry_keeps_newest_app_and_nothing_installed_is_none(self):
+        configurator = load_configurator()
+        with tempfile.TemporaryDirectory() as base:
+            home = self._home(base, apps=("3.9.0", "3.10.0"))
+            self.assertEqual(configurator.wmux_mcp_entry(home).parent.parent.parent.name, "app-3.10.0")
+        with tempfile.TemporaryDirectory() as base:
+            self.assertIsNone(configurator.wmux_mcp_entry(Path(base)))
+
+
+
 if __name__ == "__main__":
     unittest.main()

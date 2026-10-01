@@ -49,17 +49,39 @@ def replace_table_family(text: str, family: str, replacement: str) -> str:
     return text.rstrip() + "\n\n" + replacement.rstrip() + "\n"
 
 
-def newest_wmux_bundle() -> Path | None:
-    base = Path.home() / "AppData" / "Local" / "wmux"
+def _wmux_version(name: str) -> tuple:
+    return tuple(int(value) if value.isdigit() else value for value in name.split("."))
+
+
+def wmux_mcp_entry(home: Path | None = None) -> Path | None:
+    """The wmux MCP entry Codex should launch.
+
+    wmux copies each new bundle to ``~/.wmux/mcp`` on upgrade and deletes the
+    old ``app-X.Y.Z`` directory, so a versioned path dies with the next upgrade
+    until this script runs again.  Prefer the stable copy when its version
+    marker matches the newest installed app; otherwise keep the versioned path.
+    """
+    home = home or Path.home()
+    newest = newest_wmux_bundle(home)
+    stable = home / ".wmux" / "mcp" / "index.js"
+    marker = stable.with_name(".wmux-mcp-version")
+    if stable.is_file() and marker.is_file():
+        try:
+            version = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            version = ""
+        if version and (newest is None or newest.parent.parent.parent.name == f"app-{version}"):
+            return stable
+    return newest
+
+
+def newest_wmux_bundle(home: Path | None = None) -> Path | None:
+    base = (home or Path.home()) / "AppData" / "Local" / "wmux"
     candidates = []
     for app in base.glob("app-*"):
         bundle = app / "resources" / "mcp-bundle" / "index.js"
         if bundle.exists():
-            version = tuple(
-                int(value) if value.isdigit() else value
-                for value in app.name.removeprefix("app-").split(".")
-            )
-            candidates.append((version, bundle))
+            candidates.append((_wmux_version(app.name.removeprefix("app-")), bundle))
     return max(candidates, default=(None, None), key=lambda item: item[0])[1]
 
 
@@ -138,7 +160,7 @@ def configure_profile(
 
     print(f"Codex home: {codex_home}")
     print(f"Mattermost: runtime .env loader -> {wrapper}")
-    print(f"wmux: {wmux.parent.parent.parent.name}")
+    print(f"wmux: {wmux.as_posix()}")
     print("AGENTS: managed by $agent-profile-governance (not touched here)")
     print("Bridge hooks: merged (unrelated hooks preserved)")
     if seeding:
@@ -204,7 +226,7 @@ def main() -> None:
         homes = [(Path.home() / ".codex-personal").resolve()]
     homes = list(dict.fromkeys(homes))
 
-    wmux = newest_wmux_bundle()
+    wmux = wmux_mcp_entry()
     if wmux is None:
         raise SystemExit("No installed wmux MCP bundle found")
     for index, codex_home in enumerate(homes):

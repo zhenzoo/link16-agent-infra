@@ -110,6 +110,10 @@ Notes:
 - **wmux bundle must be installed** before step 1 below: `configure_personal.py`
   aborts with `No installed wmux MCP bundle found` if
   `%LOCALAPPDATA%\wmux\app-*\resources\mcp-bundle\index.js` is absent.
+  It writes the stable copy `~/.wmux/mcp/index.js` when that copy's
+  `.wmux-mcp-version` matches the newest installed app (wmux refreshes it on
+  every upgrade and deletes the old `app-X.Y.Z` directory), and falls back to
+  the versioned path otherwise.
 - Reference: the mature machine's `~/.codex-personal` was originally created by
   `codex login` under `CODEX_HOME`, not by this toolkit — hence this section
   closes the previously-undocumented from-zero step.
