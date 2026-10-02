@@ -38,6 +38,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.error
@@ -181,6 +182,21 @@ def _fmt_reset(value):
         return str(value)[:16]
 
 
+def _reset_epoch(value):
+    """Provider reset timestamp as epoch seconds; keep the display string separate."""
+    if value in (None, "", 0):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 # ---------- 各 runtime 的取数 ----------
 
 def _claude_quota(home: Path):
@@ -215,6 +231,7 @@ def _claude_quota(home: Path):
         "session_percent": float(five.get("utilization") or 0),
         "weekly_percent": float(week.get("utilization") or 0),
         "session_reset": _fmt_reset(five.get("resets_at")),
+        "session_reset_at": _reset_epoch(five.get("resets_at")),
         "weekly_reset": _fmt_reset(week.get("resets_at")),
         "severity": sev,
         "route": route,
@@ -258,6 +275,7 @@ def _codex_quota(home: Path):
         "session_percent": float(short.get("used_percent") or 0),
         "weekly_percent": float(long_.get("used_percent") or 0),
         "session_reset": _fmt_reset(short.get("reset_at")),
+        "session_reset_at": _reset_epoch(short.get("reset_at")),
         "weekly_reset": _fmt_reset(long_.get("reset_at")),
         "severity": "critical" if rl.get("limit_reached") else "normal",
         "route": route,
@@ -301,6 +319,7 @@ def collect(names=None):
         base.setdefault("session_percent", None)
         base.setdefault("weekly_percent", None)
         base.setdefault("session_reset", "—")
+        base.setdefault("session_reset_at", None)
         base.setdefault("weekly_reset", "—")
         base.setdefault("severity", "")
         base["verdict"] = _verdict(base)
@@ -311,6 +330,18 @@ def collect(names=None):
 def is_usable(row):
     """额度行能否承接新会话；阈值只由 ``_verdict`` 决定。"""
     return isinstance(row, dict) and row.get("verdict") in USABLE_VERDICTS
+
+
+def same_failover_series(source, target):
+    """Automatic handoff stays inside one runtime and one numbered profile series."""
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return False
+    if not source.get("runtime") or source["runtime"] != target.get("runtime"):
+        return False
+    names = (source.get("profile"), target.get("profile"))
+    if not all(isinstance(name, str) and name for name in names):
+        return False
+    return re.sub(r"\d+$", "", names[0]) == re.sub(r"\d+$", "", names[1])
 
 
 def auto_failover_profiles():
@@ -344,24 +375,26 @@ def auto_failover_profiles():
     return frozenset(configured)
 
 
-def pick(rows, exclude=(), prefer_runtime=None):
+def pick(rows, exclude=(), prefer_runtime=None, source=None):
     """选一个「最该切过去」的 profile。规则（按序）：
        ① effective registry 的自动候选范围（如已配置）
        ② 只考虑 verdict=够用/紧张（问不到的绝不选）
-       ③ 同 runtime 优先，再按 5h/周较差的余量排序
+       ③ 指定 runtime 时绝不跨 runtime；指定 source 时还须同 profile 系列
+       ④ 按 5h/周较差的余量排序
        返回 row 或 None。"""
     allowed = auto_failover_profiles()
     excluded = set(exclude)
     ok = [r for r in rows if is_usable(r)
           and r["profile"] not in excluded
+          and (not prefer_runtime or r["runtime"] == prefer_runtime)
+          and (source is None or same_failover_series(source, r))
           and (allowed is None or r["profile"] in allowed)]
     if not ok:
         return None
 
     def score(r):
         worst = max(r["session_percent"] or 0, r["weekly_percent"] or 0)
-        same = 0 if (prefer_runtime and r["runtime"] == prefer_runtime) else 1
-        return (same, worst)
+        return worst
 
     return sorted(ok, key=score)[0]
 
@@ -390,7 +423,7 @@ def main():
     ap.add_argument("--profile", nargs="*", help="只查这几个 profile")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--exclude", nargs="*", default=[], help="pick 时排除（通常是刚撞限流那个）")
-    ap.add_argument("--prefer-runtime", default=None, help="pick 时优先同 runtime（claude/codex）")
+    ap.add_argument("--prefer-runtime", default=None, help="pick 时仅选该 runtime（claude/codex/kimi）")
     args = ap.parse_args()
 
     rows = collect(args.profile)

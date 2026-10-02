@@ -60,6 +60,7 @@ LOG_DIR = HERE / "_logs"
 JOBS_DIR = HERE / "cron-jobs"                          # 【专属划分】每 bot 一个 <bot>.yaml（bot 名=文件名·隐含·不重复写）
 JOBS_PATH = HERE / "cron-jobs.json"                    # legacy 扁平表（向后兼容·迁移期同时读·迁完可空）
 LASTFIRE_PATH = STATE_DIR / "cron-last-fired.json"
+SHORT_WAIT_PATH = STATE_DIR / "watchdog-short-waits.json"
 LOG_PATH = LOG_DIR / "bridge-cron.log"
 DEFAULT_TZ = "Asia/Shanghai"
 TICK_SEC = 20                                          # 守护循环节拍（cron 精度到分钟，20s 足够不漏分钟）
@@ -279,6 +280,18 @@ def _marker(job):
     return f"{job.get('prompt', '').strip()} [飞书 from=cron:{name} to={bot} via=定时 · route=p2a]"
 
 
+def _watchdog_waiting_for_short_limit(bot_name):
+    """Do not queue recurring prompts into a provider session awaiting its short reset."""
+    try:
+        jobs = json.loads(SHORT_WAIT_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as exc:
+        log(f"短时恢复点无法读取，暂停本轮 cron 注入：{exc}")
+        return True
+    return isinstance(jobs, dict) and isinstance(jobs.get(bot_name), dict)
+
+
 def fire(job, dry_run=False):
     """把 job 的 prompt 注入 job['bot'] 的 Claude Code 会话。返回 True=已注入。"""
     name = job.get("name", "job")
@@ -290,6 +303,9 @@ def fire(job, dry_run=False):
     if dry_run:
         print(f"[dry-run] job={name} → bot={bot_name}\n  marker= {marker}")
         return True
+    if _watchdog_waiting_for_short_limit(bot_name):
+        log(f"fire[{name}] 跳过：{bot_name} 正在等短时额度恢复；由看门狗到点唤醒一次")
+        return False
     try:
         import feishu_bridge as fb                     # 惰性 import：list/check/start/stop 不必拉起整套桥
     except Exception as e:                             # noqa: BLE001

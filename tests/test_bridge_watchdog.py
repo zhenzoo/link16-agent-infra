@@ -113,12 +113,12 @@ def test_选号_同runtime优先(monkeypatch):
     assert q.pick(rows, exclude=[], prefer_runtime="claude")["profile"] == "ccp"
 
 
-def test_选号_跨runtime兜底(monkeypatch):
-    """主人 2026-08-20 拍板：claude 都满了直接自动切 codex，不用问。"""
+def test_选号_同runtime无可用号就不跨到codex(monkeypatch):
+    """2026-10-02 新规则：Claude 额度到顶也不能自动跨到 Codex。"""
     monkeypatch.setattr(q, "auto_failover_profiles", lambda: None)
     rows = [_row("ccp", "claude", 100, "满"), _row("ccp2", "claude", 100, "满"),
             _row("cxp", "codex", 0, "够用")]
-    assert q.pick(rows, exclude=[], prefer_runtime="claude")["profile"] == "cxp"
+    assert q.pick(rows, exclude=[], prefer_runtime="claude") is None
 
 
 def test_自动候选范围_额度再高也不切到被排除的cx或kimi(monkeypatch):

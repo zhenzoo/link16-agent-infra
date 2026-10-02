@@ -38,3 +38,17 @@ def test_board_lists_jobs_when_pyyaml_present(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert 'nightly' in out
     assert cron.yaml_blind_warning() is None
+
+
+def test_recurring_cron_waits_while_watchdog_has_one_shot_short_limit(tmp_path, monkeypatch):
+    import json
+
+    state = tmp_path / 'watchdog-short-waits.json'
+    monkeypatch.setattr(cron, 'SHORT_WAIT_PATH', state)
+    messages = []
+    monkeypatch.setattr(cron, 'log', messages.append)
+    state.write_text(json.dumps({'tb-x': {'due_at': 10400, 'status': 'scheduled'}}), encoding='utf-8')
+    assert cron.fire({'name': 'nightly', 'bot': 'tb-x', 'prompt': 'continue'}) is False
+    assert any('正在等短时额度恢复' in msg for msg in messages)
+    state.write_text('{}', encoding='utf-8')
+    assert cron._watchdog_waiting_for_short_limit('tb-x') is False

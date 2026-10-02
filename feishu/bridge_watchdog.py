@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""bridge_watchdog.py — Link16 看门狗：撞限流自动接管（检测 → 告警 → 换号 → 接手）。
+"""bridge_watchdog.py — Link16 看门狗：短时限额等恢复，周限额同系列接管。
 
 形态与 `feishu/bridge_cron.py` 完全一致：**单文件 + run/start/stop/status 子命令**，起它就完了。
 （主人 2026-08-19 / 2026-08-20 两次拍板：别搞复杂，原来什么形态就什么形态；
@@ -50,6 +50,7 @@ TZ = ZoneInfo("Asia/Shanghai")
 STATE_DIR = HERE / "_state"
 LOGS_DIR = HERE / "_logs"
 ALERTS_PATH = STATE_DIR / "watchdog-alerts.json"
+SHORT_WAIT_PATH = STATE_DIR / "watchdog-short-waits.json"
 PID_NAME = "bridge_watchdog.py"
 
 POLL_SECONDS = 120           # 与 xhs 看门狗同频，别更密（读屏是有成本的）
@@ -146,7 +147,7 @@ def is_limited(pane_text, quota_row):
         **不报错、看着正常、什么都没发生。**
 
     三态各自怎么办：
-      · 屏命中 + 账号=满     → **换号**（两把尺子都指同一个方向）
+      · 屏命中 + 账号=满     → **先分短时/周窗口**；短时等恢复，周限额才换号
       · 屏命中 + 账号=问不到 → **告警但不换号**：不知道切到哪安全，宁可不动手，
                               但**绝不静默** —— 让主人看得见「这儿可能出事了，而我不敢动」
       · 屏命中 + 账号=够用   → 不动（大概率真是屏上的历史残留文字）
@@ -168,6 +169,59 @@ def is_limited(pane_text, quota_row):
     return False, "屏与账号都没有限流迹象", False
 
 
+def limit_kind(pane_text, quota_row):
+    """Identify the blocked quota window; a generic/full verdict alone cannot authorise failover."""
+    if not find_pane_limit(pane_text) or not quota_row or quota_row.get("verdict") != "满":
+        return None
+    short = float(quota_row.get("session_percent") or 0) >= agent_quota.CRIT_PERCENT
+    weekly = float(quota_row.get("weekly_percent") or 0) >= agent_quota.CRIT_PERCENT
+    # Multiple old limit lines may remain on screen; only the last explicit one is relevant.
+    explicit = next((line for line in reversed((pane_text or "").splitlines())
+                     if re.search(r"weekly limit|session limit", line, re.I)), "")
+    if re.search(r"weekly limit", explicit, re.I):
+        return "weekly" if weekly else None
+    if re.search(r"session limit", explicit, re.I):
+        return "short" if short else None
+    if short and not weekly:
+        return "short"
+    if weekly and not short:
+        return "weekly"
+    # A generic banner with both windows full cannot prove which window stopped the turn.
+    if short and weekly:
+        return None
+    return None
+
+
+def _weekly_balance(row):
+    used = row.get("weekly_percent")
+    if used is None:
+        return "周额度占用未知"
+    return f"周额度已用 {used:.0f}%，剩余 {max(0, 100 - used):.0f}%"
+
+
+def _screen_short_reset(pane_text, now):
+    """An explicit session-limit banner can schedule a safe wait when quota API is blind."""
+    lines = (pane_text or "").splitlines()[-12:]
+    explicit = next((i for i in range(len(lines) - 1, -1, -1)
+                     if re.search(r"weekly limit|session limit", lines[i], re.I)), None)
+    if explicit is None or not re.search(r"session limit", lines[explicit], re.I):
+        return None
+    match = re.search(r"\bresets?\s+(\d{1,2}):(\d{2})\s*(am|pm)\b",
+                      " ".join(lines[explicit:explicit + 3]), re.I)
+    if not match:
+        return {"session_reset_at": None, "session_reset": "—"}
+    hour = int(match.group(1)) % 12 + (12 if match.group(3).lower() == "pm" else 0)
+    minute = int(match.group(2))
+    if minute >= 60:
+        return {"session_reset_at": None, "session_reset": "—"}
+    local = datetime.fromtimestamp(now, TZ)
+    candidate = local.replace(hour=hour, minute=minute, second=0, microsecond=0).timestamp()
+    if candidate < now:
+        candidate = (candidate + 86400) if now - candidate > 6 * 3600 else now + POLL_SECONDS
+    return {"session_reset_at": candidate,
+            "session_reset": datetime.fromtimestamp(candidate, TZ).strftime("%m-%d %H:%M")}
+
+
 # ---------- R1 · API/网络错的判据（2026-08-20 从 xhs _autopilot/watchdog.py 原样搬来）----------
 #
 # ⚠️ 下面这三样是踩过坑才有的，**搬的时候一行不改**，改动前先读懂为什么：
@@ -183,6 +237,8 @@ _CLAUDE_ERR_RE = re.compile(r"api error\s*[:(]", re.I)
 _ERR_TYPE_MARKERS = ("overloaded_error", "rate_limit_error", "internal_server_error", "api_error")
 RETRY_MARKERS = ("retrying", "attempt ", "/10", "重试", "esc to interrupt")
 NUDGE_TEXT = "继续（刚才被限流/网络抖了一下，从上次停的地方接着做）"   # ← 不含任何错误签名（防自激）
+SHORT_WAKE_TEXT = ("短时额度已恢复。请从中断处继续此前已授权的任务；"
+                   "若主人已暂停或取消，就保持等待并说明状态。")
 NUDGE_COOLDOWN = 600         # 同一面板两次注入至少隔 10min（防 spam · 给它时间真恢复）
 SELF_MARKER = "[watchdog "   # 自己面板上的日志前缀 → 绝不把自己当成卡住的会话
 
@@ -546,7 +602,7 @@ def _alerts_save(data):
 
 
 # 状态类（会持续成立）→ 冷却；动作类（一次性）→ 必发不吞。
-_STATEFUL_KINDS = {"limit", "policy_stuck", "hwm_corrupt", "stall_stuck"}
+_STATEFUL_KINDS = {"limit", "no_target", "short_wait_failed", "policy_stuck", "hwm_corrupt", "stall_stuck"}
 
 
 def _alert_target(bot_name):
@@ -634,6 +690,195 @@ def notify(bot_name, kind, text):
     except Exception as e:                             # noqa: BLE001
         log(f"[{bot_name}] DM 告警失败：{e}")
         return False
+
+
+# ---------- R2 · 短时额度的一次性恢复点（由现有 watchdog 轮询，无第二个计划任务）----------
+
+def _short_waits_load():
+    if not SHORT_WAIT_PATH.exists():
+        return {}
+    try:
+        jobs = json.loads(SHORT_WAIT_PATH.read_text(encoding="utf-8"))
+        if isinstance(jobs, dict):
+            return {name: job for name, job in jobs.items()
+                    if isinstance(name, str) and isinstance(job, dict)}
+    except (OSError, ValueError) as exc:
+        log(f"短时恢复点读取失败，保留原文件并继续巡检：{exc}")
+    return {}
+
+
+def _short_waits_save(jobs):
+    """Atomic replacement keeps scheduled one-shot wakeups across watchdog restarts."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = SHORT_WAIT_PATH.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(jobs, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(temporary, SHORT_WAIT_PATH)
+        return True
+    except OSError as exc:
+        log(f"短时恢复点写入失败：{exc}")
+        return False
+
+
+def _short_identity(rec):
+    return {key: rec.get(key) for key in ("profile", "pty", "workspace_id", "jsonl")}
+
+
+def _inbound_size(bot_name):
+    """A later owner/peer message takes control away from this automatic wakeup."""
+    try:
+        return (STATE_DIR / f"bridge-inbound-{bot_name}.jsonl").stat().st_size
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+
+
+def _short_due(row, now):
+    stamp = row.get("session_reset_at")
+    return float(stamp) if isinstance(stamp, (int, float)) and stamp > now else now + POLL_SECONDS
+
+
+def _arm_short_wait(bot_name, rec, row, jobs, now):
+    identity = _short_identity(rec)
+    if not all(identity.get(key) for key in ("profile", "pty", "workspace_id")):
+        notify(bot_name, "short_wait_failed",
+               f"⚠️ {bot_name} 被短时限额挡住，但会话身份不完整，无法安全安排到点唤醒；"
+               f"{_weekly_balance(row)}。看门狗不会切账号。")
+        return False
+    inbound_size = _inbound_size(bot_name)
+    if inbound_size is None:
+        notify(bot_name, "short_wait_failed",
+               f"⚠️ {bot_name} 被短时限额挡住，但无法读取后续消息记录，"
+               "不能安全安排自动唤醒；看门狗不会切账号。")
+        return False
+    due = _short_due(row, now)
+    job = jobs.get(bot_name)
+    if not isinstance(job, dict) or job.get("identity") != identity:
+        job = {"identity": identity, "due_at": due, "notified": False,
+               "status": "scheduled", "inbound_size": inbound_size}
+        jobs[bot_name] = job
+        if not _short_waits_save(jobs):
+            jobs.pop(bot_name, None)
+            return False
+    elif abs(job.get("due_at", 0) - due) > POLL_SECONDS and row.get("session_reset_at", 0) > now:
+        job["due_at"] = due
+        _short_waits_save(jobs)
+    if not job["notified"]:
+        reset = row.get("session_reset") or "—"
+        time_note = (f"预计 {reset} 恢复" if row.get("session_reset_at")
+                     else "接口未给恢复时间；每 2 分钟复查")
+        job["notified"] = notify(bot_name, "short_wait",
+                                 f"🟡 {bot_name} 的 {rec['profile']} **短时会话限额**挡住了当前任务；"
+                                 f"{time_note}。{_weekly_balance(row)}。"
+                                 "看门狗保留原会话，恢复后只唤醒一次，不切账号。")
+        _short_waits_save(jobs)
+    return True
+
+
+def _active_limit_footer(screen):
+    """Only a current TUI limit footer authorises a wakeup, not old text in a transcript."""
+    tail = (screen or "").splitlines()[-12:]
+    hits = [i for i, line in enumerate(tail)
+            if re.search(r"usage limit reached|hit your session limit|rate limit(?:ed)? · resets", line, re.I)]
+    if not hits or hits[-1] < len(tail) - 5:
+        return False
+    # Claude may resume by itself at the reset minute while the old banner is still visible.
+    return not any(re.search(r"^\s*[●✻✶]\s*(?:Working|Thinking|Running|Generating)\b", line, re.I)
+                   for line in tail[hits[-1] + 1:])
+
+
+def _resume_short_waits(jobs, quota, bot_by_pty, bots, now):
+    """Fire and remove due one-shot jobs; a changed session or active work is never nudged."""
+    changed = False
+    resumed = set()
+    for bot_name, job in list(jobs.items()):
+        if job.get("status") == "firing":
+            notify(bot_name, "short_resume_failed",
+                   f"⚠️ {bot_name} 的一次性唤醒在看门狗重启前进入提交阶段，结果未能确认；"
+                   "已销毁任务，避免重复注入，请查看原面板。")
+            jobs.pop(bot_name, None)
+            changed = True
+            continue
+        if bot_name not in bots or bots[bot_name].get("profile") != (job.get("identity") or {}).get("profile"):
+            jobs.pop(bot_name, None)
+            changed = True
+            continue
+        identity = job.get("identity") or {}
+        rec = session_record(bot_name)
+        if identity != _short_identity(rec):
+            jobs.pop(bot_name, None)
+            changed = True
+            log(f"[{bot_name}] 原会话已变化，销毁短时恢复点")
+            continue
+        inbound_size = _inbound_size(bot_name)
+        if inbound_size is None:
+            job["due_at"] = now + POLL_SECONDS
+            changed = True
+            continue
+        if (inbound_size is not None and job.get("inbound_size") is not None
+                and inbound_size != job["inbound_size"]):
+            jobs.pop(bot_name, None)
+            changed = True
+            log(f"[{bot_name}] 等待期间有新输入，交由当前会话处理；销毁自动恢复点")
+            continue
+        if now < float(job.get("due_at") or 0):
+            continue
+        row = quota.get(identity.get("profile"))
+        if not row or row.get("status") != "ok":
+            job["due_at"] = now + POLL_SECONDS
+            changed = True
+            continue
+        if float(row.get("session_percent") or 0) >= agent_quota.CRIT_PERCENT:
+            job["due_at"] = _short_due(row, now)
+            changed = True
+            continue
+        if float(row.get("weekly_percent") or 0) >= agent_quota.CRIT_PERCENT:
+            jobs.pop(bot_name, None)  # 周额度已挡住，交给下一轮 R2 周额度分支
+            changed = True
+            continue
+        pty = identity["pty"]
+        if bot_by_pty.get(pty) != bot_name:
+            job["due_at"] = now + POLL_SECONDS
+            changed = True
+            continue
+        screen = read_pane(pty)
+        if screen is None:
+            job["due_at"] = now + POLL_SECONDS
+            changed = True
+            continue
+        if at_picker(screen, bot_name):
+            jobs.pop(bot_name, None)
+            changed = True
+            log(f"[{bot_name}] 当前在等用户选择，销毁短时恢复点，不注入")
+            continue
+        if _active_limit_footer(screen):
+            import feishu_bridge as fb  # 惰性加载；复用桥的串行注入及提交校验
+            job["status"] = "firing"
+            if not _short_waits_save(jobs):
+                job["status"] = "scheduled"
+                continue  # 未持久化“将要注入”，不能执行可能在重启后重复的动作
+            try:
+                submitted = fb._inject(pty, identity["workspace_id"], SHORT_WAKE_TEXT)
+            except Exception as exc:  # noqa: BLE001
+                submitted = False
+                log(f"[{bot_name}] 短时恢复注入异常：{exc}")
+            if submitted:
+                notify(bot_name, "short_resumed",
+                       f"✅ {bot_name} 的 {identity['profile']} 短时额度已恢复，原会话已收到一次继续指令。"
+                       f"{_weekly_balance(row)}。")
+                resumed.add(bot_name)
+            else:
+                notify(bot_name, "short_resume_failed",
+                       f"⚠️ {bot_name} 短时额度已恢复，但原会话的继续指令没有确认提交；"
+                       "请到原面板检查输入框。不会重复注入或切账号。")
+        else:
+            log(f"[{bot_name}] 限额横幅已消失，原生自动恢复或人为取消；不额外注入")
+        jobs.pop(bot_name, None)  # 成功、失败或已自愈都只触发一次
+        changed = True
+    if changed:
+        _short_waits_save(jobs)
+    return resumed
 
 
 def _notify_bridge_down():
@@ -1208,6 +1453,14 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     by = {r["profile"]: r for r in rows}
     allowed = agent_quota.auto_failover_profiles()
     candidate_rows = [r for r in rows if allowed is None or r["profile"] in allowed]
+    curr = by.get(cur)
+    if not curr:
+        log(f"❌ 当前号 {cur} 的 runtime 无法确认，拒绝自动换号")
+        return False
+    if (curr.get("status") != "ok"
+            or float(curr.get("weekly_percent") or 0) < agent_quota.CRIT_PERCENT):
+        log(f"❌ {cur} 的周额度未确认到限额；短时限额只能等待恢复，拒绝换号")
+        return False
     if target:
         if allowed is not None and target not in allowed:
             log(f"❌ 指定的目标号 {target} 不在本机自动换号候选范围"); return False
@@ -1217,30 +1470,23 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         if chosen.get("verdict") not in {"够用", "紧张"}:
             log(f"❌ 指定的目标号 {target} 当前不可切：{chosen.get('verdict')}")
             return False
+        if target == cur:
+            log(f"❌ 目标号 {target} 就是当前号，拒绝无意义的换号")
+            return False
+        if not agent_quota.same_failover_series(curr, chosen):
+            log(f"❌ {cur} → {target} 跨 runtime 或跨 profile 系列，看门狗拒绝换号")
+            return False
     else:
         chosen = agent_quota.pick(candidate_rows, exclude=[cur],
-                                  prefer_runtime=(by.get(cur) or {}).get("runtime"))
+                                  prefer_runtime=curr["runtime"], source=curr)
     if not chosen:
         notify(bot_name, "no_target",
-               f"🔴 {bot_name} 撞额度上限（{cur}），但**允许自动切换的号都不可用**，没换。\n"
-               + "\n".join(f"· {r['profile']} {r['verdict']} 周{r['weekly_percent']}%"
-                           for r in candidate_rows))
+               f"🔴 {bot_name} 的 {cur} 周额度到限额，但**同 runtime、同 profile 系列**"
+               "没有可用且获准自动接手的号；原会话未关闭。\n"
+               + "\n".join(f"· {r['profile']} {r['verdict']} · {_weekly_balance(r)}"
+                           for r in candidate_rows if agent_quota.same_failover_series(curr, r)))
         return False
     tgt = chosen["profile"]
-    curr = by.get(cur) or {}
-
-    # 跨 runtime 时必须把【为什么跨】说清楚（tb25-link16 2026-08-20 提出 · 采纳）：
-    # TB25 那台能用的 Claude 号实际只有 ccp 一个（ccp2 已满、其余 5 个没登录），
-    # 所以「同 runtime 优先」在那台会**经常落空**、频繁跨到 codex。
-    # 主人已拍板跨 runtime 自动切，但如果不解释，他看到 claude→codex 会以为切错了。
-    cur_rt = curr.get("runtime")
-    why_cross = ""
-    if cur_rt and chosen["runtime"] != cur_rt:
-        same = [r for r in candidate_rows if r["runtime"] == cur_rt and r["profile"] != cur]
-        detail = "、".join(f"{r['profile']}({r['verdict']})" for r in same) or "一个都没有"
-        why_cross = (f"\n· **跨 runtime 说明**：同为 {cur_rt} 的其他号都用不了 —— {detail}；"
-                     f"所以切到 {chosen['runtime']} 的 {tgt}。这是预期行为，不是切错。")
-        log(f"跨 runtime：{cur_rt}→{chosen['runtime']}，因为同 runtime 候选 {detail}")
     log(f"选号：{cur}（{curr.get('verdict')}）→ {tgt}（{chosen['verdict']}·周{chosen['weekly_percent']}%"
         f"·{chosen.get('route') and '经' + chosen['route'] or ''}）")
 
@@ -1265,10 +1511,10 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         return True
 
     notify(bot_name, "limit",
-           f"🔴 {bot_name} 撞额度上限｜账号 {cur} · 周额度 {curr.get('weekly_percent')}%"
-           f"｜{curr.get('weekly_reset')} 恢复\n"
-           f"→ 正在切到 {tgt}（周 {chosen['weekly_percent']}%），并把原任务交给新会话接手。"
-           f"{why_cross}")
+           f"🔴 {bot_name} 的 {cur} **周额度**挡住了当前会话；"
+           f"{_weekly_balance(curr)}，预计 {curr.get('weekly_reset')} 重置。\n"
+           f"→ 只在同类型账号内切到 {tgt}（{_weekly_balance(chosen)}），"
+           "并把原任务交给新会话接手。")
 
     # ④ 写名册
     try:
@@ -1330,7 +1576,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
                   f"· 原会话 session {pack.get('session_id')}（账号 {cur}）\n"
                   f"· 它已拿到那份 transcript，正在自己梳理进度并继续推进\n"
                   f"· 上个会话留下 {bgn} 条在途工作线索，已一并交接（要它先判死活）\n"
-                  f"· {cur} 的额度 {curr.get('weekly_reset')} 恢复")
+                  f"· {cur} 的周额度预计 {curr.get('weekly_reset')} 重置；{_weekly_balance(curr)}")
     # 🩸 告警送没送到，必须体现在最终结论里（tb25-link16 2026-08-20 提出 · 采纳）：
     #   TB25 第一次真实换号时两条 DM 全失败，而最后一行照样打「✅ 换号 + 接手完成」——
     #   **那个 ✅ 和刚干掉的「跑着旧代码却全绿」是同一类假绿灯**：
@@ -1459,16 +1705,17 @@ def cmd_run(auto=True):
 
     规则按顺序匹配，先命中先处理：
       R3 停在交互 picker           → **什么都不做**（在等主人回答，注回车会替他乱选）
-      R2 撞额度上限（屏 + API 双源）→ 换号 + 把原任务交接给新会话
+      R2 短时限额→原会话到点恢复；周限额→同系列换号并交接
       R1 API/网络错 + 静止 2 轮     → 注「继续」
       R8 确认执行中连续静默 ≥60min → 复核工具/回合后按 Esc；等待不计时，同回合只动一次
       R5 Codex 回合被服务端掐断     → 告警 + 注「继续」；连着 3 个回合都被掐 → 停手只告警
       R4 桥进程 活→死              → 告警（每轮一次·不针对面板）
     要支持一种新的中断类型，就在这张表里加一行。"""
-    log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 限流换号 / R3 picker跳过 / "
+    log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 短时等待·周限额同系列换号 / R3 picker跳过 / "
         f"R8 执行静默{STALL_MIN}min后台复核 / R5 Codex回合被掐断 / R6 水位损坏 / R7 CLI版本漂移 / R4 桥看护 · "
         f"覆盖【全部 workspace 的全部面板】· 一视同仁")
     states = {}                      # {pty: {"hash","err_stuck","lim_stuck","last_nudge"}}
+    short_waits = _short_waits_load()
     silence = bridge_activity.SilenceClock()
     r8_unknown = {}                  # {bot: 上次记下的「无法确认」原因}·同一原因只记一次
     bridge_seen_alive = False
@@ -1488,6 +1735,8 @@ def cmd_run(auto=True):
             quota = {r["profile"]: r for r in agent_quota.collect()}
             now = time.time()
             acted = 0
+            resumed = _resume_short_waits(short_waits, quota, bot_by_pty, bots, now)
+            acted += len(resumed)
             activity_checks = {}
             r5_seen = r5_blind = 0        # R5 覆盖账：扫到几个 codex bot / 其中几个认不出 thread
 
@@ -1500,6 +1749,8 @@ def cmd_run(auto=True):
                     continue                             # 自己的日志里有错误字样，不是卡住的会话
                 ws = (ws_by_pty or {}).get(pty) or "?workspace"
                 bot_name = bot_by_pty.get(pty)
+                if bot_name in resumed:
+                    continue  # 刚注入继续，本轮不能再让 R8 按 Esc
                 st = states.setdefault(pty, {"err_sig": None, "err_stuck": 0,
                                             "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0,
                                             "dead_turn": None, "dead_streak": 0, "dead_alert_at": 0.0,
@@ -1513,14 +1764,20 @@ def cmd_run(auto=True):
                     st["err_stuck"] = st["lim_stuck"] = 0
                     continue
 
-                # ---- R2 · 撞额度上限 → 换号 + 接手 ----
+                # ---- R2 · 短时限额等恢复；周限额才同系列换号 ----
                 prof = _profile_of(bot_name, bots.get(bot_name)) if bot_name else None
                 limited, why, uncertain = (is_limited(text, quota.get(prof)) if prof
                                            else (False, "认不出是哪个 bot", False))
+                kind = limit_kind(text, quota.get(prof)) if limited else None
+                row = quota.get(prof) or {}
+                screen_short = _screen_short_reset(text, now) if prof else None
+                if kind is None and screen_short is not None and (
+                        row.get("status") != "ok" or row.get("session_percent") is None):
+                    kind = "short"  # only schedules a wait; API must recover before any injection
                 # 「说不准」= 屏上明明写着撞限流、但账号那一路答不上来（额度接口自己被限流等）。
                 # **不敢换号（不知道切到哪安全），但绝不静默** —— 静默正是这套东西要根治的病。
                 # 走状态类告警（30min 冷却），且不进 lim_stuck 计数、不触发 failover。
-                if uncertain and bot_name:
+                if uncertain and bot_name and kind != "short":
                     notify(bot_name, "limit",
                            f"⚠️ {bot_name} 疑似撞额度上限，但**我不敢自动换号**\n"
                            f"· 面板 {ws} 屏上有限流提示\n"
@@ -1528,15 +1785,33 @@ def cmd_run(auto=True):
                            f"· 详情：{why}\n"
                            f"· 你可以：`/account <别的号>` 手动切，或跑 `python feishu/agent_quota.py` 看是谁答不上来")
                     log(f"⚠️ {ws}/{bot_name} 屏命中限流但额度问不到（{prof}）→ 只告警不换号")
-                st["lim_stuck"] = _bump(st, "lim", find_pane_limit(text) if limited else None)
+                elif uncertain and kind == "short":
+                    log(f"⚠️ {ws}/{bot_name} 短时限额屏可读、额度接口问不到 → 等恢复点，绝不换号")
+                signature = f"{kind}:{find_pane_limit(text)}" if kind and (limited or uncertain) else None
+                st["lim_stuck"] = _bump(st, "lim", signature)
                 if st["lim_stuck"] >= STUCK_CONFIRM:
-                    log(f"⚡ {ws}/{bot_name} 撞额度上限（{prof}）：{why}")
-                    if auto:
-                        failover(bot_name, reason="撞额度上限")
+                    log(f"⚡ {ws}/{bot_name} {kind} 限额（{prof}）：{why}")
+                    if kind == "short":
+                        wait_row = dict(row)
+                        if screen_short is not None and row.get("status") != "ok":
+                            wait_row.update(screen_short)
+                        _arm_short_wait(bot_name, session_record(bot_name), wait_row, short_waits, now)
+                    elif auto:
+                        failover(bot_name, reason="周额度到限额")
                     else:
-                        notify(bot_name, "limit", f"🔴 {bot_name} 撞额度上限（{prof}）· 自动换号已关，需要你处理")
+                        notify(bot_name, "limit",
+                               f"🔴 {bot_name} 的 {prof} 周额度到限额，{_weekly_balance(row)}；"
+                               "自动换号已关，原会话未关闭。")
                     st["lim_stuck"] = 0
                     acted += 1
+                    continue
+
+                if find_pane_limit(text):
+                    # 限额屏无论额度接口是否可读，都不能被 R1/R8/R5 当成普通卡顿去重推。
+                    if limited and kind is None and bot_name:
+                        notify(bot_name, "limit",
+                               f"⚠️ {bot_name} 屏上有限额提示，但短时/周额度与提示未能对上；"
+                               "不切账号，继续复查。")
                     continue
 
                 # ---- R1 · API/网络错 + 静止 2 轮 → 注「继续」----
@@ -1784,29 +2059,36 @@ def failover_readiness(rows=None):
       更要命的是 `status` 照样三行全绿（它只看进程 / 名册 / 桥，**不看"有没有号可切"**）。
       这正是本仓最容易翻车的形状：**不报错、看着正常、什么都没发生。**
 
-    返回 {runtime: {"bots": n, "usable": [profile…], "ok": bool}}。"""
+    返回每种 runtime 的 bot 数、同系列可接手号及无接手号的源 profile。"""
     rows = rows if rows is not None else agent_quota.collect()
     allowed = agent_quota.auto_failover_profiles()
     candidates = [r for r in rows if allowed is None or r["profile"] in allowed]
-    by_rt = {}
-    for r in candidates:
-        by_rt.setdefault(r["runtime"], []).append(r)
+    by_name = {r["profile"]: r for r in rows}
     in_use = {}
     for bot in _iter_bots():
         prof = _profile_of(bot["name"], bot)
         if not prof:
             continue
-        spec = next((r for r in rows if r["profile"] == prof), None)
+        spec = by_name.get(prof)
         rt = spec["runtime"] if spec else "?"
-        in_use.setdefault(rt, {"bots": 0})["bots"] += 1
+        in_use.setdefault(rt, []).append(prof)
     out = {}
-    for rt, info in in_use.items():
-        usable = [r["profile"] for r in by_rt.get(rt, []) if r["verdict"] in ("够用", "紧张")]
-        # 换号至少要有 2 个可用号才有意义（撞了的那个会被排除）；
-        # 但跨 runtime 也算数 —— 主人已拍板跨 runtime 直接自动切。
-        cross = [r["profile"] for r in candidates if r["verdict"] in ("够用", "紧张")]
-        out[rt] = {"bots": info["bots"], "usable": usable,
-                   "cross_usable": cross, "ok": len(cross) >= 1}
+    for rt, profiles in in_use.items():
+        usable, blocked = set(), set()
+        for name in profiles:
+            source = by_name.get(name)
+            if not source or source.get("status") != "ok":
+                blocked.add(name)
+                continue
+            targets = [r["profile"] for r in candidates if r["profile"] != name
+                       and agent_quota.is_usable(r)
+                       and agent_quota.same_failover_series(source, r)]
+            if targets:
+                usable.update(targets)
+            else:
+                blocked.add(name)
+        out[rt] = {"bots": len(profiles), "usable": sorted(usable),
+                   "blocked": sorted(blocked), "ok": not blocked}
     return out
 
 
@@ -2057,22 +2339,27 @@ def cmd_status(verbose=False):
     rows = agent_quota.collect()
     print("\n各号额度：")
     agent_quota._print_table(rows)
+    waits = _short_waits_load()
+    print(f"\n短时恢复点：{len(waits)} 个一次性任务")
+    for bot_name, job in sorted(waits.items()):
+        due = datetime.fromtimestamp(float(job.get("due_at") or 0), TZ).strftime("%m-%d %H:%M")
+        print(f"  · {bot_name}: {job.get('identity', {}).get('profile', '?')} · {due} 复查")
 
     # ④.5 换号能力自检 —— status 三行全绿 ≠ failover 是活的（tb25 2026-08-20 提出）
-    print("\n换号能力（撞限流时到底切不切得动）：")
+    print("\n周额度换号能力（短时限额只等待）：")
     ready = failover_readiness(rows)
     if not ready:
         print("  ⚠️ 名册里没有能解析出 profile 的 bot —— 无从判断")
     for rt, v in sorted(ready.items()):
         mark = "✅" if v["ok"] else "🔴"
-        print(f"  {mark} {rt:7} 本机 {v['bots']:>2} 个 bot 在用 · 同 runtime 可切 {v['usable'] or '无'}"
-              f" · 跨 runtime 可切 {v['cross_usable'] or '无'}")
+        print(f"  {mark} {rt:7} 本机 {v['bots']:>2} 个 bot 在用 · 同系列可切 {v['usable'] or '无'}"
+              f" · 无接手号 {v['blocked'] or '无'}")
     if stale:
         print("\n" + why)          # 长输出会把开头刷走，结尾再提一次
     dead = [rt for rt, v in ready.items() if not v["ok"]]
     if dead:
-        print(f"  🔴 **{dead} 这些 runtime 撞限流时【切不动】** —— 所有候选号都『问不到』或『满』。")
-        print("     自动换号对它们等于没装（且不会报错）。先跑 `python feishu/agent_quota.py` 看是谁问不到。")
+        print(f"  🔴 **{dead} 有 profile 在周额度到限时找不到同系列可用号**。")
+        print("     核对目标号是否登记为 auto_failover_target，以及它的实时额度。")
     return 0
 
 
