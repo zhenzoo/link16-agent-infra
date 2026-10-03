@@ -24,13 +24,65 @@
 //   node wmux-rpc.js close  <ptyId|paneId>          # close ONE pane by id (targeted · ws-guarded · verified)
 //   node wmux-rpc.js rpc    <method> [jsonParams]   # raw escape hatch
 //
-// Env overrides: WMUX_AUTH_TOKEN, WMUX_SOCKET_PATH, WMUX_WS (workspaceId).
+// Env overrides: WMUX_AUTH_TOKEN, WMUX_SOCKET_PATH, WMUX_WS (workspaceId), WMUX_CLI (official CLI path).
 
 const net = require("net");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { spawnSync } = require("child_process");
+
+// ---- wmux client identity (2026-10-03 · wmux#1111) ----
+// wmux >=3.64 refuses requests without a clientName. Every request names this client; the name is
+// registered per machine in ~/.wmux/config.json mcp.firstPartyClients (feishu/wmux_identity.py),
+// which grants wmux's curated first-party method set. workspace.new/close/focus/current are
+// wmux.internal and outside that set — wmux grants them only to its own CLI — so they run through
+// the official `wmux` CLI below instead of the pipe.
+const CLIENT_NAME = "link16-agent-infra";   // must equal feishu/wmux_identity.py CLIENT_NAME
+const CLI_ROUTED = {
+  "workspace.new": (p) => ["new-workspace", ...(p.name ? ["--name", String(p.name)] : [])],
+  "workspace.close": (p) => ["close-workspace", String(p.id)],
+  "workspace.focus": (p) => ["focus-workspace", String(p.id)],
+  "workspace.current": () => ["current-workspace"],
+};
+
+function rpcError(res) {
+  let msg = res.error || "wmux returned ok:false without an error";
+  if (res.rejection && res.rejection.reason === "identity-status") {
+    msg += ` — wmux does not recognise "${CLIENT_NAME}" as a first-party client: run ` +
+      `python feishu/wmux_identity.py --apply, then restart wmux`;
+  }
+  const err = new Error(msg);
+  err.fromServer = true;   // wmux answered: do not replay on another transport (would mask it or double-send)
+  return err;
+}
+
+function cliPath() {
+  if (process.env.WMUX_CLI) return process.env.WMUX_CLI;
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    const shim = path.join(process.env.LOCALAPPDATA, "wmux", "bin", "wmux.cmd");
+    if (fs.existsSync(shim)) return shim;
+  }
+  return "wmux";
+}
+
+function wmuxCli(args) {
+  for (const a of args) {
+    if (!a || /[\r\n"%&|<>^!]/.test(a)) throw new Error(`wmux CLI: refusing unsafe argument ${JSON.stringify(a)}`);
+  }
+  const env = { ...process.env };
+  delete env.WMUX_PTY_ID;   // the pipe call never sent a caller pane; keep the CLI from stamping fan-out lineage
+  const cli = cliPath();
+  const full = [...args, "--json"];
+  const r = process.platform === "win32"
+    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${[cli, ...full].map((a) => `"${a}"`).join(" ")}"`],
+        { env, encoding: "utf8", timeout: 15000, windowsHide: true, windowsVerbatimArguments: true })
+    : spawnSync(cli, full, { env, encoding: "utf8", timeout: 15000 });
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error(`wmux ${args[0]}: ${(r.stderr || r.stdout || `exit ${r.status}`).trim()}`);
+  return JSON.parse(r.stdout);
+}
 
 function readToken() {
   if (process.env.WMUX_AUTH_TOKEN) return process.env.WMUX_AUTH_TOKEN;
@@ -57,7 +109,7 @@ function tcpPort() {
 function attempt(target, token, method, params) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
-    const req = JSON.stringify({ id, method, params, token }) + "\n";
+    const req = JSON.stringify({ id, method, params, token, clientName: CLIENT_NAME }) + "\n";
     const sock = net.connect(target);
     let buf = "";
     let done = false;
@@ -76,7 +128,7 @@ function attempt(target, token, method, params) {
           const res = JSON.parse(t);
           if (res.id === id && !done) {
             done = true; clearTimeout(timer); sock.destroy();
-            if (res.ok) resolve(res.result); else reject(new Error(res.error));
+            if (res.ok) resolve(res.result); else reject(rpcError(res));
           }
         } catch {}
       }
@@ -87,6 +139,7 @@ function attempt(target, token, method, params) {
 }
 
 async function rpc(method, params = {}) {
+  if (CLI_ROUTED[method]) return wmuxCli(CLI_ROUTED[method](params));
   const token = readToken();
   const targets = [];
   if (process.env.WMUX_SOCKET_PATH) targets.push(process.env.WMUX_SOCKET_PATH);
@@ -94,10 +147,10 @@ async function rpc(method, params = {}) {
   const port = process.platform === "win32" ? tcpPort() : undefined;
   let lastErr;
   for (const t of targets) {
-    try { return await attempt(t, token, method, params); } catch (e) { lastErr = e; }
+    try { return await attempt(t, token, method, params); } catch (e) { if (e.fromServer) throw e; lastErr = e; }
   }
   if (port) {
-    try { return await attempt({ host: "127.0.0.1", port }, token, method, params); } catch (e) { lastErr = e; }
+    try { return await attempt({ host: "127.0.0.1", port }, token, method, params); } catch (e) { if (e.fromServer) throw e; lastErr = e; }
   }
   throw lastErr ?? new Error("no transport");
 }
