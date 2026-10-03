@@ -11,13 +11,21 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-03
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.37.4 — 2026-10-03 · wmux ≥3.64 下桥恢复开会话：报身份 + 工作区操作走官方 CLI
+
+- **问题**：wmux#1111 从 v3.64.0 起拒绝不带 `clientName` 的 RPC。本机升到 3.66.0 后，`wmux-rpc.js` 的每次 `workspace.list` 都被拒，飞书桥全部 bot 开不出会话，只回“交给终端前的准备尚未完成”。SOP-010 原先写的“裸客户端会被放行”这条依赖已失效。
+- **修复**：`wmux-rpc.js` 每次报 `clientName: link16-agent-infra`，本机用 `feishu/wmux_identity.py --apply` 登记进 `~/.wmux/config.json` 的 `mcp.firstPartyClients`，wmux 按第一方客户端放行面板/终端方法。`workspace.new/close/focus/current` 属 `wmux.internal`，wmux 只放行自家 CLI，所以这 4 个改走官方 `wmux <cmd> --json`。wmux 明确回复的拒绝不再换 TCP 重发；身份被拒时报错直接给修复命令。preflight 新增「wmux 客户端身份」检查，`windows_bootstrap --apply` 自动登记。
+- **同版并入**：`0fa5c81` 看门狗区分短时与周额度——短时限额在原会话等恢复，只有周额度到限才换号，且只在同 runtime、同 profile 系列内换。
+- **验证**：新增 14 项回归（身份工具 5 项、wmux-rpc 行为 4 项 + 合同 2 项、preflight 3 项）；全仓 1167 passed、129 subtests。本机 3.66.0 严格模式实测：旧式无身份请求被拒；新客户端的 list/current/new/read/send/enter/split-here/setMetadata/pane.close/workspace.close/focus 全部通过，Link16 请求 0 条被拒。
+- **升级（每台机器都要做，顺序不能反）**：`git pull` 后立刻运行 `python feishu/wmux_identity.py --apply`，然后重启 wmux（托盘 Quit 再打开；后台会话服务和终端会话都保留），再看 `python feishu/preflight.py` 的「wmux 客户端身份」是否为 [ OK ]。拉了新代码但没登记、没重启 wmux 时，即使 wmux 版本较老，桥的调用也会被当作未确认客户端拒绝。适用 wmux ≥3.40；不需要重启桥。
 
 ## v0.37.3 — 2026-10-01 · Codex 的 wmux MCP 路径不再随 wmux 升级失效
 
