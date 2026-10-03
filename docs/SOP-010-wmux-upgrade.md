@@ -45,14 +45,17 @@ last_reviewed: 2026-08-26
 | 鉴权 token | `~/.wmux-auth-token`（裸 UUID，不是 JSON） | `docs/how-to/connect-to-wmux.md` |
 | 端点 | `\\.\pipe\wmux-<用户名>` | 同上 |
 | Windows 兜底 | `~/.wmux-tcp-port` → `127.0.0.1:<port>` | 同上 |
-| 帧格式 | NDJSON `{id,method,params,token}` → `{id,ok,result}` | `docs/PROTOCOL.md` |
-| 方法 | `workspace.list/new/close`、`input.send`、`pane.list/split` | `docs/api/reference.md` |
+| 帧格式 | NDJSON `{id,method,params,token,clientName:"link16-agent-infra"}` → `{id,ok,result}` | `docs/PROTOCOL.md` |
+| 客户端身份 | `~/.wmux/config.json` 的 `mcp.firstPartyClients` 含 `link16-agent-infra`（`feishu/wmux_identity.py --apply` 登记，改后重启 wmux） | `docs/api/mcp-plugin-spec.md` §2.4 |
+| 方法 | 走管道：`workspace.list`、`surface.list`、`pane.list/split/close/setMetadata`、`input.send/sendKey/readScreen`；走官方 CLI（`wmux <cmd> --json`）：`workspace.new/close/focus/current` | `docs/api/reference.md` |
 | 返回字段 | `id` / `ptyIds` / `metadata.agentName` / `metadata.agentStatus` | `src/shared/workspaceMirror.ts` |
 | daemon 指纹 | `~/.wmux/daemon.pid`（内容+mtime，桥用它判会话作废） | — |
 
-⚠️ 新版给 RPC 加了 capability 门，`workspace.new` / `workspace.close` 标 `wmux.internal`；上游文档明写
-**「legacy envelope-less callers grandfather through」**——我们这种不带 `clientName` 的裸客户端被放行。
-**升级后第一件事就是验它**（见 §4 第 2 条）。
+⚠️ 不带 `clientName` 的裸客户端从 v3.64.0 起一律被拒（wmux#1111 关闭 legacy 放行通道；2026-10-03
+本机升到 3.66.0 后桥全部开不出会话即此因）。现在 `wmux-rpc.js` 每次都报 `link16-agent-infra`，wmux 按
+第一方客户端放行它的面板/终端方法；`workspace.new/close/focus/current` 属 `wmux.internal`，wmux 只放行
+自家 CLI，所以这 4 个改走官方 `wmux` CLI。前提是本机已登记身份：`python feishu/preflight.py` 的
+「wmux 客户端身份」必须 [ OK ]。**升级后第一件事仍是验 §4 第 2 条。**
 
 ## 2 · 前置（做完再动手）
 
@@ -92,7 +95,7 @@ python feishu/feishu_bridge.py stop        # 停桥（避免升级中途有消�
 ls ~/AppData/Local/wmux/ | grep app-          # 应出现 app-<新版>
 node wmux/wmux-rpc.js rpc system.identify "{}"
 
-# 2) ★ 我们的裸客户端仍被放行（最关键一条）
+# 2) ★ 我们的客户端身份仍被放行（最关键一条；报 "does not recognise" → wmux_identity.py --apply 后重启 wmux）
 node wmux/wmux-rpc.js rpc workspace.list "{}"    # 要能返回，且元素带 ptyIds / metadata.agentName
 python -c "import sys;sys.path.insert(0,'feishu');import wmux_session as w;ws=w.workspaces();print(len(ws), ws[0].keys())"
 

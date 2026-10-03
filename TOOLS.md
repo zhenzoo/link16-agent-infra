@@ -82,7 +82,8 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
-| `wmux/wmux-rpc.js` | **wmux daemon JSON-RPC 客户端**（带 token+workspaceId·免 MCP 身份闸）：`panes`/`surfaces`/`read`/`send`/`key`/`enter`/`split-here`/`close`/`rpc` · 裸 `pane.split` 已禁 | `node wmux/wmux-rpc.js read <pty>` / `send <pty> "..."` / `close <pty> --allow-ws <id>` |
+| `wmux/wmux-rpc.js` | **wmux daemon JSON-RPC 客户端**（带 token+workspaceId，每次报 `clientName: link16-agent-infra`；`workspace.new/close/focus/current` 走官方 `wmux` CLI）：`panes`/`surfaces`/`read`/`send`/`key`/`enter`/`split-here`/`close`/`rpc` · 裸 `pane.split` 已禁 | `node wmux/wmux-rpc.js read <pty>` / `send <pty> "..."` / `close <pty> --allow-ws <id>` |
+| `feishu/wmux_identity.py` | 把 `link16-agent-infra` 登记进本机 `~/.wmux/config.json` 的 `mcp.firstPartyClients`（wmux ≥3.64 不登记就拒绝桥的调用）；`windows_bootstrap --apply` 自动执行，preflight 检查 | `python feishu/wmux_identity.py`（只读）/ `--apply`，然后重启 wmux |
 | `feishu/wmux_worker.py probe/kickoff/status` | **通用确切信号**：判面板死活靠 side-effect marker，派活靠 spinner，完成靠结构化 receipt；不信空闲 banner read | `python feishu/wmux_worker.py probe --id X` / `kickoff --id X --task-file task.md` / `status --id X` · 见 `docs/ARCH-010 §8` |
 
 > ⚠️ **xhs 巡航专属、不在本仓**：`spawn_worker.py`（写帖角色/lease/N+3）、`check_pane_layout.py`——那些是 xhs 自己的工作负载、只是用 wmux，留在 xhs。
