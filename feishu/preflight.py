@@ -282,6 +282,25 @@ def check_wmux():
     return Result("wmux", OK, f"daemon 在跑（{port_file.name} 存在）· RPC 客户端就位")
 
 
+def check_wmux_identity():
+    """wmux ≥3.64 拒绝不报 clientName 的调用（wmux#1111）：本机必须登记 Link16，且实际加载的客户端要报这个名字。"""
+    import wmux_identity
+    from bridge_env import resolve_wmux_rpc
+    row = wmux_identity.ensure(apply=False)
+    if row["status"] != "ok":
+        return Result("wmux 客户端身份", FAIL, row["detail"],
+                      "python feishu/wmux_identity.py --apply，然后重启 wmux（托盘 Quit 再打开）")
+    rpc = resolve_wmux_rpc(REPO)
+    try:
+        speaks = f'"{wmux_identity.CLIENT_NAME}"' in rpc.read_text(encoding="utf-8")
+    except OSError as exc:
+        return Result("wmux 客户端身份", FAIL, f"读不到实际加载的 {rpc}: {exc}", "检查 WMUX_RPC_PATH 或重新 clone 本仓")
+    if not speaks:
+        return Result("wmux 客户端身份", FAIL, f"实际加载的 {rpc} 不报 {wmux_identity.CLIENT_NAME}（旧副本盖住了仓库正本）",
+                      "删除或改名这份旧副本（或清掉 WMUX_RPC_PATH），让桥用仓库里的 wmux/wmux-rpc.js")
+    return Result("wmux 客户端身份", OK, f"已登记 {wmux_identity.CLIENT_NAME} · 客户端 {rpc.name} 报同名")
+
+
 def check_wmux_default_shell():
     """wmux GUI/store 的默认 shell 真源；不是 ~/.wmux/config.json，也不是 .bashrc alias。"""
     appdata = os.environ.get("APPDATA")
@@ -515,7 +534,8 @@ def check_profile_login():
 
 
 CHECKS = (check_python, check_deps, check_node, check_github_cli, check_repository_main, check_git_bash,
-          check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_default_shell,
+          check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_identity,
+          check_wmux_default_shell,
           check_encoding, check_env_file, check_proxy_config, check_local_roster, check_registry,
           check_agent_cli, check_profile_login)
 

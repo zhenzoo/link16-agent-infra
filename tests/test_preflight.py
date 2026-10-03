@@ -66,6 +66,32 @@ class TerminalDefaultsChecks(unittest.TestCase):
                 self.assertEqual(preflight.check_wmux_default_shell().status, preflight.OK)
 
 
+class WmuxIdentityCheck(unittest.TestCase):
+    def check(self, registered, rpc_text=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            if registered:
+                (home / ".wmux").mkdir()
+                (home / ".wmux" / "config.json").write_text(
+                    json.dumps({"mcp": {"firstPartyClients": ["link16-agent-infra"]}}), encoding="utf-8")
+            rpc = ROOT / "wmux" / "wmux-rpc.js"
+            if rpc_text is not None:
+                rpc = home / "wmux-rpc.js"
+                rpc.write_text(rpc_text, encoding="utf-8")
+            with mock.patch.object(Path, "home", return_value=home), \
+                 mock.patch.dict(os.environ, {"WMUX_RPC_PATH": str(rpc)}, clear=False):
+                return preflight.check_wmux_identity().status
+
+    def test_registered_and_repo_client_passes(self):
+        self.assertEqual(self.check(registered=True), preflight.OK)
+
+    def test_unregistered_machine_fails(self):
+        self.assertEqual(self.check(registered=False), preflight.FAIL)
+
+    def test_stale_client_copy_without_identity_fails(self):
+        self.assertEqual(self.check(registered=True, rpc_text="// old copy, envelope-less\n"), preflight.FAIL)
+
+
 class PortableSetupChecks(unittest.TestCase):
     def test_kimi_only_machine_passes_agent_cli_check(self):
         with mock.patch.object(preflight, "_fresh_which", side_effect=lambda name: "kimi.exe" if name == "kimi" else None):

@@ -20,6 +20,7 @@ from pathlib import Path
 import preflight
 import network_route
 import service_doctor
+import wmux_identity
 
 
 @dataclass(frozen=True)
@@ -688,6 +689,7 @@ def main(argv=None):
             configure_windows_terminal_git_bash(apply=args.apply),
             ensure_wmux_desktop_shortcut(apply=args.apply),
             configure_wmux_git_bash(apply=args.apply),
+            wmux_identity.ensure(apply=args.apply),
         ])
     failures = deployment_failures(rows, installs, post) if args.apply else []
     raw_health = service_doctor.collect_raw()
