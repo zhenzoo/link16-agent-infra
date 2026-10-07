@@ -92,6 +92,7 @@ last_reviewed: 2026-10-07
 ## §6 · 落地状态
 
 - **v0.7（2026-10-07）部署状态见 PLAN-1140**：共享入站保留 A2A，公共 route parser 向 Claude hooks / Codex typed event / Kimi Wire 保留 peer、mid、reply_to；自动最终发送复用现有应用/webhook 工具。改桥需按授权范围 stop→start，skill 副本用现有 bootstrap 同步并核 hash；不能仅 pull 就宣称运行码已更新。
+- **真机验收边界（main 7fb6ac4，TB25 Codex cxp ↔ TB26 Claude ccp2）**：补丁后的两个独立请求各产生一份自动结果，两个群镜像可见，测试窗口两边主人卡片创建/编辑均为 0，16:17:08–16:19:08 无自动回声；完成回址在 Stop 续跑中未复用。仅上述 A2A 路由行为已验证，未宣称全舰队/三 runtime 真机通过。完整交流仍未通过：TB26 的 Claude 原会话丢反向结果前 200 字，另有粘贴标签导致完整正文 inbox digest 不匹配；入站账本完整不能替代会话完整收到。这两项归 ARCH-110 注入/确认链，本补丁未擅改，待主人决定扩展范围；逐 mid、origin、target、镜像与初测失败详见 PLAN-1140 §2。
 - **v0.6（2026-07-03，历史）**：peer 强制 p2a 回主人，回 peer 依赖主动发送，删掉旧熔断/结束工具。本轮取代其回址规则，但不恢复那些工具。
 - **历史（均被取代）**：`PLAN-910`（reply-wait 守望）· v0.4 简化 · v0.5 熔断（`PLAN-912`）。本模型是对「死循环」的**结构性根治**，不再有兜底闸。
 
