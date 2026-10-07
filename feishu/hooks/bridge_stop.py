@@ -306,6 +306,9 @@ def main():
     proj = _project_dir()
     outdir = Path(os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or (proj / "_autopilot"))
     active_at_stop = turn_delivery_guard.read_route(outdir, bot)
+    if turn_delivery_guard.peer_turn_closed(active_at_stop):
+        _trace(f"EXIT bot={bot} peer 回合已产出 final，不沿用旧回址发送 Stop 续跑输出")
+        return
     if session_work.delivery_work(bot, {"route": active_at_stop or {}}, outdir) is False:
         _trace(f"WAIT bot={bot} feishu-workline 仍 pending，本次 Stop 不产出 answer")
         return

@@ -34,6 +34,8 @@ last_reviewed: 2026-10-07
 
 自动回信和主动新请求共用 `send_feishu_msg.send_agent_message`，不另造 webhook 通道。收到关联结果仍交给 agent 读取；outbox 返回 `suppressed=true`、receipt 留 `delivered=false` 和 `peer_result_no_auto_reply`，只记本地消费 ACK，可推进该条消费游标，不伪造 message_id，也不追加成功出站 ledger。确有新问题时由 agent 主动发一条不带 `reply_to` 的新请求；禁止把“收到／谢谢”自动反射回对方。
 
+请求 final 写入 outbox 后，现有 `active=false` 表示该 peer 回合已封口。Codex/Claude 的 Stop 检查续跑没有新入站，就不能再沿用该完成回址产出网络 final；Kimi 原有 closed turn 同样停止产出。无需增加传输字段。A2A progress 不仅禁止创建消息，也禁止 PATCH 曾经的主人进度卡；Codex steering 复用同一 root turn 不能绕过这个边界。
+
 目标字符串是否以 `oc_` 开头只决定 `receive_id_type`，不得决定格式。卡片失败可降级为文字，但 receipt 必须留下 `requested=interactive`、`via=text`、`degraded=true` 和原因；未取得 message_id 不得记成功。
 
 `purpose=progress` 与 `purpose=answer` 是显式字段。群 progress 的产品策略只依据 purpose，不得根据正文前缀猜测；以 `🤖` 等符号开头的 final 仍必须投递。隐藏推理、命令全文、tool input/output 和 secret 不得进入 final 或 progress 持久层。工具事件派生的路径仍只允许安全的仓库相对路径；唯一的绝对路径例外是 agent 在 owner `p2a` 正文中明确交付的、已核对存在的本地中间产物。该例外不得扩到 `p2a-ext`、`a2a` 或工具摘要。

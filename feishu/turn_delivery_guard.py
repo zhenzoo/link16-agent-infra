@@ -66,6 +66,11 @@ def public_route(route):
     return result
 
 
+def peer_turn_closed(route):
+    """An already finalized peer turn is not a new request after a Stop retry."""
+    return isinstance(route, dict) and route.get("kind") == "a2a" and route.get("active") is False
+
+
 def read_route(state_dir, bot):
     try:
         row = json.loads(route_path(state_dir, bot).read_text(encoding="utf-8"))

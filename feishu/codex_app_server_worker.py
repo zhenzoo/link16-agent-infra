@@ -90,6 +90,8 @@ def _load_route(state_dir: Path, bot: str) -> dict | None:
 
 
 def _answer_record(event: dict, *, session: str, route: dict | None) -> dict | None:
+    if turn_delivery_guard.peer_turn_closed(route):
+        return None
     text = str((event.get("payload") or {}).get("text") or "").strip()
     if not text or text == WARMUP_MARKER:
         return None

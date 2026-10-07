@@ -268,6 +268,57 @@ def test_claude_real_prompt_and_stop_hooks_preserve_result_route(wire):
     assert result["route"] == route
     asyncio.run(drain(B, result, {}))
     assert not wire.sent and wire.receipts[-1]["suppressed"] is True
+    # A Stop validator can continue after the first final. No fresh prompt
+    # means no fresh peer request, even if that continuation has new text.
+    with transcript.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"type": "assistant", "message": {
+            "stop_reason": "end_turn", "content": [{"type": "text", "text": "后续看板"}]}}
+        ) + "\n")
+    completed = subprocess.run([sys.executable, str(ROOT / "feishu/hooks/bridge_stop.py")],
+                               input=payload, env=env, capture_output=True, timeout=20)
+    assert completed.returncode == 0
+    after = (wire.state / f"bridge-outbox-{B}.jsonl").read_text(encoding="utf-8")
+    assert sum(json.loads(line)["kind"] == "answer" for line in after.splitlines()) == 1
+
+
+def test_codex_stop_continuation_cannot_reuse_completed_peer_request(wire, monkeypatch):
+    route = {**incoming(sender.peer_text(A, B, "probe")), "active": True}
+    event = {"turn": "same-codex-turn", "payload": {"text": "first final"}}
+    assert codex._answer_record(event, session="fixture", route=route) is not None
+    route["active"] = False
+    event["payload"]["text"] = "后续看板不是新请求"
+    assert codex._answer_record(event, session="fixture", route=route) is None
+    # The exact missing gate from the live failure must break the oracle.
+    monkeypatch.setattr(guard, "peer_turn_closed", lambda route: False)
+    with pytest.raises(AssertionError):
+        assert codex._answer_record(event, session="fixture", route=route) is None
+
+
+@pytest.mark.parametrize("milestone", [True, False])
+def test_peer_progress_never_edits_existing_owner_card_in_same_runtime_turn(wire, milestone):
+    state = {"turn": None, "steps": [], "usage": {}, "seg_start": 0,
+             "cur_mid": None, "flushed": 0, "last_flush": 0, "sent": set()}
+    calls = []
+    async def new(text, **kwargs):
+        calls.append(("new", kwargs.get("route")))
+        return "om_owner_card"
+    async def edit(mid, text):
+        calls.append(("edit", mid))
+        return True
+    def record(route, revision):
+        row = {"kind": "progress", "turn": "same-runtime-turn", "route": route,
+               "steps": [{"kind": "commentary", "event_id": "text",
+                          "revision": revision, "label": f"进展 {revision}"}]}
+        if milestone:
+            row.update(contract="milestone-v1", root_turn="same-runtime-turn")
+        return row
+    async def run():
+        for row in (record({"kind": "p2a"}, 1), record(incoming(sender.peer_text(A, B, "probe")), 2)):
+            await bridge_outbox.drain_batch([row], new_card=new, edit_card=edit,
+                                           send_plain=new, state=state, coalesce_sec=0,
+                                           clock=lambda: 100, force_flush=True)
+    asyncio.run(run())
+    assert calls == [("new", {"kind": "p2a"})], "peer progress must not PATCH owner DM"
 
 
 def test_mutation_removing_reply_relation_exposes_real_echo(wire):

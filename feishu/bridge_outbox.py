@@ -1012,6 +1012,15 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         dirty = _v2_dirty()
         if not dirty:
             return
+        if (state.get("v2_route") or {}).get("kind") == "a2a":
+            # Codex steering can reuse a root turn that already has an owner
+            # card. Peer progress must neither PATCH that card nor open one.
+            _v2_ack(dirty)
+            state["v2_mid"] = None
+            state["v2_card_ids"] = []
+            state["last_flush"] = clock()
+            _checkpoint_progress()
+            return
         snapshot = state.get("v2_steps") or []
         if not any(
             step.get("kind") != "tool" and str(step.get("label") or "").strip()
@@ -1084,6 +1093,11 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
     async def _flush_progress():
         nonlocal n
         full = state.get("steps") or []
+        if (state.get("progress_route") or {}).get("kind") == "a2a":
+            state["cur_mid"] = None
+            state["seg_start"] = state["flushed"] = len(full)
+            state["last_flush"] = clock()
+            return
         head = _header(full, state.get("usage") or {})
         while state["seg_start"] < len(full):
             seg = [s.get("label", "") for s in full[state["seg_start"]:]]
