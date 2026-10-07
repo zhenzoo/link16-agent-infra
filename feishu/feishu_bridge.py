@@ -42,6 +42,7 @@ from bridge_env import (  # noqa: E402
     resolve_wmux_rpc,
 )
 import codex_startup
+import turn_delivery_guard
 
 # ---------- 路径 / 常量 ----------
 ENV_PATH = resolve_env_path()                             # 跨机解析(VIBECODING_ROOT / 上溯找 .env / legacy 兜底)·不写死盘符
@@ -169,16 +170,16 @@ def blog(name, msg):
 
 # a2a 消息里发信方自盖的戳 [飞书_from_<发>_to_<收>]（send_feishu_msg 盖·用【名字】非 open_id）。
 # 桥事件侧 msg.sender.open_id 按 app 隔离、跨 app 认不出名字 → 这个戳才是「谁发的」的 SSOT。
-_A2A_FROM_RE = re.compile(r"\[飞书_from_(.+?)_to_.+?\]")
+_A2A_FROM_RE = turn_delivery_guard.PEER_STAMP_RE
 
 
 def a2a_from_name(text, fallback):
     """从 [飞书_from_<X>_to_<Y>] 戳解出友好发信名 X；无戳（如真人在群里 @）退 fallback。
     fallback 多半是 open_id（SDK 事件 sender·跨 app 认不出名）→ 查名册换回友好名，
     根治信封『from=ou_...』（2026-07-04·registry.name_for_open_id）。查不到才退原样 fallback。"""
-    m = _A2A_FROM_RE.search(text or "")
-    if m:
-        return m.group(1)
+    matches = list(_A2A_FROM_RE.finditer(text or ""))
+    if matches:
+        return matches[-1].group(1)
     if fallback and str(fallback).startswith("ou_"):
         try:                                   # 守卫：名册不可用则退回原 fallback（绝不比以前更糟）
             try:
@@ -2107,14 +2108,50 @@ def _record_automatic_outbound(bot_name, route, target, text, mid, fragment):
     }
     return bridge_outbound.append_delivery(
         STATE_DIR, bot_name, origin="bridge_outbox",
-        route={key: route.get(key) for key in ("kind", "dest", "at") if route.get(key)},
+        route=turn_delivery_guard.public_route(route),
         target=target, text=text, message_id=mid, **extra,
     )
+
+
+async def _deliver_peer_result(bot_name, text, route, purpose, fragment):
+    """A2A requests return once; results are consumed without reflexive output."""
+    if purpose == "progress":
+        return "skip-progress"
+    base = {"tid": "drain", "route": route, **_fragment_receipt(fragment)}
+    if route.get("reply_to"):
+        receipt(bot_name, {**base, "kind": "a2a_result_consumed", "delivered": False,
+                           "suppressed": True, "reason": "peer_result_no_auto_reply"})
+        return {"ok": True, "message_id": None, "suppressed": True}
+    if not route.get("mid"):
+        receipt(bot_name, {**base, "kind": "peer_result", "delivered": False,
+                           "err": "missing_request_mid"})
+        return {"ok": False, "message_id": None}
+    try:
+        from send_feishu_msg import send_agent_message
+        sent = await asyncio.to_thread(
+            send_agent_message, bot_name, route["peer"], text or "",
+            reply_to=route["mid"], in_chat=route.get("dest"),
+            message_uuid=_provider_message_uuid(fragment),
+        )
+        recorded = bool(sent["ok"] and sent["message_id"]) and _record_automatic_outbound(
+            bot_name, sent["route"], sent["to"], text, sent["message_id"], fragment,
+        )
+        receipt(bot_name, {**base, "kind": "peer_result", "target": sent["to"],
+                           "delivered": sent["ok"], "via": sent["via"],
+                           "mid": sent["message_id"], "err": sent["err"],
+                           "mirror": sent["mirror"], "history_recorded": recorded})
+        return {"ok": sent["ok"], "message_id": sent["message_id"]}
+    except (Exception, SystemExit) as exc:  # CLI helpers fail closed; never owner-DM fallback.
+        receipt(bot_name, {**base, "kind": "peer_result", "delivered": False,
+                           "err": str(exc)[:120]})
+        return {"ok": False, "message_id": None}
 
 
 async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, route_to_dest):
     effective = route if isinstance(route, dict) else (_load_turn_route(bot_name) or {"kind": "p2a"})
     kind = effective.get("kind") or "p2a"
+    if kind == "a2a" and effective.get("peer"):
+        return await _deliver_peer_result(bot_name, text, effective, purpose, fragment)
     target, at = route_to_dest(effective)
     base = {"tid": "drain", "route": effective, "target": target, **_fragment_receipt(fragment)}
     if not target:
@@ -2190,6 +2227,12 @@ async def _deliver_routed_new(bot, bot_name, text, route, purpose, fragment, rou
 async def _deliver_routed_plain(bot, bot_name, text, route, purpose, fragment, route_to_dest):
     effective = route if isinstance(route, dict) else (_load_turn_route(bot_name) or {"kind": "p2a"})
     kind = effective.get("kind") or "p2a"
+    if kind == "a2a" and effective.get("peer"):
+        if effective.get("reply_to") or purpose == "progress":
+            return await _deliver_peer_result(bot_name, text, effective, purpose, fragment)
+        # The first attempt already used the only peer transport. Do not POST a
+        # webhook twice as a "text fallback"; existing unacked outbox owns retry.
+        return {"ok": False, "message_id": None}
     target, at = route_to_dest(effective)
     base = {"tid": "drain", "route": effective, "target": target, **_fragment_receipt(fragment)}
     if not target:
@@ -2938,8 +2981,9 @@ def _run_bot(bot_name=None):
                 for m in (msg.mentions or []):
                     text = text.replace(getattr(m, "key", "") or "", "")
                 text = text.replace(bot["at_name"], "").strip()
-                # a2a v0.6（2026-07-03·ARCH-140）：peer 派活/回信【照常注入我会话·我读到】，但下面信封写 route=p2a →
-                #   我的【普通回复默认回主人 DM、不回 peer】。要回 peer 只能主动 send_feishu_msg（带戳）。
+                # Peer requests and correlated results both enter the session.
+                # The pinned A2A route below returns requests to peer, while
+                # reply_to results are consumed without echo or owner DM.
                 #   ⇒ 反射性回复到不了 peer → 死循环【结构上】没了。删掉了整套熔断/静音/结束工具（不需要兜底）。
             resources = list(getattr(msg, "resources", []) or [])   # 入站附件（图/文件/音视频）· SDK 给 file_key+type
             # 鉴权：群 = 你建的可信空间 → 群内(你 / 同群 peer bot)放行·且【绝不】在群消息里 auto-claim owner
@@ -3214,15 +3258,20 @@ def _run_bot(bot_name=None):
                     # 绝不再串台/过期。根因(实证 2026-06-29)：旧 next-route 便签是 per-bot 旁路文件，群消息那轮没消费
                     # 就被后来的 DM 误吃——一张 21h 前的群便签被注册 DM 踩中→回复漏进群+@错 bot。信封把回址跟消息绑死。
                     # 旧 [飞书_from_X_to_Y] 若已在 text（send_feishu_msg a2a 发信方盖章）保留它给人读，再补信封承担路由。
-                    # a2a v0.6（2026-07-03·ARCH-140）：群消息信封也写 route=p2a → 我的【普通回复恒回主人 DM、不回 peer】。
-                    #   from=<peer名> 仍带上，让我知道谁派的活、好主动 send_feishu_msg 回去。发 peer 只有 send_feishu_msg 一条路。
-                    #   ⇒ 反射性回复到不了 peer，死循环结构上没了。（对照旧版：群→route=a2a 把回复焊回群→无限循环。）
+                    # A2A identity is independent of transport. The existing
+                    # from/to stamp may carry reply_to=<original mid>: results
+                    # still enter the session but never trigger automatic echo/DM.
                     env_route = "route=p2a"
                     if is_group:
                         _gid = getattr(msg, "chat_id", "") or ""
                         _gname = _group_display(_gid)                          # via=<群名>（名册·API 源头·ARCH-140 §7）
                         via_disp = f"群:{_gname}" if _gname else "群"
                         from_disp = a2a_from_name(text, sender or "agent")     # peer bot(有戳) → 戳/名册解出名字
+                        peer_route = turn_delivery_guard.peer_route_from_message(
+                            text, dest=_gid, at=sender, mid=msg.id,
+                        )
+                        if peer_route:
+                            env_route = turn_delivery_guard.envelope_fields(peer_route)
                         # 真人（无 a2a 戳 = 不是 peer bot）→ from= 用群成员 API 查真名（owner+外部人都 API 源头·不硬编码·§7.1）
                         if (not _A2A_FROM_RE.search(text or "")) and sender and _gid:
                             from_disp = (await asyncio.to_thread(_resolve_person, sender, _gid, bot)) or sender
@@ -3293,6 +3342,9 @@ def _run_bot(bot_name=None):
             （owner 文件 / 会话 open_id / .env ALLOWED 首个·都没有→None=drainer 跳过）。"""
             if route and route.get("kind") in ("a2a", "p2a-ext") and route.get("dest"):
                 return route["dest"], route.get("at")   # 都是「回原群 + @发信人」·区别只在语义(bot vs 真人)
+            if route and route.get("kind") == "a2a":
+                # Incomplete peer metadata must never redirect an answer to owner.
+                return None, route.get("at")
             # ⚠️ ALLOWED_OPEN_IDS 是 set（_load_allowed 返回 set）→ 旧写法 `ALLOWED_OPEN_IDS[0]` 必抛
             # TypeError: 'set' object is not subscriptable。这条【只在 mirror_target 为空时才走到】，
             # 之前一直被「会话 open_id 兜底恒有值(哪怕是错的 peer bot)」挡着没暴露；把群坐标污染修掉后

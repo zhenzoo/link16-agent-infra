@@ -104,13 +104,16 @@ def _tenant_token(app_id, app_secret):
     return d["tenant_access_token"]
 
 
-def send_msg(bot, target, text, ats):
+def send_msg(bot, target, text, ats, message_uuid=None):
     """发纯文字(+@) → 返回 (ok, message_id|err)。ats=被@的 open_id 列表。"""
     app_id, app_secret = _bot_creds(bot)
     tok = _tenant_token(app_id, app_secret)
     prefix = "".join(f'<at user_id="{a}"></at> ' for a in (ats or []))
     content = json.dumps({"text": prefix + (text or "")}, ensure_ascii=False)
-    body = json.dumps({"receive_id": target, "msg_type": "text", "content": content}).encode("utf-8")
+    payload = {"receive_id": target, "msg_type": "text", "content": content}
+    if message_uuid:
+        payload["uuid"] = message_uuid
+    body = json.dumps(payload).encode("utf-8")
     rit = "chat_id" if str(target).startswith("oc_") else "open_id"
     req = urllib.request.Request(
         f"{BASE}/im/v1/messages?receive_id_type={rit}", data=body, method="POST",
@@ -368,6 +371,56 @@ def shared_group(sender, target, override=None):
         f"用 `--in <oc_群id>` 指定，或先把它们拉进同一个群。")
 
 
+def peer_text(bot, peer, text, *, reply_to=None):
+    """Extend the existing identity stamp, not a second message protocol."""
+    for value in (bot, peer, reply_to):
+        if value is not None and (not value or re.search(r"[\s\[\]]", value)):
+            raise ValueError("peer 身份及 reply_to 必须是无空白的信封字段")
+    relation = f" reply_to={reply_to}" if reply_to else ""
+    return f"{text} [飞书_from_{bot}_to_{peer}{relation}]"
+
+
+def send_agent_message(bot, peer, text, *, reply_to=None, in_chat=None,
+                       message_uuid=None, resolved=None):
+    """Shared transport for CLI requests and bridge automatic peer results.
+
+    No turn guard or ledger here: callers own their existing delivery gate/ACK.
+    Returned evidence never contains webhook URLs or credentials.
+    """
+    if resolved is None:
+        xt = cross_tenant_route(bot, peer)
+        ats = [resolve_open_id(peer)]
+        target = xt["chat_id"] if xt else shared_group(bot, peer, in_chat)
+    else:
+        xt, ats, target = resolved["xt"], resolved["ats"], resolved["target"]
+    stamped = peer_text(bot, peer, text, reply_to=reply_to)
+    mirror = None
+    if xt:
+        ok, info = send_webhook(xt["url"], stamped, ats)
+        if ok and xt.get("mirror_chat_id"):
+            try:
+                mirror_ok, mirror_info = send_msg(bot, xt["mirror_chat_id"], stamped, [])
+            except (Exception, SystemExit) as exc:
+                # Delivery is already confirmed; a mirror exception must not
+                # turn it into a retry and duplicate the destination message.
+                mirror_ok, mirror_info = False, str(exc)[:120]
+            mirror = {"chat_id": xt["mirror_chat_id"], "ok": mirror_ok, "info": mirror_info}
+    elif message_uuid:
+        ok, info = send_msg(bot, target, stamped, ats, message_uuid)
+    else:
+        ok, info = send_msg(bot, target, stamped, ats)
+    route = {"kind": "a2a-webhook" if xt else "a2a", "dest": target,
+             "at": ats[-1] if ats else None, "peer": peer}
+    if xt:
+        route["tenant_key"] = xt["tenant_key"]
+    if reply_to:
+        route["reply_to"] = reply_to
+    return {"ok": ok, "to": target, "to_agent": peer, "at": ats,
+            "via": "webhook" if xt else "app", "mirror": mirror,
+            "message_id": info if ok else None, "err": None if ok else info,
+            "route": route}
+
+
 def main():
     ap = argparse.ArgumentParser(description="主动往飞书会话发文字 + @ —— 可【按名字】喊别的智能体(--to-agent)")
     ap.add_argument("--bot", help="发送方 bot（用它的飞书应用凭据发）")
@@ -384,6 +437,7 @@ def main():
     ap.add_argument("--json", action="store_true", help="机器可读 JSON 输出")
     ap.add_argument("--proactive", action="store_true",
                     help="明确这是本轮自动回复之外的额外通知；允许发到相同回址并记入历史")
+    ap.add_argument("--reply-to", help="显式回信所关联的原消息 mid；收到回信不自动反射回复")
     a = ap.parse_args()
 
     if a.list_agents:
@@ -400,6 +454,8 @@ def main():
         raise SystemExit("❌ 需要 --bot <发送方>")
     if not a.text:
         raise SystemExit("❌ 需要 --text <正文>")
+    if a.reply_to and not a.to_agent:
+        raise SystemExit("❌ --reply-to 必须配 --to-agent")
     a.bot = local_name(a.bot)
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
 
@@ -420,23 +476,21 @@ def main():
             STATE_DIR, a.bot, target,
             bridge_session=os.environ.get("FEISHU_BRIDGE_SESSION"),
             proactive=a.proactive,
+            to_agent=a.to_agent,
         )
     except RuntimeError as exc:
         raise SystemExit(f"❌ {exc}") from exc
 
     # a2a 标记盖章(2026-06-28)：发信方自己盖 [飞书_from_<我>_to_<对方>]——open_id 按 app 隔离·接收方反查不出
     # 发信人，必须发信方盖。接收桥见已有此标记就不重复加(p2a 才补 host 标记·见 feishu_bridge on_message)。
-    send_text = f"{a.text} [飞书_from_{a.bot}_to_{a.to_agent}]" if a.to_agent else a.text
+    send_text = peer_text(a.bot, a.to_agent, a.text, reply_to=a.reply_to) if a.to_agent else a.text
 
     # 发完即返回：a2a 回信由【桥自动投进发起方会话】(见 ARCH-140 新模型)，不再守望/轮询/--wait。
     mirror = None
-    if xt:
-        ok, info = send_webhook(xt["url"], send_text, ats)
-        # 原样抄一份到发件方自己租户的群（不 @ 任何人 → 不唤醒、不成环）：两个群都能看到完整往来，
-        # 主人任一账号都能看全（09-26 主人：跨租户后群里只剩半边对话，看不懂在聊什么）。抄送失败不影响本次投递。
-        if ok and xt.get("mirror_chat_id"):
-            mirror_ok, mirror_info = send_msg(a.bot, xt["mirror_chat_id"], send_text, [])
-            mirror = {"chat_id": xt["mirror_chat_id"], "ok": mirror_ok, "info": mirror_info}
+    if a.to_agent:
+        sent = send_agent_message(a.bot, a.to_agent, a.text, reply_to=a.reply_to,
+                                 resolved={"target": target, "ats": ats, "xt": xt})
+        ok, info, mirror = sent["ok"], sent["message_id"] or sent["err"], sent["mirror"]
     else:
         ok, info = send_msg(a.bot, target, send_text, ats)
     if xt:
@@ -446,6 +500,10 @@ def main():
         route = {"kind": "a2a", "dest": target, "at": ats[-1] if ats else None}
     else:
         route = {"kind": "direct", "dest": target}
+    if a.to_agent:
+        route.update({"peer": a.to_agent})
+        if a.reply_to:
+            route["reply_to"] = a.reply_to
     history_recorded = False
     if ok and info:
         history_recorded = bridge_outbound.append_delivery(

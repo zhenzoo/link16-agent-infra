@@ -10,17 +10,46 @@ from pathlib import Path
 
 import bridge_injection
 
+PEER_STAMP_RE = re.compile(
+    r"\[飞书_from_([^\]\s]+?)_to_([^\]\s]+?)(?:\s+reply_to=([^\]\s]+))?\]"
+)
+
+
+def peer_route_from_message(text, *, dest, at, mid):
+    """Same peer identity/reply stamp for application and webhook messages."""
+    matches = list(PEER_STAMP_RE.finditer(str(text or "")))
+    if not matches:
+        return None
+    # The sender appends its real stamp after the body, which may quote stamps.
+    match = matches[-1]
+    route = {"kind": "a2a", "peer": match.group(1), "mid": mid,
+             "dest": dest, "at": at}
+    if match.group(3):
+        route["reply_to"] = match.group(3)
+    return public_route(route)
+
+
+def envelope_fields(route):
+    public = public_route(route)
+    return " ".join(
+        f"{('route' if key == 'kind' else key)}={value}"
+        for key, value in public.items()
+    )
+
 
 def route_from_prompt(prompt):
     """Read the last bridge envelope, shared by all runtime producers."""
-    matches = re.findall(
-        r"\[飞书 [^\]]*?route=(p2a-ext|a2a|p2a)(?:\s+dest=([^\]\s]+))?(?:\s+at=([^\]\s]+))?",
-        str(prompt or ""),
-    )
+    matches = re.findall(r"\[飞书 [^\]]*\]", str(prompt or ""))
     if matches:
-        kind, dest, at = matches[-1]
-        if kind in ("a2a", "p2a-ext") and dest:
-            return {"kind": kind, "dest": dest, "at": at}
+        fields = dict(re.findall(
+            r"(?:^|\s)(route|dest|at|peer|mid|reply_to)=([^\]\s]+)", matches[-1]
+        ))
+        kind = fields.pop("route", None)
+        if kind == "a2a":
+            # Even incomplete A2A metadata must not silently become owner DM.
+            return public_route({"kind": kind, **fields})
+        if kind == "p2a-ext" and fields.get("dest"):
+            return {"kind": kind, "dest": fields["dest"], "at": fields.get("at")}
     return {"kind": "p2a"}
 
 
@@ -31,7 +60,7 @@ def route_path(state_dir, bot):
 def public_route(route):
     route = route if isinstance(route, dict) else {}
     result = {"kind": route.get("kind") or "p2a"}
-    for key in ("dest", "at"):
+    for key in ("dest", "at", "peer", "mid", "reply_to", "tenant_key"):
         if route.get(key):
             result[key] = route[key]
     return result
@@ -90,7 +119,8 @@ def _p2a_targets(state_dir, bot):
     return targets
 
 
-def guard_outbound(state_dir, bot, target, *, bridge_session=None, proactive=False):
+def guard_outbound(state_dir, bot, target, *, bridge_session=None, proactive=False,
+                   to_agent=None):
     """Return guard evidence or raise before any network call."""
     bridge_session = str(bridge_session or "")
     if bridge_session != bot:
@@ -103,6 +133,14 @@ def guard_outbound(state_dir, bot, target, *, bridge_session=None, proactive=Fal
     if not route.get("active"):
         return {"guarded": False, "reason": "turn-complete", "route": public_route(route)}
     kind = route.get("kind") or "p2a"
+    if kind == "a2a" and route.get("peer"):
+        if route.get("reply_to"):
+            return {"guarded": False, "reason": "peer-result-no-automatic-reply",
+                    "route": public_route(route)}
+        if to_agent and str(to_agent).casefold() == str(route["peer"]).casefold():
+            raise RuntimeError("这条会由本轮自动回请求方，已阻止重复投递；新请求请明确加 --proactive")
+        if to_agent:
+            return {"guarded": False, "reason": "different-peer", "route": public_route(route)}
     automatic_targets = ({str(route.get("dest"))} if kind in {"p2a-ext", "a2a"}
                          and route.get("dest") else _p2a_targets(state_dir, bot))
     if kind == "p2a" and not automatic_targets:

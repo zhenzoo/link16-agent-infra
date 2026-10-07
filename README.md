@@ -363,6 +363,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 弄懂桥到底怎么运转 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) |
 | 弄懂 wmux 面板怎么被驱动 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) |
 | 让智能体互相喊话（a2a） | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) |
+| A2A 自动回请求方与跨租户双向验收 | [`docs/PLAN-1140-a2a-automatic-peer-reply.md`](docs/PLAN-1140-a2a-automatic-peer-reply.md) |
 | 给智能体排定时任务 | [`docs/ARCH-150-agent-cron.md`](docs/ARCH-150-agent-cron.md) |
 | 一个账号多个 profile（多号并行） | [`docs/ARCH-120-agent-profile-runtime.md`](docs/ARCH-120-agent-profile-runtime.md) |
 | **丢一个飞书文档/表格链接给智能体读写** | [`docs/SOP-140-feishu-document-io.md`](docs/SOP-140-feishu-document-io.md)（原理：[`ARCH-130`](docs/ARCH-130-feishu-document-io.md)） |

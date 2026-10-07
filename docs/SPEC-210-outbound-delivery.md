@@ -16,7 +16,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-09-22
+last_reviewed: 2026-10-07
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -25,9 +25,14 @@ last_reviewed: 2026-09-22
 
 | route | 发起者 | final 目标 | 格式 |
 |---|---|---|---|
-| `p2a` | 真人 DM 或 peer 入站后的安全回主人路径 | owner/session DM | `interactive`，按容量 1～N 张 |
+| `p2a` | 真人 DM | owner/session DM | `interactive`，按容量 1～N 张 |
 | `p2a-ext` | 群内真人（含 owner） | 原群 + @发起人 | `interactive`，按容量 1～N 张 |
-| `a2a` | 显式 peer 投递的历史/主动路径 | 共享群 + @peer | `text` |
+| `a2a` | 同租户或 webhook 的 peer 请求（无 `reply_to`） | 名册解析出的请求方共享群 + @peer | `text`，自动回信 |
+| `a2a` + `reply_to` | peer 的关联结果 | 注入接收会话、本地消费，不发网络回复 | 无自动消息、无 owner DM |
+
+入站沿用 `[飞书_from_<发送方>_to_<接收方>]`；回信仅追加 `reply_to=<原请求入站的真实 message_id>`。桥取末尾发送戳，把 `kind=a2a`、`peer`、`mid`、`dest`、`at` 和可选 `reply_to` 钉进同一条消息的信封；三种 runtime 的 answer 保留这些公开字段，后续 owner 回合不得改写旧 answer 的回址。`dest/at` 是入站坐标，跨租户回信重新按逻辑 `peer` 查名册，不能 @webhook 机器人冒充 @请求方。缺少请求 `mid` 时失败，不降级到主人 DM。
+
+自动回信和主动新请求共用 `send_feishu_msg.send_agent_message`，不另造 webhook 通道。收到关联结果仍交给 agent 读取；outbox 返回 `suppressed=true`、receipt 留 `delivered=false` 和 `peer_result_no_auto_reply`，只记本地消费 ACK，可推进该条消费游标，不伪造 message_id，也不追加成功出站 ledger。确有新问题时由 agent 主动发一条不带 `reply_to` 的新请求；禁止把“收到／谢谢”自动反射回对方。
 
 目标字符串是否以 `oc_` 开头只决定 `receive_id_type`，不得决定格式。卡片失败可降级为文字，但 receipt 必须留下 `requested=interactive`、`via=text`、`degraded=true` 和原因；未取得 message_id 不得记成功。
 
@@ -57,10 +62,10 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 - 分片搜索使用半开区间 `[start,end)`：位于右边界 `end` 的换行不得被纳入当前片，任何正文片都不得超过扣除标题后的 capacity。修复非法边界时不得顺带重排其它已合法分片；否则旧 answer-state 中已 ACK 的 fragment identity 会漂移。
 - Answer 使用双层预算：`2800` 是不可越过的 hard limit，`2790` 是新 answer 的正常 render target，二者之间固定 `10` 字符只作 splitter guard。正确分片不得使用 guard；若异常分片比 target 多 `1～10` 字符，可在仍不超过 hard limit 时继续投递，但 receipt/ledger 必须记录 `guard_used=true` 与实际 `guard_chars`。超过 `10` 字符必须失败且不推进 HWM。这个 guard 只用于 final answer，不顺带改变 progress/ask 的既有容量合同。
 - 每个成功片段立刻写 durable ACK。重启或重试只发送未 ACK 的 fragment；同一个 answer 的已 ACK 片不得再次发送。
-- 发送失败、返回空 message_id 或等待超过时间都不得推进 answer HWM。不得用“超过 600 秒”把未送达伪装成已处理。
+- 应发送的消息失败、返回空 message_id 或等待超过时间都不得推进 answer HWM。明确无需发送的 A2A 关联结果按 §1 记消费 ACK；这不是发送成功。不得用“超过 600 秒”把未送达伪装成已处理。
 - `fragment_id` 是 Link16 本地账本主键，固定为 64 位十六进制摘要；**不得原样作为 provider 请求 UUID**。
 - 飞书请求使用标准 UUIDv5 派生 36 字符 UUID：namespace 固定为 Python `uuid.NAMESPACE_URL`，name 固定为 `link16:feishu:fragment:<完整 fragment_id>`。相同 fragment 跨重启必须得到相同 provider UUID，不同 fragment 必须得到不同 provider UUID；卡片、a2a 文字与卡片失败后的文字 fallback 必须共用这一个派生值。
-- provider UUID 只负责远端一小时窗口内的请求去重；本地合同仍以 `fragment_id` 和 durable ACK 为准，不宣称网络模糊失败下无条件 exactly-once。
+- 应用 API 的 provider UUID 只负责远端一小时窗口内的请求去重；本地合同仍以 `fragment_id` 和 durable ACK 为准，不宣称网络模糊失败下无条件 exactly-once。自定义机器人 webhook 不支持该 UUID；其 `webhook-<时间戳>` 是本地确认号，不是飞书真实消息 ID。已确认片不重发，但远端收到、响应丢失的模糊失败不能保证恰好一次。webhook 失败不在同次投递中再走 text fallback 重发；本群镜像失败也不能推翻对方已确认的成功。
 - 旧 outbox、HWM 与 answer-state 不做迁移或清空：未 ACK 的旧 fragment 在重放时按原 `fragment_id` 派生合法 provider UUID，已 ACK 的 fragment 继续跳过。
 - 新 answer 在第一次网络请求前必须把 `split_policy`、`render_target` 和无正文 fragment manifest 原子写入 answer-state。manifest 至少含每片的 `part/total/content_start/content_end/content_sha256/fragment_id/guard_chars`；重启必须按 manifest 从原 answer 重建并校验，禁止按当前 splitter 重新切。已有 answer-state 若缺少这些字段，按 legacy `2800` policy 重建并回填 manifest，确保旧 ACK/ID 不漂移。升级或回滚到不认识某 policy 的二进制前，必须机械确认该 policy 的 incomplete answer 为 `0`。
 - 非网络逻辑异常同样不得推进 HWM。drainer 在既有 per-bot bridge log 留下 `bot/offset/kind/error_type/error`；`kind` 必须指向批内实际出错 record，未知异常的 `error` 只能是摘要哈希，不能带正文、路径、token 或 secret。同一 `(offset,kind,error_type,error_digest)` 在 HWM 未变化时只记一次，避免永久毒记录制造日志洪水。
@@ -86,10 +91,11 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 桥会话调用 `send_feishu_msg.py` 时：
 
 1. 先解析最终目标，再在获取 token/调用网络前检查 active route。
-2. `p2a` 的同一 DM 等价集合包括 owner open_id、session open_id 与 session chat_id；`p2a-ext`/`a2a` 比较 dest 群 ID。
+2. `p2a` 的同一 DM 等价集合包括 owner open_id、session open_id 与 session chat_id；`p2a-ext` 比较 dest 群 ID。新 A2A 请求比较逻辑 `peer`（忽略大小写），同群其他 peer 不是同一自动回址；旧无 peer 的 A2A 记录保留 dest 比较。
 3. 目标等于本轮自动回址时默认拒绝，并说明桥会自动回复。
 4. 真正额外的通知可显式 `--proactive`；不同目标正常放行。
 5. 桥身份存在但 active 文件缺失或损坏时 fail closed；非桥终端调用保持兼容。
+6. 当前入站是关联结果时，本轮没有自动网络回址，允许有意义的主动新请求；收到结果不等于自动开启下一轮。
 
 旧 final 只能清自己的 turn_key，禁止盲删或把下一轮改成 inactive。
 
@@ -97,7 +103,7 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 
 成功且取得 message_id 后追加到 `feishu/_state/bridge-outbound-<bot>.jsonl`，schema 为 `link16-outbound-v1`。自动与主动记录至少含：
 
-`origin`、`route`、`target`、`text`、`message_id`、`ts`；分片另含 `answer_id`、`fragment_id`、`part`、`total`，主动 override 另含 `proactive_override=true`。
+`origin`、`route`、`target`、`text`、`message_id`、`ts`；分片另含 `answer_id`、`fragment_id`、`part`、`total`，主动 override 另含 `proactive_override=true`。A2A 自动结果的 origin 是 `bridge_outbox`，route 保留真实发送路径 `a2a/a2a-webhook`、逻辑 peer 与 `reply_to`；跨租户本地确认号的边界见 §2。
 
 - ledger 单行追加必须加跨进程锁；只记录已确认发送，不存 token/secret。
 - ledger 写失败不能把“消息已发出”改报为发送失败，否则调用者重试会制造第二条；返回成功并明确 `history_recorded=false`。

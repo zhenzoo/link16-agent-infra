@@ -283,10 +283,11 @@ SDK 适配只封装一个原始回调与 normalize 入口；缺少必要接口�
 > **一句话**：「这条回复该回 DM 还是回某群+@谁」= 焊在【消息本体】的结构化信封里、跟消息绑死；hook 直接从本条消息解析，**不再靠会过期的旁路便签**。
 
 - **信封格式**（桥 `on_message` 注入时缀在消息末尾·人读 + 机读合一·**三极模型 · SSOT = [`ARCH-140 §3`](ARCH-140-a2a-comm-protocol.md) / §7**）：
-  - DM / 群内 **peer bot**（有 a2a 戳·**p2a**）：`[飞书 from=<host|peer名> to=<bot> via=<DM|群:群名> · route=p2a]` → 回主人 DM（防 bot↔bot 环）
+  - 真人 DM（**p2a**）：`[飞书 from=host to=<bot> via=DM route=p2a]` → 回主人 DM。
+  - 群内 **peer bot**（同租户与 webhook 共用 a2a 戳）：`[飞书 from=<peer名> to=<bot> via=群:<群名> route=a2a peer=<peer名> dest=<群chat_id> at=<事件sender> mid=<入站ID> reply_to=<可选原请求ID>]` → 无 `reply_to` 的请求自动回逻辑 peer；带 `reply_to` 的结果注入会话后只本地消费，不自动回信、不 DM 主人。回信解析名册的真实 peer，不 @webhook 事件 sender。
   - 群内**真人**（无戳·**含 owner 本人**·**p2a-ext**·2026-07-05 主人拍板）：`[飞书 from=<真名> to=<bot> via=群:<群名> · route=p2a-ext dest=<群chat_id> at=<发信open_id>]` → 回**原群 + @他**
-  - （`from=` 是**真名**[群成员 API 查]·`via=` 带**群名**[名册 groups 段]·都 API 源头·见 `ARCH-140 §7`。旧 `route=a2a` 入站早已不写·仅历史遗留。）
-- **hook**（`bridge_userprompt.py`）每轮用 `re.findall(...)[-1]` 取本条 prompt 里**最末**一个信封解析 `route=/dest=/at=`（正则含 `p2a-ext`）→ 原子写 `bridge-turn-route-<bot>.json`。当前 schema 是 `{kind,dest?,at?,active,turn_key,session,started_at}`：前三项是公开回址，后四项只用于同轮防双发。三个 final producer 成功钉住 answer 后按 `turn_key` compare-and-clear，旧轮不得清掉新轮。drainer/outbox 只携带前三项，不泄漏内部生命周期字段。
+  - （`from=` 是群成员真名或末尾 peer 戳中的逻辑名；`via=` 带名册群名，见 `ARCH-140 §7`。）
+- **hook**（`bridge_userprompt.py`）每轮通过共享 `turn_delivery_guard.route_from_prompt` 取本条 prompt 里**最末**信封，原子写 `bridge-turn-route-<bot>.json`。公开字段是 `{kind,dest?,at?,peer?,mid?,reply_to?}`；`active/turn_key/session/started_at` 只用于同轮防双发，final producer 按 turn_key compare-and-clear，旧轮不得清掉新轮。drainer/outbox 不泄漏内部生命周期字段。
 
 **2026-08-26 当前出站合同**（覆盖本文后方所有“群一律纯文字”或“final 永远一张”的历史表述；精确字段见 [`SPEC-210`](SPEC-210-outbound-delivery.md)）：
 
@@ -445,7 +446,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **配套 · 送达回执**（解决「我只知道写了不知道发没发」）：桥每发一条往 `_autopilot/bridge-receipts-<bot>.jsonl` 追加一行 `{tid, ts, kind, delivered, via, len, …}`。终端会话 `Read` 这文件尾巴即可确认「我上一条到底送达没、走第几级」（事后确认 · 非同轮）。
 
-**历史边界（仅 v7 tailer，已被 v8 取代）**：当时 @ 轮统一发 owner DM。当前合同不同：真人群 `p2a-ext` 自动回原群 + @发起人，peer 入站 `p2a` 才回主人 DM；以 §2.5.1 与 `SPEC-210` 为准。
+**历史边界（仅 v7 tailer，已被 v8 取代）**：当时 @ 轮统一发 owner DM。当前合同不同：真人群 `p2a-ext` 自动回原群 + @发起人，peer 请求 `a2a` 自动回请求方，关联结果不反射；以 §2.5.1 与 `SPEC-210` 为准。
 
 **激活**：改完需 `python feishu/feishu_bridge.py stop && python feishu/feishu_bridge.py start` 重启桥（常驻进程不会热加载新代码）。
 

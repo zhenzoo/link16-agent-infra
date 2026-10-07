@@ -51,7 +51,7 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 |---|---|
 | 给飞书在线链接反查本地 HTML | `python feishu/online_local_html.py "<URL>"`：只读匹配项目 `meta.json` / `*.meta.json` 中的精确在线 URL，区分交互评审页与在线文档正文快照，回读存在的 HTML 与映射来源；无显式映射时如实报告，不按文件名猜 |
 | 查看/切换本机全局在线产物开关 | `python feishu/artifact_delivery.py status`；`set-online on|off` |
-| 给另一只 bot 派活、回结果或续轮 | `python feishu/send_feishu_msg.py --bot <我> --to-agent <对方> --text "…"` |
+| 给另一只 bot 派活或发具体新问题 | `python feishu/send_feishu_msg.py --bot <我> --to-agent <对方> --text "…"`；peer 请求的正常最终结果由桥自动回，不另调工具补投 |
 | 查看可发送的 agent | `python feishu/send_feishu_msg.py --list-agents` |
 | 发图片、视频、音频、PDF 等媒体（默认唯一入口：在线文档） | `python feishu/send_feishu_media.py --bot <我> --media <路径> --title "…"` |
 | 新建媒体审阅文档并验证真实预览 | 上述入口加 `--publish-only --receipt <新的JSON> --verify-out <新目录>`；自动逐项检查真实页面，见 SOP-141 |
@@ -94,9 +94,10 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 
 - `p2a`：真人私聊 bot。普通回复由桥自动回原 DM，渲染为互动卡片。
 - `p2a-ext`：真人在群里 @bot。普通回复由桥自动回原群并 @发起人，最终答案按卡片容量发一张或多张互动卡片。
-- `a2a`：peer bot 派活。派活、回结果和续轮都显式调用一次 `send_feishu_msg.py --to-agent`；使用纯文字，保证对端能读取。
+- `a2a`：同群或跨租户 peer 请求；信封保存 `peer`、原消息 `mid`。正常最终答案由桥自动回 peer（纯文字 + 真 @），复用现有应用/webhook 路径，不默认 DM 主人，不要再手动发送同一结果。
+- `a2a` 且带 `reply_to`：收到 peer 的结果。结果仍可读取并继续工作，但本轮普通输出不自动发群或主人 DM；不要发“收到/谢谢”。有具体新问题才主动 `--to-agent` 新请求，显式回信可用 `--reply-to <原mid>`，不靠文字猜回信性质。
 
-当前 turn 已有 `p2a` 或 `p2a-ext` 自动回址时，只输出正常最终答案。`send_feishu_msg.py` 会在网络请求前机械拒绝向本轮自动回址再次投递；不要绕过这道闸。怀疑漏发时先查 `bridge_history.py`、receipt 和 outbox。真正额外的主动通知才显式加 `--proactive`，且历史会记录该 override；跨目标通知与正常 a2a 不需要 override。
+当前 turn 已有 `p2a`、`p2a-ext` 或 A2A 请求自动回址时，只输出正常最终答案。`send_feishu_msg.py` 在发送前拒绝向本轮自动回址/同一 peer 补投；不要绕过这道闸。怀疑漏发先查 `bridge_history.py`、receipt 和 outbox。真正额外的通知或同 peer 新请求才加 `--proactive`；收到 A2A 结果的轮次没有自动回信，显式新请求可正常发出。只有主人明确要求汇报、需拍板或故障需介入时才另通知主人。
 
 最终答案过长可以拆成多张卡；“不重复”指同一 answer 的同一内容分片不得被手动、自动或重试链再次投递，不是强制每轮只能一张卡。不要把隐藏推理、命令全文或工具输入/输出塞进最终卡片；用户可见进度只走桥定义的安全摘要。
 

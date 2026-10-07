@@ -582,6 +582,8 @@ def _route_key(route):
     kind = route.get("kind") or "p2a"
     if kind == "p2a":
         return ("p2a",)
+    if kind == "a2a" and route.get("peer"):
+        return (kind, route["peer"], route.get("mid"), route.get("reply_to"))
     return (kind, route.get("dest"), route.get("at"))
 
 
@@ -838,6 +840,10 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
 
     def _result(result):
         if isinstance(result, dict):
+            if result.get("suppressed") is True:
+                # Explicit A2A result consumption is a successful local action,
+                # not a sent message. Never invent a provider message_id.
+                return bool(result.get("ok")), None
             mid = result.get("message_id")
             if not isinstance(mid, str) or not mid.strip():
                 mid = None
@@ -1237,6 +1243,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 raise RetrySend()
             receipts[fid] = {
                 "acked": True, "message_id": mid, "part": fragment["part"],
+                "suppressed": bool(isinstance(result, dict) and result.get("suppressed")),
                 "content_sha256": fragment["content_sha256"],
                 "split_policy": fragment["split_policy"],
                 "guard_used": fragment["guard_used"],
