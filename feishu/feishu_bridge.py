@@ -66,7 +66,7 @@ CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_s
 #   入站消息一律走 paste（限速分块·bracketed-paste）注入，不再用裸 send。原因：CC 输入框是 TUI·有吞吐上限，
 #   裸 send 把多千字一次性灌进去会丢字 → 截断（2026-06-28 实证：几千字真实消息走 send 被截。早前"send 4199字
 #   OK / 吞吐截断是 warmup 假象"的结论是错的·已被真实截断推翻——别再据此放行裸 send）。
-#   含 TAB 的数据（cookies/TSV）另在 on_message 上游落盘转 Read（send/paste 都救不了 TAB→空格）。
+#   多行正文、含 TAB 的数据和超长文本在 on_message 上游落盘转 Read；TUI 只接收单行短指令。
 SEND_MAX_CHARS = 16000   # marker 作 node 命令行参传递的天花板(~Windows CreateProcess 32767 留余量·send/paste 共用·与截断无关)
 # 注入投递保证（§2.12b · 2026-07-16）：paste 后别盲等 0.3s 就 enter——settle 按字数线性伸缩 + 回车后读屏闭环校验重按。
 INJECT_SETTLE_BASE = 0.2         # settle 基线秒（短消息 1 块 ≈ 这个值·闭环兜底→可略激进）
@@ -968,6 +968,30 @@ def _cmdline_units(s):
     """字符串占多少个 UTF-16 单元 = Windows CreateProcess 命令行真正计的单位（SEND_MAX_CHARS 按它判）。
     别用 len()：中文 1 字 = 1 单元没错，但 emoji 等星平面字符 1 字 = 2 单元，len() 会低估一半、闸放行后照炸。"""
     return len(s.encode("utf-16-le")) // 2
+
+
+def _prepare_tui_text(bot_name, message_id, text):
+    """Reuse the inbox-file handoff for text a terminal cannot preserve reliably."""
+    reason = ""
+    if "\t" in text:
+        reason = "含制表符 TAB·内联会损坏"
+    elif _cmdline_units(text) > SEND_MAX_CHARS:
+        reason = "超长·内联会撑爆命令行上限"
+    elif "\n" in text or "\r" in text:
+        # A partial multiline composer can look like an approval menu to wmux.
+        # A complete paste also loses some punctuation on Windows Codex; do not
+        # make correctness depend on the UI parser or a smaller length threshold.
+        reason = "多行正文·通过文件完整交接"
+    if not reason:
+        return text, ""
+    try:
+        STATE_DIR.mkdir(exist_ok=True)
+        inbox = STATE_DIR / f"bridge-inbox-{bot_name}-{bridge_inbox.prompt_digest(message_id)[:24]}.txt"
+        inbox.write_bytes(text.encode("utf-8"))  # No Windows newline translation.
+    except OSError as exc:
+        raise RuntimeError("完整原文尚未保存，消息保留待办；没有截断提交") from exc
+    return (f"[桥转交] 请先读取 UTF-8 文件 {inbox.as_posix()} "
+            f"中的完整用户原文（{len(text)} 字），按原文处理本条消息。"), reason
 
 
 def wmux(*cmd_args):
@@ -3227,31 +3251,6 @@ def _run_bot(bot_name=None):
                                               f"原档位 {verification['before'][0]}/{verification['before'][1]}")
                             await reply(msg.chat_id, f"🧠 已先选 `{level}`，并核对当前会话为 `{model}` / `{level}`；"
                                                      "现在开始处理这条任务。")
-                    # 普通/长/多行文本一律由 _inject 直接注入（实测长消息不截断·不转文件）。**两类**必须落盘 byte-exact：
-                    #   ① 含 TAB 的结构化数据（cookies/TSV）——Claude 输入框把 TAB 转空格、内联无法保原样
-                    #      （实测 3 TAB→0·对 cookie 致命）。
-                    #   ② **超长文本**——marker 最终要作【node 命令行参】传给 wmux-rpc（wmux() 里 subprocess.run），
-                    #      Windows CreateProcess 的 lpCommandLine 硬上限 = 32767 个 UTF-16 单元，超了整个进程起不来，
-                    #      抛 [WinError 206]「文件名或扩展名太长」——**名字极具误导性，实际是命令行太长、跟文件名无关**。
-                    #      2026-08-02 实证：主人从手机飞书转发【整段客户聊天记录 + 8 张图】→ 连炸两次、文字全丢
-                    #      （图已落盘、正文没了），日志只留 "❌ 处理 … 出错: [WinError 206]"。
-                    #      复现实验：subprocess.run(['node','-e','0','x'*40000]) → 206；'x'*30000 → OK。
-                    #      ⚠️ SEND_MAX_CHARS 这道闸【2026-06-28 就写进常量、注释写明就是防这个 32767，却从没接进代码】
-                    #      （全仓引用数=1·只有定义那行）——典型「规矩写了但没长在流程里」。这次真接上。
-                    # 其余绝不转文件（2026-06-23 干净重测推翻"长会截断"）。
-                    _over = _cmdline_units(text or "") > SEND_MAX_CHARS
-                    if text and ("\t" in text or _over):
-                        _why = "超长·内联会撑爆命令行上限" if _over else "含制表符 TAB·内联会损坏"
-                        try:
-                            STATE_DIR.mkdir(exist_ok=True)
-                            inbox = STATE_DIR / f"bridge-inbox-{bot['name']}-{bridge_inbox.prompt_digest(msg.id)[:24]}.txt"
-                            inbox.write_text(text, encoding="utf-8")
-                            _hint = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")[:50]
-                            blog(bot["name"], f"[{tid}] 📄 {_why} 落盘转 Read {inbox.name}（{_cmdline_units(text)} 单元）")
-                            text = (f"[桥转交·{_why}] 已 byte-exact 存到：{inbox.as_posix()} "
-                                    f"——请 Read 它拿完整原文（约 {len(text)} 字）。首行：{_hint}…")
-                        except Exception as _e:  # noqa: BLE001
-                            raise RuntimeError('完整原文尚未保存，消息保留待办；没有截断提交') from _e
                     # 标记 = 结构化元数据信封（2026-06-29 重构·把「回址」焊进消息本体，根治会过期的旁路便签）。
                     #   人读：from=<谁> to=<本bot> via=<DM|群>  ·  机器路由：route=<p2a|a2a>[ dest=<chat_id> at=<open_id>]
                     # hook(bridge_userprompt) 直接从【本条消息】解析 route → 每条消息自带回址、按消息原子化，
@@ -3281,7 +3280,15 @@ def _run_bot(bot_name=None):
                             env_route = f"route=p2a-ext dest={_gid} at={sender}"
                     else:
                         from_disp, via_disp = "host", "DM"
-                    marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp} · {env_route} mid={msg.id}]"
+                    # Resolve sender/route from the original before replacing it
+                    # with a file pointer, so multiline A2A retains its identity.
+                    text, file_reason = _prepare_tui_text(bot["name"], msg.id, text)
+                    if file_reason:
+                        blog(bot["name"], f"[{tid}] 📄 {file_reason}，原文已存入消息专属 inbox 文件")
+                    # The decorative middle dot is lost by Windows Codex input;
+                    # omit it on file handoffs so the native receipt digest matches.
+                    separator = " " if file_reason else " · "
+                    marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp}{separator}{env_route} mid={msg.id}]"
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
                     pre = ({} if agent_runtime.runtime_name(bot) == 'codex' else
                            {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)})

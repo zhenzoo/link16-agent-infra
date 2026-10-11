@@ -5,12 +5,15 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "feishu"))
 
 import bridge_inbound  # noqa: E402
+import bridge_inbox  # noqa: E402
+import feishu_bridge  # noqa: E402
 
 
 def _message(mid, text, *, create_time=1_700_000_000_123, chat_type="p2p", resources=None):
@@ -100,6 +103,44 @@ class InboundLedgerTests(unittest.TestCase):
         self.assertEqual(len(rows), 61)
         self.assertEqual(len({row["message_id"] for row in rows}), 61)
         self.assertIn("om_after", {row["message_id"] for row in rows})
+
+
+class TuiTextHandoffTests(unittest.TestCase):
+    def test_numbered_multiline_below_length_limit_uses_exact_file(self):
+        # The incident was only 5716 units, far below the command-line limit.
+        body = ("6. 录制与存储\r\n• 云台 ± 10°：“完整原文” 😀\n" * 250)[:5716]
+        self.assertLess(feishu_bridge._cmdline_units(body), feishu_bridge.SEND_MAX_CHARS)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)):
+            pointer, reason = feishu_bridge._prepare_tui_text("unit", "om_list", body)
+            files = list(Path(tmp).glob("bridge-inbox-unit-*.txt"))
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].read_bytes(), body.encode("utf-8"))
+            self.assertIn(files[0].as_posix(), pointer)
+            self.assertNotIn("\n", pointer)
+            self.assertNotIn("6. 录制", pointer)
+            self.assertIn("多行", reason)
+            # Existing retry identity reuses this message's file, never a shared last-text file.
+            self.assertEqual(feishu_bridge._prepare_tui_text("unit", "om_list", body), (pointer, reason))
+
+    def test_plain_single_line_stays_inline_without_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)):
+            self.assertEqual(feishu_bridge._prepare_tui_text("unit", "om_short", "继续检查"), ("继续检查", ""))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_tab_and_utf16_limits_keep_existing_file_policy(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)):
+            for mid, body in [("om_tab", "name\tvalue"), ("om_emoji", "😀" * 8001)]:
+                pointer, reason = feishu_bridge._prepare_tui_text("unit", mid, body)
+                saved = Path(tmp) / f"bridge-inbox-unit-{bridge_inbox.prompt_digest(mid)[:24]}.txt"
+                self.assertEqual(saved.read_bytes(), body.encode("utf-8"))
+                self.assertIn(saved.as_posix(), pointer)
+                self.assertTrue(reason)
+
+    def test_failed_save_never_returns_a_partial_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)), \
+                mock.patch.object(Path, "write_bytes", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(RuntimeError, "没有截断提交"):
+                feishu_bridge._prepare_tui_text("unit", "om_full", "1. 一\n2. 二")
 
 
 if __name__ == "__main__":
