@@ -1,13 +1,20 @@
-"""Per-bot Codex effort override for turns started through the Feishu TUI."""
+"""One profile default, plus explicitly requested effort for one accepted turn."""
 
 import json
 import os
+import re
+import threading
 import time
 import tomllib
+import uuid
 from pathlib import Path
+
+import tomlkit
+from bridge_injection import ProcessFileLock
 
 
 EFFORTS = frozenset({"medium", "high", "xhigh"})
+CONTRACT = "profile-default-v1"
 
 
 def normalize(value):
@@ -19,119 +26,173 @@ def normalize(value):
     raise ValueError("档位只接受 medium、high、xhigh（也可写 x-high）")
 
 
-def path(state_dir, bot):
-    return Path(state_dir) / f"bridge-effort-{bot}.json"
-
-
-def accepted_path(state_dir, bot):
-    return Path(state_dir) / f"bridge-effort-applied-{bot}.json"
-
-
-def accepted(state_dir, bot, profile):
-    try:
-        record = json.loads(accepted_path(state_dir, bot).read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
-        return None
-    return record if isinstance(record, dict) and record.get("profile") == profile else None
-
-
-def status(state_dir, bot, profile):
-    selection = selection_record(state_dir, bot, profile)
-    if selection is None:
-        return {"model": None, "effort": None, "accepted": False}
-    receipt = accepted(state_dir, bot, profile)
-    applied = bool(receipt and receipt.get("effort") == selection["effort"] and
-                   float(receipt.get("accepted_at") or 0) >= float(selection.get("updated_at") or 0))
-    return {"model": selection.get("model"), "effort": selection["effort"], "accepted": applied,
-            "turn_id": receipt.get("turn_id") if applied else None}
-
-
-def profile_model(profile_home):
-    """Use Link16's selected profile model, never Codex's unrelated catalog default."""
+def profile_defaults(profile_home):
     config = Path(profile_home) / "config.toml"
     try:
         saved = tomllib.loads(config.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ValueError(f"无法读取当前 Codex profile 的默认模型：{config}: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"无法读取当前 Codex profile 默认设置：{config}: {exc}") from exc
     model = saved.get("model")
     if not isinstance(model, str) or not model.strip():
         raise ValueError(f"当前 Codex profile 未保存默认模型：{config}")
-    return model.strip()
+    return {"model": model.strip(), "effort": saved.get("model_reasoning_effort")}
 
 
-def record_accepted(state_dir, bot, profile, effort, turn_id):
-    record = {"profile": profile, "effort": effort, "turn_id": turn_id, "accepted_at": time.time()}
-    target = accepted_path(state_dir, bot)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(target.name + f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(temporary, target)
+def profile_model(profile_home):
+    return profile_defaults(profile_home)["model"]
 
 
-def selection_record(state_dir, bot, profile):
-    """An override belongs to one bot and one exact profile; never cross /account."""
+def save_default(profile_home, effort):
+    """Human /effort saves the same key as the native picker; keep other keys."""
+    effort = normalize(effort)
+    config = Path(profile_home) / "config.toml"
+    with ProcessFileLock(config.with_name(".config.toml.link16-effort.lck")):
+        original = config.read_text(encoding="utf-8")
+        document = tomlkit.parse(original)
+        if not isinstance(document.get("model"), str) or not document["model"].strip():
+            raise ValueError("当前 Codex profile 未保存默认模型")
+        document["model_reasoning_effort"] = effort
+        temporary = config.with_name(f".config.toml.link16-effort.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(tomlkit.dumps(document), encoding="utf-8")
+            # Native terminals don't share our lock; reject observed concurrent saves.
+            if config.read_text(encoding="utf-8") != original:
+                raise RuntimeError("profile 默认设置被另一终端修改；请重试本次选择")
+            os.replace(temporary, config)
+        finally:
+            temporary.unlink(missing_ok=True)
+        saved = profile_defaults(profile_home)
+        if saved["effort"] != effort:
+            raise RuntimeError("profile 默认设置已被另一终端更新；以最新保存为准")
+        return saved
+
+
+def next_path(state_dir, bot):
+    return Path(state_dir) / f"bridge-effort-next-{bot}.json"
+
+
+def _read(path):
     try:
-        record = json.loads(path(state_dir, bot).read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    if not isinstance(record, dict) or record.get("profile") != profile:
-        return None
-    effort = record.get("effort")
-    if effort not in EFFORTS:
+    if not isinstance(record, dict):
         raise ValueError("飞书桥 effort 状态无效")
     return record
 
 
-def load(state_dir, bot, profile):
-    record = selection_record(state_dir, bot, profile)
-    return record["effort"] if record else None
-
-
-def launch_args(state_dir, bot, profile):
-    """Make a saved bot override visible from a new Codex TUI's first frame."""
+def _write(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
     try:
-        record = selection_record(state_dir, bot, profile)
-    except (OSError, ValueError, UnicodeError):
-        return []
-    if not record:
-        return []
-    model_args = ["--model", record["model"]] if record.get("model") else []
-    return [*model_args, "-c", f'model_reasoning_effort="{record["effort"]}"']
+        temporary.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def save(state_dir, bot, profile, effort, model=None):
-    """Set a bot-local override without changing the profile's config.toml."""
+def selection_record(state_dir, bot, profile, startup_id, thread_id):
+    record = _read(next_path(state_dir, bot))
+    if not record or record.get("consumed_at"):
+        return None
+    if any(record.get(key) != value for key, value in (
+            ("profile", profile), ("startup_id", startup_id), ("thread_id", thread_id))):
+        return None
+    if not startup_id or not thread_id or record.get("effort") not in EFFORTS:
+        raise ValueError("飞书桥临时 effort 状态无效")
+    return record
+
+
+def select_next(state_dir, bot, profile, effort, *, message_id=None):
+    """Bind to the live worker and thread, never to a future /new."""
+    import codex_startup
     effort = normalize(effort)
-    if model is not None and (not isinstance(model, str) or not model.strip() or
-                              any(char.isspace() for char in model)):
-        raise ValueError("profile 默认模型无效")
-    target = path(state_dir, bot)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    record = {"profile": profile, "effort": effort, "updated_at": time.time()}
-    if model:
-        record["model"] = model
-    temporary = target.with_name(target.name + f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(temporary, target)
+    ready = codex_startup.read_state(
+        Path(state_dir) / f"bridge-codex-app-ready-{bot}.json")
+    if (ready.get("profile") != profile or ready.get("effort_contract") != CONTRACT
+            or not ready.get("startup_id") or not ready.get("thread_id")
+            or not codex_startup.ready(ready, bot=bot)):
+        raise RuntimeError("当前 worker 不支持一次性 effort；下次正常新建会话后可用")
+    target = next_path(state_dir, bot)
+    record = {"profile": profile, "effort": effort, "startup_id": ready["startup_id"],
+              "thread_id": ready["thread_id"], "selection_id": uuid.uuid4().hex,
+              "message_id": message_id, "updated_at": time.time()}
+    with ProcessFileLock(target.with_suffix(".lck")):
+        _write(target, record)
+    return record
 
 
-def apply_turn(raw, state_dir, bot, profile):
-    """Add effort only to turn/start. Active turn/steer has no override support."""
-    message = json.loads(raw)
-    if message.get("method") != "turn/start":
-        return raw
-    try:
-        selected = selection_record(state_dir, bot, profile)
-    except (OSError, ValueError, UnicodeError):
-        # A damaged local override must not disconnect the active Codex TUI.
-        return raw
-    if selected is None:
-        return raw
-    params = message.get("params")
-    if not isinstance(params, dict):
-        raise ValueError("turn/start 缺少 params")
-    params["effort"] = selected["effort"]
-    model = selected.get("model")
-    if model:
-        params["model"] = model
-    return json.dumps(message, ensure_ascii=False)
+def status(state_dir, bot, profile, profile_home):
+    defaults = profile_defaults(profile_home)
+    ready = _read(Path(state_dir) / f"bridge-codex-app-ready-{bot}.json") or {}
+    pending = selection_record(state_dir, bot, profile, ready.get("startup_id"), ready.get("thread_id"))
+    receipt = _read(Path(state_dir) / f"bridge-effort-applied-{bot}.json")
+    if receipt and (receipt.get("profile") != profile or receipt.get("contract") != CONTRACT
+                    or receipt.get("startup_id") != ready.get("startup_id")
+                    or receipt.get("thread_id") != ready.get("thread_id")):
+        receipt = None
+    return {**defaults, "pending": pending, "receipt": receipt}
+
+
+def effective_effort(params):
+    # Codex collaboration settings take precedence over the top-level field.
+    settings = (params.get("collaborationMode") or {}).get("settings") or {}
+    return settings.get("reasoning_effort") or params.get("effort")
+
+
+class TurnEffort:
+    """Correlate a one-shot selection with its actual RPC acceptance."""
+
+    def __init__(self, state_dir, bot, profile, startup_id):
+        self.state_dir, self.bot, self.profile, self.startup_id = state_dir, bot, profile, startup_id
+        self.pending = {}
+        self.consumed = set()
+        self.lock = threading.Lock()
+
+    def apply(self, raw):
+        message = json.loads(raw)
+        if message.get("method") != "turn/start" or "id" not in message:
+            return raw
+        params = message.get("params") or {}
+        try:
+            record = selection_record(self.state_dir, self.bot, self.profile,
+                                      self.startup_id, params.get("threadId"))
+        except (OSError, ValueError, UnicodeError):
+            return raw
+        if not record:
+            return raw
+        if record.get("message_id"):
+            texts = [item.get("text", "") for item in params.get("input", [])
+                     if isinstance(item, dict) and item.get("type") == "text"]
+            marker = r"\bmid=" + re.escape(record["message_id"]) + r"(?=[\s\]])"
+            if not any(re.search(marker, text) for text in texts):
+                return raw
+        with self.lock:
+            if record["selection_id"] in self.pending.values() or record["selection_id"] in self.consumed:
+                return raw
+            self.pending[message["id"]] = record["selection_id"]
+        params["effort"] = record["effort"]
+        collaboration = params.get("collaborationMode")
+        if isinstance(collaboration, dict):
+            collaboration.setdefault("settings", {})["reasoning_effort"] = record["effort"]
+        return json.dumps(message, ensure_ascii=False)
+
+    def result(self, request, turn_id):
+        with self.lock:
+            selected_id = self.pending.pop(request["id"], None)
+            if selected_id and turn_id:
+                self.consumed.add(selected_id)
+        if not turn_id:
+            return  # Rejected requests may retry the same selection.
+        if selected_id:
+            target = next_path(self.state_dir, self.bot)
+            with ProcessFileLock(target.with_suffix(".lck")):
+                current = _read(target)
+                if current and current.get("selection_id") == selected_id:
+                    _write(target, {**current, "consumed_at": time.time(), "turn_id": turn_id})
+        params = request.get("params") or {}
+        effort = effective_effort(params)
+        _write(Path(self.state_dir) / f"bridge-effort-applied-{self.bot}.json",
+               {"contract": CONTRACT, "profile": self.profile, "startup_id": self.startup_id,
+                "thread_id": params.get("threadId"), "effort": effort,
+                "selection_id": selected_id, "turn_id": turn_id, "accepted_at": time.time()})

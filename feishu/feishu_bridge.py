@@ -1539,9 +1539,11 @@ def _inject_unlocked(pty, workspace_id, marker):
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
-def _inject(pty, workspace_id, marker):
+def _inject(pty, workspace_id, marker, *, idle_bot=None):
     """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
     with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
+        if idle_bot and bridge_activity.read_activity(STATE_DIR, idle_bot).get("state") != "idle":
+            raise RuntimeError("会话已不空闲；一次性 effort 任务未注入，请等当前回合结束后重发")
         return _inject_unlocked(pty, workspace_id, marker)
 
 
@@ -2508,69 +2510,80 @@ def _run_bot(bot_name=None):
                 runtime = agent_runtime.runtime_name(bot)
                 if runtime == "kimi":
                     await reply(chat_id, "⛔ 当前 Kimi 会话没有经 Link16 验证的逐回合 effort 切换接口；没有修改配置。"); return
+                if (runtime == "codex" and arg and from_group
+                        and sender not in ALLOWED_OPEN_IDS and sender != load_owner(bot["name"])):
+                    await reply(chat_id, "⛔ 只有主人能保存 profile 默认 effort；智能体临时选档请用 bridge_effort_cli.py。"); return
                 if not arg:
                     if runtime == "codex":
                         profile = agent_runtime.current_account(bot)
                         try:
-                            state = await asyncio.to_thread(bridge_effort.status, STATE_DIR, bot["name"], profile)
+                            state = await asyncio.to_thread(
+                                bridge_effort.status, STATE_DIR, bot["name"], profile,
+                                agent_runtime.profile_spec(profile).home_path)
                         except (OSError, ValueError) as exc:
                             await reply(chat_id, f"⛔ effort 状态读取失败：{exc}"); return
-                        label = state["effort"] or "未设置（跟随 Codex 当前会话／profile）"
-                        model_label = state.get("model") or "profile 当前模型"
-                        proof = "上一新回合已由 Codex 接受" if state["accepted"] else "尚无新回合接受记录"
                         live_label = "当前没有运行中的 Codex 会话"
                         if alive:
                             import bridge_effort_control
                             live = bridge_effort_control.live_footer(await asyncio.to_thread(read_screen, rec["pty"], None))
-                            live_label = (f"底栏实时状态 `{live[0]}` / `{live[1]}`" if live
+                            live_label = (f"底栏实时状态：{live[0]} / {live[1]}" if live
                                           else "底栏实时状态暂未读到，不能确认当前档位")
-                        await reply(chat_id, f"🧠 这只 bot 保存的模型/effort：`{model_label}` / `{label}`；{proof}；{live_label}。"
-                                             "用 `/effort medium`、`/effort high`、`/effort extra high` 设置当前会话后续任务和新会话首回合。"); return
-                    await reply(chat_id, "🧠 Claude 会话使用原生 `/effort <档位>`；例如 `/effort medium` 或 `/effort xhigh`。"); return
+                        pending = state.get("pending")
+                        temporary = f"；另有一次性 {pending['effort']} 等待指定新回合" if pending else ""
+                        effort_receipt = state.get("receipt")
+                        proof = (f"；最近接受请求的 effort：{effort_receipt['effort']}（不代表当前默认）"
+                                 if effort_receipt else "")
+                        await reply(chat_id, f"🧠 profile {profile} 的新会话默认："
+                                             f"{state['model']} / {state['effort'] or '模型默认'}；"
+                                             f"{live_label}{temporary}{proof}。"
+                                             "用 /effort medium、high、extra high 保存同一 profile 的新会话默认；"
+                                             "其他已运行会话不会自动切换。"); return
+                    await reply(chat_id, "🧠 Claude 会话使用原生 /effort <档位>；例如 /effort medium 或 /effort xhigh。"); return
                 try:
                     level = bridge_effort.normalize(arg)
                 except ValueError as exc:
                     await reply(chat_id, f"❓ {exc}"); return
                 if runtime == "claude":
                     if not alive:
-                        await reply(chat_id, "🛌 当前没有 Claude 会话；先发句话起会话，再发 `/effort <档位>`。"); return
+                        await reply(chat_id, "🛌 当前没有 Claude 会话；先发句话起会话，再发 /effort <档位>。"); return
                     await asyncio.to_thread(wmux, "send", rec["pty"], f"/effort {level}", "--allow-ws", rec["workspace_id"])
                     await asyncio.to_thread(wmux, "enter", rec["pty"], "--allow-ws", rec["workspace_id"])
-                    await reply(chat_id, f"⏎ 已把 `/effort {level}` 转给 Claude 原生命令；以 Claude 回显为准。"); return
+                    await reply(chat_id, f"⏎ 已把 /effort {level} 转给 Claude 原生命令；以 Claude 回显为准。"); return
                 profile = agent_runtime.current_account(bot)
+                profile_home = agent_runtime.profile_spec(profile).home_path
                 try:
-                    model = await asyncio.to_thread(
-                        bridge_effort.profile_model, agent_runtime.profile_spec(profile).home_path)
-                except (OSError, ValueError) as exc:
-                    await reply(chat_id, f"⛔ 没有改 effort：{exc}"); return
+                    saved = await asyncio.to_thread(bridge_effort.save_default, profile_home, level)
+                except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
+                    await reply(chat_id, f"⛔ 默认 effort 保存未通过核验：{exc}"); return
+                model = saved["model"]
+                saved_label = (f"🧠 已保存 profile {profile} 的新会话默认：{model} / {level}。"
+                               "同一 profile 的 /new 和其他终端新建会话都会继承最新保存值。")
                 if not alive:
-                    await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
-                    await reply(chat_id, f"🧠 已为这只 bot 保存 `{model}` / `{level}`；下次新建 Codex 会话时，"
-                                         "首条任务会带上这组设置；会话尚未启动，暂不报切换完成。"); return
+                    await reply(chat_id, saved_label + " 当前没有运行中的会话。"); return
                 ready = codex_startup.read_state(STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json")
                 if not (ready.get("effort_control") and ready.get("profile") == profile
                         and codex_startup.process_alive(ready.get("worker_pid"))):
-                    await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
-                    await reply(chat_id, f"🧠 已保存 `{model}` / `{level}`，但当前会话由旧版 worker 托管；"
-                                         "下次正常重建后从首个任务回合使用。当前会话没有被关闭。"); return
+                    await reply(chat_id, saved_label + " 当前会话无法核验切换能力，保留原状态。"); return
                 import bridge_effort_control
+                activity = await asyncio.to_thread(bridge_activity.read_activity, STATE_DIR, bot)
+                if activity.get("state") != "idle":
+                    await reply(chat_id, saved_label + " 当前回合未确认空闲，本回合未切换。"); return
+                screen = await asyncio.to_thread(read_screen, rec["pty"], None)
+                if not any("› Ask Codex to do anything" in line for line in screen.splitlines()[-20:]):
+                    await reply(chat_id, saved_label + " 当前会话正在执行或有未提交输入，本回合未切换。"); return
                 try:
                     verification = await asyncio.to_thread(
                         bridge_effort_control.switch_current,
-                        model=model, effort=level,
-                        profile_home=agent_runtime.profile_spec(profile).home_path,
+                        model=model, effort=level, profile_home=profile_home,
                         read_screen=lambda: read_screen(rec["pty"], None),
                         send=lambda value: wmux("send", rec["pty"], value, "--allow-ws", rec["workspace_id"]),
                         key=lambda value: wmux("key", rec["pty"], value, "--allow-ws", rec["workspace_id"]),
                     )
                 except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
-                    await reply(chat_id, f"⛔ 当前会话的模型切换未通过核验：{exc}；没有报切换完成。"
-                                         "请等会话空闲后重发这条命令。"); return
-                await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
-                await reply(chat_id, f"✅ 已切换当前 Codex 会话为 `{model}` / `{level}`；"
-                                     f"Codex 切换回显、模型/effort 选择器、底栏与实时 `/status` 均已核对。"
-                                     f"切换前为 `{verification['before'][0]}` / `{verification['before'][1]}`；"
-                                     "下一条任务仍在同一会话执行。"); return
+                    await reply(chat_id, saved_label + f" 当前会话切换未通过核验：{exc}；不报切换完成。"); return
+                await reply(chat_id, saved_label + f" ✅ 当前会话也已切换为 {model} / {level}；"
+                                     "切换回显、选择器、底栏与实时 /status 均已核对。"
+                                     f"切换前为 {verification['before'][0]} / {verification['before'][1]}。"); return
             if cmd == "/clear":
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 控制命令=撤销投递契约→清账（§2.13·防 doctor 误判重投）
@@ -2876,7 +2889,7 @@ def _run_bot(bot_name=None):
                     "· 💡 `/cd` 选目录、`/account` 选账号都【只是选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录+账号冷启）\n"
                     "· `/clear` — 清空当前会话上下文\n"
                     "· `/screen` — 看现场\n"
-                    "· `/effort medium|high|xhigh` — Codex 自动配对 Link16 profile 已保存的模型，设置这只 bot 当前会话后续任务与新会话首回合\n"
+                    "· `/effort medium|high|xhigh` — 保存当前 profile 的新会话默认；当前会话空闲时也切换，其他运行中会话保持原档位\n"
                     "· `/stop` — 打断当前任务（顺手清空输入框）\n"
                     "· `/close` — 关会话（顺手把临时切的账号切回名册默认）\n"
                     "· `/handoff [profile]`（=`/交接`）— **`/close` 的进阶版**：关掉当前会话 → 开一个**全新 context**\n"
@@ -3214,6 +3227,7 @@ def _run_bot(bot_name=None):
                     # Explicit "choose your own effort" runs a separate short Codex
                     # classification turn before this task is handed to the TUI.
                     # An active turn cannot change its own effort through turn/steer.
+                    temporary_effort = None
                     if agent_runtime.runtime_name(bot) == "codex":
                         import bridge_effort
                         import bridge_effort_auto
@@ -3221,36 +3235,35 @@ def _run_bot(bot_name=None):
                             profile = agent_runtime.current_account(bot)
                             ready = codex_startup.read_state(
                                 STATE_DIR / f"bridge-codex-app-ready-{bot['name']}.json")
-                            if not (ready.get("effort_control") and ready.get("profile") == profile
-                                    and codex_startup.process_alive(ready.get("worker_pid"))):
+                            if not (ready.get("effort_contract") == bridge_effort.CONTRACT
+                                    and ready.get("profile") == profile
+                                    and codex_startup.ready(ready, bot=bot["name"])):
                                 durable_inbox.boundary(msg.id)
-                                await reply(msg.chat_id, "⛔ 当前 Codex worker 尚不支持已验证的自动 effort 切换。"
-                                                         "这条任务没有注入；正常重启飞书桥后，请重发原消息。")
+                                await reply(msg.chat_id, "⛔ 当前 Codex worker 尚不支持一次性 effort。"
+                                                         "这条任务没有注入；下次正常新建会话后请重发原消息。")
                                 return
                             try:
+                                activity = await asyncio.to_thread(bridge_activity.read_activity, STATE_DIR, bot)
+                                if activity.get("state") != "idle":
+                                    raise RuntimeError("当前回合未确认空闲，不能中途选档")
+                                screen = await asyncio.to_thread(read_screen, pty, None)
+                                if not any("› Ask Codex to do anything" in line for line in screen.splitlines()[-20:]):
+                                    raise RuntimeError("当前会话不是空闲输入框，不能为正在执行的回合选档")
                                 model = await asyncio.to_thread(
                                     bridge_effort.profile_model, agent_runtime.profile_spec(profile).home_path)
                                 level = await asyncio.to_thread(bridge_effort_auto.choose, profile, model, text)
-                                import bridge_effort_control
-                                verification = await asyncio.to_thread(
-                                    bridge_effort_control.switch_current,
-                                    model=model, effort=level,
-                                    profile_home=agent_runtime.profile_spec(profile).home_path,
-                                    read_screen=lambda: read_screen(pty, None),
-                                    send=lambda value: wmux("send", pty, value, "--allow-ws", ws),
-                                    key=lambda value: wmux("key", pty, value, "--allow-ws", ws),
-                                )
+                                temporary_effort = await asyncio.to_thread(
+                                    bridge_effort.select_next, STATE_DIR, bot["name"], profile, level,
+                                    message_id=msg.id)
                             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
                                 durable_inbox.boundary(msg.id)
-                                await reply(msg.chat_id, f"⛔ 自动选档或当前会话核验失败：{exc}。"
+                                await reply(msg.chat_id, f"⛔ 自动选档未完成：{exc}。"
                                                          "这条任务没有注入；请检查会话空闲状态后重发。")
                                 return
-                            await asyncio.to_thread(bridge_effort.save, STATE_DIR, bot["name"], profile, level, model)
-                            blog(bot["name"], f"[{tid}] 🧠 自动选档 {model}/{level}，"
-                                              f"会话切换已由 /status、选择器和回显确认；"
-                                              f"原档位 {verification['before'][0]}/{verification['before'][1]}")
-                            await reply(msg.chat_id, f"🧠 已先选 `{level}`，并核对当前会话为 `{model}` / `{level}`；"
-                                                     "现在开始处理这条任务。")
+                            blog(bot["name"], f"[{tid}] 🧠 已为消息 {msg.id} 选择一次性 effort {level}；"
+                                              "等待 turn/start 接受，profile 默认未修改")
+                            await reply(msg.chat_id, f"🧠 已为这条任务选择一次性 {level}，等待新回合接受；"
+                                                     "你的默认设置保持不变。")
                     # 标记 = 结构化元数据信封（2026-06-29 重构·把「回址」焊进消息本体，根治会过期的旁路便签）。
                     #   人读：from=<谁> to=<本bot> via=<DM|群>  ·  机器路由：route=<p2a|a2a>[ dest=<chat_id> at=<open_id>]
                     # hook(bridge_userprompt) 直接从【本条消息】解析 route → 每条消息自带回址、按消息原子化，
@@ -3294,7 +3307,8 @@ def _run_bot(bot_name=None):
                            {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)})
                     inject_wall = time.time()
                     durable_inbox.boundary(msg.id, prompt=marker)
-                    inject_ok = await asyncio.to_thread(_inject, pty, ws, marker)
+                    inject_ok = await asyncio.to_thread(
+                        _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None)
                     if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
                         blog(bot["name"], f"[{tid}] ⚠️ 注入后校验：重按{INJECT_VERIFY_TRIES}次仍卡输入框(没提交) → 已喊主人")
                         try:

@@ -69,7 +69,7 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 查某 bot 完整收发历史 | `python feishu/bridge_history.py --bot <bot> --recent 40 --full`（自动与主动出站均含 Feishu message_id） |
 | 查身份 | `python feishu/whoami.py` |
 | 桥状态和健康 | `python feishu/feishu_bridge.py status`；`python feishu/bridge_doctor.py` |
-| 飞书桥切换 Codex effort | 主人发 `/effort medium|high|xhigh`；桥从当前 Link16 profile 读取模型，驱动当前空闲会话的 `/model` 选择器并核验。智能体在飞书回合内为下一回合选档用 `python feishu/bridge_effort_cli.py medium|high|xhigh` |
+| 飞书桥切换 Codex effort | 主人发 `/effort medium|high|xhigh` 保存当前 profile 的新会话默认，空闲会话同时切换并核验。智能体用 `python feishu/bridge_effort_cli.py medium|high|xhigh` 仅选择一次性下一回合，不改默认、不跨 `/new` |
 | 看门狗状态 | `python feishu/bridge_watchdog.py status` |
 | 查看或设置 cron | `python feishu/bridge_cron.py board`；详情读 `docs/ARCH-150-agent-cron.md` |
 | 审计 bot 权限 | `python feishu/bridge_scope_audit.py --all-env` |
@@ -82,7 +82,9 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 
 默认 medium 用于讨论、头脑风暴、梳理现状、局部 UI／文案和可脚本验收的重复执行；xhigh 用于多份材料对齐、跨组件实现、反例与边界条件多、容易把草稿误报完成的证据核对，以及关键异常处理和最终验收。按核验难度选，不能只看任务耗时；用户明确指定的档位优先。baseball-2 的规则措辞、baseball-3 的局部页面调整可先用 medium；baseball-3 的事件语义核对和 baseball-4 的草稿与真实调用证据区分宜用 xhigh。历史案例只表明风险类型，不构成档位胜率实测。
 
-用户在任务中写“选用你合适的 effort，自己去调整”时，Codex 飞书桥先用当前 Link16 profile 运行只读预判断，再在正式任务注入前驱动 `/model`；底部实时状态、`/status`、选择器的 current 标记和切换回显核对通过才报告“当前会话已切换”。无会话时，主人单独发 `/effort` 会为这只 bot 的新会话首回合保存选择。活动中的 Codex 回合无法中途变更 effort；智能体调用 `bridge_effort_cli.py` 只能设置**下一回合**，命令回执里的 `current_turn_changed=false` 必须如实转述。若预判断或当前会话切换失败，任务不得以错误档位继续注入，也不能说已切换。Claude、Kimi 的能力按各自 runtime 处理，不借用 Codex 路径。
+同一 Link16 profile 只用原生 `config.toml` 保存默认模型与 effort。用户在 wmux 或其他终端原生 `/model` 中保存的选择，以及主人手动飞书 `/effort` 保存的档位，供后续新会话继承；不恢复旧默认，不维护永久 bot 覆盖。手动 `/effort` 在空闲会话同时驱动 `/model`，切换回显、选择器、`/status` 与底栏核对通过才报当前已切换；无会话或会话忙时只报默认已保存。其他运行中会话和其他 profile 不自动切换。
+
+用户明确要求“选用你合适的 effort，自己去调整”时，桥做只读预判断，将一次性 effort 绑定本条消息与当前 worker/thread，不驱动 `/model`、不改用户默认。智能体调用 `bridge_effort_cli.py` 仅选择当前 worker/thread 的**下一新回合**；`current_turn_changed=false`、`default_changed=false` 必须如实转述。临时选择在新回合被接受后消费，失败可重试，新 worker 或新 thread 不继承；当前活动回合不能中途升档。旧 worker 未支持一次性接口或预判断失败时，不以错误档位注入原任务。`/effort` 查询分别显示默认、底栏现场、待接受选择与最近接受回执，不能把排队成功说成已切换。Claude、Kimi 按各自 runtime 处理。
 
 反查返回 `metadata_only` 时，继续查看已命中的 `meta.json` 中的 `local_source`、发布回执或构建入口，向用户说明找到的是源码还是候选 HTML；没有明确 `local_entry` 就不宣称它是线上发布页的本地同版文件。
 

@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-09-28
+last_reviewed: 2026-10-15
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -162,22 +162,33 @@ python feishu/agent_profile_cli.py command --profile cxp --cwd . --json -- --mod
 Windows 有显式 provider 参数时，在该次启动环境设置 `MSYS2_ARG_CONV_EXCL=*`，
 防止 Git Bash 把 `/model` 改成 Git 安装目录下的文件路径；传入路径应使用原生 Windows 路径。
 
-飞书桥的新 thread 只以 `Reply exactly LINK16_APP_SERVER_READY.` 预热，供官方 TUI 恢复。
-没有 bot 覆盖时使用所选 profile 的模型与 effort；已有 `/effort` 覆盖时，启动参数从该
-profile 读取模型，并给该 bot 的首回合传所选档位。普通消息只加回址标记，`/model` 原样转发。
-`/effort medium|high|xhigh` 是桥的显式指令。当前 Codex 会话空闲时，桥驱动原生 `/model`
-选中该 profile 的模型与指定 effort；切换回显、选择器的 current 标记、`/status` 和底部
-实时状态都符合才报完成。原生选择器会短暂写入共享 profile 配置，桥立即恢复原模型与
-effort，避免改变兄弟 bot 的默认值。无会话时只保存该 bot/profile 的新会话首回合覆盖，
-明确说明尚未完成实时切换；旧 worker 不具备受验切换能力时也只保存并如实回报。
-Codex worker 在随后 `turn/start` 转发前同时填入官方 `model` 和 `effort` 字段；正在执行的
-`turn/steer` 不支持中途换档。覆盖跨 bot、跨 profile 不继承。`/effort` 无参数读取选择与
-app-server 接受回执；只有新回合被接受才记 `bridge-effort-applied-<bot>.json`。
-用户在任务内明确要求“选用合适 effort，自己调整”时，桥先用所选 Codex profile 运行
-只读、短时预判断（按边界条件与核验难度选择 medium/xhigh），再切换并核验当前空闲会话，
-最后才注入原任务。判断或切换失败时告知任务没有注入、请重发，不以错误档位继续。智能体自行调用
-`bridge_effort_cli.py` 只能设置下一回合，不能把当前正在执行的回合说成已升档。
-Claude 会话继续使用原生 `/effort`；Kimi 暂无经 Link16 验证的逐回合切换路径，桥明确拒绝。
+飞书桥的 `/new` 和普通消息冷启动共用 `ensure_session`，新 worker 直接读取所选 profile
+最近保存的模型与 effort，不再读取旧 `bridge-effort-<bot>.json`。启动不发送预热模型任务。
+同一 profile 的 wmux 与其他终端共享 `config.toml`；用户在原生 `/model` 中保存的选择，
+或主人在飞书手动 `/effort medium|high|xhigh` 保存的档位，都是后续新会话的默认。
+不同 profile 各自独立；已运行会话保留自己的现场设置，恢复旧 thread 不冒充新建。
+
+手动 `/effort` 先原子更新 profile 的 `model_reasoning_effort`，保留模型及其余配置。
+当前会话空闲且 worker 支持控制时，再驱动原生 `/model`，核对切换回显、选择器的 current、
+`/status` 和底栏后报告当前会话已切换。保留原生选择器保存的新默认，不再恢复旧值。
+无会话或会话忙时明确报告默认已保存、当前回合未切换；切换核验失败也不冒报成功。
+群内 agent 的控制授权不等于修改主人默认的授权：保存默认只接受主人；智能体用一次性接口。
+
+临时选档另走 `bridge-effort-next-<bot>.json`，不写 profile。仅用户明确要求自行判断 effort
+时，桥做只读预判断，将结果绑定本条飞书 `mid`、profile、worker 启动编号和 thread。
+智能体 `bridge_effort_cli.py` 仅绑定当前 worker/thread 的下一新回合，不能中途改变活动回合。
+worker 只在匹配的 `turn/start` 同步顶层 `effort` 与
+`collaborationMode.settings.reasoning_effort`，保留模型与其他字段；不改 `turn/steer`。
+请求成功接受才消费选择并记 `bridge-effort-applied-<bot>.json`；拒绝允许重试，
+旧回执不会消费后来保存的新选择；新 worker 或新 thread 不继承临时选择。
+
+`/effort` 无参数分别报告 profile 默认、终端底栏现场档位、待接受的一次性选择及最近接受
+请求的有效档位。回执优先读取 collaboration setting，不把单个顶层字段、历史启动横幅或
+旧版回执当作实际档位证据。临时选档不改变底栏原来的会话选择；后续普通回合恢复 TUI 所带档位。
+已有旧 worker 保留运行，旧覆盖文件归档后不再逐轮强加；新一次性功能需正常新建后使用，
+能力未就绪时明确拒绝自动选档任务。迁移只归档旧覆盖，不删除认证、历史、会话或原生配置。
+
+Claude 继续使用原生 `/effort`；Kimi 暂无经 Link16 验证的逐回合切换路径，桥明确拒绝。
 普通文本里的档位词不触发切换；只有明确的自选要求触发预判断，避免讨论模型时误改执行设置。
 
 依据：[官方配置优先级](https://developers.openai.com/codex/config-basic/)、

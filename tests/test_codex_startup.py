@@ -110,6 +110,7 @@ class GatewayTests(unittest.TestCase):
     def test_turn_modifier_reaches_upstream_without_touching_steer(self):
         calls = []
         accepted = []
+        results = []
         def upstream(ws):
             for raw in ws:
                 msg = json.loads(raw)
@@ -129,6 +130,7 @@ class GatewayTests(unittest.TestCase):
                 f"ws://127.0.0.1:{server.socket.getsockname()[1]}", mock.Mock(),
                 turn_modifier=lambda raw: json.dumps({**json.loads(raw), "params": {**json.loads(raw)["params"], "effort": "xhigh"}}),
                 on_turn_accepted=lambda effort, turn_id: accepted.append((effort, turn_id)),
+                on_turn_result=lambda request, turn_id: results.append((request["id"], turn_id)),
             )
             try:
                 with connect(gateway.start(), proxy=None) as tui:
@@ -143,6 +145,7 @@ class GatewayTests(unittest.TestCase):
                 self.assertEqual(calls[1]["params"]["effort"], "xhigh")
                 self.assertNotIn("effort", calls[2]["params"])
                 self.assertEqual(accepted, [("xhigh", "turn-2")])
+                self.assertEqual(results, [(2, "turn-2"), (4, None)])
             finally:
                 gateway.close()
 

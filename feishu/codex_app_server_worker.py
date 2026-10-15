@@ -697,8 +697,8 @@ def run(args) -> int:
     log_path = state_dir / f"codex-app-server-{args.bot}.log"
     env = worker_environment(args.bot, args.codex_home, state_dir)
     import bridge_effort
-    model_args = (agent_runtime.codex_saved_model_args(args.codex_home, cwd)
-                  + bridge_effort.launch_args(state_dir, args.bot, profile_name))
+    model_args = agent_runtime.codex_saved_model_args(args.codex_home, cwd)
+    turn_effort = bridge_effort.TurnEffort(state_dir, args.bot, profile_name, startup_id)
     with open(log_path, "a", encoding="utf-8") as log:
         server = None
         rpc = None
@@ -738,9 +738,7 @@ def run(args) -> int:
 
             gateway = codex_startup.TuiGateway(url, session_received, on_request=lambda method: progress.update(
                 "tui_session_requested", "官方终端正在" + ("创建新会话" if method == "thread/start" else "恢复已有会话")),
-                turn_modifier=lambda raw: bridge_effort.apply_turn(raw, state_dir, args.bot, profile_name),
-                on_turn_accepted=lambda effort, turn_id: bridge_effort.record_accepted(
-                    state_dir, args.bot, profile_name, effort, turn_id))
+                turn_modifier=turn_effort.apply, on_turn_result=turn_effort.result)
             tui_url = gateway.start()
             progress.update("observer_connecting", "正在接入飞书回传观察连接")
             # 速记员搬进自己的进程（不再是本进程里的线程）：这样「重启回程」不必掐掉主人的会话。
@@ -783,7 +781,7 @@ def run(args) -> int:
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f"{progress.record['detail']}：没有收到会话成功响应")
             progress.update("ready", "Codex 会话与飞书回传均已就绪", tui_pid=tui.pid,
-                            effort_control=True, **gateway.session)
+                            effort_control=True, effort_contract=bridge_effort.CONTRACT, **gateway.session)
             codex_startup.atomic_write_json(ready_path, progress.record)
             return tui.wait()
         except Exception as exc:

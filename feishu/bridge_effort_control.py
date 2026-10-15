@@ -1,12 +1,9 @@
 """Change one idle Codex TUI's model/effort and verify its live session state."""
 
-import os
 import re
 import time
 import tomllib
 from pathlib import Path
-
-import tomlkit
 
 from bridge_injection import ProcessFileLock
 
@@ -68,39 +65,15 @@ def live_footer(screen):
 
 
 def _footer_matches(screen, model, effort):
-    return live_footer(screen) == (model, effort)
-
-
-def _restore_profile_config(config, original, chosen_model, chosen_effort):
-    """Undo only the profile-wide keys the native /model menu changed."""
-    with ProcessFileLock(config.with_name(".config.toml.link16-effort.lck")):
-        current_text = config.read_text(encoding="utf-8")
-        current = tomlkit.parse(current_text)
-        keys = {"model": chosen_model, "model_reasoning_effort": chosen_effort}
-        for key, chosen in keys.items():
-            if current.get(key) != original.get(key) and current.get(key) != chosen:
-                raise RuntimeError(f"profile 的 {key} 被另一进程修改；没有覆盖它")
-        for key in keys:
-            if key in original:
-                current[key] = original[key]
-            else:
-                current.pop(key, None)
-        updated = tomlkit.dumps(current)
-        if updated != current_text:
-            temporary = config.with_name(f".config.toml.link16-effort.{os.getpid()}.tmp")
-            temporary.write_text(updated, encoding="utf-8")
-            os.replace(temporary, config)
-        verified = tomllib.loads(config.read_text(encoding="utf-8"))
-        if any(verified.get(key) != original.get(key) for key in keys):
-            raise RuntimeError("Codex profile 默认模型/effort 恢复核验失败")
+    live = live_footer(screen)
+    return bool(live and live[0].casefold() == model.casefold() and live[1] == effort)
 
 
 def switch_current(*, model, effort, profile_home, read_screen, send, key):
     """Drive /model, then verify picker, confirmation and live /status.
 
-    The native picker writes the shared profile config. Restore its original
-    model/effort immediately so sibling bots keep their own defaults; the TUI's
-    live session choice remains changed, as verified by /status.
+    This is a human selection: retain the native picker's profile-wide save.
+    Existing sibling sessions keep their own live settings.
     """
     config = Path(profile_home) / "config.toml"
     original = tomllib.loads(config.read_text(encoding="utf-8"))
@@ -114,13 +87,12 @@ def switch_current(*, model, effort, profile_home, read_screen, send, key):
         before = _status(read, send, key)
         if "› Ask Codex to do anything" not in read():
             raise RuntimeError("Codex 状态查询后未回到空闲输入框")
-        changed = False
         try:
             send("/model")
             key("enter")
             picker = _wait(read, lambda value: "Select Model and Effort" in value)
             choices = [(index, label) for index, label, _ in _rows(picker)
-                       if label.split(" (")[0].split()[0] == model]
+                       if label.split(" (")[0].split()[0].casefold() == model.casefold()]
             if len(choices) != 1:
                 raise RuntimeError(f"Codex 模型选择器找不到唯一的 {model}")
             _navigate(read, key, choices[0][0])
@@ -133,23 +105,19 @@ def switch_current(*, model, effort, profile_home, read_screen, send, key):
             if len(choices) != 1:
                 raise RuntimeError(f"Codex effort 选择器找不到唯一的 {effort}")
             _navigate(read, key, choices[0][0])
-            earlier_toasts = read().count(f"Model changed to {model} {effort}")
+            confirmation = f"Model changed to {model} {effort}".casefold()
+            earlier_toasts = read().casefold().count(confirmation)
             key("enter")
-            toast = _wait(read, lambda value: value.count(
-                f"Model changed to {model} {effort}") > earlier_toasts)
-            changed = True
-            # Native /model also writes the shared profile. Undo that write
-            # before the slower status/picker checks so sibling bots see the
-            # profile default again as soon as possible.
-            _restore_profile_config(config, original, model, effort)
+            _wait(read, lambda value: value.casefold().count(confirmation) > earlier_toasts)
             live = _status(read, send, key)
-            if live != (model, effort):
+            if live[0].casefold() != model.casefold() or live[1] != effort:
                 raise RuntimeError(f"Codex 实时状态是 {live[0]}/{live[1]}，目标是 {model}/{effort}")
             _wait(read, lambda value: _footer_matches(value, model, effort))
             send("/model")
             key("enter")
             picker = _wait(read, lambda value: "Select Model and Effort" in value)
-            if not any(text.startswith(model + " (current)") for _, text, _ in _rows(picker)):
+            if not any(text.casefold().startswith(model.casefold() + " (current)")
+                       for _, text, _ in _rows(picker)):
                 raise RuntimeError("Codex 模型选择器没有把目标模型标为 current")
             key("enter")
             levels = _wait(read, lambda value: f"Select Reasoning Level for {model}" in value)
@@ -158,6 +126,9 @@ def switch_current(*, model, effort, profile_home, read_screen, send, key):
                 raise RuntimeError("Codex effort 选择器没有把目标档位标为 current")
             key("escape")
             key("escape")
+            saved = tomllib.loads(config.read_text(encoding="utf-8"))
+            if saved.get("model") != model or saved.get("model_reasoning_effort") != effort:
+                raise RuntimeError("当前会话已切换，但默认设置已被另一终端更新；保留最新默认")
             return {"before": before, "after": live, "footer_verified": True,
                     "picker_verified": True, "confirmation_verified": True}
         finally:
@@ -169,4 +140,3 @@ def switch_current(*, model, effort, profile_home, read_screen, send, key):
                     key("escape")
             except Exception:
                 pass
-            _restore_profile_config(config, original, model, effort)

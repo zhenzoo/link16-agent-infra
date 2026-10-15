@@ -163,6 +163,9 @@ class RemoteResumePermissionTests(unittest.TestCase):
             state = Path(tmp)
             codex = state / "codex.exe"
             codex.touch()
+            # A legacy permanent bot setting must never override profile defaults.
+            (state / "bridge-effort-test-bot.json").write_text(
+                '{"profile":"cxp","effort":"medium","model":"obsolete"}', encoding="utf-8")
             worker._thread_state_path(state, "test-bot").write_text(
                 json.dumps({"thread_id": "existing-thread"}), encoding="utf-8"
             )
@@ -222,6 +225,9 @@ class RemoteResumePermissionTests(unittest.TestCase):
             self.assertIn("--dangerously-bypass-hook-trust", command)
             self.assertEqual(launched[0][1:3], ["-c", 'model="gpt-6-sol"'])
             self.assertEqual(command[1:3], ["-c", 'model="gpt-6-sol"'])
+            self.assertNotIn('model_reasoning_effort="medium"', launched[0])
+            self.assertNotIn('model_reasoning_effort="medium"', command)
+            self.assertNotIn("obsolete", command)
             self.assertFalse(worker._ready_state_path(state, "test-bot").exists())
             server.terminate.assert_called_once()
 

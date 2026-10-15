@@ -109,12 +109,13 @@ class TuiGateway:
     No prompts, tool arguments, credentials or raw notifications are persisted.
     """
     def __init__(self, upstream_url, before_session, on_request=None, turn_modifier=None,
-                 on_turn_accepted=None):
+                 on_turn_accepted=None, on_turn_result=None):
         self.upstream_url = upstream_url
         self.before_session = before_session
         self.on_request = on_request or (lambda method: None)
         self.turn_modifier = turn_modifier or (lambda raw: raw)
         self.on_turn_accepted = on_turn_accepted or (lambda effort, turn_id: None)
+        self.on_turn_result = on_turn_result or (lambda request, turn_id: None)
         self.attached = threading.Event()
         self.failed = threading.Event()
         self.error = ""
@@ -214,14 +215,18 @@ class TuiGateway:
                         for raw in upstream:
                             msg = json.loads(raw)
                             method = pending.pop(msg.get("id"), None)
-                            accepted_effort = pending_turns.pop(msg.get("id"), None)
-                            if accepted_effort and not msg.get("error"):
-                                turn_id = ((msg.get("result") or {}).get("turn") or {}).get("id")
-                                if turn_id:
-                                    try:
+                            turn_request = pending_turns.pop(msg.get("id"), None)
+                            if turn_request:
+                                turn_id = None if msg.get("error") else (
+                                    ((msg.get("result") or {}).get("turn") or {}).get("id"))
+                                try:
+                                    self.on_turn_result(turn_request, turn_id)
+                                    if turn_id:
+                                        from bridge_effort import effective_effort
+                                        accepted_effort = effective_effort(turn_request.get("params") or {})
                                         self.on_turn_accepted(accepted_effort, turn_id)
-                                    except OSError:
-                                        pass  # Receipt write failure must not disconnect the live TUI.
+                                except (OSError, ValueError, TimeoutError):
+                                    pass  # Local receipt failure must not disconnect the live TUI.
                             session = None
                             if method and not self.attached.is_set():
                                 if msg.get("error"):
@@ -253,9 +258,8 @@ class TuiGateway:
                         self.on_request(msg["method"])
                     if msg.get("method") == "turn/start":
                         forwarded = self.turn_modifier(raw)
-                        effort = (json.loads(forwarded).get("params") or {}).get("effort")
-                        if effort is not None and "id" in msg:
-                            pending_turns[msg["id"]] = effort
+                        if "id" in msg:
+                            pending_turns[msg["id"]] = json.loads(forwarded)
                         upstream.send(forwarded)
                     else:
                         upstream.send(raw)

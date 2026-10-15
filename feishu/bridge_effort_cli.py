@@ -36,9 +36,13 @@ def main(argv=None):
         os.environ.get("FEISHU_BRIDGE_OUTBOX_DIR") or Path(__file__).resolve().parent / "_state")
     level = bridge_effort.normalize(args.effort)
     model = bridge_effort.profile_model(spec.home_path)
-    bridge_effort.save(state_dir, bot, profile, level, model)
+    try:
+        selection = bridge_effort.select_next(state_dir, bot, profile, level)
+    except (OSError, ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
     print(json.dumps({"bot": bot, "profile": profile, "model": model, "effort": level,
-                      "state": "next_turn_selected", "current_turn_changed": False}, ensure_ascii=False))
+                      "state": "next_turn_selected", "current_turn_changed": False,
+                      "default_changed": False, "thread_id": selection["thread_id"]}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
