@@ -588,6 +588,15 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
         flush=True,
     )
 
+    import tenant_probe
+    tenant = tenant_probe.sync_registry_tenant(runtime_bot_name)
+    if tenant.get("tenant_key"):
+        print(f"\n✅ 名册租户：{tenant['tenant_key']}", flush=True)
+    else:
+        followup = ("Monitor 将在后续轮询继续补齐租户字段。" if monitor else
+                    f"入群后运行 python feishu/tenant_probe.py --bot {runtime_bot_name} --apply。")
+        print(f"\nℹ️ {tenant['error']}；{followup}", flush=True)
+
     if monitor:
         monitor = registration_monitor.record_stage(monitor["job_id"], "registered", app_id=app_id)
         monitor = registration_monitor.request_permission_review(monitor["job_id"])

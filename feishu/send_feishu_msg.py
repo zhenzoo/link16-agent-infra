@@ -143,7 +143,13 @@ def cross_tenant_route(sender, target):
         target_key = (registry.find(target) or {}).get("tenant_key")
     except Exception:  # noqa: BLE001 — 名册读不到 = 不判跨租户，维持原路径
         return None
-    if not sender_key or not target_key or sender_key == target_key:
+    if not sender_key or not target_key:
+        missing = [name for name, key in ((sender, sender_key), (target, target_key)) if not key]
+        print(f"⚠️ 名册缺少 {', '.join(missing)} 的 tenant_key，无法判定跨租户通道；"
+              "本次仅尝试共享群。请在该 bot 所在机器运行 "
+              "`python feishu/tenant_probe.py --bot <bot> --apply` 补齐。", file=sys.stderr)
+        return None
+    if sender_key == target_key:
         return None
     tenant = next((t for t in tenants if t.get("tenant_key") == target_key), None) or {}
     url_env = tenant.get("webhook_env")

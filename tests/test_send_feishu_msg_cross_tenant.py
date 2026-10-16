@@ -52,8 +52,11 @@ def test_same_tenant_keeps_shared_group_path(registry):
     assert sender.cross_tenant_route("tb24-link16", "tb25-link16") is None
 
 
-def test_missing_tenant_key_never_guesses(registry):
+def test_missing_tenant_key_never_guesses(registry, capsys):
     assert sender.cross_tenant_route("tb26-multi-camera", "tb25-link16") is None
+    error = capsys.readouterr().err
+    assert "tb26-multi-camera" in error and "tenant_key" in error
+    assert "tenant_probe.py" in error and "--apply" in error
 
 
 def test_cross_tenant_picks_target_tenant_webhook(registry, monkeypatch):

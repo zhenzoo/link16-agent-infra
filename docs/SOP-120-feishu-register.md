@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-09-09
+last_reviewed: 2026-10-17
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -367,7 +367,9 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 2. `im/v1/chats` 每条 chat 自带的 `tenant_key` —— **免权限、零成本**，要求 bot 至少在一个群里。
 3. 仍拿不到或出现多个 key → `unknown`，要求显式 `--group` 或人工选择；绝不看机器上的其它 bot 猜。
 
-**注册流程**：新 bot 入群前通常拿不到 tenant key，因此 `group-a2a` 注册机械要求显式 `--group`；人按 Device Grant 页面选择的组织填写对应共享群。既有 bot 的自动体检仍用 `tenant_probe`，并按 registry 里的精确 chat ID 验收。租户判不出时保持 `unknown`，不会把“进了任意群”误报成完成。
+**注册流程**：新 bot 入群前通常拿不到 tenant key，因此 `group-a2a` 注册机械要求显式 `--group`；人按 Device Grant 页面选择的组织填写对应共享群。注册器在运行时名册写入后尝试探测租户，Monitor 后续轮询（含入群后）继续补齐私有 agent registry 的 `tenant_key`。复用 `tenant_probe` 的官方接口／非外部群列表证据，刷新群缓存并读完分页；未知不猜，已有字段不覆盖。该补写不新增里程碑或改变原有 `ready` 条件；结果记在 job 的 `checks.tenant`，异常仍可按下列命令恢复。既有 bot 的自动体检仍用 `tenant_probe`，未显式指定群时按 registry 里的精确 chat ID 验收。
+
+旧 bot 缺字段，或已结束的 job 不再轮询时，在该 bot 所在机器运行 `python feishu/tenant_probe.py --bot <bot> --apply`，按实测结果只补缺失字段（不重新注册、不改权限）。普通查询不写名册。发送工具遇到缺字段会明确提示无法判定跨租户通道，并保留原有共享群路径。私有名册不随 Git 分发；其他机器若没有新 bot，应通过既有私有名册同步流程补充其非密钥身份信息，不能以拉取代码代替名册同步。
 
 ### § 4.3 · 删掉旧应用、用【同名】重建一只 bot（迁移 SOP）
 

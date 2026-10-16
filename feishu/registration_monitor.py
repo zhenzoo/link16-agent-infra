@@ -597,11 +597,18 @@ def check_once(job_id, emit=True):
     owner = _owner_check(state["bot"])
     need_group = "group-a2a" in state.get("capabilities", [])
     group = _group_check(state["bot"], state.get("group")) if need_group else {"status": "ready"}
+    # 入群前可能没有租户证据；沿用本轮 API 状态补登记，不新增完成闸。
+    tenant = None
+    if state.get("milestones", {}).get("registered"):
+        import tenant_probe
+        tenant = tenant_probe.sync_registry_tenant(state["bot"])
 
     def apply(item):
         if item.get("status") in TERMINAL_STATUSES:
             return
         item["checks"] = {"permissions": permission, "owner": owner, "group": group}
+        if tenant is not None:
+            item["checks"]["tenant"] = tenant
         milestones = item["milestones"]
         milestones["permissions_ready"] = permission.get("status") == "ready"
         milestones["owner_ready"] = owner.get("status") == "ready"

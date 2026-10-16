@@ -7,7 +7,9 @@
 2. 「scope 全塞进一条 auth?q= 链就行」—— 错。54 条 = 1446 字符 → 飞书整页「参数不合法」；
    18 条 = 523 字符 → 正常。链接一律过长度闸、超了拆条。
 """
+import json
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -72,6 +74,31 @@ FAKE_TENANTS = [
 
 
 class TenantRoutingTests(unittest.TestCase):
+    def test_chat_refresh_sees_join_after_empty_cached_result(self):
+        tenant_probe._CHATS_CACHE.clear()
+        spec = {"app_id_env": "NEW_ID", "app_secret_env": "SECRET"}
+        joined = {"tenant_key": "ent-key", "external": False}
+        with mock.patch.object(tenant_probe.audit, "_token", return_value=("token", None)), \
+                mock.patch.object(tenant_probe.audit, "_req", side_effect=[
+                    {"code": 0, "data": {"items": []}},
+                    {"code": 0, "data": {"items": [joined]}},
+                ]):
+            self.assertIsNone(tenant_probe._query_via_chats(spec)[0])
+            self.assertEqual(tenant_probe._query_via_chats(spec, refresh=True)[0], "ent-key")
+
+    def test_chat_probe_checks_later_pages_before_persisting_unique_key(self):
+        spec = {"app_id_env": "PAGED_ID", "app_secret_env": "SECRET"}
+        with mock.patch.object(tenant_probe.audit, "_token", return_value=("token", None)), \
+                mock.patch.object(tenant_probe.audit, "_req", side_effect=[
+                    {"code": 0, "data": {"items": [{"tenant_key": "ent-key", "external": False}],
+                                         "has_more": True, "page_token": "page 2"}},
+                    {"code": 0, "data": {"items": [{"tenant_key": "other-key", "external": False}]}},
+                ]) as request:
+            key, error, _ = tenant_probe._query_via_chats(spec, refresh=True)
+        self.assertIsNone(key)
+        self.assertIn("多个", error)
+        self.assertIn("page_token=page+2", request.call_args.args[1])
+
     def test_enterprise_tenant_routes_to_its_own_group(self):
         entry = tenant_probe.tenant_entry("ent-key", FAKE_TENANTS)
         self.assertEqual(entry["group_name"], "obsagent 大乱斗")
@@ -182,6 +209,84 @@ class MonitorGroupCheckTests(unittest.TestCase):
                                   side_effect=AssertionError("显式 --group 时不该再判租户")):
             result = monitor._group_check("tb26-x", "obsagent")
         self.assertEqual(result["status"], "ready")
+
+
+class TenantRegistrySyncTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "registry.json"
+        self.original = {"agents": [{"name": "显示名", "send_key": "new-bot", "repo": "keep"},
+                                    {"name": "other", "tenant_key": "other-key"}],
+                         "tenants": FAKE_TENANTS}
+        self.path.write_text(json.dumps(self.original), encoding="utf-8")
+        for name in ("registry_path", "writable_registry_path"):
+            patch = mock.patch.object(tenant_probe, name, return_value=self.path)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_unknown_then_known_updates_only_missing_field_and_repeated_call_does_not_probe(self):
+        with mock.patch.object(tenant_probe, "resolve_tenant", side_effect=[
+            {"tenant_key": None, "error": "未入群"},
+            {"tenant_key": "ent-key", "source": "chats"},
+        ]) as probe:
+            self.assertEqual(tenant_probe.sync_registry_tenant("new-bot")["status"], "unknown")
+            self.assertEqual(json.loads(self.path.read_text()), self.original)
+            self.assertEqual(tenant_probe.sync_registry_tenant("new-bot")["status"], "updated")
+            self.assertEqual(tenant_probe.sync_registry_tenant("new-bot")["status"], "unchanged")
+        self.assertEqual(probe.call_count, 2)
+        probe.assert_called_with("new-bot", refresh=True)
+        expected = json.loads(json.dumps(self.original))
+        expected["agents"][0]["tenant_key"] = "ent-key"
+        self.assertEqual(json.loads(self.path.read_text()), expected)
+
+    def test_concurrent_registration_is_preserved_and_conflicting_value_is_not_overwritten(self):
+        def live(_bot, **_kwargs):
+            data = json.loads(self.path.read_text())
+            data["agents"].append({"name": "new-other"})
+            data["agents"][0]["tenant_key"] = "manual-key"
+            self.path.write_text(json.dumps(data), encoding="utf-8")
+            return {"tenant_key": "ent-key", "source": "chats"}
+        with mock.patch.object(tenant_probe, "resolve_tenant", side_effect=live):
+            result = tenant_probe.sync_registry_tenant("new-bot")
+        self.assertEqual(result["status"], "unknown")
+        self.assertIn("未覆盖", result["error"])
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["agents"][0]["tenant_key"], "manual-key")
+        self.assertEqual(data["agents"][-1]["name"], "new-other")
+
+    def test_write_failure_remains_diagnostic_without_leaking_exception_text(self):
+        with mock.patch.object(tenant_probe, "resolve_tenant",
+                               return_value={"tenant_key": "ent-key", "source": "chats"}), \
+                mock.patch.object(tenant_probe, "atomic_write_json", side_effect=OSError("secret-private")):
+            result = tenant_probe.sync_registry_tenant("new-bot")
+        self.assertEqual(result["status"], "unknown")
+        self.assertNotIn("secret-private", str(result))
+        self.assertEqual(json.loads(self.path.read_text()), self.original)
+
+    def test_monitor_retries_after_join_and_persists_before_ready(self):
+        with mock.patch.object(monitor, "STATE_DIR", self.root / "state"), \
+                mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}), \
+                mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}), \
+                mock.patch.object(monitor, "_group_check", side_effect=[{"status": "missing"}, {"status": "ready"}]), \
+                mock.patch.object(tenant_probe, "resolve_tenant", side_effect=[
+                    {"tenant_key": None, "error": "未入群"},
+                    {"tenant_key": "ent-key", "source": "chats"},
+                ]):
+            state = monitor.arm_job("new-bot", ["core", "group-a2a"], group="指定群",
+                                    notify_bot="controller", app_id="cli_test",
+                                    id_env="ID", secret_env="SECRET", launch=False)
+            monitor.record_sdk_result(state["job_id"], "cli_test")
+            monitor.record_stage(state["job_id"], "registered", app_id="cli_test")
+            first = monitor.check_once(state["job_id"], emit=False)
+            self.assertFalse(first["milestones"]["ready"])
+            self.assertEqual(first["checks"]["tenant"]["status"], "unknown")
+            second = monitor.check_once(state["job_id"], emit=False)
+        self.assertTrue(second["milestones"]["ready"])
+        self.assertEqual(second["checks"]["tenant"]["status"], "updated")
+        self.assertNotIn("tenant_ready", second["milestones"])
+        self.assertEqual(json.loads(self.path.read_text())["agents"][0]["tenant_key"], "ent-key")
 
 
 if __name__ == "__main__":

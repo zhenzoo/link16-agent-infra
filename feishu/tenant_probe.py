@@ -24,6 +24,7 @@ CLI：
   python feishu/tenant_probe.py                     # 全体：租户 / 该进哪个群 / 在不在
   python feishu/tenant_probe.py --bot tb26-baseball-2
   python feishu/tenant_probe.py --bot X --print-group   # 只吐群名（给脚本消费）
+  python feishu/tenant_probe.py --bot X --apply         # 按实测补齐名册 tenant_key
   python feishu/tenant_probe.py --json
 """
 from __future__ import annotations
@@ -33,9 +34,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bridge_env import bots_config_path, registry_path  # noqa: E402
+from bridge_env import bots_config_path, registry_path, writable_registry_path  # noqa: E402
+from bot_names import find_entry  # noqa: E402
+from bridge_injection import ProcessFileLock, atomic_write_json  # noqa: E402
 import bridge_scope_audit as audit  # noqa: E402
 
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -100,20 +104,32 @@ def _query_tenant_api(spec):
 _CHATS_CACHE = {}
 
 
-def _query_via_chats(spec):
+def _query_via_chats(spec, *, refresh=False):
     """二级：群列表里的唯一 tenant_key（免权限）。无群或多 key 都不猜。"""
     cache_key = spec.get("app_id_env")
-    if cache_key in _CHATS_CACHE:
+    if not refresh and cache_key in _CHATS_CACHE:
         return _CHATS_CACHE[cache_key]
     token, err = audit._token(spec["app_id_env"], spec["app_secret_env"])  # noqa: SLF001
     if err:
         out = (None, "token: %s" % err, [])
     else:
-        result = audit._req("GET", audit.BASE + "/im/v1/chats?page_size=50", token)  # noqa: SLF001
+        items = []
+        params = {"page_size": 50}
+        while True:
+            result = audit._req("GET", audit.BASE + "/im/v1/chats?" + urlencode(params), token)  # noqa: SLF001
+            if result.get("code") != 0:
+                break
+            data = result.get("data") or {}
+            items.extend(data.get("items") or [])
+            if not data.get("has_more"):
+                break
+            page_token = data.get("page_token")
+            if not page_token or page_token == params.get("page_token"):
+                return None, "群列表分页不完整", items
+            params["page_token"] = page_token
         if result.get("code") != 0:
             out = (None, "chats %s" % result.get("code"), [])
         else:
-            items = (result.get("data") or {}).get("items") or []
             keys = sorted({
                 it.get("tenant_key") for it in items
                 if it.get("external") is False and it.get("tenant_key")
@@ -128,7 +144,7 @@ def _query_via_chats(spec):
     return out
 
 
-def resolve_tenant(bot):
+def resolve_tenant(bot, *, refresh=False):
     """判定一只 bot 的 tenant_key。返回 dict(tenant_key, source, name, groups, error)。
 
     source in {tenant-api, chats, unknown}。unknown 不映射到任何群。"""
@@ -139,11 +155,11 @@ def resolve_tenant(bot):
 
     info, _err = _query_tenant_api(spec)
     if info and info.get("tenant_key"):
-        _key, _e, items = _query_via_chats(spec)
+        _key, _e, items = _query_via_chats(spec, refresh=refresh)
         return {"bot": bot, "tenant_key": info["tenant_key"], "source": "tenant-api",
                 "name": info.get("name"), "groups": items, "error": None}
 
-    key, err, items = _query_via_chats(spec)
+    key, err, items = _query_via_chats(spec, refresh=refresh)
     if key:
         return {"bot": bot, "tenant_key": key, "source": "chats",
                 "name": None, "groups": items, "error": None}
@@ -151,6 +167,39 @@ def resolve_tenant(bot):
     return {"bot": bot, "tenant_key": None, "source": "unknown", "name": None,
             "groups": items,
             "error": err or "还没入群且未开 tenant:tenant:readonly；请显式指定目标群"}
+
+
+def sync_registry_tenant(bot):
+    """补齐缺失的租户字段；未知不猜、已有值不覆盖，不改变注册完成条件。"""
+    try:
+        data = json.loads(registry_path().read_text(encoding="utf-8"))
+        entry = find_entry(data.get("agents", []), bot)
+        if entry is None:
+            return {"status": "unknown", "error": f"名册无 bot {bot}"}
+        if entry.get("tenant_key"):
+            return {"status": "unchanged", "tenant_key": entry["tenant_key"]}
+        info = resolve_tenant(bot, refresh=True)
+        key = info.get("tenant_key")
+        if not key:
+            return {"status": "unknown", "error": info.get("error") or "租户未判定"}
+        path = writable_registry_path()
+        with ProcessFileLock(path.with_suffix(".tenant.lck"), timeout=5):
+            # 网络读取期间可能有其他登记：写前重新读，只补目标字段。
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entry = find_entry(data.get("agents", []), bot)
+            if entry is None:
+                return {"status": "unknown", "error": f"名册无 bot {bot}"}
+            previous = entry.get("tenant_key")
+            if previous and previous != key:
+                return {"status": "unknown", "error": "租户字段已变化，未覆盖；请核对名册"}
+            if not previous:
+                entry["tenant_key"] = key
+                atomic_write_json(path, data)
+        return {"status": "unchanged" if previous else "updated",
+                "tenant_key": key, "source": info["source"]}
+    except Exception as exc:
+        # 不把 HTTP/凭据异常原文写进注册 job。
+        return {"status": "unknown", "error": f"租户登记失败：{type(exc).__name__}"}
 
 
 def target_group(bot):
@@ -175,10 +224,18 @@ def main():
     ap.add_argument("--print-group", action="store_true",
                     help="只打印目标群名（给脚本消费·配合 --bot）")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--apply", action="store_true", help="仅配合 --bot，按 API 实测补齐名册 tenant_key")
     args = ap.parse_args()
+    if args.apply and (not args.bot or args.print_group):
+        ap.error("--apply 需要 --bot，不能与 --print-group 同用")
     if args.bot:
         from bot_names import local_name
         args.bot = local_name(args.bot)
+
+    if args.apply:
+        result = sync_registry_tenant(args.bot)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] != "unknown" else 1
 
     if args.print_group:
         if not args.bot:

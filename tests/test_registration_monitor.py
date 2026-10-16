@@ -23,8 +23,12 @@ class _MonitorCase(unittest.TestCase):
         self.state_dir = Path(self.tmp.name)
         self.state_patch = mock.patch.object(monitor, "STATE_DIR", self.state_dir)
         self.state_patch.start()
+        self.tenant_patch = mock.patch("tenant_probe.sync_registry_tenant",
+                                      return_value={"status": "unknown", "error": "未入群"})
+        self.tenant_patch.start()
 
     def tearDown(self):
+        self.tenant_patch.stop()
         self.state_patch.stop()
         self.tmp.cleanup()
 

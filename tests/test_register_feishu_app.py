@@ -201,6 +201,9 @@ class RegistrationLifecycleTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(register.agent_runtime, "profile_doctor", return_value={"ok": True}))
             stack.enter_context(mock.patch.object(register, "ENV_PATH", root / ".env"))
             stack.enter_context(mock.patch.object(register, "append_registry_stub", return_value={"send_key": "test", "at_name": "@test"}))
+            import tenant_probe
+            tenant_sync = stack.enter_context(mock.patch.object(tenant_probe, "sync_registry_tenant",
+                return_value={"status": "unknown", "error": "未入群"}))
             roster = stack.enter_context(mock.patch.object(register.agent_runtime, "upsert_runtime_bot", return_value={"name": "test", "profile": "cxp"}))
             post = stack.enter_context(mock.patch.object(sdk.requests, "post", side_effect=[
                 response({"supported_auth_methods": ["client_secret"]}),
@@ -215,6 +218,7 @@ class RegistrationLifecycleTests(unittest.TestCase):
                                "--notify-bot", "test-controller"]))
             output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             register.main()
+            tenant_sync.assert_called_once_with("test")
             state = monitor.get_job(bot="test")
             self.assertEqual(state["notify_bot"], "test-controller")
             self.assertEqual(state["registration_source"], "official_sdk")
@@ -231,6 +235,8 @@ class RegistrationLifecycleTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}))
             result = monitor.check_once(state["job_id"], emit=False)
             self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["checks"]["tenant"]["status"], "unknown")
+            self.assertEqual(tenant_sync.call_count, 2)
             self.assertNotIn("group_ready", result["events"])
 
 
