@@ -168,6 +168,30 @@ def _kimi_activity(state_dir, name, bot, inspect_tools):
     return _turn_state(key, ended, pending)
 
 
+def kimi_prompt_submitted(state_dir, bot, prompt):
+    """Return whether Kimi's native journal accepted this exact prompt or steer."""
+    try:
+        name = bot["name"]
+        binding = json.loads((Path(state_dir) / f"bridge-kimi-thread-{name}.json").read_text(encoding="utf-8"))
+        import agent_runtime
+        from kimi_native_worker import find_wire
+        wire = find_wire(agent_runtime.profile_spec(binding["profile"]).home_path, binding["session"])
+        normalize = lambda value: str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+        expected = normalize(prompt)
+        for _offset, rec in _tail_records(wire):
+            if rec.get("type") not in {"turn.prompt", "turn.steer"}:
+                continue
+            text = "\n".join(
+                part.get("text", "") for part in rec.get("input", [])
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            if normalize(text) == expected:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def read_activity(state_dir, bot, *, inspect_tools=False):
     """Return only runtime metadata for one roster bot, read the way its platform exposes it."""
     name = bot.get("name") if isinstance(bot, dict) else None

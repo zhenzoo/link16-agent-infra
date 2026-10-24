@@ -220,14 +220,17 @@ class WireObserver:
                             public["root_turn"] = self.reducer.turn
                             public["turn"] = self.reducer.turn
                         identity = f"kimi:{self.session}:{start}:{index}"
+                        failed_turn = (public.get("kind") == "answer" and record.get("type") == "turn.ended"
+                                       and record.get("reason") in {"failed", "cancelled", "blocked"})
+                        if failed_turn:
+                            public["route"]["workline_gate"] = session_work.GATE_CONTRACT
                         if identity not in self.published:
                             public.update(source_event_id=identity, ts=int(record.get("time", 0) / 1000))
                             _append(self.outbox, public)
                             self.published.add(identity)
                             count += 1
                         if public.get("kind") == "answer":
-                            if (record.get("type") == "turn.ended"
-                                    and record.get("reason") in {"failed", "cancelled", "blocked"}):
+                            if failed_turn:
                                 for _ in range(2):
                                     session_work.request_stop_repair(
                                         self.bot, public["route"]["turn_key"], state_dir=self.state_dir,

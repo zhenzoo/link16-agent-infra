@@ -3,6 +3,7 @@ import ast
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import patch
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -312,3 +313,20 @@ def test_same_unknown_is_logged_once_not_every_patrol(tmp_path, monkeypatch):
     with pytest.raises(Done):
         w.cmd_run()
     assert sum("[R8]" in line for line in logs) == 1
+
+
+def test_kimi_prompt_receipt_matches_turn_prompt_and_steer(tmp_path):
+    binding = {"session": "session_test", "profile": "kp"}
+    (tmp_path / "bridge-kimi-thread-bot.json").write_text(json.dumps(binding), encoding="utf-8")
+    wire = tmp_path / "wire.jsonl"
+    prompt = "补充信息 [飞书 route=p2a]"
+    rows = [
+        {"type": "turn.prompt", "agentId": "main", "input": [{"type": "text", "text": prompt}]},
+        {"type": "turn.steer", "agentId": "main", "input": [{"type": "text", "text": "另一条"}]},
+    ]
+    wire.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    bot = {"name": "bot", "agent": "kimi"}
+    with patch("agent_runtime.profile_spec", return_value=SimpleNamespace(home_path=tmp_path)), \
+         patch("kimi_native_worker.find_wire", return_value=wire):
+        assert a.kimi_prompt_submitted(tmp_path, bot, prompt)
+        assert not a.kimi_prompt_submitted(tmp_path, bot, "未提交")

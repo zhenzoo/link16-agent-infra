@@ -1518,8 +1518,10 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
       ② 回车后闭环校验：读屏看输入框还卡着我的内容没 → 卡就重按 enter，最多 INJECT_VERIFY_TRIES 次直到框空。
       ③ N 次仍卡 → 返回 False（调用方 DM 喊主人·绝不静默）。
     paste 仍走限速分块 bracketed-paste（CC 输入框有吞吐上限·裸 send 会丢字截断·2026-06-28 实证）；marker 不含 TAB（上游已拦）。
-    Kimi 活跃回合在 Enter 后补 Ctrl+S（\\x13，wmux 命名键不支持 ctrl+s）进行 steer；其他状态与平台保持原 Enter 行为。"""
+    Kimi 活跃回合在 Enter 后补 Ctrl+S（\\x13，wmux 命名键不支持 ctrl+s）进行 steer；其他状态与平台保持原 Enter 行为。
+    Kimi 另以 Wire turn.prompt/turn.steer 的原生回执确认真实消费；活跃时原生回执未到不重复 Enter。"""
     allow = ["--allow-ws", workspace_id]
+    is_kimi = bool(runtime_bot and agent_runtime.runtime_name(runtime_bot) == "kimi")
     steer_kimi = _kimi_active_turn(runtime_bot)
     wmux("paste", pty, marker, *allow)
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
@@ -1529,8 +1531,11 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
     if steer_kimi:
         wmux("send", pty, "\x13", *allow)
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
-    for i in range(INJECT_VERIFY_TRIES):
+    tries = 15 if is_kimi else INJECT_VERIFY_TRIES
+    for i in range(tries):
         time.sleep(INJECT_VERIFY_FIRST if i == 0 else INJECT_VERIFY_POLL)
+        if is_kimi and bridge_activity.kimi_prompt_submitted(STATE_DIR, runtime_bot, marker):
+            return True
         try:
             scr = read_screen(pty, 10)
         except RuntimeError:
@@ -1539,6 +1544,8 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
             return True                          # 输入框已空 = 提交成功
         if _busy_or_queued(scr):                 # 忙(生成中)/消息已进排队队列 = 已被接受·不是卡死
             return True                          # → 不误报「没提交」·且【别再按回车】(防把排队消息重复入队)·2026-07-20 根治
+        if is_kimi and bridge_activity.read_activity(STATE_DIR, runtime_bot).get("state") == "active":
+            continue                             # 活跃 Kimi 的原生回执未到前不重复 Enter/steer
         wmux("enter", pty, *allow)               # 空闲却卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 

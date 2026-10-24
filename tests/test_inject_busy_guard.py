@@ -73,9 +73,34 @@ class InjectBusyGuardTest(unittest.TestCase):
         with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
              mock.patch.object(fb, "read_screen", return_value=CLEAR), \
              mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": state}) as activity, \
+             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=False), \
              mock.patch("time.sleep"):
             result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
         return result, calls, activity
+
+    def test_kimi_native_receipt_overrides_stale_composer(self):
+        calls = []
+        bot = {"name": "unit-bot", "agent": "kimi"}
+        with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
+             mock.patch.object(fb, "read_screen", return_value=STUCK), \
+             mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": "active"}), \
+             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=True), \
+             mock.patch("time.sleep"):
+            result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
+        self.assertTrue(result)
+        self.assertEqual([call[0] for call in calls], ["paste", "enter", "send"])
+
+    def test_kimi_active_without_native_receipt_never_repeats_enter(self):
+        calls = []
+        bot = {"name": "unit-bot", "agent": "kimi"}
+        with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
+             mock.patch.object(fb, "read_screen", return_value=STUCK), \
+             mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": "active"}), \
+             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=False), \
+             mock.patch("time.sleep"):
+            result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
+        self.assertFalse(result)
+        self.assertEqual([call[0] for call in calls], ["paste", "enter", "send"])
 
     def test_kimi_active_enters_then_steers(self):
         result, calls, _ = self._run_runtime("kimi", "active")
