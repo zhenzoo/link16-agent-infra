@@ -17,7 +17,7 @@ read_when:
   - 要让一个 agent 去喊另一个 agent 干活
   - 回信发错对象 / 等不到回复
   - 改动 send_feishu_msg.py 的寻址或等待逻辑
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-24
 ---
 # ARCH-140 · Agent↔Agent 通讯协议（a2a comm）—— 请求自动回 peer，结果不反射
 
@@ -67,7 +67,7 @@ last_reviewed: 2026-10-07
 | 信封 `route=<p2a\|p2a-ext\|a2a>` | `p2a` 只用于真人 DM/终端默认；`p2a-ext dest=<群> at=<真人>` 回原群；peer 为 `a2a peer=<发件名> mid=<本条ID> dest=<入站群> at=<SDK发件ID>`，可附 `reply_to=<原请求ID>`。逻辑回信对象只认 peer 名册，不能把 webhook 的 SDK 发件机器人当 peer。精确字段与出站 ACK 见 SPEC-210。 |
 | `msg_type == "text"` | a2a 必走纯文字（飞书把卡片渲成占位 `[interactive]`，对端读不到正文）。 |
 
-呈现矩阵由 route kind 唯一决定：`p2a` 私聊 final 是互动卡片，`p2a-ext` 真人群 final 是 1～N 张互动卡片并 @发起人；a2a 新请求与自动结果是纯文字并 @peer，关联结果的接收回合没有自动外发。`oc_` 只说明 receive ID 类型，不能用来判断消息格式。
+呈现矩阵由 route kind 唯一决定：`p2a` 私聊 final 是互动卡片，`p2a-ext` 真人群 final 是 1～N 张互动卡片并 @发起人；a2a 新请求与自动结果是纯文字并 @peer，正文与本方抄送都在开头显示发送方和接收方代号，具体格式见 SPEC-210 §1。关联结果的接收回合没有自动外发。`oc_` 只说明 receive ID 类型，不能用来判断消息格式。
 
 ## §4 · 工具原语（全在 `feishu/`）
 

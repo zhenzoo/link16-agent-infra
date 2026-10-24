@@ -104,6 +104,10 @@ async def drain(bot, record, state):
 def test_cross_tenant_request_result_and_consumption_use_real_chain(wire):
     request = sender.send_agent_message(A, B, "probe request")
     assert request["via"] == "webhook" and request["mirror"]["ok"]
+    request_text = wire.sent[0]["body"]["content"]["text"]
+    request_mirror = json.loads(wire.sent[1]["body"]["content"])["text"]
+    assert request_mirror.startswith(f"{A} → {B}\n\nprobe request")
+    assert request_text == '<at user_id="ou_b"></at> ' + request_mirror
     route = incoming(wire.sent[0]["body"]["content"]["text"])
     assert route["peer"] == A and "reply_to" not in route
     record = answer(route)
@@ -114,7 +118,10 @@ def test_cross_tenant_request_result_and_consumption_use_real_chain(wire):
     assert len(wire.sent) == 4  # request+mirror, result+mirror
     response = wire.sent[2]
     assert response["url"] == "https://fixture/personal"
-    assert response["body"]["content"]["text"].startswith('<at user_id="ou_a">')
+    response_text = response["body"]["content"]["text"]
+    response_mirror = json.loads(wire.sent[3]["body"]["content"])["text"]
+    assert response_mirror.startswith(f"{B} → {A}\n\nprobe result")
+    assert response_text == '<at user_id="ou_a"></at> ' + response_mirror
     assert "reply_to=om_request" in response["body"]["content"]["text"]
     assert '<at ' not in wire.sent[3]["body"]["content"]
     ledger = bridge_outbound.read_records(wire.state, B)
@@ -140,7 +147,8 @@ def test_same_tenant_final_uses_shared_sender_stamp_and_provider_uuid(wire):
     assert len(wire.sent) == 1
     body = wire.sent[0]["body"]
     assert body["receive_id"] == "oc_personal"
-    assert json.loads(body["content"])["text"].startswith('<at user_id="ou_c">')
+    assert json.loads(body["content"])["text"].startswith(
+        f'<at user_id="ou_c"></at> {A} → {C}\n\nprobe result')
     assert f"[飞书_from_{A}_to_{C} reply_to=om_request]" in body["content"]
     assert len(body["uuid"]) == 36
 
@@ -181,6 +189,8 @@ def test_long_final_keeps_same_request_relation_across_all_fragments(wire):
     posts = [item for item in wire.sent if item["url"].startswith("https://fixture/")]
     assert len(posts) > 1
     for post in posts:
+        assert post["body"]["content"]["text"].startswith(
+            f'<at user_id="ou_a"></at> {B} → {A}\n\n')
         received = incoming(post["body"]["content"]["text"], mid="om_fragment")
         assert received["reply_to"] == "om_request"
     original_count = len(wire.sent)

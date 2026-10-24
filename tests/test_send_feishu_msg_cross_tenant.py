@@ -115,6 +115,8 @@ def test_main_routes_cross_tenant_agent_through_webhook(registry, tmp_path, monk
     assert (bot, chat, mirror_ats) == ("tb26-link16", "oc_enterprise", [])
     url, text, ats = hook.call_args.args
     assert url == "https://hook/p" and ats == ["ou_tb25"]
+    assert text.startswith("tb26-link16 → tb25-link16\n\n拉一下 link16")
+    assert mirrored == text
     assert text.endswith("[飞书_from_tb26-link16_to_tb25-link16]")
     assert append.call_args.kwargs["route"]["kind"] == "a2a-webhook"
     assert append.call_args.kwargs["target"] == "oc_personal"
