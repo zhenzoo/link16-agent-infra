@@ -55,6 +55,9 @@ feishu/bridge-picker-*.json
 feishu/bridge-cd-pending-*.json
 feishu/bridge-hooks.json
 feishu/inbox/
+# 本机调查证据与浏览器会话；不随公开仓分发，盘上保留。
+/scratch/
+/browser-profiles/
 
 # python
 __pycache__/
