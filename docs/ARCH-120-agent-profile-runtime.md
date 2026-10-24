@@ -436,7 +436,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 
 ### 11.2 Wire 1.5 → 共享 milestone 合同
 
-只接受已验证的 Wire `protocol_version=1.5` 和精确 `agents/main/wire.jsonl`。`turn.prompt` 字节偏移形成稳定 turn_key，入口信封当场锁定回址。`content.part` 只接收公开 text；工具调用只派生固定类别/安全仓库相对路径；`tools.update_store` 的 todo 状态生成真实 plan 修订。思考、系统提示、工具参数、工具结果与错误详情不得进入 outbox。
+只接受已验证的 Wire `protocol_version=1.5` 和精确 `agents/main/wire.jsonl`。`turn.prompt` 字节偏移形成稳定 turn_key，入口信封当场锁定回址。工作行闸只在 hook 已创建匹配 pending 时启用；observer 不为无合同的 Wire 回合自建 pending，wmux 手输、后台通知和看门狗恢复因此不被回执闸阻塞。`content.part` 只接收公开 text；工具调用只派生固定类别/安全仓库相对路径；`tools.update_store` 的 todo 状态生成真实 plan 修订。思考、系统提示、工具参数、工具结果与错误详情不得进入 outbox。
 
 `turn.ended.reason` 决定终结：completed 且存在无工具步骤的公开文字才生成正常答案；failed/cancelled/blocked 分别明确呈现。工具步骤中的文字作为进度，不拼进最终答案。ETA 与实际时间由 agent 提供，适配器保留，不编造。终结记录持久写入 outbox 后才按 turn_key compare-and-clear，旧轮不得清掉新轮。
 
