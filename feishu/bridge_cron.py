@@ -332,7 +332,7 @@ def fire(job, dry_run=False):
     except Exception:                                  # noqa: BLE001
         busy = None
     try:
-        if fb._inject(pty, ws, marker) is False:
+        if fb._inject(pty, ws, marker, runtime_bot=bot) is False:
             log(f"fire[{name}] 注入未确认提交：prompt 仍卡在输入框")
             return False
     except Exception as e:                             # noqa: BLE001

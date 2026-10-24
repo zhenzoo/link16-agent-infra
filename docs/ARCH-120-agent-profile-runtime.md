@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-24
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -416,6 +416,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
   治理脚本与 launcher 必须解析同一个 effective registry，不能各自管理 committed 与 local 两份名单。
 - 飞书 `/account` 可显式选择已注册的 Kimi profile。额度状态保持 unknown；未验收可靠额度接口前，自动选号不选择 Kimi。
 - `worker_cmd()` 启动 `kimi_native_worker.py`，后者启动官方原生 TUI 和独立观察子进程；沿用现有桥注入、路由、outbox、卡片与 durable ACK，不复制发送引擎。
+- 所有注入来源共用 Kimi 状态规则：`bridge_activity=active` 时先 `Enter` 再 `Ctrl+S`，把新输入 steer 进当前回合；`idle` / `waiting` / `unknown` 只按 `Enter`。Codex 与 Claude 不发送 `Ctrl+S`。
 
 ### 11.1 会话与观察者身份
 

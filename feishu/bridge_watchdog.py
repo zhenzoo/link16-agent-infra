@@ -859,7 +859,7 @@ def _resume_short_waits(jobs, quota, bot_by_pty, bots, now):
                 job["status"] = "scheduled"
                 continue  # 未持久化“将要注入”，不能执行可能在重启后重复的动作
             try:
-                submitted = fb._inject(pty, identity["workspace_id"], SHORT_WAKE_TEXT)
+                submitted = fb._inject(pty, identity["workspace_id"], SHORT_WAKE_TEXT, runtime_bot=bots[bot_name])
             except Exception as exc:  # noqa: BLE001
                 submitted = False
                 log(f"[{bot_name}] 短时恢复注入异常：{exc}")
@@ -1558,7 +1558,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     # 它的 docstring 明写「调用方 DM 喊主人·绝不静默」——所以这个返回值必须认，
     # 否则会出现「日志说接手完成、实际 prompt 还躺在输入框里」的假成功（2026-08-20 首跑差点踩到）。
     try:
-        submitted = fb._inject(pty, ws, marker)
+        submitted = fb._inject(pty, ws, marker, runtime_bot=bot)
     except Exception as e:                             # noqa: BLE001
         notify(bot_name, "failed", f"⛔ {bot_name} 已切到 {tgt}、新会话已起，但**接手 prompt 注入失败**：{e}。")
         return False

@@ -1502,20 +1502,32 @@ def _busy_or_queued(screen):
     return bool(re.search(r"\(\s*\d+s\s*·", screen))   # 生成中状态行的耗时锚 `(47s ·`
 
 
-def _inject_unlocked(pty, workspace_id, marker):
+def _kimi_active_turn(runtime_bot):
+    return bool(
+        runtime_bot
+        and agent_runtime.runtime_name(runtime_bot) == "kimi"
+        and bridge_activity.read_activity(STATE_DIR, runtime_bot).get("state") == "active"
+    )
+
+
+def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
       ① 线性分档 settle：paste 后按字数/块数伸缩等待（短消息 ~0.3s·长文本按需），取代旧固定 sleep(0.3) 盲赌。
       ② 回车后闭环校验：读屏看输入框还卡着我的内容没 → 卡就重按 enter，最多 INJECT_VERIFY_TRIES 次直到框空。
       ③ N 次仍卡 → 返回 False（调用方 DM 喊主人·绝不静默）。
-    paste 仍走限速分块 bracketed-paste（CC 输入框有吞吐上限·裸 send 会丢字截断·2026-06-28 实证）；marker 不含 TAB（上游已拦）。"""
+    paste 仍走限速分块 bracketed-paste（CC 输入框有吞吐上限·裸 send 会丢字截断·2026-06-28 实证）；marker 不含 TAB（上游已拦）。
+    Kimi 活跃回合在 Enter 后补 Ctrl+S（\\x13，wmux 命名键不支持 ctrl+s）进行 steer；其他状态与平台保持原 Enter 行为。"""
     allow = ["--allow-ws", workspace_id]
+    steer_kimi = _kimi_active_turn(runtime_bot)
     wmux("paste", pty, marker, *allow)
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
     chunks = max(1, -(-len(marker) // 100))
     time.sleep(min(INJECT_SETTLE_CAP, INJECT_SETTLE_BASE + INJECT_SETTLE_PER_CHUNK * chunks))
     wmux("enter", pty, *allow)
+    if steer_kimi:
+        wmux("send", pty, "\x13", *allow)
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
     for i in range(INJECT_VERIFY_TRIES):
         time.sleep(INJECT_VERIFY_FIRST if i == 0 else INJECT_VERIFY_POLL)
@@ -1531,12 +1543,12 @@ def _inject_unlocked(pty, workspace_id, marker):
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
-def _inject(pty, workspace_id, marker, *, idle_bot=None):
+def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None):
     """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
     with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
         if idle_bot and bridge_activity.read_activity(STATE_DIR, idle_bot).get("state") != "idle":
             raise RuntimeError("会话已不空闲；一次性 effort 任务未注入，请等当前回合结束后重发")
-        return _inject_unlocked(pty, workspace_id, marker)
+        return _inject_unlocked(pty, workspace_id, marker, runtime_bot=runtime_bot)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
@@ -2785,7 +2797,7 @@ def _run_bot(bot_name=None):
                 })
                 marker = (bw.build_align_prompt(pack)
                           + f"\n[飞书 from=host to={bot['name']} via=handoff · route=p2a]")
-                ok = await asyncio.to_thread(_inject, pty2, ws2, marker)
+                ok = await asyncio.to_thread(_inject, pty2, ws2, marker, runtime_bot=bot)
                 _record_handoff_attempt(
                     bot["name"], pack, "complete" if ok else "injection-unconfirmed"
                 )
@@ -3290,7 +3302,8 @@ def _run_bot(bot_name=None):
                     inject_wall = time.time()
                     durable_inbox.boundary(msg.id, prompt=marker)
                     inject_ok = await asyncio.to_thread(
-                        _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None)
+                        _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None,
+                        runtime_bot=bot)
                     if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
                         blog(bot["name"], f"[{tid}] ⚠️ 注入后校验：重按{INJECT_VERIFY_TRIES}次仍卡输入框(没提交) → 已喊主人")
                         try:
@@ -3479,7 +3492,7 @@ def _run_bot(bot_name=None):
             if int((p or {}).get("attempts", 0)) < 1 and pty and ws:
                 ok = True                                          # 注入结果当真·不再吞异常后谎报「已重投」（B2·2026-07-18）
                 try:
-                    await asyncio.to_thread(_inject, pty, ws, txt)         # 重投·compact 后上下文已空·正常必成
+                    await asyncio.to_thread(_inject, pty, ws, txt, runtime_bot=bot)  # 重投·compact 后上下文已空·正常必成
                 except Exception as e:  # noqa: BLE001 — 会话已关/死壳 → 注入抛错 → 没投进去
                     ok = False
                     blog(bname, f"🔁 投递保证：重投注入失败（{str(e)[:80]}）→ 会话可能已关")

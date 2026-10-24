@@ -134,7 +134,7 @@ def inject_bot_prompt(bot_name: str, marker: str) -> dict:
         return {"ok": False, "error": f"bot 不在本机 roster: {bot_name}"}
     try:
         ws, pty, created, pinned = fb.ensure_session(bot)
-        submitted = fb._inject(pty, ws, marker)
+        submitted = fb._inject(pty, ws, marker, runtime_bot=bot)
     except Exception as exc:  # noqa: BLE001 - caller needs a durable error summary
         return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
     if submitted is False:

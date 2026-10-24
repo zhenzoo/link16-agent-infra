@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-09-28
+last_reviewed: 2026-10-24
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -635,7 +635,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **文件交接合同**：三个 runtime 共用同一入口；文件名按 bot 与原 message id 摘要隔离，正文用 `write_bytes(text.encode('utf-8'))` 避免 Windows 换行改写。先用原文确定 sender / A2A / 群路由，再替换正文，保留同一 mid。文件交接信封省去会在 Windows Codex 输入中丢失的装饰性中点，使输入回执摘要一致。真机验收覆盖 Codex：原始 5809 字符测试材料文件字节一致，231 字符读取指令导出回读也字节一致；Claude / Kimi 仅覆盖共享入口回归，未声称三平台真机全测。需要重启对应 bot 的桥进程加载 Python 改动，不需重启 Wmux 或业务会话；未确认消息不自动重投。
 
-**短输入提交**：`_inject` paste 后按字数等待，再发送 Enter 并检查 composer。以下是该机制的历史证据；Codex 是否消费仍以原生 prompt 回执和入站 digest 为准，不能用 RPC 成功或输入框空代替。
+**短输入提交**：`_inject` paste 后按字数等待，再发送 Enter 并检查 composer。Kimi 额外按 `bridge_activity` 的结构状态分流：`active` 时 Enter 后立即补一次 Ctrl+S，让主人、Cron、看门狗等所有来源的新输入 steer 进当前回合；`idle` / `waiting` / `unknown` 只发送 Enter。Codex 与 Claude 不发送 Ctrl+S。以下是该机制的历史证据；Codex 是否消费仍以原生 prompt 回执和入站 digest 为准，不能用 RPC 成功或输入框空代替。
 
 **病根（2026-07-16 用户实证 + 真机复现）**：旧 `_inject` = `paste → time.sleep(0.3) → enter`，固定 0.3s 是**唯一赌注**。paste 是分块限速的（`wmux paste` 100字/块·长文本 paste 本身要 4~5s），paste 返回只代表「字节已交 daemon」，**不代表 Claude 的 TUI 已把粘贴消化+提交进输入框**。长文本 / 后台命令刚完 TUI 正忙时，0.3s 不够 → 回车抢在消化完成前按下 → 被吞 → 文字卡输入框。**是负载相关的偶发竞态**（干净环境真 paste+0.3+enter 复现不出·印证用户「有的时候」）→ 修法必须走**闭环自愈**，不是把 0.3 调大赌一个够用的值。
 
