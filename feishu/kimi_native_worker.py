@@ -10,6 +10,8 @@ import re
 import subprocess
 import sys
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import agent_runtime
@@ -22,8 +24,10 @@ from kimi_events import KimiEvents, WIRE_VERSION
 class StartupProgress:
     """Small, sanitized startup receipt shared with the Feishu bridge."""
 
-    def __init__(self, state_dir, bot, profile, cwd):
+    def __init__(self, state_dir, bot, profile, cwd, startup_id=None):
         self.path = Path(state_dir) / f"bridge-kimi-ready-{bot}.json"
+        self.attempt_path = Path(state_dir) / f"bridge-kimi-startup-{bot}.json"
+        self.owns_lock = False
         self.started = time.monotonic()
         self.record = {
             "contract": agent_runtime.KIMI_STARTUP_CONTRACT,
@@ -31,9 +35,10 @@ class StartupProgress:
             "profile": profile,
             "cwd": str(cwd),
             "worker_pid": os.getpid(),
+            "startup_id": startup_id or uuid.uuid4().hex,
         }
 
-    def update(self, stage, detail, **extra):
+    def update(self, stage, detail, *, begin=False, **extra):
         self.record.update(
             stage=stage,
             detail=detail,
@@ -41,7 +46,29 @@ class StartupProgress:
             elapsed_sec=round(time.monotonic() - self.started, 2),
             **extra,
         )
-        bridge_injection.atomic_write_json(self.path, self.record)
+        # A late lazy-binding update from an old owner cannot overwrite a newer
+        # failed attempt that the bridge is currently waiting for.
+        with bridge_injection.injection_lock(self.path.parent, "kimi-startup", self.record["bot"]):
+            try:
+                current = json.loads(self.attempt_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                current = {}
+            if begin or current.get("startup_id") in (None, self.record["startup_id"]):
+                bridge_injection.atomic_write_json(self.attempt_path, self.record)
+        if self.owns_lock:
+            bridge_injection.atomic_write_json(self.path, self.record)
+
+    @contextmanager
+    def claim(self, lock):
+        with lock:
+            self.owns_lock = True
+            try:
+                yield
+            except Exception as exc:
+                self.update("failed", _startup_failure_detail(exc), error_type=type(exc).__name__)
+                raise
+            finally:
+                self.owns_lock = False
 
 
 def _startup_failure_detail(exc):
@@ -361,13 +388,14 @@ def run(args):
     state_dir, cwd = Path(args.state_dir).resolve(), Path(args.cwd).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     profile_name = str(os.environ.get(agent_runtime.PROFILE_ENV) or "").strip()
-    progress = StartupProgress(state_dir, args.bot, profile_name, cwd)
-    progress.update("worker_started", "启动命令已执行，正在检查 Kimi 会话")
+    progress = StartupProgress(state_dir, args.bot, profile_name, cwd, getattr(args, "startup_id", None))
+    progress.update("worker_started", "启动命令已执行，正在检查 Kimi 会话", begin=True)
     try:
         profile = agent_runtime.profile_from_env()
-        with bridge_injection.ProcessFileLock(
+        with progress.claim(bridge_injection.ProcessFileLock(
             bridge_injection.lock_path(state_dir, "kimi-worker", args.bot), timeout=0,
-        ):
+        )):
+            progress.update("worker_started", "已取得 Kimi worker 占用，正在检查会话")
             binding, wire, before_ids = start_or_resume(
                 args.bot, profile.name, cwd, state_dir, progress=progress)
             ensure_workspace_trust(profile.home_path, cwd)
@@ -439,6 +467,7 @@ def main():
     parser.add_argument("--bot", required=True)
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--startup-id", default=None)
     parser.add_argument("--observe-only", action="store_true", help="Observe the pinned native session; do not launch a TUI")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.bot):

@@ -112,6 +112,7 @@ import bridge_activity
 import bridge_outbound  # noqa: E402 (统一自动/主动出站历史)
 import bridge_doctor  # noqa: E402  (v8 机械自愈：outbox 卡→自动修·连续卡才喊人)
 import bridge_process
+import kimi_process
 import bridge_injection  # noqa: E402  (桥/cron/watchdog/注册监督器跨进程共享注入锁)
 import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持久化)
 import bridge_inbox  # noqa: E402
@@ -1025,7 +1026,9 @@ def _codex_startup_record(bot, since=0):
 def _kimi_startup_record(bot, since=0):
     if agent_runtime.runtime_spec(bot).name != "kimi":
         return {}
-    path = STATE_DIR / f"bridge-kimi-ready-{bot['name']}.json"
+    # A failed contender must not replace the live owner's receipt.
+    kind = "startup" if bot.get("_startup_id") else "ready"
+    path = STATE_DIR / f"bridge-kimi-{kind}-{bot['name']}.json"
     record = codex_startup.read_state(path)
     try:
         if (
@@ -1033,6 +1036,7 @@ def _kimi_startup_record(bot, since=0):
             and record.get("bot") == bot["name"]
             and float(record.get("ts") or 0) >= since
             and str(record.get("profile") or "") == agent_runtime.profile_name(bot, required=True)
+            and (not bot.get("_startup_id") or record.get("startup_id") == bot["_startup_id"])
         ):
             return record
     except (ValueError, TypeError, AttributeError, KeyError):
@@ -1335,7 +1339,7 @@ def _resolve_jsonl(bot, marker, pinned, inject_wall, pre=None):
 def _worker_cmd(bot, cwd=None):
     """起 worker 的命令。CLI/runtime 差异集中在 agent_runtime.py，桥只关心 outbox 合约。"""
     command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd)
-    if agent_runtime.uses_app_server(bot) and bot.get("_startup_id"):
+    if (agent_runtime.uses_app_server(bot) or agent_runtime.runtime_name(bot) == "kimi") and bot.get("_startup_id"):
         command += " --startup-id " + shlex.quote(bot["_startup_id"])
     return command
 
@@ -1461,6 +1465,43 @@ def ensure_session(bot):
     """跨进程串行地复用或创建 bot 会话，防两个外部触发器同时 spawn。"""
     with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
         return _ensure_session_unlocked(bot)
+
+
+def _close_session_unlocked(bot):
+    """Capture old ownership before wmux can discard the parent shell."""
+    rec = load_session(bot["name"]) or {}
+    is_kimi = rec.get("agent") == "kimi" or agent_runtime.runtime_name(bot) == "kimi"
+    has_kimi = is_kimi or bridge_injection.lock_path(STATE_DIR, "kimi-worker", bot["name"]).exists()
+    result = {"had_session": bool(rec.get("workspace_id")), "reaped_pids": []}
+    if has_kimi:
+        with kimi_process.KimiClose(bot["name"], STATE_DIR) as recovery:
+            if rec.get("workspace_id"):
+                wmux_session.close(rec["workspace_id"], force=True)
+            result.update(recovery.finish(check_observer=is_kimi))
+            result["had_session"] |= bool(result["reaped_pids"])
+    elif rec.get("workspace_id"):
+        wmux_session.close(rec["workspace_id"], force=True)
+    return result
+
+
+def close_session_runtime(bot):
+    """Explicit account/directory/handoff changes retain their own metadata."""
+    with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
+        return _close_session_unlocked(bot)
+
+
+def replace_session(bot, defaults, *, create=False):
+    """/close and /new are one transaction with external session creators."""
+    with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
+        result = _close_session_unlocked(bot)
+        # Never erase the identity needed to retry a failed close.
+        clear_session(bot["name"])
+        clear_codex_thread(bot["name"])
+        agent_runtime.reset_account(bot, defaults)
+        if create:
+            session_work.clear(bot["name"], STATE_DIR)
+            result["session"] = _ensure_session_unlocked(bot)
+        return result
 
 
 def _composer_holds_paste(screen, marker):
@@ -2444,9 +2485,7 @@ def _run_bot(bot_name=None):
             """【只选定目录·不起会话】(懒启动模型 2026-06-26)：关旧会话(若在) + 把目标目录暂存进注册表 `cwd`。
             真正起会话推迟到你发【下一条正式消息(提示词)】——那时 on_message→ensure_session 在这个目录(+ 当前账号)冷启。
             好处：`切目录`/`切账号` 可任意叠加、互不清除、也不会各自先抢起一个空会话。`/cd ..`/`/cd <名字>`/编号选中共用。"""
-            rec = load_session(bot["name"])
-            if rec and rec.get("pty") and await asyncio.to_thread(wmux_session.pty_alive, rec["pty"]):
-                await asyncio.to_thread(wmux_session.close, rec["workspace_id"])   # 关旧会话→下条消息必冷启到新目录(pty 置空=ensure_session 不复用)
+            await asyncio.to_thread(close_session_runtime, bot)
             # 只暂存目录(current_cwd 读 cwd)·清掉旧会话 runtime 字段(pty/ws/jsonl/daemon_fp)·保留 chat_id/open_id/account
             _merge_session(bot["name"], {"cwd": str(target_dir).replace("\\", "/"),
                                          "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
@@ -2602,18 +2641,17 @@ def _run_bot(bot_name=None):
                         "residual": "（输入框仍有顽固残留·去终端瞄一眼）"}.get(status, "")
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
-                # The authorized command itself is confirmation, including
-                # during startup and while an agent process is still running.
-                if rec and rec.get("workspace_id"):
-                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"], force=True)
+                try:
+                    closed = await asyncio.to_thread(replace_session, bot, account_default)
+                except Exception as e:
+                    await reply(chat_id, f"⛔ 关闭未完成：{str(e)[:200]}。未清除旧会话绑定。"); return
                 durable_inbox.cancel_before(inbound_id)
-                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /close=结束会话=撤销投递契约→清账（§2.13）
-                agent_runtime.reset_account(bot, account_default)         # /close = 结束本会话 = 账号切回名册默认
-                clear_session(bot["name"])                                # 清掉会话注册表（含 /cd 过的 cwd）→ 下次重开回名册默认目录
-                clear_codex_thread(bot["name"])                           # codex：连 app-server thread 指针一起清 → 下次真·新会话（否则 resume 把旧对话整根接回来）
-                default_acc = default_account()                          # reset 后 = 名册默认账号
-                def_dir = default_cwd(bot)                               # 名册默认目录（下次重开用这个）
-                head = "🗑 已关闭会话" if alive else "🛌 本来就没有会话"
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])
+                default_acc = default_account()
+                def_dir = default_cwd(bot)
+                head = "🗑 已关闭会话" if closed["had_session"] else "🛌 会话已关闭，无残留占用"
+                if closed.get("locks_released"):
+                    head += "，Kimi 占用已释放"
                 await reply(chat_id, f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）"); return
             if cmd in ("/handoff", "/交接", "/接手"):
                 # `/close` 的进阶版（主人 2026-08-21 定）：**关掉当前会话 → 开一个全新 context →
@@ -2764,7 +2802,7 @@ def _run_bot(bot_name=None):
                     durable_inbox.cancel_before(inbound_id)
                     bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # 结束会话 = 撤销投递契约（同 /close·§2.13）
                     keep_dir = await asyncio.to_thread(current_cwd, bot)       # ① 保持当前目录（不回名册默认）
-                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
+                    await asyncio.to_thread(close_session_runtime, bot)
                 clear_codex_thread(bot["name"])                            # codex：清 thread 指针，确保真·新会话
                 _merge_session(bot["name"], {"cwd": keep_dir, "pty": None, "workspace_id": None,
                                              "jsonl": None, "daemon_fp": None})   # 只清 runtime 指针·留账号与目录
@@ -2802,28 +2840,12 @@ def _run_bot(bot_name=None):
                        "\n读完它会回你一份「原任务 / 已完成 / 停在哪 / 哪些还没定」，然后你再提新需求。"))); return
             if cmd == "/new":
                 durable_inbox.cancel_before(inbound_id)
-                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /new=全新会话=撤销旧投递契约→清账（§2.13）
-                session_work.clear(bot["name"], STATE_DIR)                 # 全新会话=旧工作行作废
-                # 开一个【全新空会话·不注入任何文本】——与「正常发消息起会话」【同一 spawn 路径】(ensure_session)，
-                #   唯一区别：不缀文本、不注入 → 起好停在就绪 ❯，等你【自己发消息注入】。
-                #   之前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；/new 把「起会话」和「注入内容」拆开：
-                #   先 /new 起个空的 → 再自己发消息喂它。
-                #   起在【名册默认账号 + 默认目录】（与 /close 一致·撤掉临时 /account 切的号 + /cd 切的目录·主人拍板 2026-07-07）。
-                agent_runtime.reset_account(bot, account_default)     # 账号原地回名册默认（改 bot dict → 下面 spawn 用默认号）
-                if alive:
-                    try:
-                        await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
-                    except Exception:  # noqa: BLE001
-                        pass
-                clear_session(bot["name"])                            # 清注册表(含 /cd 的 cwd + 旧 runtime 字段) → current_cwd 回默认目录·spawn 在默认目录起
-                clear_codex_thread(bot["name"])                       # codex：thread 指针一起清 → /new 名副其实是「全新」（否则 resume 接回旧对话）
-                _dir = await asyncio.to_thread(current_cwd, bot)
-                _acc_lbl, _dir_lbl = runtime_labels(_dir)
-                await reply(chat_id, f"🆕 正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个全新的 {agent_runtime.display_name(bot)}…十几秒后就绪（**空会话·不注入任何文本**）")
+                bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])
+                await reply(chat_id, f"🆕 正在结束旧会话并释放占用，再用默认账号 `{default_account()}` · 默认目录 `{default_cwd(bot)}` 起全新空会话（**不注入任何文本**）")
                 try:
-                    await asyncio.to_thread(ensure_session, bot)   # eager 冷启（不像 /cd·/account 懒启动·立刻起）·不注入
-                except Exception as e:  # noqa: BLE001
-                    await reply(chat_id, f"❌ 起会话失败：{str(e)[:200]}（@ 我发 /screen 看现场）"); return
+                    await asyncio.to_thread(replace_session, bot, account_default, create=True)
+                except Exception as e:
+                    await reply(chat_id, f"❌ 新建未完成：{str(e)[:200]}（旧会话未成功关闭时不会继续新建；启动现场可用 /screen 查看）"); return
                 await reply(chat_id, f"✅ 全新的 {agent_runtime.display_name(bot)} 已就绪·空的（没注入任何文本·账号+目录已回名册默认）——现在直接发消息就注入进去"); return
             if cmd == "/cd":
                 cur = await asyncio.to_thread(current_cwd, bot)
@@ -2948,8 +2970,7 @@ def _run_bot(bot_name=None):
                         f"⛔ profile `{al}` 名册写入失败，未切账号、未关闭当前会话：{_pe}",
                     ); return
                 # ③ 持久化成功后再关旧会话并切内存对象。
-                if alive:
-                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
+                await asyncio.to_thread(close_session_runtime, bot)
                 label = agent_runtime.apply_account(bot, al)          # 原地改 bot dict 账号/runtime
                 account_default.clear(); account_default.update(agent_runtime.account_snapshot(bot))  # /close 也切回【新】默认
                 # ④ 目录歧义：profile 已切·存编号待选 → 回数字时用新 profile。

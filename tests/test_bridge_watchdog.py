@@ -518,7 +518,7 @@ def test_handoff_命令先快照再关旧会话并在指定时切账号():
     assert "persist_account" in body and "apply_account" in body
     assert "target_profile != current_profile" in body, "无参数/同 profile 必须保持旧行为"
     assert "snapshot_handoff" in body, "必须在关会话【之前】快照交接包"
-    assert body.index("snapshot_handoff") < body.index("wmux_session.close"), "快照必须在关会话之前"
+    assert body.index("snapshot_handoff") < body.index("close_session_runtime"), "快照必须在回收旧会话之前"
     assert "build_align_prompt" in body, "必须注入对齐版 prompt"
     assert "ensure_session" in body, "必须主动起新会话（不像 /close 那样懒启动）"
 
@@ -531,7 +531,7 @@ def test_handoff_额度闸必须先于快照持久化和关闭旧会话():
     assert quota < body.index("snapshot_handoff")
     assert quota < body.index("persist_handoff_pack")
     assert quota < body.index("persist_account")
-    assert quota < body.index("wmux_session.close")
+    assert quota < body.index("close_session_runtime")
     assert "agent_quota.is_usable(target_row)" in body
     assert body.index("agent_quota.is_usable(target_row)") < body.index("agent_quota.pick")
 

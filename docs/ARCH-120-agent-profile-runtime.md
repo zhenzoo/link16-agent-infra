@@ -429,7 +429,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 
 新建会话不调用模型预热。worker 先通过原生 `session list --cwd <cwd> --json` 记录既有 ID，再直接打开原生 TUI；新版允许首条消息前没有 session，因此输入框就绪不要求 session 已存在。首条真实 prompt 创建 session 后，supervisor 每秒最多核对一次，只接受本次新出现且唯一的 ID，并用精确 `agents/main/wire.jsonl` 从字节 0 绑定、启动 observer，首轮不会漏读。多个候选、终端提前退出或目录未就位都失败，不猜最新目录。已有会话仍按指针用 `--session` 恢复并立即启动 observer。目录信任仅写所选 profile、精确 bot cwd 的本地记录，保留已有记录，原生 workspace key 从该 session 的实际目录取得。模型回复属于就绪后的首轮验收，不再是打开终端的前置条件。桥内无人值守 TUI 设官方 `KIMI_CODE_WATCH=0`，避免 Windows `fs.watch` 的 EPERM 噪声；手工 profile 的监听与热重载默认值不变。
 
-`bridge-kimi-thread-<bot>.json` 保存 profile/cwd/session/initial_offset；恢复要求 profile 与目录一致。`/close`、`/new`、`/handoff` 只封存会话指针，保留 provider 历史与投递游标。交接包使用精确 session 的主 agent Wire 路径并说明格式；找不到绑定就先失败，不关闭旧会话。原生交互选择器尚未适配飞书按钮，不据此宣称全部交互能力可用。
+`bridge-kimi-thread-<bot>.json` 保存 profile/cwd/session/initial_offset；恢复要求 profile 与目录一致。`/close`、`/new` 必须回收本 bot 的旧受管 Kimi 进程并验证 worker/observer 锁释放，再封存指针；窗口消失不能替代进程退出。关闭前按精确脚本、bot、状态目录及进程出生时间保留旧子树身份，关闭后回收残留，身份不明或锁未释放就明确失败，禁止继续 new。两条命令与 ensure-session 共用生命周期互斥；provider 历史与投递游标保持不变。交接仍先生成精确 session 主 agent Wire 的交接包并说明格式；找不到绑定就先失败，不关闭旧会话。实现与生产加载状态见 [PLAN-1180](PLAN-1180-kimi-close-new-release.md)。原生交互选择器尚未适配飞书按钮，不据此宣称全部交互能力可用。
 
 观察子进程持有共享 per-bot observer 锁，父 worker 另持 Kimi worker 锁。观察者异常退出后由父进程退避拉起，可单独恢复而不停止 TUI。解析异常按当前已锁定的 route 报告回传中断；没有新 turn 时不误发历史告警。原生进程退出后再读完 journal 尾部，缺少终结事件则报告结果未确认。
 
