@@ -47,11 +47,11 @@ class StartupProgress:
 def _startup_failure_detail(exc):
     """Return a useful cause without persisting raw model output or secrets."""
     if isinstance(exc, subprocess.TimeoutExpired):
-        return "启动失败：Kimi 登录或模型预热在 120 秒内没有完成"
+        return "启动失败：Kimi 原生会话目录查询在 30 秒内没有完成"
     if isinstance(exc, TimeoutError):
         return "启动失败：已有 Kimi worker 占用这个 bot，请先关闭旧会话"
-    if isinstance(exc, RuntimeError) and "warmup failed" in str(exc):
-        return "启动失败：Kimi 登录或模型不可用，预热没有返回可恢复会话"
+    if isinstance(exc, RuntimeError) and "session" in str(exc).lower():
+        return "启动失败：Kimi 原生会话未就位，请检查原生终端与 session list"
     if isinstance(exc, FileNotFoundError):
         return "启动失败：找不到 Kimi 启动所需的本机文件"
     return f"启动失败：Kimi worker 在就绪前退出（{type(exc).__name__}）"
@@ -75,34 +75,44 @@ def find_wire(home, session):
     return matches[0]
 
 
-def new_session(profile, cwd):
-    """Create through native CLI; ACP-created runtimes cannot resume native tools.
-
-    Use a typed resume hint, never discover identity by newest-file heuristics.
-    Warmup history is below the observer's initial byte boundary and stays local.
-    """
-    marker = "LINK16_KIMI_NATIVE_READY"
-    command = agent_runtime.standalone_worker_cmd(profile, provider_args=[
-        "-p", f"Reply exactly {marker}. Do not use tools.", "--output-format", "stream-json",
-    ])
+def native_session_ids(profile, cwd):
+    """List native session IDs without making a model request."""
+    command = agent_runtime.standalone_worker_cmd(
+        profile, provider_args=["session", "list", "--cwd", str(cwd), "--json"],
+    )
     result = subprocess.run(
         [agent_runtime.resolve_shell(), "-lc", command], cwd=cwd,
-        capture_output=True, text=True, encoding="utf-8", timeout=120,
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
-    records = []
-    for line in result.stdout.splitlines():
-        try:
-            record = json.loads(line)
-            if isinstance(record, dict):
-                records.append(record)
-        except ValueError:
-            continue
-    sessions = [r.get("session_id") for r in records
-                if r.get("role") == "meta" and r.get("type") == "session.resume_hint"]
-    replies = [r.get("content") for r in records if r.get("role") == "assistant"]
-    if result.returncode or len(sessions) != 1 or marker not in replies:
-        raise RuntimeError("Kimi native warmup failed; check profile login and model availability")
-    return sessions[0]
+    if result.returncode:
+        raise RuntimeError("Kimi native session listing failed")
+    try:
+        rows = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Kimi native session listing returned invalid JSON") from exc
+    if not isinstance(rows, list):
+        raise RuntimeError("Kimi native session listing returned an invalid result")
+    return {row["id"] for row in rows if isinstance(row, dict) and row.get("id")}
+
+
+def bind_new_session(bot, profile, cwd, state_dir, before_ids):
+    """Bind a lazy native session after the first real prompt, from Wire byte zero."""
+    candidates = native_session_ids(profile.name, cwd) - before_ids
+    if len(candidates) > 1:
+        raise RuntimeError("Kimi native TUI created ambiguous session candidates")
+    if not candidates:
+        return None
+    session = next(iter(candidates))
+    try:
+        wire = find_wire(profile.home_path, session)
+    except ValueError:
+        return None
+    binding = {"session": session, "profile": profile.name, "cwd": str(cwd),
+               "initial_offset": 0}
+    bridge_injection.atomic_write_json(
+        Path(state_dir) / f"bridge-kimi-thread-{bot}.json", binding,
+    )
+    return binding, wire
 
 
 def ensure_workspace_trust(home, cwd, *, workspace_key=None):
@@ -224,6 +234,12 @@ class WireObserver:
                             self.published.add(identity)
                             count += 1
                         if public.get("kind") == "answer":
+                            if (record.get("type") == "turn.ended"
+                                    and record.get("reason") in {"failed", "cancelled", "blocked"}):
+                                for _ in range(2):
+                                    session_work.request_stop_repair(
+                                        self.bot, public["route"]["turn_key"], state_dir=self.state_dir,
+                                    )
                             turn_delivery_guard.compare_and_clear(
                                 self.state_dir, self.bot, public["route"]["turn_key"],
                             )
@@ -283,15 +299,10 @@ def start_or_resume(bot, profile, cwd, state_dir, progress=None):
         if progress:
             progress.update("session_found", "已找到 Kimi 会话，正在重新连接")
         wire = find_wire(spec.home_path, previous["session"])
-        return previous, wire
+        return previous, wire, set()
     if progress:
-        progress.update("warming_up", "正在验证 Kimi 登录并创建可恢复会话")
-    session = new_session(profile, cwd)
-    wire = find_wire(spec.home_path, session)
-    binding = {"session": session, "profile": profile, "cwd": str(cwd),
-               "initial_offset": wire.stat().st_size}
-    bridge_injection.atomic_write_json(pointer, binding)
-    return binding, wire
+        progress.update("opening_native", "正在打开原生终端并建立可恢复会话")
+    return None, None, native_session_ids(profile, cwd)
 
 
 def observe(args):
@@ -314,19 +325,25 @@ def observe(args):
             raise
 
 
-def supervise(native, command, log):
-    """Restart a failed observer with backoff while leaving the native UI alive."""
+def supervise(native, command, log, bind=None):
+    """Restart a failed observer; lazy sessions bind after the first real prompt."""
     child, next_start, delay = None, 0, 2
+    bound = bind is None
+    next_bind = 0
     try:
         while native.poll() is None:
             try:
-                if (child is None or child.poll() is not None) and time.monotonic() >= next_start:
+                now = time.monotonic()
+                if not bound and now >= next_bind:
+                    bound = bool(bind())
+                    next_bind = now + 1
+                if bound and (child is None or child.poll() is not None) and now >= next_start:
                     try:
                         child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                                                  stderr=subprocess.STDOUT)
                     except OSError:
                         child = None
-                    next_start = time.monotonic() + delay
+                    next_start = now + delay
                     delay = min(delay * 2, 30)
                 time.sleep(0.2)
             except KeyboardInterrupt:
@@ -351,41 +368,66 @@ def run(args):
         with bridge_injection.ProcessFileLock(
             bridge_injection.lock_path(state_dir, "kimi-worker", args.bot), timeout=0,
         ):
-            binding, wire = start_or_resume(
+            binding, wire, before_ids = start_or_resume(
                 args.bot, profile.name, cwd, state_dir, progress=progress)
-            progress.update("session_ready", "Kimi 会话已就位，正在打开原生终端",
-                            session=binding["session"])
-            ensure_workspace_trust(profile.home_path, cwd, workspace_key=wire.parents[3].name)
-            with wire.open("rb") as handle:
-                KimiEvents(binding["session"], cwd).consume(json.loads(handle.readline()), 0)
+            ensure_workspace_trust(profile.home_path, cwd)
+            provider_args = ["--session", binding["session"]] if binding else []
             command = agent_runtime.standalone_worker_cmd(
-                profile.name, provider_args=["--session", binding["session"]],
-                extra_env={"FEISHU_BRIDGE_SESSION": args.bot, "FEISHU_BRIDGE_OUTBOX_DIR": str(state_dir)},
+                profile.name, provider_args=provider_args,
+                extra_env={
+                    "FEISHU_BRIDGE_SESSION": args.bot,
+                    "FEISHU_BRIDGE_OUTBOX_DIR": str(state_dir),
+                    "KIMI_CODE_WATCH": "0",
+                },
             )
             observer_command = [sys.executable, str(Path(__file__).resolve()), "--observe-only",
                                 "--bot", args.bot, "--cwd", str(cwd), "--state-dir", str(state_dir)]
+
+            def accept_binding(result):
+                nonlocal binding, wire
+                if result is None:
+                    return False
+                binding, wire = result
+                ensure_workspace_trust(
+                    profile.home_path, cwd, workspace_key=wire.parents[3].name,
+                )
+                with wire.open("rb") as handle:
+                    KimiEvents(binding["session"], cwd).consume(json.loads(handle.readline()), 0)
+                progress.update("session_ready", "Kimi 原生终端与会话已绑定",
+                                session=binding["session"])
+                return True
+
             with (state_dir / f"bridge-kimi-observer-{args.bot}.log").open("a", encoding="utf-8") as log:
                 native = subprocess.Popen([agent_runtime.resolve_shell(), "-lc", command], cwd=cwd)
-                # The bridge combines this process-owned receipt with a visible
-                # composer; neither half depends on renameable TUI wording.
+                if binding is not None:
+                    accept_binding((binding, wire))
+                # A lazy native session is not a startup prerequisite. The first
+                # real prompt creates it; the supervisor then binds from byte zero.
                 progress.update(
                     "ready", "Kimi 原生终端已启动，正在确认输入框",
-                    session=binding["session"], native_pid=native.pid,
+                    session=(binding or {}).get("session"), native_pid=native.pid,
                     wire_version=WIRE_VERSION, cli_version=agent_runtime.cli_version("kimi"),
                 )
-                supervise(native, observer_command, log)
-            with bridge_injection.ProcessFileLock(
-                bridge_injection.lock_path(state_dir, "observer", args.bot), timeout=2,
-            ):
-                observer = WireObserver(bot=args.bot, session=binding["session"], wire=wire,
-                                        state_dir=state_dir, cwd=cwd, initial_offset=binding["initial_offset"])
-                try:
-                    observer.poll()
-                    if not observer.reducer.closed:
+                supervise(
+                    native, observer_command, log,
+                    bind=(None if binding is not None else lambda: accept_binding(
+                        bind_new_session(args.bot, profile, cwd, state_dir, before_ids)
+                    )),
+                )
+            if binding is not None:
+                with bridge_injection.ProcessFileLock(
+                    bridge_injection.lock_path(state_dir, "observer", args.bot), timeout=2,
+                ):
+                    observer = WireObserver(bot=args.bot, session=binding["session"], wire=wire,
+                                            state_dir=state_dir, cwd=cwd,
+                                            initial_offset=binding["initial_offset"])
+                    try:
+                        observer.poll()
+                        if not observer.reducer.closed:
+                            observer.report_failure(terminal=True)
+                    except Exception:
                         observer.report_failure(terminal=True)
-                except Exception:
-                    observer.report_failure(terminal=True)
-                    raise
+                        raise
             return native.returncode
     except Exception as exc:
         progress.update("failed", _startup_failure_detail(exc), error_type=type(exc).__name__)

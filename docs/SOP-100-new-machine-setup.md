@@ -113,6 +113,8 @@ Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要�
 
 后续更新也只走各提供方的原生自动更新、CLI 内置更新命令或同一官方安装脚本；不得再用 npm、uv/pip 或第三方包管理器覆盖这三个入口。更新后重新核对实际命令路径和签名，不能只凭版本号判断来源。
 
+Link16 新交互 session 会经过 `feishu/agent_update.py`，统一调用官方 `claude update`、`codex update`、`kimi update --yes`，不另写下载器，也不让多个 profile 并发更新同一程序。没有其他更新在跑时，更新成功后开 session；已有更新继续运行则当前 session 不等待；失败或 60 秒超时跳过并启动旧版，写脱敏回执。Codex 自带的重复启动检查由 Link16 集中更新后关闭。`agent_update.py status --profile <名>` 查最近结果，紧急时用 `LINK16_AGENT_UPDATE=0` 绕过；已运行的会话不被更新流程中断。
+
 | CLI | 官方默认程序入口 | 官方说明 |
 |---|---|---|
 | Claude Code | `%USERPROFILE%/.local/bin/claude.exe` | [安装与更新](https://code.claude.com/docs/en/setup) |
@@ -266,7 +268,7 @@ Kimi 通过原生终端与 Wire 观察程序接桥，`service_doctor.py` 检查 
 - Claude 的 `feishu` / `feishu-workline` 安装到各所选 profile home；Codex/Kimi 共用用户级 `$HOME/.agents/skills/<skill>`。
 - 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
 - 重开 Git Bash，用用户自己命名的 profile 函数进入对应账号并在官方页面登录；不复制别人的认证文件。
-- Kimi 示例：`kimi-work login`，随后 `kimi-work --version` 和 `python feishu/agent_profile_cli.py selftest --profile kimi-work`；版本检查只证明程序可启动，仍需真实模型回复验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。
+- Kimi 示例：`kimi-work login`，随后 `kimi-work --version` 和 `python feishu/agent_profile_cli.py selftest --profile kimi-work`；selftest 只证明程序可执行，不覆盖 wmux、TUI、模型或飞书链路，仍需真实会话回复验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。
 
 ### 1.4 · 装 OpenSSH Server（仅 `envsync` 的硬前置 · 要管理员）
 
@@ -568,8 +570,8 @@ python feishu/bridge_watchdog.py status
 |---|---|
 | `ModuleNotFoundError: lark_channel` / 桥打印「缺依赖 pip install lark-channel-sdk」 | §2 没做 |
 | `node ~/wmux-rpc.js` 报找不到文件 / ENOENT | §3 第 2 步 `~/wmux-rpc.js` 没放 |
-| rpc `timeout` / `closed before response` / `no transport` | wmux daemon 没开（打开 wmux GUI）或 `~/.wmux-tcp-port` 缺 |
-| 桥起了会话但里面没出 Claude/Codex | 跑 `agent_profile_cli.py doctor --profile <name>`；检查 registry、本机 profile home/CLI 与名册 `profile`，不要补裸 alias |
+| rpc `timeout` / `closed before response` / `no transport` | 先查 daemon 与 `~/.wmux-tcp-port`。`workspace.new` 超时不等于没创建：共享启动器会按前后 ID 差分接管唯一匹配项；若报多候选或无法核对，不要盲目重发，先 `wmux_session.py list` 核实现场 |
+| 桥起了会话但里面没出 Claude/Codex/Kimi | 跑 `agent_profile_cli.py doctor --profile <name>`；检查 registry、本机 profile home/CLI 与名册 `profile`，不要补裸 alias |
 | 敲某个 `<profile>` 冒 `wsl: …` + `execvpe(/bin/bash) failed`，直接回到提示符 | 命令被交给了 **System32 的 WSL bash**（`CreateProcess` 把 System32 排在 PATH 前）。执行处必须走 `agent_runtime.resolve_shell()`，绝不传裸名 `bash`。查：`python -c "import subprocess;subprocess.call(['bash','-lc','echo HI'])"` —— 打不出 `HI` 就是中招（PLAN-923 · BUG-1） |
 | 开新 Git Bash 冒一串 ``syntax error near unexpected token `('``，且 `type <profile>` 显示 is aliased | CLI 输出带 `\r`，`unalias` 拿到旧名删不掉老 alias → 函数定义撞 alias。查：`agent_profile_cli.py list --names \| od -c` 有没有 `\r`（PLAN-923 · BUG-2） |
 | 拿不准「现在到底哪些号能起」 | `python feishu/agent_profile_cli.py selftest` —— 一张矩阵 + `N/N 全绿`，比逐个 doctor 可靠（它会真启动一次） |

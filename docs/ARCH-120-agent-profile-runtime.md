@@ -234,9 +234,11 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 - `show` / `doctor`：解析 profile 并检查本机 home、launcher、CLI、**可用 shell**；
 - `run`：设置 provider 环境并执行 Claude/Codex/原生 Kimi Code；
 - `command`：给 wmux spawner 返回不含密钥的安全启动命令/JSON spec；
-- `selftest`：逐个 profile 走 registry → doctor → 命令生成 → **真启动**（provider 参数换成
+- `selftest`：逐个 profile 走 registry → doctor → 命令生成 → **程序启动**（provider 参数换成
   `--version`，秒退不开 TUI，但走的是和真启动完全同一条 shell+env+launcher 路径），
-  打印矩阵并以 `N/N 全绿` 收尾。**判「现在敲下去起不起得来」以它为准**，别只看 doctor。
+  打印矩阵并以 `N/N 全绿` 收尾。它只回答「程序能否执行」，不覆盖 wmux 创建、TUI 就绪、
+  模型回复或飞书收发；这些由真实 wmux 会话的 worker 回执和首轮公开事件另行验收。
+  安装版本只作诊断，不维护已验证 CLI 版本白名单，也不要求升级后登记才能启动。
 
 实现可以位于 `feishu/agent_profile_cli.py`，但 alias 解析和命令生成必须复用
 `feishu/agent_runtime.py`，不得再产生第二套 launcher 逻辑。
@@ -280,6 +282,18 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 
 公共 launcher 不把主 session 的 `FEISHU_BRIDGE_SESSION` 复制给普通内容 worker，
 避免多个 pane 共用一个飞书身份和 outbox。
+
+### 5.3 新进程更新闸
+
+交互式主 session、独立 wmux worker 与飞书新 worker 在 provider 进程前经过一次
+`feishu/agent_update.py ensure --profile <name>`；`--version`、`session list`、doctor/selftest
+等探针不经过更新闸。三者都直接调用官方 updater：`claude update`、`codex update`、
+`kimi update --yes`，Link16 不另写下载器。Codex 自己的 `check_for_update_on_startup` 关闭，
+因为更新已由 Link16 集中执行，避免重复检查拖慢 TUI。
+更新按可执行文件跨进程互斥，记录 before/after 版本和脱敏回执；锁忙表示已有更新继续运行，
+当前 session 不等待；其他情况更新成功后启动新进程，失败或 60 秒超时则跳过并启动旧版。
+更新不是选号输入，只有 Codex 的重复检查设置写入所选 profile。`LINK16_AGENT_UPDATE=0`
+是故障时的紧急绕过；已经运行的 CLI 不被更新流程重启或中断。
 
 ## 6. Fail closed
 
@@ -413,7 +427,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 均为 `model=k3, thinkingEffort=high`，与该隔离 profile 保存值一致。只读取模型字段核验，不改配置。
 
 
-首次用原生 `-p --output-format stream-json` 做有界热身；退出成功、精确响应标记和唯一 typed `session.resume_hint` 同时通过才固定 session。不得猜最新目录。热身字节边界以前的内容只作本地历史，不投递。随后原生 TUI 用 `--session` 接续；目录信任仅写所选 profile、精确 bot cwd 的本地记录，保留已有记录，原生 workspace key 从该 session 的实际目录取得。
+新建会话不调用模型预热。worker 先通过原生 `session list --cwd <cwd> --json` 记录既有 ID，再直接打开原生 TUI；新版允许首条消息前没有 session，因此输入框就绪不要求 session 已存在。首条真实 prompt 创建 session 后，supervisor 每秒最多核对一次，只接受本次新出现且唯一的 ID，并用精确 `agents/main/wire.jsonl` 从字节 0 绑定、启动 observer，首轮不会漏读。多个候选、终端提前退出或目录未就位都失败，不猜最新目录。已有会话仍按指针用 `--session` 恢复并立即启动 observer。目录信任仅写所选 profile、精确 bot cwd 的本地记录，保留已有记录，原生 workspace key 从该 session 的实际目录取得。模型回复属于就绪后的首轮验收，不再是打开终端的前置条件。桥内无人值守 TUI 设官方 `KIMI_CODE_WATCH=0`，避免 Windows `fs.watch` 的 EPERM 噪声；手工 profile 的监听与热重载默认值不变。
 
 `bridge-kimi-thread-<bot>.json` 保存 profile/cwd/session/initial_offset；恢复要求 profile 与目录一致。`/close`、`/new`、`/handoff` 只封存会话指针，保留 provider 历史与投递游标。交接包使用精确 session 的主 agent Wire 路径并说明格式；找不到绑定就先失败，不关闭旧会话。原生交互选择器尚未适配飞书按钮，不据此宣称全部交互能力可用。
 
@@ -440,7 +454,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 新增独立 CLI runtime 的验收顺序固定为：
 
 1. 在用户治理层登记 `RuntimeDocumentSpec` 并增加模板，证明共享沟通块逐字注入且二次渲染 writes=0；
-2. 在 Link16 登记 `RuntimeSpec`，实现显式 launcher、home/env、登录、就绪信号、hook/event adapter 与版本漂移检查；
+2. 在 Link16 登记 `RuntimeSpec`，实现显式 launcher、home/env、登录、就绪信号、hook/event adapter 与运行时协议能力检查；安装版本只记录诊断，不设版本白名单；
 3. adapter 只把公开 commentary、plan、工具安全摘要和 final 投影成 `milestone-v1`，为私有 reasoning/think、工具参数/结果和错误正文建立负例；
 4. bootstrap/doctor、context import、session recovery 与真实 owner DM 都给出该 runtime 的机械证据；
 5. 最后才允许 profile registry 接受该 runtime。缺任何一项都保持拒绝，而不是复用“最像”的现有 driver。

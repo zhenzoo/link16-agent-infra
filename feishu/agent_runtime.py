@@ -44,13 +44,8 @@ CODEX_TRUST_TEXT = "Do you trust the contents of this directory?"
 CODEX_APP_SERVER_READY_MARK = "LINK16_APP_SERVER_READY"
 KIMI_STARTUP_CONTRACT = "kimi-startup-v1"
 
-# CLI versions whose startup/readiness contract was verified on a real terminal
-# here, so a silent upstream upgrade cannot quietly invalidate a screen marker
-# again. Drift is never an error — it is the signal to re-verify. Kimi Code
-# auto-installed 0.41.0 on 2026-09-06 23:19 and renamed its status-bar modes;
-# nothing noticed until every kp session had burned a 150s ready wait. Add a
-# runtime here only after actually watching that version reach a live composer.
-VERIFIED_CLI_VERSIONS = {"kimi": "0.41.0"}
+# Installed versions are diagnostic facts, not an allowlist. Startup acceptance
+# comes from the live worker/session contract and, where needed, TUI structure.
 _CLI_VERSION_CACHE = {}
 
 # Codex 投递路 = typed-event app-server【默认】（主人 2026-07-23 拍板：建 codex bot 一律 canary，
@@ -649,36 +644,6 @@ def cli_version(runtime: str):
     return version
 
 
-def cli_version_drift(name: str) -> dict:
-    """Compare a profile's installed CLI against the version we verified here.
-
-    ``drifted`` is only ever True on positive evidence — a known verified
-    version and a different installed one. An unregistered runtime or an
-    unreadable version reports False, so this can never invent an alarm.
-    """
-    runtime = profile_spec(name).runtime
-    verified = VERIFIED_CLI_VERSIONS.get(runtime)
-    installed = cli_version(runtime)
-    return {
-        "runtime": runtime,
-        "installed": installed,
-        "verified": verified,
-        "drifted": bool(verified and installed and installed != verified),
-    }
-
-
-def version_drift_note(name: str):
-    """One human line about drift, or None when there is nothing to report."""
-    drift = cli_version_drift(name)
-    if not drift["drifted"]:
-        return None
-    return (
-        f"{drift['runtime']} CLI 已升级到 {drift['installed']}，"
-        f"本机验证过的是 {drift['verified']} —— 启动/就绪判据可能对不上新版界面，"
-        f"先跑 `python feishu/agent_profile_cli.py selftest --profile {name}` 复验。"
-    )
-
-
 def _persistent_windows_path() -> str:
     """Windows 注册表里的 user+machine PATH —— 即「新开一个终端会看到什么」。
 
@@ -755,10 +720,10 @@ def profile_doctor(name: str, *, check_execution_env: bool = True) -> dict:
         "login": profile_login_state(profile),
     }
     if check_execution_env:
-        # Report drift, never fail on it: an unverified version still starts
-        # most of the time, and turning "newer than we checked" into a hard
-        # error would take the bridge down on every upstream release.
-        result["version"] = cli_version_drift(profile.name)
+        result["version"] = {
+            "runtime": profile.runtime,
+            "installed": cli_version(profile.runtime),
+        }
     return result
 
 
@@ -1026,11 +991,17 @@ def codex_saved_model_args(codex_home, cwd) -> list[str]:
     return args
 
 
+def auto_update_prefix(profile: ProfileSpec, project: Path) -> str:
+    script = Path(project) / "feishu" / "agent_update.py"
+    return f"python {_q(script.as_posix())} ensure --profile {_q(profile.name)} && "
+
+
 def standalone_worker_cmd(
     profile_name_: str,
     cwd=None,
     extra_env=None,
     provider_args=None,
+    auto_update=False,
 ) -> str:
     """Return a provider-aware command for a non-Feishu main/worker session.
 
@@ -1057,7 +1028,7 @@ def standalone_worker_cmd(
         prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
     if profile.runtime == "claude":
         command = (
-            _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS)
+            _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS + ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES"))
             + prefix
             + env_text
             + f"CLAUDE_CONFIG_DIR={_q(profile.home_path.as_posix())} "
@@ -1116,6 +1087,16 @@ def standalone_worker_cmd(
         # Provider arguments are opaque argv, not paths. Preserve backslashes,
         # TOML quotes, dollar signs and backticks without shell expansion.
         command += " " + " ".join(shlex.quote(str(arg)) for arg in provider_args)
+    args = [str(arg) for arg in (provider_args or [])]
+    is_probe = (
+        any(arg in {"--version", "-V", "-p", "--prompt"} or arg.startswith("--prompt=")
+            for arg in args)
+        or args[:1] in (["doctor"], ["session"], ["update"], ["upgrade"])
+    )
+    if auto_update and not is_probe:
+        command = auto_update_prefix(
+            profile, Path(infrastructure_env()["LINK16_AGENT_INFRA_ROOT"]),
+        ) + command
     return command
 
 
@@ -1129,6 +1110,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         # a Scheduled Task's reduced SHELL/PATH must not veto an otherwise valid
         # profile before wmux gets a chance to run and probe the real command.
         _require_profile_available(profile, check_execution_env=False)
+    update = auto_update_prefix(profile, project) if profile else ""
     name = bot["name"] if isinstance(bot, dict) else str(bot)
     cwd = (cwd or (bot.get("cwd") if isinstance(bot, dict) else None) or str(project))
     cwd = str(cwd).replace("\\", "/")
@@ -1144,8 +1126,8 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         prefix = ""
         if profile.launcher == "launch-sh":
             prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
-        return (
-            _unset_shell_env(BOT_LAUNCH_SCRUB_KEYS)
+        return update + (
+            _unset_shell_env(BOT_LAUNCH_SCRUB_KEYS + ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES"))
             + prefix
             + env
             + f"CLAUDE_CONFIG_DIR={_q(config_dir)} "
@@ -1158,13 +1140,13 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         codex_home = profile.home_path.as_posix()
         if uses_app_server(bot):
             worker = (project / "feishu" / "codex_app_server_worker.py").as_posix()
-            return (
+            return update + (
                 env
                 + f"CODEX_HOME={_q(codex_home)} FEISHU_CODEX_EVENT_STREAM=1 "
                 + f"python {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} "
                 + f"--state-dir {_q(autopilot.as_posix())} --codex-home {_q(codex_home)}"
             )
-        return (
+        return update + (
             env
             + f"CODEX_HOME={_q(codex_home)} "
             + "codex --dangerously-bypass-approvals-and-sandbox "
@@ -1174,7 +1156,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         )
     if spec.name == "kimi":
         worker = (project / "feishu" / "kimi_native_worker.py").as_posix()
-        return (
+        return update + (
             env + f"python {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} "
             + f"--state-dir {_q(autopilot.as_posix())}"
         )

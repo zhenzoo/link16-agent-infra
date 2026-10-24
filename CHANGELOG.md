@@ -19,6 +19,15 @@ last_reviewed: 2026-10-24
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 
+## v0.40.0 — 2026-10-24 · 三 runtime 启动恢复与官方自动更新
+
+- **统一自动更新**：交互式主 session、独立 wmux worker 与飞书新 worker 统一调用官方 `claude update`、`codex update`、`kimi update --yes`。按可执行文件互斥，已有更新继续运行则当前 session 不等；其他情况更新后启动，失败或 60 秒超时跳过并启动旧版。只读探针不触发，`LINK16_AGENT_UPDATE=0` 可紧急绕过。
+- **启动恢复**：wmux 创建结果不确定时按前后 ID 只接管唯一匹配 workspace；长命令落短 launcher，shell 未就绪不盲发。Codex 自带重复启动检查由 Link16 集中更新后关闭，避免每次冷启动重复等待。
+- **Kimi 首轮**：不再为取得 session ID 做模型预热。新版 TUI 可在首条消息前无 session，observer 等真实 prompt 后唯一差分绑定并从 Wire 字节 0 读取；恢复旧 session 仍精确绑定。孤儿 composer 不再冒充本次 worker 就绪，桥内文件监听 EPERM 由官方开关隔离。
+- **取消回合**：Kimi 取消／失败／阻塞按既有停止修复合同转为可投递失败态，避免工作行 pending 永久堵 drainer。CLI 安装版本只作诊断，不再维护启动白名单。
+- **验证**：全仓 1276 项测试、3 项跳过、155 个子用例通过；取消回合定向 136 项、40 个子用例通过。Claude 2.1.310、Codex 0.164.0、Kimi 2.3.1 selftest 3/3 全绿；真实 Kimi 首条 prompt 后绑定及单一模型答案、三 runtime 真 wmux 启动和官方 updater 均实测。
+- **升级**：新启动的命令直接使用新逻辑；常驻桥需在各 bot 维护窗口重载后生成新 launcher。生产 `tb26-baseball-3` 已恢复干净 worker 与公开 Wire 进度，但业务模型任务完成不属于本次发布验收。
+
 ## v0.39.0 — 2026-10-24 · 带评论文档批改续跑与明确关闭会话
 
 - **文档编辑**：新增 `docio edit-text`，以块 ID、旧文、新文声明批量修订；整批预检后逐处绑定版本、核验正文和原评论，再保存恢复点。评论与回复完整分页，保护原评论身份、回复、状态、关联块及选中文字；涉及评论选区或无法定位时停止。

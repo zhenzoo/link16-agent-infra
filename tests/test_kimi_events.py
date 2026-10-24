@@ -217,6 +217,19 @@ class WireRecoveryTests(unittest.TestCase):
         self.assertTrue(turn_delivery_guard.read_route(self.state, "test")["active"])
         self.assertEqual(turn_delivery_guard.read_route(self.state, "test")["turn_key"], "newer")
 
+    def test_cancelled_turn_becomes_deliverable_failure_not_permanent_pending(self):
+        rows = fixture()
+        rows[-1] = row("turn.ended", turnId=0, reason="cancelled")
+        self.write(rows)
+        observer = self.observer()
+        observer.poll()
+        answer = next(json.loads(line) for line in observer.outbox.read_text(encoding="utf-8").splitlines()
+                      if json.loads(line)["kind"] == "answer")
+        turn_key = worker.session_work.record_turn_key(answer)
+        gate = worker.session_work._load_gate("test", self.state)["turns"][turn_key]
+        self.assertEqual(gate["status"], "failed-ready")
+        self.assertIsInstance(worker.session_work.delivery_work("test", answer, self.state), dict)
+
     def test_failure_is_safe_pinned_and_idempotent_across_restart(self):
         self.write(fixture()[:4])
         observer = self.observer()
@@ -265,20 +278,59 @@ class NativeBindingTests(unittest.TestCase):
         native.terminate.assert_not_called()
         second.terminate.assert_called_once()
 
-    def test_native_seed_requires_success_and_one_typed_session_hint(self):
-        good = [{"role": "assistant", "content": "LINK16_KIMI_NATIVE_READY"},
-                {"role": "meta", "type": "session.resume_hint", "session_id": "session_test"}]
-        with patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="native"), \
-                patch.object(worker.agent_runtime, "resolve_shell", return_value="shell"):
-            for code, rows in [(0, good), (1, good), (0, good + good[-1:]), (0, good[:1]),
-                               (0, [{**good[0], "content": "wrong"}, good[1]])]:
-                result = SimpleNamespace(returncode=code, stdout="\n".join(map(json.dumps, rows)))
-                with self.subTest(code=code, rows=rows), patch.object(worker.subprocess, "run", return_value=result):
-                    if code == 0 and rows == good:
-                        self.assertEqual(worker.new_session("kp", "."), "session_test")
-                    else:
-                        with self.assertRaises(RuntimeError):
-                            worker.new_session("kp", ".")
+    def test_lazy_binding_starts_observer_only_after_session_exists(self):
+        native = Mock()
+        native.poll.side_effect = [None, None, None, 0]
+        child = Mock()
+        child.poll.return_value = None
+        with patch.object(worker.subprocess, "Popen", return_value=child) as launch, \
+                patch.object(worker.time, "sleep"), \
+                patch.object(worker.time, "monotonic", side_effect=[0, 1, 2]):
+            worker.supervise(native, ["observer"], None,
+                             bind=Mock(side_effect=[False, True]))
+        launch.assert_called_once()
+        child.terminate.assert_called_once()
+
+    def test_native_exit_without_lazy_session_never_starts_observer(self):
+        native = Mock()
+        native.poll.side_effect = [None, 0]
+        with patch.object(worker.subprocess, "Popen") as launch, \
+                patch.object(worker.time, "sleep"), \
+                patch.object(worker.time, "monotonic", return_value=0):
+            worker.supervise(native, ["observer"], None, bind=Mock(return_value=False))
+        launch.assert_not_called()
+
+    def test_native_session_listing_does_not_make_a_model_request(self):
+        result = SimpleNamespace(returncode=0, stdout=json.dumps([
+            {"id": "session_test"}, {"id": "session_other"},
+        ]))
+        with patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="native") as command, \
+                patch.object(worker.agent_runtime, "resolve_shell", return_value="shell"), \
+                patch.object(worker.subprocess, "run", return_value=result):
+            self.assertEqual(worker.native_session_ids("kp", "."),
+                             {"session_test", "session_other"})
+        provider_args = command.call_args.kwargs["provider_args"]
+        self.assertEqual(provider_args[:2], ["session", "list"])
+        self.assertNotIn("-p", provider_args)
+
+    def test_new_native_binding_requires_one_new_session(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            wire = root / "sessions/wd_test_0123456789ab/session_test/agents/main/wire.jsonl"
+            wire.parent.mkdir(parents=True)
+            wire.write_text("{}\n", encoding="utf-8")
+            profile = SimpleNamespace(name="kp", home_path=root)
+            with patch.object(worker, "native_session_ids", return_value=set()):
+                self.assertIsNone(worker.bind_new_session("test", profile, root, root, set()))
+            with patch.object(worker, "native_session_ids", return_value={"session_test"}):
+                binding, actual = worker.bind_new_session("test", profile, root, root, set())
+            self.assertEqual(actual, wire)
+            self.assertEqual(binding["session"], "session_test")
+            self.assertEqual(binding["initial_offset"], 0)
+            with patch.object(worker, "native_session_ids",
+                              return_value={"session_test", "session_other"}):
+                with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                    worker.bind_new_session("other", profile, root, root, set())
 
     def test_worker_persists_sanitized_failure_before_native_tui_exists(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -290,14 +342,14 @@ class NativeBindingTests(unittest.TestCase):
                     patch.object(worker.bridge_injection, "ProcessFileLock",
                                  return_value=nullcontext()), \
                     patch.object(worker, "start_or_resume",
-                                 side_effect=RuntimeError("Kimi native warmup failed; secret output")):
+                                 side_effect=RuntimeError("Kimi native session listing failed; secret output")):
                 with self.assertRaises(RuntimeError):
                     worker.run(args)
             record = json.loads(
                 (root / "bridge-kimi-ready-test.json").read_text(encoding="utf-8"))
             self.assertEqual(record["contract"], worker.agent_runtime.KIMI_STARTUP_CONTRACT)
             self.assertEqual(record["stage"], "failed")
-            self.assertIn("登录或模型不可用", record["detail"])
+            self.assertIn("原生会话未就位", record["detail"])
             self.assertNotIn("secret output", record["detail"])
 
     def test_worker_persists_ready_stage_after_launching_native_tui(self):
@@ -319,11 +371,11 @@ class NativeBindingTests(unittest.TestCase):
                     patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
                     patch.object(worker.bridge_injection, "ProcessFileLock",
                                  return_value=nullcontext()), \
-                    patch.object(worker, "start_or_resume", return_value=(binding, wire)), \
+                    patch.object(worker, "start_or_resume", return_value=(binding, wire, set())), \
                     patch.object(worker, "ensure_workspace_trust"), \
                     patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="kimi"), \
                     patch.object(worker.agent_runtime, "resolve_shell", return_value="bash"), \
-                    patch.object(worker.agent_runtime, "cli_version", return_value="0.41.0"), \
+                    patch.object(worker.agent_runtime, "cli_version", return_value="2.3.1"), \
                     patch.object(worker.subprocess, "Popen", return_value=native), \
                     patch.object(worker, "supervise"), \
                     patch.object(worker, "WireObserver", return_value=observer):
@@ -333,7 +385,35 @@ class NativeBindingTests(unittest.TestCase):
             self.assertEqual(record["stage"], "ready")
             self.assertEqual(record["native_pid"], 456)
             self.assertEqual(record["session"], "session_test")
-            self.assertEqual(record["cli_version"], "0.41.0")
+            self.assertEqual(record["cli_version"], "2.3.1")
+
+    def test_worker_is_ready_before_first_prompt_creates_a_session(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = SimpleNamespace(bot="test", cwd=str(root), state_dir=str(root))
+            profile = SimpleNamespace(name="kp", home_path=root)
+            native = Mock(pid=456, returncode=0)
+            with patch.dict(os.environ, {worker.agent_runtime.PROFILE_ENV: "kp"}), \
+                    patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
+                    patch.object(worker.bridge_injection, "ProcessFileLock",
+                                 return_value=nullcontext()), \
+                    patch.object(worker, "start_or_resume", return_value=(None, None, set())), \
+                    patch.object(worker, "ensure_workspace_trust"), \
+                    patch.object(worker.agent_runtime, "standalone_worker_cmd",
+                                 return_value="kimi") as command, \
+                    patch.object(worker.agent_runtime, "resolve_shell", return_value="bash"), \
+                    patch.object(worker.agent_runtime, "cli_version", return_value="2.3.1"), \
+                    patch.object(worker.subprocess, "Popen", return_value=native), \
+                    patch.object(worker, "supervise") as supervise, \
+                    patch.object(worker, "WireObserver") as observer:
+                self.assertEqual(worker.run(args), 0)
+            record = json.loads(
+                (root / "bridge-kimi-ready-test.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["stage"], "ready")
+            self.assertIsNone(record["session"])
+            self.assertEqual(command.call_args.kwargs["extra_env"]["KIMI_CODE_WATCH"], "0")
+            self.assertIsNotNone(supervise.call_args.kwargs["bind"])
+            observer.assert_not_called()
 
     def test_exact_binding_resumes_and_handoff_rejects_closed_or_wrong_workspace(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -343,23 +423,29 @@ class NativeBindingTests(unittest.TestCase):
             wire.write_text(json.dumps(fixture()[0]) + "\n", encoding="utf-8")
             spec = SimpleNamespace(runtime="kimi", home_path=root)
             with patch.object(worker.agent_runtime, "profile_spec", return_value=spec), \
-                    patch.object(worker, "new_session", return_value="session_test") as create:
-                binding, actual = worker.start_or_resume("test", "kp", root, root)
+                    patch.object(worker, "native_session_ids", return_value=set()) as list_sessions:
+                binding, actual, before = worker.start_or_resume("test", "kp", root, root)
+                self.assertIsNone(binding)
+                self.assertIsNone(actual)
+                self.assertEqual(before, set())
+                pointer = root / "bridge-kimi-thread-test.json"
+                binding = {"session": "session_test", "profile": "kp", "cwd": str(root),
+                           "initial_offset": wire.stat().st_size}
+                pointer.write_text(json.dumps(binding), encoding="utf-8")
+                binding, actual, before = worker.start_or_resume("test", "kp", root, root)
                 self.assertEqual(actual, wire)
                 self.assertEqual(binding["initial_offset"], wire.stat().st_size)
-                worker.start_or_resume("test", "kp", root, root)
-                self.assertEqual(create.call_count, 1)
+                self.assertEqual(list_sessions.call_count, 1)
                 source = worker.handoff_source("test", "kp", root, root)
                 self.assertEqual(source["session_id"], "session_test")
                 self.assertEqual(source["transcript_runtime"], "kimi")
                 with self.assertRaises(ValueError):
                     worker.handoff_source("test", "kp", root / "other", root)
-                pointer = root / "bridge-kimi-thread-test.json"
                 pointer.write_text(json.dumps({**binding, "closed": True}), encoding="utf-8")
                 with self.assertRaises(ValueError):
                     worker.handoff_source("test", "kp", root, root)
                 worker.start_or_resume("test", "kp", root, root)
-                self.assertEqual(create.call_count, 2)
+                self.assertEqual(list_sessions.call_count, 2)
 
 
 class KimiDeliveryTests(unittest.IsolatedAsyncioTestCase):

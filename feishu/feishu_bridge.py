@@ -1076,7 +1076,7 @@ def _ready_timeout(bot, explicit=None):
     if agent_runtime.uses_app_server(bot):
         return float(CODEX_APP_SERVER_READY_TIMEOUT_SEC)
     if agent_runtime.runtime_spec(bot).name == "kimi":
-        return 150.0  # Native warmup has a 120-second bounded model call.
+        return 60.0  # Native session discovery is local; model work starts only after readiness.
     if agent_runtime.runtime_spec(bot).name == "claude":
         return float(CLAUDE_READY_TIMEOUT_SEC)
     return float(READY_TIMEOUT_SEC)
@@ -1130,13 +1130,15 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
                     trust_sent = True
                 time.sleep(READY_POLL_SEC)
                 continue
-            if agent_runtime.is_ready(bot, scr):
+            is_kimi = agent_runtime.runtime_spec(bot).name == "kimi"
+            if not is_kimi and agent_runtime.is_ready(bot, scr):
                 return True
             # Kimi: same two-part rule. The handshake proves this spawn's worker
-            # attached the right session; the composer box proves the terminal
-            # can take keystrokes. Neither half depends on renameable words.
+            # started the native TUI; the composer proves it can take keystrokes.
+            # A composer left by an orphaned TUI is not evidence for this spawn.
             if (
-                _kimi_ready_signal(bot, wait_started)
+                is_kimi
+                and _kimi_ready_signal(bot, wait_started)
                 and re.search(r"(?m)^\s*│\s*>\s*│\s*$", scr) is not None
             ):
                 return True
@@ -1236,9 +1238,7 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
     if retried:
         blog(bot["name"], f"⏳ {pty} 明确停在裸 shell → 补发一次 {agent_runtime.display_name(bot)} 启动命令")
         try:
-            wmux("send", pty, _worker_cmd(bot, cwd), "--allow-ws", workspace_id)
-            time.sleep(0.3)
-            wmux("enter", pty, "--allow-ws", workspace_id)
+            wmux_session.send_command(pty, workspace_id, _worker_launcher(bot, cwd))
         except Exception as exc:  # noqa: BLE001
             screen_error = f"补发失败：{exc}"
         else:
@@ -1345,6 +1345,18 @@ def _worker_cmd(bot, cwd=None):
     return command
 
 
+def _worker_launcher(bot, cwd):
+    """Use the proven Codex bootstrap shape for every runtime."""
+    launcher = STATE_DIR / f"agent-launch-{bot['name']}-{bot.get('_startup_id') or 'retry'}.sh"
+    launcher.write_text(
+        "#!/usr/bin/env bash\n"
+        + "cd -- " + shlex.quote(str(cwd).replace("\\", "/")) + " || exit $?\n"
+        + _worker_cmd(bot, cwd) + "\n",
+        encoding="utf-8",
+    )
+    return f'bash "{launcher.as_posix()}"'
+
+
 def _reuse_check(bot, rec):
     """这条会话记录能不能【原样复用】。返回 (reusable, ws_present, why)：
       · reusable=True             → 直接复用那个活会话。
@@ -1421,40 +1433,24 @@ def _ensure_session_unlocked(bot):
     cwd = current_cwd(bot)  # 沿用【当前所在目录】：/cd 过则自愈重生仍回那个目录（与账号自愈对称）·/close 清过或没 /cd 过则回名册默认
     # Permission bypass flags do not bypass either runtime's directory-trust gate.
     agent_runtime.ensure_launch_cwd_trust(bot, cwd)
-    startup_bot = bot
+    startup_bot = {**bot, "_startup_id": uuid.uuid4().hex}
     startup_started = time.time()
-    if agent_runtime.uses_app_server(bot):
-        startup_bot = {**bot, "_startup_id": uuid.uuid4().hex}
-        # One shell invocation works from either PowerShell or Git Bash. The
-        # script itself confirms cd and then runs the worker; no prompt scraping
-        # or staged bash/cd/launcher injection is needed for this transport.
-        launcher = STATE_DIR / f"codex-launch-{startup_bot['_startup_id']}.sh"
-        launcher.write_text("#!/usr/bin/env bash\n" +
-                            "cd -- " + shlex.quote(str(cwd).replace("\\", "/")) + " || exit $?\n" +
-                            _worker_cmd(startup_bot, cwd) + "\n", encoding="utf-8")
-        r = wmux_session.spawn(f"bot-{bot['name']}", cmd=f'bash "{launcher.as_posix()}"',
-                               cwd=None, shell_init=None)
-    else:
-        r = wmux_session.spawn(f"bot-{bot['name']}", cmd=_worker_cmd(bot, cwd), cwd=cwd)
+    # Codex already proved this shape: one script performs cd + worker launch,
+    # and the terminal receives one short command from either default shell.
+    r = wmux_session.spawn(
+        f"bot-{bot['name']}", cmd=_worker_launcher(startup_bot, cwd),
+        cwd=None, shell_init=None,
+    )
     ws, pty = r["workspace_id"], r["pty"]
     if not _finish_worker_startup(startup_bot, ws, pty, cwd, started=startup_started):
         try:
             wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
         except Exception:  # noqa: BLE001
             pass
-        # Name the most likely cause instead of making the owner guess: a CLI
-        # that upgraded past the version whose startup we verified is exactly
-        # how this failure was produced on 2026-09-07.
-        try:
-            drift = agent_runtime.version_drift_note(
-                agent_runtime.profile_name(bot, required=True))
-        except Exception:  # noqa: BLE001 — 归因失败绝不吞掉原始报错
-            drift = None
         raise RuntimeError(
             f"{agent_runtime.display_name(bot)} 启动未完成："
             + ((_load_startup_failure(bot["name"]) or {}).get("reason") or "未取得就绪信号") + "。"
             "失败现场已保存，请发 /screen 查看；桥没有向仍在启动的 TUI 重复塞命令。"
-            + (f" 可能原因：{drift}" if drift else "")
         )
     newj = _detect_new_jsonl(bot, before)
     jsonl = str(newj) if newj else None

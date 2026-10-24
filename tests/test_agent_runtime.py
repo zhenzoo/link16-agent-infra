@@ -201,7 +201,7 @@ class AgentProfileTests(unittest.TestCase):
         self.assertIn('LINK16_AGENT_PROFILE="cck"', kimi)
         self.assertIn('CLAUDE_CONFIG_DIR=', kimi)
         self.assertIn('XHS_AUTOPILOT="1"', kimi)
-        self.assertIn("unset CLAUDE_CODE_CHILD_SESSION;", kimi)
+        self.assertIn("unset CLAUDE_CODE_CHILD_SESSION DISABLE_AUTOUPDATER DISABLE_UPDATES;", kimi)
         self.assertNotIn("API_KEY", kimi)
         self.assertIn('LINK16_AGENT_PROFILE="cxp"', codex)
         self.assertIn(".codex-personal", codex)
@@ -211,6 +211,22 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(shlex.split(codex)[-2:], ["resume", "abc 123"])
         self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
         self.assertNotIn("CLAUDE_CODE_CHILD_SESSION", codex)
+
+    def test_only_interactive_launch_commands_run_the_update_entry(self):
+        for profile in ("ccp", "cxp", "kp"):
+            with self.subTest(profile=profile), \
+                    patch.object(agent_runtime, "_require_profile_available"):
+                interactive = agent_runtime.standalone_worker_cmd(profile, auto_update=True)
+                probe = agent_runtime.standalone_worker_cmd(
+                    profile, provider_args=["--version"], auto_update=True,
+                )
+                bridge = agent_runtime.worker_cmd(
+                    {"name": "update-test", "profile": profile}, ROOT, ROOT / "feishu" / "_state",
+                )
+            self.assertEqual(interactive.count("agent_update.py"), 1)
+            self.assertIn(f'ensure --profile "{profile}"', interactive)
+            self.assertNotIn("agent_update.py", probe)
+            self.assertEqual(bridge.count("agent_update.py"), 1)
 
     def test_cxp_saved_model_wins_when_default_home_is_a_project_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,12 +327,13 @@ class AgentProfileTests(unittest.TestCase):
     def test_bridge_worker_of_every_runtime_starts_without_outer_agent_stamps(self):
         # The bot's hooks tell it from agents it launches by these stamps
         # (bridge_env.nested_agent); a stale one from the pane must not survive.
-        scrub = "unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID;"
-        for profile in ("ccp", "cxp"):
+        scrub = "unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID"
+        for profile in ("ccp", "cxp", "kp"):
             bot = {"name": f"{profile}-bot", "profile": profile}
             with self.subTest(profile=profile), patch.object(agent_runtime, "_require_profile_available"):
                 command = agent_runtime.worker_cmd(bot, ROOT, ROOT / "feishu" / "_state")
-                self.assertTrue(command.startswith(scrub), command[:120])
+                launch = command.split(" && ", 1)[1]
+                self.assertTrue(launch.startswith(scrub), launch[:120])
 
     @unittest.skipUnless(os.name == "nt", "requires Git Bash/native Windows boundary")
     def test_git_bash_does_not_rewrite_native_provider_slash_arguments(self):
@@ -1202,6 +1219,15 @@ class AppServerReadySignalTests(unittest.TestCase):
                 self.assertFalse(feishu_bridge._wait_agent_ready(bot, 'pty', 'ws', timeout=0.01))
                 send.assert_not_called()
 
+    def test_orphaned_kimi_composer_is_not_this_workers_ready_signal(self):
+        bot = {"name": "test-orphan-kimi", "profile": "kp"}
+        screen = " ╭────────╮\n │ >        │\n ╰────────╯\n context: 0%"
+        with patch.object(feishu_bridge, "read_screen", return_value=screen), \
+                patch.object(feishu_bridge, "_kimi_startup_record", return_value={}), \
+                patch.object(feishu_bridge, "_kimi_ready_signal", return_value=False), \
+                patch.object(feishu_bridge.time, "sleep"):
+            self.assertFalse(feishu_bridge._wait_agent_ready(bot, "pty", "ws", timeout=0.01))
+
     def test_old_trust_text_does_not_confirm_a_live_composer(self):
         bot = {"name": "test-old-trust", "agent": "codex"}
         screen = 'Do you trust the contents of this directory?\nPress enter to continue\n› Ask Codex to do anything'
@@ -1395,16 +1421,16 @@ class BridgeStartupRecoveryTests(unittest.TestCase):
                 patch.object(feishu_bridge, "_worker_cmd", return_value="launch-claude"),
                 patch.object(feishu_bridge, "blog"),
                 patch.object(feishu_bridge.time, "sleep"),
-                patch.object(feishu_bridge, "wmux") as send,
+                patch.object(feishu_bridge.wmux_session, "send_command") as send,
             ):
                 self.assertTrue(feishu_bridge._finish_worker_startup(
                     self.BOT, "ws-test", "pty-test", "C:/repo",
                 ))
-            self.assertEqual(send.call_count, 2)
-            send.assert_any_call(
-                "send", "pty-test", "launch-claude", "--allow-ws", "ws-test"
-            )
-            send.assert_any_call("enter", "pty-test", "--allow-ws", "ws-test")
+            send.assert_called_once()
+            command = send.call_args.args[2]
+            launcher = Path(command.split('"')[1])
+            self.assertEqual(launcher.read_text(encoding="utf-8"),
+                             '#!/usr/bin/env bash\ncd -- C:/repo || exit $?\nlaunch-claude\n')
             self.assertFalse((tmp / "bridge-startup-failure-test-claude-startup.json").exists())
 
         self._with_state_dir(check)

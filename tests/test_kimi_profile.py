@@ -201,27 +201,13 @@ class KimiProfileTests(unittest.TestCase):
         credentials.write_text(json.dumps({"refresh_token": "present"}), encoding="utf-8")
         self.assertEqual(runtime.profile_login_state(profile)["status"], "ok")
 
-    def test_version_drift_only_fires_on_positive_evidence(self):
-        verified = runtime.VERIFIED_CLI_VERSIONS["kimi"]
-        with patch.object(runtime, "cli_version", return_value="99.0.0"):
-            drift = runtime.cli_version_drift("kp")
-            self.assertTrue(drift["drifted"])
-            self.assertEqual(drift["verified"], verified)
-            self.assertIn("99.0.0", runtime.version_drift_note("kp"))
-        for installed in (verified, None):   # 同版本 / 读不出版本 → 绝不误报
-            with patch.object(runtime, "cli_version", return_value=installed):
-                self.assertFalse(runtime.cli_version_drift("kp")["drifted"])
-                self.assertIsNone(runtime.version_drift_note("kp"))
-        with patch.dict(runtime.VERIFIED_CLI_VERSIONS, {}, clear=True):
-            with patch.object(runtime, "cli_version", return_value="99.0.0"):
-                self.assertFalse(runtime.cli_version_drift("kp")["drifted"])
-
-    def test_doctor_reports_version_without_turning_drift_into_failure(self):
+    def test_doctor_reports_installed_version_without_a_version_allowlist(self):
         with patch.object(runtime, "cli_version", return_value="99.0.0"):
             report = runtime.profile_doctor("kp")
-        self.assertEqual(report["version"]["runtime"], "kimi")
-        self.assertTrue(report["version"]["drifted"])
+        self.assertEqual(report["version"], {"runtime": "kimi", "installed": "99.0.0"})
         self.assertNotIn("99.0.0", "；".join(report["errors"]))
+        self.assertFalse(hasattr(runtime, "VERIFIED_CLI_VERSIONS"))
+        self.assertFalse(hasattr(runtime, "cli_version_drift"))
 
 
 if __name__ == "__main__":

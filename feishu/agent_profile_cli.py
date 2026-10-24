@@ -109,6 +109,7 @@ def _selftest(names: list[str], as_json: bool) -> int:
         good = sum(1 for r in rows if r["launch"])
         print(f"\n{good}/{len(rows)} 全绿" if good == len(rows)
               else f"\n{good}/{len(rows)} 通过 —— 有 {len(rows) - good} 个起不来")
+        print("范围：仅验证 registry、启动条件、命令生成与 --version；不代表 wmux、TUI、模型或飞书链路已就绪。")
     return 0 if all(r["launch"] for r in rows) else 1
 
 
@@ -221,10 +222,9 @@ def main(argv=None) -> int:
                     f"{'OK' if result['ok'] else 'FAIL'} {profile}: "
                     + ("；".join(result["errors"]) if result["errors"] else "可启动")
                 )
-                # Drift is a warning line, not an exit code: the profile still
-                # launches, but its screen contract is no longer verified.
-                if result.get("version", {}).get("drifted"):
-                    print("WARN " + (agent_runtime.version_drift_note(profile) or ""))
+                installed = result.get("version", {}).get("installed")
+                if installed:
+                    print(f"INFO CLI {installed}；doctor 只验启动条件，真实会话另看 worker 回执")
             return 0 if result["ok"] else 2
 
         if args.command in {"ready", "needs-trust"}:
@@ -256,6 +256,7 @@ def main(argv=None) -> int:
             cwd=args.cwd,
             extra_env=env,
             provider_args=provider_args,
+            auto_update=True,
         )
         if args.command == "command":
             if args.json:

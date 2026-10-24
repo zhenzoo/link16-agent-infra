@@ -17,7 +17,7 @@ read_when:
   - 改动 wmux_session.py 或任何面板驱动逻辑
   - 面板起不来 / 判活不准需要定位
   - 评估某个 wmux 新 API 能不能用
-last_reviewed: 2026-09-06
+last_reviewed: 2026-10-24
 ---
 # WMUX 多窗口编排 · 交接文档（成功方案 + 失败记录）
 
@@ -35,6 +35,8 @@ last_reviewed: 2026-09-06
 - 🚨 **最重要 · 必读 §8（确切信号）**：`read` 读屏对【刚 spawn 的空闲面板】**不可靠**——只返回 banner、读不到 `❯`，**但面板其实活着**（`LEN=46` 只 banner ≠ 死）。通用任务用 `feishu/wmux_worker.py probe/kickoff/status`：判活看 marker、派活看 spinner、完成看 receipt；内容仓 wrapper 只能在这套信号上增加业务合同，不能退回空闲 read 猜状态。
 - **目标**：在 wmux 多 pane 中运行 Claude/Codex，由 orchestrator 程序化读屏、派活和收结果；每个独立 worker 与主 session 使用同一个 Link16 profile。
 - **已跑通**：wmux RPC 负责 pane I/O，Link16 public launcher 负责 profile/runtime/home；两层不互相猜账号。
+- **创建结果必须核对**：`workspace.new` 超时只表示结果未知，不表示没建。共享 `wmux_session.spawn` 先存现有 workspace ID，失败后只读差分；恰好一个名称吻合的新 ID 才接管并继续启动。旧同名、多候选或无法读取均失败，绝不重放创建。该路径与 runtime 无关，Claude／Codex／Kimi 共用。
+- **新进程先过更新闸**：公共 launcher 对三 runtime 都调用各自官方 updater；只读探针不触发，已有更新不等待，失败或 60 秒超时跳过并启动旧版。合同见 ARCH-120 §5.3。
 - **没跑通**：wmux 自带的 **MCP `terminal_*` 工具**，全报 `Workspace identity unknown`（缺 env `WMUX_WORKSPACE_ID`）。
 - **当前事实**：主 session 从受管 profile wrapper 在 wmux pane 内启动时会同时继承 `WMUX_WORKSPACE_ID` 与 `LINK16_AGENT_PROFILE`；前者给 wmux 身份，后者给账号身份，两者不可互相替代。
 

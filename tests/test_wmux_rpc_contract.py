@@ -112,6 +112,80 @@ class WmuxRpcIdentityBehaviour(unittest.TestCase):
                 self.assertEqual("--force" in args, force is True)
 
 
+class WmuxSessionCreateRecoveryTests(unittest.TestCase):
+    def test_uncertain_create_adopts_only_the_new_matching_workspace(self):
+        rows = [{"id": "ws-old", "name": "bot-kp"}]
+
+        def rpc(method, params=None):
+            if method == "workspace.list":
+                return list(rows)
+            if method == "workspace.new":
+                rows.append({"id": "ws-new", "name": "bot-kp"})
+                raise wmux_session.WmuxOutcomeUnknown("response lost")
+            raise AssertionError(method)
+
+        for command in ("claude-worker", "codex-worker", "kimi-worker"):
+            with self.subTest(command=command), \
+                    mock.patch.object(wmux_session, "_rpc", side_effect=rpc), \
+                    mock.patch.object(wmux_session, "_wait_first_pty", return_value="pty-new"), \
+                    mock.patch.object(wmux_session, "_wait_shell_ready", return_value=True), \
+                    mock.patch.object(wmux_session, "_wmux") as wmux, \
+                    mock.patch.object(wmux_session.time, "sleep"):
+                result = wmux_session.spawn("bot-kp", cmd=command, shell_init=None)
+                self.assertEqual(result["workspace_id"], "ws-new")
+                self.assertEqual(wmux.call_count, 2)
+                wmux.assert_any_call("paste", "pty-new", command, "--allow-ws", "ws-new")
+                wmux.assert_any_call("enter", "pty-new", "--allow-ws", "ws-new")
+                rows.pop()
+
+    def test_shell_not_ready_never_receives_the_launcher(self):
+        with mock.patch.object(wmux_session, "_create_workspace", return_value={"id": "ws-new"}), \
+                mock.patch.object(wmux_session, "_wait_first_pty", return_value="pty-new"), \
+                mock.patch.object(wmux_session, "_wait_shell_ready", return_value=False), \
+                mock.patch.object(wmux_session, "_wmux") as wmux:
+            with self.assertRaisesRegex(RuntimeError, "shell 未就绪"):
+                wmux_session.spawn("bot-kp", cmd="codex-worker", shell_init=None)
+        wmux.assert_not_called()
+
+    def test_long_command_becomes_a_short_launcher(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(wmux_session, "PROJECT", Path(temp)):
+            command = "python update && " + "x" * 300
+            short = wmux_session._short_launcher(command)
+            launcher = Path(short.split('"')[1])
+            self.assertLess(len(short), 240)
+            self.assertEqual(launcher.read_text(encoding="utf-8"),
+                             "#!/usr/bin/env bash\n" + command + "\n")
+            self.assertEqual(wmux_session._short_launcher("short"), "short")
+
+    def test_uncertain_create_never_adopts_an_old_same_name_workspace(self):
+        rows = [{"id": "ws-old", "name": "bot-kp"}]
+        with mock.patch.object(wmux_session, "_rpc") as rpc, \
+                mock.patch.object(wmux_session, "_CREATE_RECONCILE_TIMEOUT", 0), \
+                mock.patch.object(wmux_session, "_wait_first_pty") as wait:
+            rpc.side_effect = [list(rows), wmux_session.WmuxOutcomeUnknown("response lost"), list(rows)]
+            with self.assertRaisesRegex(wmux_session.WmuxOutcomeUnknown, "无法核对"):
+                wmux_session.spawn("bot-kp", shell_init=None)
+            wait.assert_not_called()
+
+    def test_uncertain_create_refuses_multiple_new_matches(self):
+        rows = [{"id": "ws-old", "name": "bot-kp"}]
+        with mock.patch.object(wmux_session, "_rpc") as rpc, \
+                mock.patch.object(wmux_session, "_wait_first_pty") as wait:
+            created = rows + [{"id": "ws-new-1", "name": "bot-kp"},
+                              {"id": "ws-new-2", "name": "bot-kp"}]
+            rpc.side_effect = [list(rows), wmux_session.WmuxOutcomeUnknown("response lost"), created]
+            with self.assertRaisesRegex(RuntimeError, "拒绝猜测"):
+                wmux_session.spawn("bot-kp", shell_init=None)
+            wait.assert_not_called()
+
+    def test_python_timeout_preserves_uncertain_outcome(self):
+        with mock.patch.object(wmux_session.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired(["node"], 30)):
+            with self.assertRaises(wmux_session.WmuxOutcomeUnknown):
+                wmux_session._wmux("rpc", "workspace.new", "{}")
+
+
 class WmuxSessionCloseTests(unittest.TestCase):
     def test_force_is_explicit_and_close_is_verified(self):
         for force in (False, True):

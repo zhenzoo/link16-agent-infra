@@ -40,10 +40,16 @@ WMUX_RPC = resolve_wmux_rpc(PROJECT)   # ~/wmux-rpc.js 优先·兜底仓库副�
 #   workspace、重发 `send`/`enter` 会把同一段文字**注入两次**（用户看到重复派活）——
 #   这类一律不重试，宁可报错。
 _RETRY_ERR_MARKS = ("RPC timeout", "closed before response", "ECONNRESET", "EPIPE")
+_UNCERTAIN_ERR_MARKS = _RETRY_ERR_MARKS + ("timed out", "ETIMEDOUT")
 _IDEMPOTENT_RPC = {"workspace.list", "workspace.current", "pane.list", "surface.list"}
 _IDEMPOTENT_CMD = {"read", "surfaces", "panes"}
 _RETRY_TRIES = 3          # 首次 + 2 次重试
 _RETRY_SLEEP = (1.0, 2.0)  # 退避：第 1 次重试前 1s、第 2 次前 2s
+_CREATE_RECONCILE_TIMEOUT = 10.0
+
+
+class WmuxOutcomeUnknown(RuntimeError):
+    """The call may have taken effect; replaying it is not safe."""
 
 
 def _retryable(args, stderr) -> bool:
@@ -60,16 +66,26 @@ def _retryable(args, stderr) -> bool:
 def _wmux(*args):
     last_err = ""
     for attempt in range(_RETRY_TRIES):
-        r = subprocess.run(["node", str(WMUX_RPC), *args],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢鼠标焦点
+        try:
+            r = subprocess.run(["node", str(WMUX_RPC), *args],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢鼠标焦点
+        except subprocess.TimeoutExpired as exc:
+            last_err = f"wmux-rpc {' '.join(args[:2])} timed out after 30 seconds"
+            if attempt == _RETRY_TRIES - 1 or not _retryable(args, last_err):
+                raise WmuxOutcomeUnknown(last_err) from exc
+            time.sleep(_RETRY_SLEEP[attempt])
+            continue
         if r.returncode == 0:
             return r.stdout
         last_err = r.stderr.strip()
         if attempt == _RETRY_TRIES - 1 or not _retryable(args, last_err):
             break
         time.sleep(_RETRY_SLEEP[attempt])
-    raise RuntimeError(f"wmux-rpc {' '.join(args[:2])} failed: {last_err}")
+    error_type = (WmuxOutcomeUnknown if any(mark.lower() in last_err.lower()
+                                           for mark in _UNCERTAIN_ERR_MARKS)
+                  else RuntimeError)
+    raise error_type(f"wmux-rpc {' '.join(args[:2])} failed: {last_err}")
 
 
 def _rpc(method, params=None):
@@ -203,18 +219,73 @@ def _wait_shell_ready(pty, echoed_hint=None, timeout=SHELL_READY_TIMEOUT):
     return False
 
 
-def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
-    """新建 workspace → (可选 cd) → 起 cmd。返回 {workspace_id, pty, name}。
-    shell_init: 新终端默认 shell 可能是 PowerShell,而 ccp 是 Git Bash 别名 → 先进 bash 再 ccp。
-    传 shell_init=None 跳过(已在 bash / cmd 不依赖别名时)。
+def _reconcile_new_workspace(name, before_ids, cause):
+    """Adopt only the unique matching workspace created by an uncertain call."""
+    deadline = time.monotonic() + _CREATE_RECONCILE_TIMEOUT
+    last_error = ""
+    while True:
+        try:
+            rows = workspaces()
+        except RuntimeError as exc:
+            last_error = str(exc)
+            rows = []
+        candidates = {
+            w["id"]: w for w in rows
+            if w.get("id") and w["id"] not in before_ids and w.get("name") == name
+        }
+        if len(candidates) == 1:
+            return next(iter(candidates.values()))
+        if len(candidates) > 1:
+            raise RuntimeError(
+                f"workspace.new 结果不确定：出现 {len(candidates)} 个同名新 workspace；"
+                "拒绝猜测或重复创建"
+            ) from cause
+        if time.monotonic() >= deadline:
+            raise WmuxOutcomeUnknown(
+                f"workspace.new 未确认结果，且无法核对到唯一的新 workspace：{cause}；"
+                f"最后核对：{last_error or '没有匹配项'}"
+            ) from cause
+        time.sleep(0.25)
 
-    每行【探就绪再发下一行】(取代固定 sleep 盲等)：发完一行轮询读屏到 shell 提示符回来再发下一行,
-    探不到则超时回退原 sleep(0.4)。根治「冷机/新 shell 没就绪→下一行被吞→cd 丢(进错目录)/命令没起来
-    (起会话空等满超时)」——2026-06-17 实测同一病根。分行独立发 bash/cd/cmd,不合并。"""
-    ws = _rpc("workspace.new", {"name": name})
-    ws_id = ws.get("id")
-    if not ws_id:
-        raise RuntimeError(f"workspace.new 没回 id: {ws}")
+
+def _create_workspace(name):
+    before_ids = {w.get("id") for w in workspaces() if w.get("id")}
+    try:
+        ws = _rpc("workspace.new", {"name": name})
+    except WmuxOutcomeUnknown as exc:
+        return _reconcile_new_workspace(name, before_ids, exc)
+    if ws.get("id"):
+        return ws
+    return _reconcile_new_workspace(
+        name, before_ids, RuntimeError(f"workspace.new 没回 id: {ws}"),
+    )
+
+
+def send_command(pty, workspace_id, command):
+    """Submit one launcher command with throttled bracketed paste, then Enter."""
+    _wmux("paste", pty, command, "--allow-ws", workspace_id)
+    _wmux("enter", pty, "--allow-ws", workspace_id)
+
+
+def _short_launcher(command):
+    if len(command) <= 240:
+        return command
+    launcher = PROJECT / "feishu" / "_state" / f"agent-launch-wmux-{time.time_ns()}.sh"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("#!/usr/bin/env bash\n" + command + "\n", encoding="utf-8")
+    return f'bash "{launcher.as_posix()}"'
+
+
+def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
+    """Create or reconcile one workspace, then start the registry-derived command.
+
+    A lost response is not a failed create. Never replay ``workspace.new``:
+    reconcile the before/after IDs and adopt exactly one matching new workspace.
+    Shell/cd lines are sent only after that ownership check, separately, so a
+    prompt that is not ready yet cannot redirect the agent into another cwd.
+    """
+    ws = _create_workspace(name)
+    ws_id = ws["id"]
     pty = _wait_first_pty(ws_id)
     if not pty:
         raise RuntimeError(f"workspace {ws_id} 没起出终端 pty")
@@ -234,7 +305,9 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
     if cwd:
         tail = cwd.rstrip("/").rsplit("/", 1)[-1]     # cd 后新提示符含目录尾段 = 落地铁证
         send_line(f'cd "{cwd}"', echoed_hint=tail)    # ② 单独一行 cd(不合并)·探到新目录提示符再继续
-    send_line(cmd, gate=False)                        # ③ 末行起 claude·不 gate(就绪由调用方 _wait_claude_ready 判)
+    if not _wait_shell_ready(pty):
+        raise RuntimeError(f"workspace {ws_id} shell 未就绪，未提交启动命令")
+    send_command(pty, ws_id, _short_launcher(cmd))  # ③ 长命令落脚本，终端只收短 launcher
     return {"workspace_id": ws_id, "pty": pty, "name": name}
 
 
