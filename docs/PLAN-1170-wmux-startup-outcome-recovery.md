@@ -2,7 +2,7 @@
 doc_type: PLAN
 doc_id: PLAN-1170
 title: wmux 启动恢复与三 runtime 官方自动更新
-status: active
+status: archived
 purpose: 让三类 runtime 在 wmux 创建异常时恢复原会话，首条 Kimi 消息后懒绑定，并在新进程前安全调用官方 updater。
 owns:
   - 本次启动修复、统一更新闸、跨 runtime 回归与真机验收
@@ -31,7 +31,7 @@ last_reviewed: 2026-10-24
 4. 没有其他更新在跑时，更新成功后开 session；已有更新继续运行则当前 session 不等待；失败或 60 秒超时跳过并启动旧版，绝不卡住启动和运行。
 5. C 盘盘点由另一 session 执行，本 PLAN 不做。
 
-当前 Step／恢复点：4.1。代码与全仓测试已完成；三 runtime 官方更新和真 wmux 启动已验，Kimi 首轮懒绑定及真实模型回复已验。生产 `tb26-baseball-3` 已换为干净 worker，精确 session 与公开 Wire 进度已恢复；业务模型任务不属于本 PLAN 完成闸。下一步更新发布记录、提交并推送。
+当前 Step／恢复点：全部完成。代码与全仓测试、三 runtime 官方更新和真 wmux 启动、Kimi 首轮懒绑定及真实模型回复均已验收。生产 `tb26-baseball-3` 已换为干净 worker，精确 session 与公开 Wire 进度已恢复；业务模型任务不属于本 PLAN 完成闸。主提交 `8c9e40a7fd6c` 已回读 origin/main。
 
 ## §1 Stage / Step
 
@@ -52,9 +52,9 @@ last_reviewed: 2026-10-24
 　✅ 3.2 Codex 自带 `check_for_update_on_startup` 在 Link16 集中更新后关闭，消除重复检查；长命令改短 launcher 后，真实新 Codex 全链从约 50–80 秒降到 25.29 秒。
 　✅ 3.3 真实更新：Claude `2.1.309 → 2.1.310`（38.58 秒）；Kimi `2.3.1` 已最新（4.44 秒）；Codex `0.163.0 → 0.164.0`（114.75 秒，真实下载），后续已最新检查 4–8 秒。`ccp/cxp/kp` selftest 3/3 全绿；该探针不冒充 TUI 验收。
 
-🔄 **⭐ Stage 4｜交付：全量回归、发布记录与 main 同步（ETA 15:00）**
+✅ **⭐ Stage 4｜交付：全量回归、发布记录与 main 同步（实际 14:52）**
 　✅ 4.1 全仓 `1276 passed、3 skipped、155 subtests passed`；取消回合补丁定向 `136 passed、40 subtests passed`。更新 PLAN／CHANGELOG／ARCH／SOP／TOOLS，保留其他 session 的 PLAN-1150 改动，不接管其工作。
-　⏳ 4.2 最终 diff 审阅与必要复测，按 commit/push 规范提交 main、推送并回读远端 SHA；不提交 `_state`、本机名册、凭据或其他 session 的改动。
+　✅ 4.2 最终 diff 审阅与必要复测完成；主提交 `8c9e40a7fd6c` 已推送并回读 origin/main。未提交 `_state`、本机名册、凭据或其他 session 的改动。
 
 ⏸ 24 小时外候选：其他电脑加载新启动代码并各做一次真实冷启动（需各机维护窗口）。
 
