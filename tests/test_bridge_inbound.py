@@ -106,21 +106,12 @@ class InboundLedgerTests(unittest.TestCase):
 
 
 class TuiTextHandoffTests(unittest.TestCase):
-    def test_numbered_multiline_below_length_limit_uses_exact_file(self):
-        # The incident was only 5716 units, far below the command-line limit.
+    def test_numbered_multiline_below_length_limit_stays_inline_without_a_file(self):
         body = ("6. 录制与存储\r\n• 云台 ± 10°：“完整原文” 😀\n" * 250)[:5716]
         self.assertLess(feishu_bridge._cmdline_units(body), feishu_bridge.SEND_MAX_CHARS)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)):
-            pointer, reason = feishu_bridge._prepare_tui_text("unit", "om_list", body)
-            files = list(Path(tmp).glob("bridge-inbox-unit-*.txt"))
-            self.assertEqual(len(files), 1)
-            self.assertEqual(files[0].read_bytes(), body.encode("utf-8"))
-            self.assertIn(files[0].as_posix(), pointer)
-            self.assertNotIn("\n", pointer)
-            self.assertNotIn("6. 录制", pointer)
-            self.assertIn("多行", reason)
-            # Existing retry identity reuses this message's file, never a shared last-text file.
-            self.assertEqual(feishu_bridge._prepare_tui_text("unit", "om_list", body), (pointer, reason))
+            self.assertEqual(feishu_bridge._prepare_tui_text("unit", "om_list", body), (body, ""))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_plain_single_line_stays_inline_without_a_file(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)):
@@ -140,7 +131,7 @@ class TuiTextHandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)), \
                 mock.patch.object(Path, "write_bytes", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(RuntimeError, "没有截断提交"):
-                feishu_bridge._prepare_tui_text("unit", "om_full", "1. 一\n2. 二")
+                feishu_bridge._prepare_tui_text("unit", "om_full", "1. 一\t2. 二")
 
 
 if __name__ == "__main__":

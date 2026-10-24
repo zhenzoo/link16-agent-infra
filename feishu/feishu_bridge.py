@@ -66,7 +66,7 @@ CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_s
 #   入站消息一律走 paste（限速分块·bracketed-paste）注入，不再用裸 send。原因：CC 输入框是 TUI·有吞吐上限，
 #   裸 send 把多千字一次性灌进去会丢字 → 截断（2026-06-28 实证：几千字真实消息走 send 被截。早前"send 4199字
 #   OK / 吞吐截断是 warmup 假象"的结论是错的·已被真实截断推翻——别再据此放行裸 send）。
-#   多行正文、含 TAB 的数据和超长文本在 on_message 上游落盘转 Read；TUI 只接收单行短指令。
+#   普通换行原文直发；含 TAB 或超长文本才在 on_message 上游落盘转 Read，TUI 只接收单行短指令。
 SEND_MAX_CHARS = 16000   # marker 作 node 命令行参传递的天花板(~Windows CreateProcess 32767 留余量·send/paste 共用·与截断无关)
 # 注入投递保证（§2.12b · 2026-07-16）：paste 后别盲等 0.3s 就 enter——settle 按字数线性伸缩 + 回车后读屏闭环校验重按。
 INJECT_SETTLE_BASE = 0.2         # settle 基线秒（短消息 1 块 ≈ 这个值·闭环兜底→可略激进）
@@ -977,11 +977,6 @@ def _prepare_tui_text(bot_name, message_id, text):
         reason = "含制表符 TAB·内联会损坏"
     elif _cmdline_units(text) > SEND_MAX_CHARS:
         reason = "超长·内联会撑爆命令行上限"
-    elif "\n" in text or "\r" in text:
-        # A partial multiline composer can look like an approval menu to wmux.
-        # A complete paste also loses some punctuation on Windows Codex; do not
-        # make correctness depend on the UI parser or a smaller length threshold.
-        reason = "多行正文·通过文件完整交接"
     if not reason:
         return text, ""
     try:
