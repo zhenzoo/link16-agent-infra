@@ -71,7 +71,7 @@ def test_due_short_wait_survives_restart_injects_once_then_removes_job(monkeypat
     monkeypatch.setattr(w, "at_picker", lambda *a: False)
     import feishu_bridge as fb
     injected = []
-    monkeypatch.setattr(fb, "_inject", lambda pty, ws, text: injected.append((pty, ws, text)) or True)
+    monkeypatch.setattr(fb, "_inject", lambda pty, ws, text, **kwargs: injected.append((pty, ws, text)) or True)
     w._arm_short_wait("voiceover", REC, row(), {}, 10000)
     jobs = w._short_waits_load()  # a new watchdog process reads the persisted one-shot job
     assert w._resume_short_waits(jobs, {"ccp2": row(short=0)}, {"pty-1": "voiceover"}, BOTS, 10400) == {"voiceover"}

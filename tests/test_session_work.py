@@ -110,11 +110,21 @@ class WorklineGateTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def begin(self, key="turn-1", digest="digest-1"):
+    def begin(self, key="turn-1", digest="digest-1", now=None):
         return session_work.begin_turn(
             self.bot, key, session="s1", runtime="codex",
-            project_hint="Link16", prompt_digest=digest, state_dir=self.state, now=10,
+            project_hint="Link16", prompt_digest=digest, state_dir=self.state, now=now,
         )
+
+    def test_pending_receipt_times_out_to_visible_failure_and_delivers(self):
+        import time
+        self.begin(now=time.time() - session_work.RECEIPT_PENDING_TIMEOUT_SEC - 1)
+        pending = {"route": {"turn_key": "turn-1", "workline_gate": session_work.GATE_CONTRACT}}
+        work = session_work.delivery_work(self.bot, pending, self.state)
+        self.assertIsInstance(work, dict)
+        self.assertIn("回执连续缺失", work["progress"])
+        gate = session_work._load_gate(self.bot, self.state)["turns"]["turn-1"]
+        self.assertEqual(gate["status"], "failed-ready")
 
     def test_replace_commits_revision_and_pins_delivery_snapshot(self):
         self.begin()
@@ -167,9 +177,11 @@ class WorklineGateTests(unittest.TestCase):
 
     def test_newest_commit_releases_older_pending_turns_in_same_burst(self):
         # 2026-09-26 tb24-link16: owner follow-up + two task notices arrived within 3 s.
-        for key, t in (("notice-a", 10), ("owner", 11), ("notice-b", 12)):
+        import time
+        base = time.time()
+        for key, t in (("notice-a", 0), ("owner", 1), ("notice-b", 2)):
             session_work.begin_turn(self.bot, key, session="s1", runtime="claude",
-                                    project_hint="Link16", state_dir=self.state, now=t)
+                                    project_hint="Link16", state_dir=self.state, now=base + t)
         queued = {"turn_key": "notice-a", "workline_gate": session_work.GATE_CONTRACT}
         self.assertIs(session_work.delivery_work(self.bot, queued, self.state), False)
         with self.assertRaisesRegex(ValueError, "已过期"):
@@ -177,7 +189,7 @@ class WorklineGateTests(unittest.TestCase):
                                      task="旧任务", state_dir=self.state)
         session_work.decide_work(self.bot, "notice-b", "replace", project="Link16",
                                  task="查清回复为什么没送到并补发", progress="核对 🔄",
-                                 state_dir=self.state, now=13)
+                                 state_dir=self.state, now=base + 3)
         for key in ("notice-a", "owner"):
             record = {"turn_key": key, "workline_gate": session_work.GATE_CONTRACT}
             work = session_work.delivery_work(self.bot, record, self.state)
@@ -193,10 +205,12 @@ class WorklineGateTests(unittest.TestCase):
         self.assertIn("标题生成失败", work["task"])                  # 放行，而不是永远 False
 
     def test_commit_does_not_release_a_later_pending_turn(self):
-        session_work.begin_turn(self.bot, "first", state_dir=self.state, now=10)
+        import time
+        base = time.time()
+        session_work.begin_turn(self.bot, "first", state_dir=self.state, now=base)
         session_work.decide_work(self.bot, "first", "replace", project="P", task="第一件事",
-                                 state_dir=self.state, now=11)
-        session_work.begin_turn(self.bot, "second", state_dir=self.state, now=20)
+                                 state_dir=self.state, now=base + 1)
+        session_work.begin_turn(self.bot, "second", state_dir=self.state, now=base + 2)
         record = {"turn_key": "second", "workline_gate": session_work.GATE_CONTRACT}
         self.assertIs(session_work.delivery_work(self.bot, record, self.state), False)
 
@@ -397,6 +411,26 @@ class HookContextTests(unittest.TestCase):
                 state, "tb25-test",
                 "执行验收\n[飞书 from=host route=p2a]", "session-kimi",
             )
+            self.assertIn("绝对不要调用 AskUserQuestion", emitted)
+
+    def test_no_picker_policy_is_not_injected_into_other_runtimes(self):
+        import bridge_userprompt
+        payload = {"prompt": "hi", "session_id": "claude-session",
+                   "transcript_path": "claude.jsonl"}
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {
+                    "FEISHU_BRIDGE_SESSION": "tb25-test",
+                    "FEISHU_BRIDGE_OUTBOX_DIR": tmp,
+                }), \
+                mock.patch.object(bridge_userprompt, "_read_stdin_json", return_value=payload), \
+                mock.patch.object(bridge_userprompt.bridge_inbox, "confirm_prompt"), \
+                mock.patch.object(bridge_userprompt, "_work_context", return_value="work"), \
+                mock.patch.object(bridge_userprompt, "_rules_context", return_value=""), \
+                mock.patch.object(bridge_userprompt, "_delivery_context", return_value=""), \
+                redirect_stdout(out):
+            bridge_userprompt.main()
+        self.assertNotIn("AskUserQuestion", out.getvalue())
 
 
 class DeliveryCheckTests(unittest.TestCase):

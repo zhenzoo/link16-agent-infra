@@ -159,6 +159,30 @@ class WireRecoveryTests(unittest.TestCase):
         return WireObserver(bot="test", session="session_test", wire=self.wire,
                             state_dir=self.state, cwd=self.root, **kwargs)
 
+    def test_native_turn_without_hook_contract_is_ungated(self):
+        import session_work
+        self.write(fixture())
+        self.observer().poll()
+        route = turn_delivery_guard.read_route(self.state, "test")
+        self.assertNotIn("workline_gate", route)
+        self.assertFalse(session_work.gate_path("test", self.state).exists())
+        first = json.loads(self.state.joinpath("bridge-outbox-test.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        self.assertNotIn("workline_gate", first["route"])
+
+    def test_native_turn_with_hook_contract_reuses_pending_gate(self):
+        import bridge_inbox
+        import session_work
+        prompt = fixture()[1]["input"][0]["text"]
+        session_work.begin_turn(
+            "test", "hook-turn", session="session_test", runtime="kimi",
+            prompt_digest=bridge_inbox.prompt_digest(prompt), state_dir=self.state,
+        )
+        self.write(fixture())
+        self.observer().poll()
+        route = turn_delivery_guard.read_route(self.state, "test")
+        self.assertEqual(route["turn_key"], "hook-turn")
+        self.assertEqual(route["workline_gate"], session_work.GATE_CONTRACT)
+
     def test_restart_midturn_reconstructs_final_and_never_resends_history(self):
         self.write(fixture()[:-2])
         first = self.observer()

@@ -235,19 +235,11 @@ class WireObserver:
                             route["turn_key"] = pending["turn_key"]
                             self.reducer.turn = pending["turn_key"]
                             self.reducer.accumulator.turn = pending["turn_key"]
-                        else:
-                            hint = session_work.resolve(self.bot, self.state_dir).get("project") or ""
-                            session_work.begin_turn(
-                                self.bot, route["turn_key"], session=self.session,
-                                runtime="kimi", project_hint=hint,
-                                prompt_digest=self.reducer.prompt_digest,
-                                state_dir=self.state_dir, now=route["started_at"],
-                            )
-                        route["workline_gate"] = session_work.GATE_CONTRACT
+                            route["workline_gate"] = session_work.GATE_CONTRACT
                         turn_delivery_guard.activate(
                             self.state_dir, self.bot, route, session=self.session,
                             now=route["started_at"], turn_key=route["turn_key"],
-                            metadata={"workline_gate": session_work.GATE_CONTRACT},
+                            metadata={"workline_gate": session_work.GATE_CONTRACT} if pending else None,
                         )
                     for index, public in enumerate(records):
                         if record.get("type") == "turn.prompt" and self.reducer.route:
@@ -255,14 +247,17 @@ class WireObserver:
                             public["root_turn"] = self.reducer.turn
                             public["turn"] = self.reducer.turn
                         identity = f"kimi:{self.session}:{start}:{index}"
+                        failed_turn = (public.get("kind") == "answer" and record.get("type") == "turn.ended"
+                                       and record.get("reason") in {"failed", "cancelled", "blocked"})
+                        if failed_turn:
+                            public["route"]["workline_gate"] = session_work.GATE_CONTRACT
                         if identity not in self.published:
                             public.update(source_event_id=identity, ts=int(record.get("time", 0) / 1000))
                             _append(self.outbox, public)
                             self.published.add(identity)
                             count += 1
                         if public.get("kind") == "answer":
-                            if (record.get("type") == "turn.ended"
-                                    and record.get("reason") in {"failed", "cancelled", "blocked"}):
+                            if failed_turn:
                                 for _ in range(2):
                                     session_work.request_stop_repair(
                                         self.bot, public["route"]["turn_key"], state_dir=self.state_dir,

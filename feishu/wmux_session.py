@@ -14,6 +14,7 @@
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -95,6 +96,108 @@ def _rpc(method, params=None):
 
 def workspaces():
     return _rpc("workspace.list")
+
+
+def transport_unavailable(error):
+    """Only an unavailable local endpoint qualifies; timeouts/auth failures do not."""
+    message = str(error)
+    return "wmux" in message.lower() and any(
+        mark in message for mark in ("ECONNREFUSED", "ENOENT", "no transport"))
+
+
+def _desktop_wmux_state():
+    """Observe the current desktop session; failed observation must never mean absent."""
+    import bridge_process
+    script = """
+$ErrorActionPreference = 'Stop'
+try {
+  $session = (Get-Process -Id $PID -ErrorAction Stop).SessionId
+  $rows = @(Get-CimInstance Win32_Process -Filter "Name='wmux.exe'" -ErrorAction Stop |
+    Where-Object { $_.SessionId -eq $session })
+  @{ok=$true; session=$session; running=($rows.Count -gt 0)} | ConvertTo-Json -Compress
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+"""
+    value = bridge_process._envelope(bridge_process._powershell(script, 10))
+    if type(value.get("session")) is not int or type(value.get("running")) is not bool:
+        raise RuntimeError("WMUX 进程查询结果不完整")
+    return value
+
+
+def _windows_shutting_down():
+    import ctypes
+    return bool(ctypes.windll.user32.GetSystemMetrics(0x2000))  # SM_SHUTTINGDOWN
+
+
+def recover_transport(error):
+    """Repair pre-submission failure only. Never restart a live GUI or replay input.
+
+    The durable inbox owns retries and verifies RPC/session readiness on its next
+    attempt. One machine-wide lock and cooldown prevent every bot launching WMUX.
+    This is deliberately opt-in from inbound preparation, not a side effect of reads.
+    """
+    if not transport_unavailable(error):
+        return None
+    if os.name != "nt":
+        return "本机 WMUX 连接不可用，消息仍在等待重试。"
+    import bridge_process
+    from bridge_injection import atomic_write_json
+    from windows_bootstrap import wmux_executable
+    cooldown = bridge_process.LOCK_DIR / "wmux-recovery.json"
+    try:
+        with bridge_process.service_lock("wmux-inbound-recovery", control=True, timeout=1):
+            if _windows_shutting_down():
+                return "Windows 正在关机，保留原消息，待系统恢复后继续。"
+            state = _desktop_wmux_state()
+            if state["session"] == 0:
+                return "当前服务没有交互式桌面，无法启动 WMUX；原消息仍保留。"
+            if state["running"]:
+                return "WMUX 进程已在运行，但本机连接尚未就绪；保留会话并继续重试。"
+            now = time.time()
+            try:
+                previous = json.loads(cooldown.read_text(encoding="utf-8"))
+                elapsed = now - float(previous["at"])
+            except (OSError, ValueError, KeyError, TypeError):
+                previous = {}
+                elapsed = 60
+            attempts = int(previous.get("attempts", 0))
+            if attempts >= 2:
+                return "WMUX 已尝试启动 2 次仍未恢复，已停止自动启动；原消息保留，需检查程序现场。"
+            if 0 <= elapsed < 60:
+                return "刚尝试过启动 WMUX，等待启动结果后继续原消息，避免重复拉起。"
+            executable = wmux_executable()
+            if not executable:
+                return "未找到本机 WMUX 程序，无法自动启动；原消息仍保留。"
+            # Record before launching, including failed/crashing launches, to bound retries.
+            atomic_write_json(cooldown, {"at": now, "attempts": attempts + 1})
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = 0
+            subprocess.Popen(
+                [str(executable)], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                startupinfo=startup,
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
+            )
+            return "检测到 WMUX 未运行，已发起启动；待终端就绪后自动继续原消息。"
+    except Exception as exc:
+        # Diagnostics must not consume the inbox item or assert that a launch succeeded.
+        return f"WMUX 自动恢复尚未完成（{type(exc).__name__}），原消息保留并继续重试。"
+
+
+def mark_transport_recovered():
+    """Only a successful terminal handoff resets the bounded launch budget."""
+    import bridge_process
+    from bridge_injection import atomic_write_json
+    path = bridge_process.LOCK_DIR / "wmux-recovery.json"
+    if not path.exists():
+        return
+    try:
+        with bridge_process.service_lock("wmux-inbound-recovery", control=True, timeout=1):
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(state, dict) and state.get("attempts"):
+                atomic_write_json(path, {"at": 0, "attempts": 0})
+    except (OSError, ValueError, TimeoutError):
+        pass
 
 
 def _ws(ws_id):

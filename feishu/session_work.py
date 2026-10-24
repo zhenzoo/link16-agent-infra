@@ -57,6 +57,7 @@ BANNER_MAX = 400        # 顶栏总上限（先不抠长度·主人 2026-09-19�
 FIELD_MAX = 300         # task / progress 各自上限
 PROJECT_MAX = 40
 SUMMARY_MAX = 120       # 卡片摘要（会话列表预览行）上限；客户端本来就只显示一行
+RECEIPT_PENDING_TIMEOUT_SEC = 120
 CARD_HARD = 2980        # 正文(CARD_BUDGET 2800) + 顶栏 必须留在飞书单卡 ~3000 之内：超了只裁顶栏、不动正文
 
 
@@ -309,7 +310,7 @@ def record_turn_key(record: dict) -> str:
 
 
 def delivery_work(bot: str, record: dict, state_dir=None):
-    """Return a pinned work snapshot, False while pending, or None for legacy rows."""
+    """Return a pinned snapshot, False while fresh-pending, or a timed-out visible failure."""
     route = record.get("route") if isinstance(record, dict) else None
     gated = (record or {}).get("workline_gate") or (
         route.get("workline_gate") if isinstance(route, dict) else None
@@ -327,7 +328,11 @@ def delivery_work(bot: str, record: dict, state_dir=None):
             "source": "agent",
         })
     if row.get("status") == "pending":
-        return False
+        if time.time() - float(row.get("started_at") or 0) < RECEIPT_PENDING_TIMEOUT_SEC:
+            return False
+        for _ in range(2):
+            request_stop_repair(bot, turn_key, state_dir=state_dir)
+        row = (_load_gate(bot, state_dir).get("turns") or {}).get(turn_key) or row
     work = row.get("work")
     return _work_snapshot(work) if isinstance(work, dict) and work.get("project") else False
 

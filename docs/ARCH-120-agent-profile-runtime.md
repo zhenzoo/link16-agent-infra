@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-24
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -416,6 +416,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
   治理脚本与 launcher 必须解析同一个 effective registry，不能各自管理 committed 与 local 两份名单。
 - 飞书 `/account` 可显式选择已注册的 Kimi profile。额度状态保持 unknown；未验收可靠额度接口前，自动选号不选择 Kimi。
 - `worker_cmd()` 启动 `kimi_native_worker.py`，后者启动官方原生 TUI 和独立观察子进程；沿用现有桥注入、路由、outbox、卡片与 durable ACK，不复制发送引擎。
+- 所有注入来源共用 Kimi 状态规则：`bridge_activity=active` 时先 `Enter` 再 `Ctrl+S`，把新输入 steer 进当前回合；`idle` / `waiting` / `unknown` 只按 `Enter`。Codex 与 Claude 不发送 `Ctrl+S`。
 
 ### 11.1 会话与观察者身份
 
@@ -435,7 +436,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 
 ### 11.2 Wire 1.5 → 共享 milestone 合同
 
-只接受已验证的 Wire `protocol_version=1.5` 和精确 `agents/main/wire.jsonl`。`turn.prompt` 字节偏移形成稳定 turn_key，入口信封当场锁定回址。`content.part` 只接收公开 text；工具调用只派生固定类别/安全仓库相对路径；`tools.update_store` 的 todo 状态生成真实 plan 修订。思考、系统提示、工具参数、工具结果与错误详情不得进入 outbox。
+只接受已验证的 Wire `protocol_version=1.5` 和精确 `agents/main/wire.jsonl`。`turn.prompt` 字节偏移形成稳定 turn_key，入口信封当场锁定回址。工作行闸只在 hook 已创建匹配 pending 时启用；observer 不为无合同的 Wire 回合自建 pending，wmux 手输、后台通知和看门狗恢复因此不被回执闸阻塞；pending 超过 120 秒则自动失败放行，失败/取消/阻塞也生成可见结果而非永久等待。`turn.prompt` / `turn.steer` 的精确文本同时作为注入已被原生消费的结构回执，屏幕校验落后时不误报交接失败。`content.part` 只接收公开 text；工具调用只派生固定类别/安全仓库相对路径；`tools.update_store` 的 todo 状态生成真实 plan 修订。思考、系统提示、工具参数、工具结果与错误详情不得进入 outbox。
 
 `turn.ended.reason` 决定终结：completed 且存在无工具步骤的公开文字才生成正常答案；failed/cancelled/blocked 分别明确呈现。工具步骤中的文字作为进度，不拼进最终答案。ETA 与实际时间由 agent 提供，适配器保留，不编造。终结记录持久写入 outbox 后才按 turn_key compare-and-clear，旧轮不得清掉新轮。
 

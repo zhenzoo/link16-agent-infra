@@ -107,6 +107,7 @@ os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 sys.path.insert(0, str(Path(__file__).parent))
 from jsonl_reply_extract import extract  # noqa: E402  (find_ask_picker 退役·答题侧改结构化 bridge-picker 状态·ARCH-101 §2.10)
 import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
+import network_route
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
 import bridge_activity
 import bridge_outbound  # noqa: E402 (统一自动/主动出站历史)
@@ -1542,23 +1543,40 @@ def _busy_or_queued(screen):
     return bool(re.search(r"\(\s*\d+s\s*·", screen))   # 生成中状态行的耗时锚 `(47s ·`
 
 
-def _inject_unlocked(pty, workspace_id, marker):
+def _kimi_active_turn(runtime_bot):
+    return bool(
+        runtime_bot
+        and agent_runtime.runtime_name(runtime_bot) == "kimi"
+        and bridge_activity.read_activity(STATE_DIR, runtime_bot).get("state") == "active"
+    )
+
+
+def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
       ① 线性分档 settle：paste 后按字数/块数伸缩等待（短消息 ~0.3s·长文本按需），取代旧固定 sleep(0.3) 盲赌。
       ② 回车后闭环校验：读屏看输入框还卡着我的内容没 → 卡就重按 enter，最多 INJECT_VERIFY_TRIES 次直到框空。
       ③ N 次仍卡 → 返回 False（调用方 DM 喊主人·绝不静默）。
-    paste 仍走限速分块 bracketed-paste（CC 输入框有吞吐上限·裸 send 会丢字截断·2026-06-28 实证）；marker 不含 TAB（上游已拦）。"""
+    paste 仍走限速分块 bracketed-paste（CC 输入框有吞吐上限·裸 send 会丢字截断·2026-06-28 实证）；marker 不含 TAB（上游已拦）。
+    Kimi 活跃回合在 Enter 后补 Ctrl+S（\\x13，wmux 命名键不支持 ctrl+s）进行 steer；其他状态与平台保持原 Enter 行为。
+    Kimi 另以 Wire turn.prompt/turn.steer 的原生回执确认真实消费；活跃时原生回执未到不重复 Enter。"""
     allow = ["--allow-ws", workspace_id]
+    is_kimi = bool(runtime_bot and agent_runtime.runtime_name(runtime_bot) == "kimi")
+    steer_kimi = _kimi_active_turn(runtime_bot)
     wmux("paste", pty, marker, *allow)
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
     chunks = max(1, -(-len(marker) // 100))
     time.sleep(min(INJECT_SETTLE_CAP, INJECT_SETTLE_BASE + INJECT_SETTLE_PER_CHUNK * chunks))
     wmux("enter", pty, *allow)
+    if steer_kimi:
+        wmux("send", pty, "\x13", *allow)
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
-    for i in range(INJECT_VERIFY_TRIES):
+    tries = 15 if is_kimi else INJECT_VERIFY_TRIES
+    for i in range(tries):
         time.sleep(INJECT_VERIFY_FIRST if i == 0 else INJECT_VERIFY_POLL)
+        if is_kimi and bridge_activity.kimi_prompt_submitted(STATE_DIR, runtime_bot, marker):
+            return True
         try:
             scr = read_screen(pty, 10)
         except RuntimeError:
@@ -1567,16 +1585,18 @@ def _inject_unlocked(pty, workspace_id, marker):
             return True                          # 输入框已空 = 提交成功
         if _busy_or_queued(scr):                 # 忙(生成中)/消息已进排队队列 = 已被接受·不是卡死
             return True                          # → 不误报「没提交」·且【别再按回车】(防把排队消息重复入队)·2026-07-20 根治
+        if is_kimi and bridge_activity.read_activity(STATE_DIR, runtime_bot).get("state") == "active":
+            continue                             # 活跃 Kimi 的原生回执未到前不重复 Enter/steer
         wmux("enter", pty, *allow)               # 空闲却卡着 = 上次回车被吞 → 再按（顺序处理·空框重按无害·无双提交）
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
-def _inject(pty, workspace_id, marker, *, idle_bot=None):
+def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None):
     """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
     with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
         if idle_bot and bridge_activity.read_activity(STATE_DIR, idle_bot).get("state") != "idle":
             raise RuntimeError("会话已不空闲；一次性 effort 任务未注入，请等当前回合结束后重发")
-        return _inject_unlocked(pty, workspace_id, marker)
+        return _inject_unlocked(pty, workspace_id, marker, runtime_bot=runtime_bot)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
@@ -2822,7 +2842,7 @@ def _run_bot(bot_name=None):
                 })
                 marker = (bw.build_align_prompt(pack)
                           + f"\n[飞书 from=host to={bot['name']} via=handoff · route=p2a]")
-                ok = await asyncio.to_thread(_inject, pty2, ws2, marker)
+                ok = await asyncio.to_thread(_inject, pty2, ws2, marker, runtime_bot=bot)
                 _record_handoff_attempt(
                     bot["name"], pack, "complete" if ok else "injection-unconfirmed"
                 )
@@ -3139,6 +3159,9 @@ def _run_bot(bot_name=None):
                         return
                     await asyncio.to_thread(clear_cd_pending, bot["name"])
                 try:
+                    network = await asyncio.to_thread(network_route.ensure_agent_proxy, apply=True)
+                    if network.get("status") == "recovered":
+                        blog(bot["name"], network["detail"])
                     rec = load_session(bot["name"])
                     # 预热提示：用 _reuse_check（与 ensure_session 同判据·含 daemon 重启指纹 + agentName 死壳）
                     # 预测要不要冷启 → daemon 重启后注进死壳的老 bug 不再静默,改成「会话已失效·起新的」。
@@ -3154,6 +3177,8 @@ def _run_bot(bot_name=None):
                     try:
                         ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
                     except Exception as exc:
+                        if wmux_session.transport_unavailable(exc):
+                            raise  # Local transport is recoverable before terminal submission.
                         raise bridge_inbox.NonRetryableHandoffError(str(exc)) from exc
                     # 入站附件：真下载字节到 inbox，注入【本地路径】而非 SDK 的 `![image](key)` 占位。
                     # download_resource_to_file 带 message_id → 走 im/v1/messages/{id}/resources（入站正确端点·非 image.get）。
@@ -3305,7 +3330,8 @@ def _run_bot(bot_name=None):
                     inject_wall = time.time()
                     durable_inbox.boundary(msg.id, prompt=marker)
                     inject_ok = await asyncio.to_thread(
-                        _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None)
+                        _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None,
+                        runtime_bot=bot)
                     if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
                         blog(bot["name"], f"[{tid}] ⚠️ 注入后校验：重按{INJECT_VERIFY_TRIES}次仍卡输入框(没提交) → 已喊主人")
                         try:
@@ -3331,6 +3357,7 @@ def _run_bot(bot_name=None):
                                 break
                             await asyncio.sleep(REPLY_POLL_SEC)
                     blog(bot["name"], f"[{tid}] 已注入·回复走 hook→outbox→drainer（v8）{'·冷启动' if created else ''}")
+                    await asyncio.to_thread(wmux_session.mark_transport_recovered)
                 except Exception as e:  # noqa: BLE001
                     err = str(e)
                     blog(bot["name"], f"❌ 处理 {sender} 出错: {err[:300]}")
@@ -3493,7 +3520,7 @@ def _run_bot(bot_name=None):
             if int((p or {}).get("attempts", 0)) < 1 and pty and ws:
                 ok = True                                          # 注入结果当真·不再吞异常后谎报「已重投」（B2·2026-07-18）
                 try:
-                    await asyncio.to_thread(_inject, pty, ws, txt)         # 重投·compact 后上下文已空·正常必成
+                    await asyncio.to_thread(_inject, pty, ws, txt, runtime_bot=bot)  # 重投·compact 后上下文已空·正常必成
                 except Exception as e:  # noqa: BLE001 — 会话已关/死壳 → 注入抛错 → 没投进去
                     ok = False
                     blog(bname, f"🔁 投递保证：重投注入失败（{str(e)[:80]}）→ 会话可能已关")
@@ -3559,10 +3586,16 @@ def _run_bot(bot_name=None):
                 await card_send(ch, payload['message']['chat_id'],
                                 f"❌ 启动失败：{exc}\n原消息已保存在收件队列，已停止自动重试；请排除故障后重新发送。", bname)
                 raise
-            except Exception:
+            except Exception as exc:
                 row = durable_inbox.get(payload['message']['message_id']) or {}
+                recovery = None
+                if row.get('state') == 'processing':
+                    recovery = await asyncio.to_thread(wmux_session.recover_transport, exc)
+                    if recovery:
+                        blog(bname, recovery)
                 if row.get('attempts') == 1 and row.get('state') != 'done':
-                    detail = ('交给终端前的准备尚未完成，我会从保存的待办继续重试。'
+                    detail = (('尚未送达终端。' + (recovery or getattr(exc, 'user_message', None)
+                                              or '准备步骤失败，原消息已保留，我会自动重试。'))
                               if row.get('state') == 'processing' else
                               '终端交接结果暂未确认，我会保留记录等待实际接收信号，不重复提交。')
                     try:

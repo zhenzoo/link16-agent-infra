@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge Link16's UserPromptSubmit and Stop gates into one isolated Kimi home."""
+"""Merge Link16's prompt, stop and no-picker gates into one isolated Kimi home."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,13 @@ from pathlib import Path
 
 import tomlkit
 from tomlkit.items import AoT
+
+
+_HOOKS = (
+    ("UserPromptSubmit", "bridge_userprompt.py", None),
+    ("Stop", "bridge_workline_stop.py", None),
+    ("PreToolUse", "bridge_kimi_pretool.py", "AskUserQuestion"),
+)
 
 
 def default_kimi_home() -> Path:
@@ -25,9 +32,7 @@ def _is_bridge_command(command: object) -> bool:
     if not isinstance(command, str):
         return False
     normalized = command.replace("\\", "/").lower()
-    return any(name in normalized for name in (
-        "/hooks/bridge_userprompt.py", "/hooks/bridge_workline_stop.py",
-    ))
+    return any(f"/hooks/{name}" in normalized for _event, name, _matcher in _HOOKS)
 
 
 def _load(path: Path):
@@ -49,10 +54,11 @@ def _merged(document, repo: Path):
     for entry in out.get("hooks") or []:
         if not _is_bridge_command(entry.get("command")):
             hooks.append(entry)
-    for event, name in (("UserPromptSubmit", "bridge_userprompt.py"),
-                        ("Stop", "bridge_workline_stop.py")):
+    for event, name, matcher in _HOOKS:
         hook = tomlkit.table()
         hook.add("event", event)
+        if matcher:
+            hook.add("matcher", matcher)
         hook.add("command", _hook_command(repo, name))
         hook.add("timeout", 5)
         hooks.append(hook)
@@ -62,19 +68,19 @@ def _merged(document, repo: Path):
 
 def _installed(document, repo: Path) -> bool:
     expected = [
-        {"event": "UserPromptSubmit", "command": _hook_command(repo), "timeout": 5},
-        {"event": "Stop", "command": _hook_command(repo, "bridge_workline_stop.py"), "timeout": 5},
+        {**({"matcher": matcher} if matcher else {}),
+         "event": event, "command": _hook_command(repo, name), "timeout": 5}
+        for event, name, matcher in _HOOKS
     ]
     rows = [entry for entry in document.get("hooks") or []
             if _is_bridge_command(entry.get("command"))]
-    return len(rows) == 2 and [dict(row) for row in rows] == expected
+    return len(rows) == len(expected) and [dict(row) for row in rows] == expected
 
 
 def hooks_plan(kimi_home: Path, repo: Path) -> tuple[dict, str | None]:
     kimi_home, repo = Path(kimi_home), Path(repo).resolve()
     target = kimi_home / "config.toml"
-    hook_files = [repo / "feishu" / "hooks" / name for name in
-                  ("bridge_userprompt.py", "bridge_workline_stop.py")]
+    hook_files = [repo / "feishu" / "hooks" / name for _event, name, _matcher in _HOOKS]
     missing = [str(path) for path in hook_files if not path.is_file()]
     if missing:
         return ({"kind": "kimi-bridge-hook", "path": str(target),
