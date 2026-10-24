@@ -849,6 +849,9 @@ def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypa
         pass
 
     注了, 喊了 = [], []
+    import network_route
+    monkeypatch.setattr(network_route, "ensure_agent_proxy", lambda **kw: {"status": "unmanaged"})
+    monkeypatch.setattr(w, "revive_dead_bridges", lambda: 0)
     monkeypatch.setattr(w, "scan_topology", lambda: ({"pty-1": "ws-voiceover"}, ["pty-1"]))
     monkeypatch.setattr(w, "read_pane", lambda *a, **k: "• Ran node scripts/audit.mjs")
     monkeypatch.setattr(w, "live_bot_by_pty", lambda: {"pty-1": "假codex-bot"})

@@ -26,6 +26,9 @@ class EndReview(BaseException):
 
 
 def run_scenes(monkeypatch, tmp_path, scenes, *, esc_ok=True, nudge_ok=True, configure=None):
+    import network_route
+    monkeypatch.setattr(network_route, "ensure_agent_proxy", lambda **kw: {"status": "unmanaged"})
+    monkeypatch.setattr(w, "revive_dead_bridges", lambda: 0)
     events = []
     cursor = {"i": -1}
 

@@ -51,6 +51,9 @@ def test_watchdog_real_loop_retries_failed_r4_and_r6(tmp_path, monkeypatch):
     monkeypatch.setattr(w, 'bridge_alive', Mock(side_effect=[True, False, False, False]))
     down = Mock(side_effect=[False, True])
     monkeypatch.setattr(w, '_notify_bridge_down', down)
+    import network_route
+    monkeypatch.setattr(network_route, 'ensure_agent_proxy', lambda **kw: {'status': 'unmanaged'})
+    monkeypatch.setattr(w, 'revive_dead_bridges', lambda: 0)
     monkeypatch.setattr(w, '_heartbeat_write', lambda panes, acted, checks: beats.append((copy.deepcopy(state), checks)))
     def sleep(*args):
         if len(beats) == 4:

@@ -147,6 +147,9 @@ def test_recheck_rejects_new_turn_new_output_and_waiting(rpc, monkeypatch):
 def test_watchdog_real_loop_respects_state_hour_and_recheck(
     tmp_path, monkeypatch, state, minutes, confirmed, esc_count,
 ):
+    import network_route
+    monkeypatch.setattr(network_route, "ensure_agent_proxy", lambda **kw: {"status": "unmanaged"})
+    monkeypatch.setattr(w, "revive_dead_bridges", lambda: 0)
     class Done(BaseException):
         pass
     pokes, alerts = [], []
@@ -285,6 +288,9 @@ def test_kimi_wire_gives_turn_state_for_the_main_agent_only(tmp_path, monkeypatc
 
 
 def test_same_unknown_is_logged_once_not_every_patrol(tmp_path, monkeypatch):
+    import network_route
+    monkeypatch.setattr(network_route, "ensure_agent_proxy", lambda **kw: {"status": "unmanaged"})
+    monkeypatch.setattr(w, "revive_dead_bridges", lambda: 0)
     class Done(BaseException):
         pass
     logs = []

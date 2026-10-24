@@ -31,10 +31,12 @@ def nested_bridge_function(name, env):
 
 class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
     def handler(self, runtime="codex"):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
         self.rec = {"workspace_id": "ws-target", "pty": "pty-target"}
         self.env = dict(vars(feishu_bridge))
         self.env.update(
-            asyncio=asyncio, bot={"name": "unit", "agent": runtime},
+            asyncio=asyncio, bot={"name": "unit", "agent": runtime}, STATE_DIR=Path(temporary.name),
             reply=mock.AsyncMock(), account_default={}, default_account=lambda: "profile",
             default_cwd=lambda _: "repo", load_session=mock.Mock(return_value=self.rec),
             clear_session=mock.Mock(), clear_codex_thread=mock.Mock(),
@@ -43,6 +45,17 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
             # Reproduce a close arriving during the former startup guard window.
             startup_window={"start": 0, "end": float("inf")}, close_confirm={"at": 0},
             _gate_verdict=mock.Mock(return_value=(True, "主人")), receipt=mock.Mock(), blog=mock.Mock())
+        self.env["agent_runtime"].runtime_name.return_value = runtime
+        recovery = mock.MagicMock()
+        recovery.KimiClose.return_value.__enter__.return_value.finish.return_value = {
+            "reaped_pids": [], "locks_released": ["kimi-worker", "observer"]}
+        self.env["kimi_process"] = recovery
+        # Exercise the real shared lifecycle using the same isolated globals as
+        # the handler. Imported functions would otherwise retain production I/O.
+        tree = ast.parse((ROOT / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8"))
+        helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name in {"_close_session_unlocked", "replace_session"}]
+        exec(compile(ast.Module(body=helpers, type_ignores=[]), "close-lifecycle-test", "exec"), self.env)
         return nested_bridge_function("handle_slash", self.env)
 
     async def test_one_close_terminates_live_session_for_every_runtime(self):
@@ -66,8 +79,9 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_close_keeps_session_and_delivery_state(self):
         handler = self.handler()
         self.env["wmux_session"].close.side_effect = RuntimeError("close failed")
-        with self.assertRaisesRegex(RuntimeError, "close failed"):
-            await handler("chat", "/close", arrived=time.time())
+        await handler("chat", "/close", arrived=time.time())
+        self.assertIn("关闭未完成", self.env["reply"].call_args.args[1])
+        self.assertIn("close failed", self.env["reply"].call_args.args[1])
         self.env["clear_session"].assert_not_called()
         self.env["clear_codex_thread"].assert_not_called()
         self.env["durable_inbox"].cancel_before.assert_not_called()
