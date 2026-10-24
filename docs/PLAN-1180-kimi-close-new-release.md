@@ -36,7 +36,7 @@ related:
 
 待调研回传与决定：隔离验收决定实现是否可交付，由执行者判断；生产桥加载需要 ROLE-010 规定的明确维护窗口，代码和验证准备完成后再提交精确加载范围，不能把修复授权外推为全机重载授权。
 
-当前 Step／恢复点：Stage 1–3 已完成，Stage 4 正发布。合并后全仓 1332 项与 171 子测试通过，3 项跳过；补齐旧测试隔离后相关 170 项复验通过。Link16 已合并远端六笔，无内容冲突；claude-config 盘点异常修正 b7475dd 已推送 main 并回读一致。旧 TASTE 草稿、settings 偏好、自动更新及本机文件排除；02:12 新出现的 PLAN-1151 与 wmux RPC 测试属于另一会话仍在实施的粘贴修复，未形成完整补丁，保留不提交。精确释放证据在 `feishu/_state/kimi-close-research-20261025/release-receipt.json`；未操作主人新会话。此 session 单写本 PLAN 和本次生命周期代码。
+当前 Step／恢复点：Stage 1–4 已完成，Stage 5 等主人批准 TB26 维护窗口。Link16 v0.40.3 / 6a65ff4 与 claude-config b7475dd 均已推送 main 并回读一致，TB24/TB25 真 @ 通知和两个 Tenant 群投递/抄送成功，尚未收到两机拉取完成回执。全仓 1332 项与 171 子测试通过，3 项跳过；隔离补齐后的相关 170 项复验通过。旧 TASTE、settings、本机策略/锁文件，以及另一会话在途的 PLAN-1151/wmux 粘贴修复不纳入。精确释放与同步回执在 `feishu/_state/kimi-close-research-20261025/`；未操作主人新会话。此 session 单写本 PLAN 和本次生命周期代码；本次额外文档收尾提交不改变 v0.40.3 代码快照。
 
 ## §1 Stage / Step
 
@@ -54,12 +54,17 @@ related:
 　✅ 3.1 临时状态目录与可控进程复现窗口缺失/关窗仅父进程退出，close/new 四组实测释放两把锁，旁置 bot 存活；未知查询、身份变化、嵌套外部 bot、释放失败均阻止误报/新建。三 runtime 关闭/新建顺序通过，未动真实 baseball-3（实际 01:52）。
 　✅ 3.2 回读代码差异并更新 ARCH-120/RESEARCH-110/CHANGELOG；合并远端六笔后全仓 1332 项和 171 子测试通过，3 项跳过，编译和差异检查通过。旧关闭夹具接回共同生命周期；看门狗测试隔离代理恢复与桥探活，相关 170 项复验通过。报告已原位在线同步并完整回读，本机打开请求接受但原 Typora 窗口最小化、身份未确认，不宣称可见（实际 02:12）。
 
-🔄 **⭐ Stage 4｜交付：Link16 / claude-config 的 main 提交推送与 TB24/TB25 跨机同步通知（ETA 02:20）**
+✅ **⭐ Stage 4｜交付：Link16 / claude-config 的 main 提交推送与 TB24/TB25 跨机同步通知（实际 02:16）**
 　✅ 4.1 两仓 survey 仅刷新 origin/main；Link16 三处交集先提交本次代码再三方合并，六笔远端更新全部保留、无内容冲突；claude-config 原本同步。不 stash、不强推、不拉功能分支（实际 01:54）。
 　✅ 4.2 已读两仓 diff 与未跟踪候选，纳入 disk-steward 的 ValueError 修正并用隔离目录核普通文件统计与未知链接跳过。旧 TASTE 与现行规则冲突，不纳入；settings 的自动更新/effort 偏好、本机策略/锁文件保留。新增 PLAN-1151 及配套测试仍在施工，未获完整实现验收，留原会话继续（实际 02:12）。
-　🔄 4.3 两仓分别 fix-identity、按概念暂存审查；claude-config b7475dd 已发布。Link16 按 v0.40.3 汇总上版以来修复，CHANGELOG 与 tag 对齐；推 main 后回读本地 main/origin/main/远端 main 三者一致，不重写共享历史（ETA 02:16）。
-　⏳ 4.4 registry 已核 TB24 的发送键 link16、TB25 的 tb25-link16，二者经个人租户「tb24-25交流水吧」webhook 真 @，并自动抄送 TB26 企业租户「obsagent 大乱斗」，对应主人点名的两个 Tenant 通道。发送两仓精确版本及行为变化，要求保护 dirty/未推送工作、核冲突后只拉 origin/main，忙则当前任务结束再做；保存投递/抄送回执及对方回复，送达不冒充已同步（ETA 02:18）。
-　⏳ 4.5 回传两仓同步结果、排除项目及各机回执。TB26 当前加载候选为 12 桥、1 cron、1 watchdog 和旧 Kimi 的 1 个 observer；只替换这些管理进程，核原 worker/TUI/workspace/session 身份不变，不调用 close/new。按 ROLE-010 提交具体维护窗口，未批准则保留待加载；PLAN-1151 的 WMUX 修复与安装归另一会话，不触碰（ETA 02:20）。
+　✅ 4.3 两仓 fix-identity 并按概念审查提交；claude-config b7475dd 已发布。Link16 v0.40.3 的 tag/CHANGELOG 对齐于 6a65ff4，推送后本地 main/origin/main/远端 main 三者一致，ahead/behind 均 0（实际 02:15）。
+　✅ 4.4 TB24（发送键 link16）和 TB25（tb25-link16）均经「tb24-25交流水吧」webhook 真 @，自动抄送「obsagent 大乱斗」，四次投递均成功。正文要求当前任务结束再处理、保护 dirty/未推送工作、核冲突后只拉 origin/main；两仓 SHA、Kimi/沟通变化、测试及加载边界已附。回执为 sync-tb24-receipt.json、sync-tb25-receipt.json；对方拉取仍待回复（实际 02:16）。
+　✅ 4.5 已回传发布和租户投递结果，并提出 TB26 约 3 分钟维护窗口：12 桥、1 cron、1 watchdog、1 旧 Kimi observer，保留 worker/TUI/session，不操作 PLAN-1151 的 WMUX。规则来源 ROLE-010 已说明；主人尚未答复，执行迁入 Stage 5（实际 02:16）。
+
+⏳ **⭐ Stage 5｜交付：TB26 常驻桥加载 v0.40.3，现有 worker/TUI/会话保持不变（ETA 02:23，待维护窗口）**
+　⏳ 5.1 等待主人明确批准维护时间；问题已发，不能以沉默或时间经过代替授权。若批准现在执行，先重新核 12 桥、cron/watchdog、Kimi observer 的脚本/bot/PID/出生时间，记录所有现有 workspace、worker 与会话身份；若另指定时刻，原位改排期（ETA 02:20）。
+　⏳ 5.2 仅在批准窗口内经既有 start/stop 管理入口重载桥与守护组件；旧 Kimi observer 按精确身份单独替换，让监督进程恢复新观察者，不结束 worker/原生 TUI，不调用 close/new，不重启 WMUX。若其他会话的在途代码已改变加载范围，先核差异并停止依赖该改动的重载，不把未验证代码装入生产（ETA 02:22）。
+　⏳ 5.3 核 12 桥 ready/handling、唯一 cron/watchdog 心跳与 observer 单实例；比较前后 worker 出生时间、workspace/session 指针，逐项确认原会话保留。明确 close/new 已加载的新版本与仍待下次原生启动的回执/hook 边界；记录并交付维护回执，更新本 PLAN 并同步 main（ETA 02:23）。
 
 ⏸ 24 小时外候选：Windows Job Object 的 worker 异常退出级加固——本轮先完成主人直接使用 close/new 的可验收链路，隔离结果若仍有无法可靠回收的后代再重评；不为加固扩大全机进程管理范围。
 
@@ -71,3 +76,4 @@ related:
 - 2026-10-25 01:52｜242 项相关测试、34 子测试通过，含 20 项新增回归与四组 Windows 真进程实验。Stage 2 原 ETA 02:05，实际提前 13 分钟；出生时间精度与子树隔离反例已修正。生产桥未重载。
 - 2026-10-25 01:54｜修复提交 24388ef 后合并 origin/main 六笔更新，三处重叠文件自动三方合并、无内容冲突。claude-config 盘点 ValueError 修正经隔离样本通过并提交 b7475dd；旧沟通草稿与现行合同冲突，保留本地，settings 与本机文件不提交。全仓回归运行中。
 - 2026-10-25 02:12｜全仓 1332 passed、3 skipped、171 subtests；追加隔离桥探活后的 170 项复验通过。首次全仓发现旧关闭夹具未隔离新 helper，以及看门狗测试进入真实本机查询，停止测试进程后补齐夹具重跑；生产桥/worker 未重启。新出现的 PLAN-1151/wmux 测试为另会话在途工作，留原位不纳入。Stage 3 提前 3 分钟，Stage 4 因两仓审查及合并已并行完成由 02:45 提前到 02:20。
+- 2026-10-25 02:16｜Link16 main/tag v0.40.3=6a65ff458bf2dcf72a7b36dfdacbfd4f1898f734；claude-config main=b7475ddab4a4d440d40a900491d83a841e9bb9bd，均回读一致。TB24/TB25 webhook 投递成功，两条 TB26 群抄送成功；仅能确认送达，尚无拉取回执。Stage 4 比更新后 ETA 提前 4 分钟。增加 Stage 5 承接已提出但未获答复的维护窗口，原会话保持不动。
