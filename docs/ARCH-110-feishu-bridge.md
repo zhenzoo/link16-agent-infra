@@ -183,13 +183,15 @@ python feishu/install_codex_bridge_hooks.py --write
 
 该脚本合并到 `CODEX_HOME/hooks.json`，按 command 去重并保留已有 hook（例如个人 Stop 声音提醒）。Codex hook 脚本自身仍用 `FEISHU_BRIDGE_SESSION` 守门，所以即使全局安装，也只对桥 spawn 的 Codex 会话写 outbox；普通 Codex 会话 env 不命中即 no-op。**bot 里再起的智能体不算 bot**（v0.33.6）：这个变量会被 bot 派生的一切继承，bot 在 shell 里跑的 `codex exec` 也带着它。所有桥 hook 先调 `bridge_env.nested_agent(payload)`：环境里外层智能体的会话戳（`CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`）与本 hook 的会话号不同 → 直接 no-op，不开 turn、不改路由、不发进度、不判工作行失败。桥启动 bot 时清掉这些戳（`agent_runtime.BOT_LAUNCH_SCRUB_KEYS`），bot 自己的 hook 只会看到自己的戳。边界：Codex bot 里再起 Codex、Kimi 里再起 Codex/Kimi 时内层会覆盖或不带戳，识别不到。
 
-**Kimi 原生 hook 与 Wire observer**：`profile_bootstrap.py --profile <kimi-profile> --apply` 用 `install_kimi_bridge_hooks.py` 把 `UserPromptSubmit` 与 `Stop` 两条 bridge hook 合并进该 profile 的 `config.toml`，保留已有 `[[hooks]]`，重复执行不增副本；`service_doctor.py` 同时检查 hook、worker 和 reducer。Kimi 0.41 的 `prompt` 是 `ContentPart[]`，`bridge_userprompt.py` 只拼接其中的 text part 来确认 inbox 与解析最末路由信封，图片等 part 不落状态。hook 以 exit-0 stdout 显式触发 `feishu-workline`；Wire observer 用 prompt digest 复用 UserPromptSubmit 已建立的 turn key，避免同一轮长出两份回执。普通 Kimi 会话没有 `FEISHU_BRIDGE_SESSION` 时立即 no-op。
+**Kimi 原生 hook 与 Wire observer**：`profile_bootstrap.py --profile <kimi-profile> --apply` 用 `install_kimi_bridge_hooks.py` 把 `UserPromptSubmit`、`Stop` 与 `PreToolUse` 三条 bridge hook 合并进该 profile 的 `config.toml`，保留已有 `[[hooks]]`，重复执行不增副本；`service_doctor.py` 同时检查 hook、worker 和 reducer。Kimi 0.41 的 `prompt` 是 `ContentPart[]`，`bridge_userprompt.py` 只拼接其中的 text part 来确认 inbox 与解析最末路由信封，图片等 part 不落状态。hook 以 exit-0 stdout 显式触发 `feishu-workline`；Wire observer 用 prompt digest 复用 UserPromptSubmit 已建立的 turn key，避免同一轮长出两份回执。普通 Kimi 会话没有 `FEISHU_BRIDGE_SESSION` 时立即 no-op。
+
+飞书/wmux 托管的 Kimi 禁止交互提问：UserPromptSubmit 在每轮上下文开头声明不得调用 `AskUserQuestion`，`bridge_kimi_pretool.py` 再在工具执行前以 exit 2 硬拦截；确需主人决定时改用普通文字，不弹终端 picker。该拦截只检查桥会话环境标识与工具名，桥外 Kimi、Codex、Claude 均不受影响。桥内 TUI 使用 `KIMI_CODE_WATCH=0`，因此新安装或升级的 PreToolUse hook 从下一次原生进程启动起生效，不能冒称已热加载进旧进程。
 
 Kimi 可能在 composer 前弹出可选升级菜单。ready loop 只在同时看到 `Kimi Code Update Available`、两个选项和 `Esc continue` 时发送一次 Escape，选择继续当前已验证版本；不使用 `Down+Enter`，避免丢键后误触升级，也不把 worker 已启动误判成 composer 可注入。
 
 hook 不承担“读取思维链”。桥会话里的 Kimi 把可公开的当前动作写成 Wire `content.part(type=text)`；同一步随后发生工具调用时，observer 把这段 text 当 commentary，再附安全工具摘要。原生 `content.part(type=think)`、工具参数、工具结果和错误正文全部丢弃。`turn.ended` 只把未归入工具步骤的公开 text 组成 final。这样用户能看到“现在在做什么”和阶段发现，但看不到模型私有推理。
 
-**当前边界**：AskUserQuestion 结构化检测仍是 Claude PreToolUse 路径；Codex 的交互问题样式需等真实 payload 后再补 adapter。桥的 `/screen`、`/stop`、`/close`、`/cd`、附件下载、飞书发送路径已 runtime-neutral。
+**当前边界**：Claude 与 Kimi 都在桥会话中禁止 AskUserQuestion，不再把终端 picker 转发到飞书；Codex 的交互问题样式需等真实 payload 后再补 adapter。桥的 `/screen`、`/stop`、`/close`、`/cd`、附件下载、飞书发送路径已 runtime-neutral。
 
 ### § 2.4.2 · Codex typed milestone canary（PLAN-915 · 2026-07-17）
 

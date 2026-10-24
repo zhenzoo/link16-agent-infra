@@ -68,6 +68,42 @@ class KimiBridgeHookTests(unittest.TestCase):
                 hooks.apply_hooks(home, ROOT)
             self.assertEqual(config.read_bytes(), original)
 
+    def test_no_picker_hook_is_installed_and_scoped_to_bridge_sessions(self):
+        import json
+        import os
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            hooks.apply_hooks(home, ROOT)
+            parsed = tomlkit.parse((home / "config.toml").read_text(encoding="utf-8"))
+            pretool = next(row for row in parsed["hooks"]
+                           if "bridge_kimi_pretool.py" in row["command"])
+            self.assertEqual(dict(pretool), {
+                "event": "PreToolUse",
+                "matcher": "AskUserQuestion",
+                "command": f'python "{(ROOT / "feishu/hooks/bridge_kimi_pretool.py").as_posix()}"',
+                "timeout": 5,
+            })
+
+        script = ROOT / "feishu" / "hooks" / "bridge_kimi_pretool.py"
+        cases = (
+            ({}, "AskUserQuestion", 0),
+            ({"FEISHU_BRIDGE_SESSION": "tb24-test"}, "Read", 0),
+            ({"FEISHU_BRIDGE_SESSION": "tb24-test"}, "AskUserQuestion", 2),
+        )
+        for extra_env, tool_name, expected in cases:
+            with self.subTest(extra_env=extra_env, tool_name=tool_name):
+                env = os.environ.copy()
+                env.pop("FEISHU_BRIDGE_SESSION", None)
+                env.update(extra_env)
+                result = subprocess.run(
+                    [sys.executable, str(script)], input=json.dumps({"tool_name": tool_name}),
+                    capture_output=True, text=True, encoding="utf-8", env=env, timeout=10,
+                )
+                self.assertEqual(result.returncode, expected)
+                self.assertEqual("禁止使用" in result.stderr, expected == 2)
+
 
 if __name__ == "__main__":
     unittest.main()

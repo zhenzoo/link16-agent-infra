@@ -99,8 +99,14 @@ def main():
         pass
     # 机械触发 repo-owned skill。Claude/Codex 接 JSON additionalContext；
     # Kimi 的 exit-0 stdout 会直接进入上下文。
-    context = "\n\n".join(filter(None, [_work_context(bot, sd, active), _rules_context(bot, sd, inp, profile),
-                                        _delivery_context(bot, sd)]))
+    kimi_policy = (
+        "[Link16 Kimi bridge policy] 本会话由飞书/wmux 托管。绝对不要调用 AskUserQuestion，"
+        "也不要显示终端选择题。授权范围内的可逆决定直接执行；确实只能由主人决定的事项，"
+        "用普通文字说明选项和推荐，并通过飞书回复，不弹 picker。等待决定时继续做不依赖该决定的工作。"
+        if is_kimi else ""
+    )
+    context = "\n\n".join(filter(None, [kimi_policy, _work_context(bot, sd, active),
+                                        _rules_context(bot, sd, inp, profile), _delivery_context(bot, sd)]))
     if is_kimi and context:
         print(context)
     elif context:

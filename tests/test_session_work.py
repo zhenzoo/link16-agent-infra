@@ -411,6 +411,26 @@ class HookContextTests(unittest.TestCase):
                 state, "tb25-test",
                 "执行验收\n[飞书 from=host route=p2a]", "session-kimi",
             )
+            self.assertIn("绝对不要调用 AskUserQuestion", emitted)
+
+    def test_no_picker_policy_is_not_injected_into_other_runtimes(self):
+        import bridge_userprompt
+        payload = {"prompt": "hi", "session_id": "claude-session",
+                   "transcript_path": "claude.jsonl"}
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {
+                    "FEISHU_BRIDGE_SESSION": "tb25-test",
+                    "FEISHU_BRIDGE_OUTBOX_DIR": tmp,
+                }), \
+                mock.patch.object(bridge_userprompt, "_read_stdin_json", return_value=payload), \
+                mock.patch.object(bridge_userprompt.bridge_inbox, "confirm_prompt"), \
+                mock.patch.object(bridge_userprompt, "_work_context", return_value="work"), \
+                mock.patch.object(bridge_userprompt, "_rules_context", return_value=""), \
+                mock.patch.object(bridge_userprompt, "_delivery_context", return_value=""), \
+                redirect_stdout(out):
+            bridge_userprompt.main()
+        self.assertNotIn("AskUserQuestion", out.getvalue())
 
 
 class DeliveryCheckTests(unittest.TestCase):
