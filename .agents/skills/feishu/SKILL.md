@@ -1,6 +1,6 @@
 ---
 name: feishu
-description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、表格、Wiki、多维表格或白板链接的完整内容（含别人只分享给主人的、L1–L4 密级文档；优先于 lark-* 官方技能和网页抓取），按在线链接查本地 HTML、新建或编辑在线文档、在已有文档插入/嵌入图片音频视频、大文件在线审阅、发送消息和语音，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，以及 bot 注册、改名、历史、a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
+description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、表格、Wiki、多维表格或白板链接的完整内容（含别人只分享给主人的、L1–L4 密级文档；优先于 lark-* 官方技能和网页抓取），带评论文档批量改稿与断点续跑、按在线链接查本地 HTML、新建或编辑在线文档、在已有文档插入/嵌入图片音频视频、大文件在线审阅、发送消息和语音，将已有 HTML、视频交互或三维查看器发布为妙搭应用链接，以及 bot 注册、改名、历史、a2a、cron、bridge、watchdog、registration monitor 与权限审计。凡任务涉及飞书、Lark、妙搭网页发布、bot 名称与后台链接、bot 群聊、定时派活、注册回调或桥健康检查时使用。
 ---
 
 # Feishu — Link16 核心工具入口
@@ -57,10 +57,11 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 新建媒体审阅文档并验证真实预览 | 上述入口加 `--publish-only --receipt <新的JSON> --verify-out <新目录>`；自动逐项检查真实页面，见 SOP-141 |
 | 往已有文档插入图片／音频／视频 | 同一 `send_feishu_media.py` 加 `--document <docx链接或token>`；默认末尾，指定位置加 `--parent-block <父块> --index <从0起的位置>`；保留原正文和权限，仍加 `--verify-out` |
 | 读全文、解析wiki链接、表格写回、查文档权限 | `python feishu/docio_cli.py --bot <我> inspect/read/write/doctor ...`；依 SOP-140，媒体插入走上一行；链接没分享给 bot 但主人能看时 `read <url> --into <目录> --as-user` 用主人账号读 |
+| 已有文档批量改字／逐点修订，须保留评论 | `python feishu/docio_cli.py --bot <我> edit-text "<URL>" --changes <changes.json> --state <新批次目录>`；默认全批预检、零在线写入，已授权后同命令加 `--resume --apply`；每项只填 `block_id/old/new`，工具生成最小补丁和全文目标。恢复继续用原目录和原清单，见下方与 SOP-140 §5 |
 | 发聊天语音条（仅用户本轮明确说“语音条”时） | `python feishu/send_feishu_voice.py --bot <我> --audio <路径> --text "…"`；其余音频走 `send_feishu_media.py` |
 | 图片直发私聊（仅用户本轮明确说“直接发图片”时） | `python feishu/feishu_bridge.py send --bot <我> --image <路径> [--text "…"]`；其余图片走 `send_feishu_media.py` |
 | 发布 Markdown / HTML 在线文档（默认唯一入口） | 全局开关开启后用 `python feishu/feishu_bridge.py send --bot <我> --doc <文件>`；用户仅本轮明确要求在线稿时加 `--explicit-online` |
-| 本地 Markdown 改了，同步到已有在线文档（链接不变） | `python feishu/feishu_bridge.py send --bot <文档所属 bot> --doc <文件.md> --update <docx/wiki 链接>`：按块比对，只删改有变化的块，未变块及其评论保留；线上有本地没有的图片等块时拒绝，确认以本地为准才加 `--overwrite`；读取后文档被他人改动即中止。表格形态 `--table-layout auto|native|vertical`（创建也可用；更新时 auto 沿用线上形态）。不要自写比对脚本或直调 feishu_docs 内部函数 |
+| 本地 Markdown 改了，同步到已有无评论在线文档（链接不变） | `python feishu/feishu_bridge.py send --bot <文档所属 bot> --doc <文件.md> --update <docx/wiki 链接>`：按块比对，只删改变化块；检测到原生评论引用就停止，改用上一行 `edit-text` 或 `docio write`，`--overwrite`不能绕过。线上有本地没有的图片等块时拒绝，确认以本地为准才加 `--overwrite`；并发正文修改中止。表格形态 `--table-layout auto|native|vertical`（auto 沿用线上形态）。不要自写比对脚本或直调 feishu_docs 内部函数 |
 | 参照现有表格新建同类型飞书Sheet | 读 [原生Sheet参考表复刻流程](references/SOP-020-native-sheet-from-reference.md)，再按 `lark-cli skills read lark-shared` 与 `lark-cli skills read lark-sheets` 调用飞书API；先只读参考表，声明式新建，最后回读工作簿、单元格、样式、合并、冻结、下拉和条件格式 |
 | 将已有 HTML、视频交互或三维查看器发布为妙搭应用链接 | 读 [HTML→妙搭流程](references/SOP-010-html-to-miaoda.md)，复用 `lark-apps`，保留已有应用入口；资源清单和发布核验用 `python feishu/miaoda_delivery.py --help` |
 | 把 bot 建的在线文档交给主人（主人说“这份给我/交接给我/要发给别人看”，或 PRD 交付稿） | `python feishu/docio_cli.py transfer-owner <url>`（默认 dry-run，确认后加 `--apply`）；用**创建它的那只 bot** 身份跑，主人 = 该 bot 的 owner 文件，bot 保留可管理；不挂群、不改其他协作者与分享设置 |
@@ -77,6 +78,20 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 已有 bot 改名 / 查后台链接 / 改名后新名不识别 | 先读 SOP-125；`python feishu/rename_bot.py plan --bot <原名或别名> --name <准确新名> --out feishu/_state/bot-renames/<本次操作>.json`，按状态给 console_url、watch 或 apply，最后 verify |
 
 表中没有的操作先读 `TOOLS.md`，不要另造脚本。
+
+### 带评论改稿：先用现有批改工具
+
+普通文字修改不必重新探索 API 或手写逐段循环。先按第 2 节读原文，从 `document.json` 的原生 XML 取真实块 ID，保存 UTF-8 `changes.json`：
+
+```json
+{"changes":[{"block_id":"从原文取到的真实块ID","old":"原有完整短句","new":"审定后的新短句"}]}
+```
+
+运行表内 `edit-text` 预演，审阅 `preview.json` 后，在任务授权内直接 `--resume --apply`，不重复请求已给过的改稿许可。每项限同一行内文字片段，跨格式片段/跨块或全文匹配不唯一会拒绝；结构与表格改动用 `write` 的原生 XML 局部补丁，具体格式见 SOP-140 §5。用户身份路径须显式加 `--as-user`，续跑保持同一身份、URL、清单和目录。
+
+工具全批预检后逐处写入，完整分页读评论及回复；写前核版本、评论选区，写后核全文及原评论 ID、作者、回复、状态、关联块与选中文字。**保留块 ID，或保留原句首尾，都不等于评论选区保住。** 替换碰到评论选中文字、带评论块的整块覆盖、评论关联无法确定时直接停止；不能改用裸 `lark-cli +update`、Markdown 全量同步、自写脚本、重建同文评论或解决旧评论绕过。保留原文与回执，回传具体受阻句子及评论处理取舍；涉及删除/迁移原评论须用户明确决定，不能用新评论冒称原评论无损保留。
+
+中断后用原 `--state` 加 `--resume`：工具先只读核对未确认操作，已落地且通过全文和评论检查才接续；未落地或结果不明也不会自动重发。单补丁使用 `write <URL> --patch <原JSON> --recover`。失败先看批次 `pending` 和 `*.docx-state.json`，不要换目录重试、删除恢复记录或把 HTTP 成功当交付。保护仅针对这条受管写入链；原有失定位评论照实保留，不能称已修复。
 
 ### Bridge Effort
 
@@ -116,7 +131,7 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 - 用户要“像某张飞书表格一样”时，`一样`默认指原生Sheet资源类型、字段、布局和交互能力相同，不等于复制参考表正文。必须先按SOP-020回读参考表的真实结构，再用`+workbook-create`声明式新建；不得把Doc原生表、Markdown表或Excel导入冒充同类型Sheet，也不得为省事改写参考表。
 - 研究、计划和日常回复默认用纵向标题、段落与列表，手机阅读优先；正式PRD按需要使用原生表格。不要把本地Markdown里的竖线表格直接塞进飞书普通文字块，也不把用户偏好解释成禁止任何表格。用户要比较时用同一内容展示真实原生样式。
 - Markdown创建的机械闸在 `feishu/doc_structure.py`：非PRD表格编译为原生字段列表并保留链接；PRD简单原生表格先检查全篇预算，复杂表格/媒体转 `lark-cli skills read lark-doc` 的专用资源流程。写入后完整分页回读正文、链接、样式和结构，`structure_verified=true`才准返回成功。失败不再纯文本降级，也不得用import绕过检查。
-- 更新已有在线文档先读 `lark-cli skills read lark-doc/references/lark-doc-xml.md` 的XML与资源规范，再走 `python feishu/docio_cli.py write <url> --patch <json>`；补丁 `docx.format=xml`，写入前绑定当前revision，已获授权则加 `--apply`。整篇覆盖/追加自动构造全文核验目标；局部替换必须提供 `expected_document` 完整XML。`doc_xml_structure.py`逐项核对全文、链接、原生列表/表格、样式与资源标识后才报告成功。不要直接调用裸 `lark-cli +update` 绕过回读闸；保留已有评论/资源，局部内容变化不能擅自整篇覆盖。
+- 更新已有在线文档：普通文字优先上方 `edit-text`；结构改动才先读 `lark-cli skills read lark-doc/references/lark-doc-xml.md`，再走 `python feishu/docio_cli.py write <url> --patch <json>`。补丁 `docx.format=xml`，绑定当前revision，已授权则加 `--apply`；局部替换必须提供 `expected_document` 完整XML。写前评论保护与写后全文/评论回读均通过才成功，整篇覆盖有评论文档被拒绝。整篇覆盖/追加自动构造全文目标；不直接调用裸 `lark-cli +update`，不把局部修订变成整篇覆盖。单补丁不确定结果只用 `--recover` 读取，禁止盲重试。
 - 这两道闸覆盖受管文字创建及XML更新；HTML/Office导入、媒体播放和手机视觉效果仍须按对应流程另外验证，不能把文字结构通过称作所有格式均已验证。
 - 发送入口没有旁路：图片、视频、音频、PDF 等媒体一律 `send_feishu_media.py`，Markdown / HTML 一律 `send --doc`。只有用户本轮明确说“文件”“附件”或“原文件”时，才使用 `send_feishu_file.py --file`；明确说“直接发图片”时才用 `send --image`；明确说“语音条”时才用 `send_feishu_voice.py`。在线开关、在线 URL 或 `$open-local` 成功都不能外推出这三种例外的授权。旧的 `send --file` 已机械拒绝，不能再用。
 - 飞书在线文档和关键网页 URL 必须裸写或写成 `[标签](https://...)`，不得套反引号或代码围栏。

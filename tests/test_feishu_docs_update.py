@@ -5,6 +5,7 @@ concurrent edits stop before any write, overwrite, no-op, layout inference, brid
 judge: mechanical call contract; live Feishu behaviour is verified separately (SOP-140).
 """
 import sys
+import copy
 import types
 import unittest
 from pathlib import Path
@@ -32,7 +33,8 @@ def table(bid, text):
 
 
 class UpdateTextDocTests(unittest.TestCase):
-    def run_update(self, live, live_roots, source, source_roots, *, revisions=(7, 7, 8), **kwargs):
+    def run_update(self, live, live_roots, source, source_roots, *, revisions=(7, 7, 8),
+                   latest=None, **kwargs):
         writes, deletes = [], []
 
         def write_roots(_token, _doc, _by_id, roots, index=0):
@@ -48,7 +50,8 @@ class UpdateTextDocTests(unittest.TestCase):
             mock.patch.object(feishu_docs, "_tenant_token", return_value="token"),
             mock.patch.object(feishu_docs, "_doc_revision", side_effect=list(revisions)),
             mock.patch.object(feishu_docs, "_read_doc_blocks",
-                              side_effect=[(live, live_roots), (source, source_roots)]),
+                              side_effect=[(live, live_roots), (latest or live, live_roots),
+                                           (source, source_roots)]),
             mock.patch.object(feishu_docs, "_convert_markdown", return_value=(source, source_roots)),
             mock.patch.object(feishu_docs, "_write_roots", side_effect=write_roots),
             mock.patch.object(feishu_docs, "_throttled_write", side_effect=throttled),
@@ -58,6 +61,7 @@ class UpdateTextDocTests(unittest.TestCase):
         for p in patches:
             p.start()
         self.addCleanup(mock.patch.stopall)
+        self.write_calls, self.delete_calls = writes, deletes
         result = feishu_docs.update_text_doc("app", "secret", DOC, markdown="# src", **kwargs)
         return result, writes, deletes
 
@@ -87,6 +91,30 @@ class UpdateTextDocTests(unittest.TestCase):
         live = [para("a", "一")]
         with self.assertRaises(DocStructureError):
             self.run_update(live, ["a"], [para("s1", "二")], ["s1"], revisions=(7, 9))
+
+    def test_comments_refuse_markdown_sync_even_with_overwrite(self):
+        for overwrite in (False, True):
+            live = [para("a", "一")]
+            live[0]["text"]["elements"][0]["text_run"]["comment_ids"] = ["original"]
+            with self.assertRaises(DocStructureError) as caught:
+                self.run_update(live, ["a"], [para("s1", "二")], ["s1"], overwrite=overwrite)
+            self.assertIn("docio edit-text", str(caught.exception))
+            self.assertEqual((self.write_calls, self.delete_calls), ([], []))
+
+    def test_comment_added_without_revision_change_is_refused(self):
+        live = [para("a", "一")]
+        latest = copy.deepcopy(live)
+        latest[0]["text"]["elements"][0]["text_run"]["comment_ids"] = ["new"]
+        with self.assertRaises(DocStructureError):
+            self.run_update(live, ["a"], [para("s1", "二")], ["s1"], latest=latest)
+        self.assertEqual((self.write_calls, self.delete_calls), ([], []))
+
+    def test_commented_unchanged_source_remains_noop(self):
+        live = [para("a", "一")]
+        live[0]["comment_ids"] = ["existing"]
+        result, writes, deletes = self.run_update(live, ["a"], [para("s1", "一")], ["s1"])
+        self.assertFalse(result["changed"])
+        self.assertEqual((writes, deletes), ([], []))
 
     def test_unchanged_source_writes_nothing(self):
         result, writes, deletes = self.run_update([para("a", "一")], ["a"], [para("s1", "一")], ["s1"])

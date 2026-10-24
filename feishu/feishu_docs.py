@@ -882,6 +882,8 @@ def update_text_doc(app_id: str, app_secret: str, doc: str, file_path=None, *,
                    if op[0] != "equal"]
     deleted = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in opcodes if tag in ("delete", "replace"))
     inserted = sum(j2 - j1 for tag, _i1, _i2, j1, j2 in opcodes if tag in ("insert", "replace"))
+    if opcodes:
+        _reject_commented_sync(live)
     plan = {"doc_id": doc_id, "table_layout": layout, "revision_before": revision_before,
             "live_roots": len(live_roots), "source_roots": len(first_level),
             "kept_roots": len(live_roots) - deleted, "deleted_roots": deleted, "inserted_roots": inserted,
@@ -894,6 +896,9 @@ def update_text_doc(app_id: str, app_secret: str, doc: str, file_path=None, *,
                 "url": _doc_url(token, doc_id), "token": doc_id, "type": "docx"}
     if _doc_revision(token, doc_id) != revision_before:
         raise DocStructureError("读取后文档已被改动，未写入；请重新运行以基于最新版本比对")
+    # Comment-only changes need not advance the document revision.
+    latest, _ = _read_doc_blocks(token, doc_id)
+    _reject_commented_sync(latest)
     stats = {"tables_real": 0, "batches": 0, "table_cells_attempted": 0,
              "table_cells_filled": 0, "table_cells_failed": 0}
     for tag, i1, i2, j1, j2 in reversed(opcodes):
@@ -901,7 +906,7 @@ def update_text_doc(app_id: str, app_secret: str, doc: str, file_path=None, *,
             d = _throttled_write("DELETE", f"{_DOCX}/{doc_id}/blocks/{doc_id}/children/batch_delete"
                                  "?document_revision_id=-1", token, {"start_index": i1, "end_index": i2})
             if not d or d.get("code") != 0:
-                raise DocStructureError(f"删除旧块失败 {(d or {}).get('code')} {(d or {}).get('msg')}；文档可能处于部分更新状态，请重跑")
+                raise DocStructureError(f"删除旧块失败 {(d or {}).get('code')} {(d or {}).get('msg')}；文档可能处于部分更新状态，先回读核对，禁止盲重试")
         if tag in ("insert", "replace"):
             written = _write_roots(token, doc_id, by_id, first_level[j1:j2], i1)
             for key in stats:
@@ -912,6 +917,19 @@ def update_text_doc(app_id: str, app_secret: str, doc: str, file_path=None, *,
     return {**plan, **stats, **verification, "changed": True, "kept_root_ids": kept_ids,
             "revision_after": _doc_revision(token, doc_id),
             "url": _doc_url(token, doc_id), "token": doc_id, "type": "docx", "tables_degraded": 0}
+
+
+def _reject_commented_sync(blocks):
+    """Markdown sync cannot express or verify existing comment selections."""
+    def has_comment(value):
+        if isinstance(value, dict):
+            return any(bool(item) if key == "comment_ids" else has_comment(item)
+                       for key, item in value.items())
+        return isinstance(value, list) and any(has_comment(item) for item in value)
+    if has_comment(blocks):
+        raise DocStructureError(
+            "线上文档含评论，Markdown块同步不能核验选区；改用docio edit-text批改或"
+            "docio write局部XML补丁（SOP-140 §5），--overwrite不能绕过评论保护")
 
 
 def _read_doc_blocks(token, doc_id):

@@ -8,6 +8,7 @@ owns:
   - 权限基线开通与逐 bot 拉齐的操作顺序
   - scope 等级快照的刷新步骤与前置条件
   - 文档读写的调用方式与覆盖率验收
+  - 已有Docx评论保护、批量文字修改及中断恢复
   - 三类失败的现场处置
 does_not_own:
   - 部件分层与身份模型（属 ARCH-130）
@@ -17,7 +18,7 @@ read_when:
   - 收到飞书文档或表格链接要读写
   - 新建智能体后要开权限
   - 报"没权限"但不确定该开 scope 还是该分享文档
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-20
 related:
   - ARCH-130
   - SPEC-220
@@ -97,11 +98,67 @@ L4 低于可管理时直接下载图片/附件会被拒，`docio read` 自动改
 
 ## 5 · 写回一个飞书链接
 
-1. 先 `docio read` 取当前状态，确认要改的范围。
-2. `docio write <url> --patch <file>` 默认 dry-run，打印将要变更的每一处。
-3. 确认无误后加 `--apply` 执行。
-4. 工具**自动独立回读**目标范围逐格比对：任何一格对不上即报"❌ N 处不一致"并返回失败码。
-   **回读不通过就不算写成功**；工具不做自动回滚，失败时按回读报告人工决定下一步。
+先 `docio read <url> --into <目录>` 取当前正文与资源，运行 `coverage` 如实保留缺口，再选择下面唯一对应入口。所有命令从 Link16 根运行，`--bot <我>` 放在子命令前。bot 无权而主人能编辑时，明确使用 `--as-user [已登记profile]`，不会自动换身份；恢复全过程保持同一身份。
+
+### 5.1 · 批量改普通文字：edit-text
+
+用户要在现有稿件逐点改字、改标题或改措辞，先用这条命令，不再写临时 API 循环或手拼每一份完整XML。保留任务授权的范围，从 `document.json` 的原生 `content` 获取真实块 ID；每项 `old` 必须是同一文字片段中的原文，`new` 是已审定的新文。输入文件用 UTF-8：
+
+```json
+{
+  "changes": [
+    {"block_id": "原文中的真实块ID", "old": "原有短句", "new": "审定的新短句"},
+    {"block_id": "另一个真实块ID", "old": "另一处原文", "new": "另一处新文"}
+  ]
+}
+```
+
+```text
+python feishu/docio_cli.py --bot <我> edit-text "<docx或wiki URL>" --changes changes.json --state <新批次目录>
+python feishu/docio_cli.py --bot <我> edit-text "<同一URL>" --changes changes.json --state <同一目录> --resume --apply
+```
+
+第一次默认预演、零在线写入，审阅 `<批次目录>/preview.json` 的块、实际匹配文字与替换内容；原任务已授权改稿即可执行第二行，无需重复请用户批准。也允许初次直接 `--apply`，内部仍先预检整批。工具只在唯一原文的同一行内片段做最小替换，自动生成每处完整预期XML；跨格式、跨块、重复匹配、删空整片段或覆盖评论选区会拒绝，不能靠缩小几个字符绕过。
+
+整批预检全部通过后，按清单逐处执行；每处重新绑定最新版本、写前核评论、写后核全文和评论，再写入恢复点。局部改稿不是按键模拟，仍调用一次原生文字替换；安全性来自可定位范围、选区保护和独立回读，而非“逐字”这个说法。输入顺序即执行顺序，同一块后续项的旧文应以先前修改后的正文为准。
+
+### 5.2 · 结构修改与Sheet：write
+
+列表、标题层级或表格等结构修改，先读已装引擎的 `lark-cli skills read lark-doc/references/lark-doc-xml.md`，再用 `docio write <url> --patch <json>` 预演，任务授权内加 `--apply`。Docx补丁对象为 `docx`，必填 `format: "xml"`、`command`、`content`，带上原 `revision_id`；`str_replace` 需 `pattern`，`block_replace` 需实际 `block_id` 或同父正向的 `start_block_id/end_block_id`，`block_insert_after` 需真实锚点 `block_id`。局部操作还须 `expected_document`（改后整篇原生XML），不能仅给新段落；`append/overwrite` 自动构造全文目标。`edit-text` 已代办文字修改的这些细节。
+
+有评论文档禁止整篇 `overwrite`；整块替换涉及的任何子块带评论也拒绝。`send --doc --update` 用于无评论的Markdown镜像同步，发现原生 `comment_ids` 就停止并导向docio，`--overwrite`不能豁免。它不承担评论选区核验，不能代替本节的受管流程。新建文档仍走原发布入口，媒体仍按SOP-141处理。
+
+Sheet仍使用现有 `writes` 补丁、写前逐格基线和独立回读；Docx的 `--recover` 不用于Sheet。不把Docx评论保护说成已经覆盖Sheet批注、HTML/Office导入或媒体播放。
+
+### 5.3 · 评论保护与通过条件
+
+`docio_comments.py` 通过原生CLI读完全部已解决/未解决评论及每条回复；正文 `comment-refs` 经 `reference_map` 还原真实评论ID，与原生relation核对。缺分页状态、分页重复、权限失败、引用未读全或有效评论无法定位均停止，不能把“未知”当“没有评论”。既有已失定位评论单独按原基线保留，不借这次改稿重建或解决。
+
+写前保存正文、版本、评论快照与身份；预检阻止覆盖评论选中文字、带评论范围整块覆盖及不唯一匹配。同块有多条评论时，每条关联都须可解释。保留首尾标点或原块ID仍可能失定位、缩小选区或使评论不再指向新需求，不能作为保护算法。遇到确实需改评论选区内正文的任务，保留原文，回传受阻句子、原评论和处理取舍；删除、迁移或重建原评论需要用户明确决定，不能冒称无损修复。
+
+写入前重读正文及评论，阻止可观察的并发变化；本机同文档操作有进程锁，服务器版本保护其他机器的正文修改。飞书没有正文与评论原子事务，检查之后发生的评论变化可能只能由写后回读发现；发现即报失败，不承诺零竞态。
+
+写后分别比较：整篇文字、链接、列表/表格与样式/资源；原评论ID集合、作者、创建时间、回复ID/作者/正文、解决状态、是否失定位、关联块及选中文字。新增评论也说明基线发生并发变化，须停下核对，不推断一定由本工具破坏。只有两项回读均通过，`*.docx-receipt.json` 才记录 `structure_verified` 与 `comments_verified` 为真；用户仍判断新需求和原评论语义是否一致。
+
+### 5.4 · 中断、部分写入与恢复
+
+批次文件 `batch.json` 记录清单指纹、身份、已完成数量、当前 `pending` 和最近核验正文；各处 `edit-NNNN.docx-state.json` 保留写前快照、预期和状态。`prepared` 表示未发更新请求，`applying/written_unverified` 表示结果尚不确定，`verified` 表示已回读通过。已返回的接口终态保存在 `write_response`（退出码与原生响应），用于查明具体错误或警告；它不替代正文与评论回读，也不授权自动重发。不要删或改这些记录，不换新目录逃过恢复检查。
+
+批次继续使用原清单/目录，加 `--resume` 默认只读核对，加 `--resume --apply` 才继续剩余已授权修改。遇到pending先读线上正文及评论：符合原目标才记完成，不重复发送已落地操作；线上尚未达到目标、存在外部修改或无法判断时停止，即使暂时看到旧文也不重发可能仍在途的请求。
+
+单补丁超时或部分写入时，用原文件执行：
+
+```text
+python feishu/docio_cli.py --bot <我> write "<原URL>" --patch <原JSON> --recover
+```
+
+此命令绝不写在线。核对不通过就交代已写/未证范围和具体差异；先查明最终远端状态并合并他人改动，才可制定新补丁。禁止自动回滚、重建同文评论、解决旧评论、裸 `+update` 或同请求盲重试。恢复文件含原文与评论，只留任务的本地受控目录，不上传公开仓库。
+
+### 5.5 · 改动后的验证
+
+运行 `python -m pytest tests/test_docio_comments.py tests/test_docio_xml_structure.py tests/test_docio_io.py tests/test_docio_identity.py tests/test_docio_coverage.py tests/test_feishu_docs_update.py -q`。反例包括整条被评论标题替换、正文相同而关联丢失、同块第二条评论关联未知、回复分页失败、仅评论并发变化、部分写入、超时已落地/未证结果、重复续跑和身份/清单漂移；正常无评论片段修改须通过。
+
+使用历史事故快照本地回放，并在获准可读文档做零写入 `edit-text` 预演，核真实权限、回复分页与选区映射。不在实际PRD制造评论损坏。离线引擎回归与线上只读预演不等于真实线上写入实验；发布回执分别说明证据范围。
 
 ## 6 · 失败现场处置
 
@@ -113,7 +170,7 @@ L4 低于可管理时直接下载图片/附件会被拒，`docio read` 自动改
 | `denied(resource)` | 资源没分享给这个身份 | 主人本人能看（含别人只分享给主人的）→ `docio read <url> --into <dir> --as-user`；bot 自己建的文档才用 `docio share <url> --apply` 挂协作群。**加 scope 无效** |
 | `denied(role)` | 能访问，但这次操作需要更高角色 | 让 `full_access` 的人提升角色或代为操作 |
 | `参数/用法错误` | 与权限无关 | 按 `inspect` 的真实类型与接口契约修正 |
-| `网络失败` | 与权限无关 | 已自动重试三次；持续失败查 DNS / 代理 |
+| `网络失败` | 与权限无关 | token交换有有限重试；写入请求超时不盲重发，按§5.4只读核对；持续读取失败查DNS / 代理 |
 
 归类依据是 `feishu/feishu-error-codes.json`（只登记实测到的码 + 官方原文 message）
 加上结构化 `error.type/subtype`；**没登记过的码如实报"未分类"，不猜成权限问题**。

@@ -30,7 +30,8 @@ def xml_contract(value):
     def tag(node):
         return aliases.get(node.tag, node.tag)
     # Feishu adds colgroup/col width metadata to otherwise identical tables.
-    counts = Counter(tag(n) for n in tree.iter() if n is not tree and n.tag not in ('colgroup', 'col'))
+    counts = Counter(tag(n) for n in tree.iter() if n is not tree and n.tag not in ('colgroup', 'col')
+                     and not (n.tag == 'span' and not n.attrib))
     text = re.sub(r'\s+', '', ''.join(tree.itertext()))
     links = [n.get('href') for n in tree.iter('a')]
     # Keep resource identities, not mutable display sizes or generated block IDs.
@@ -47,8 +48,11 @@ def xml_contract(value):
                  ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'pre')]
     spans = [(n.tag, n.get('rowspan', '1'), n.get('colspan', '1'))
              for n in tree.iter() if n.tag in ('td', 'th')]
+    comments = [(n.get('comment-refs'), ''.join(n.itertext()))
+                for n in tree.iter() if n.get('comment-refs')]
     return {'text': text, 'links': links, 'counts': dict(counts), 'cell_spans': spans,
-            'resources': resources, 'styles': styled, 'structure': structure}
+            'resources': resources, 'styles': styled, 'structure': structure,
+            'comment_selections': comments}
 
 
 def verify_xml(expected, actual):

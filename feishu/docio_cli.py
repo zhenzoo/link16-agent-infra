@@ -1106,107 +1106,46 @@ DOCX_COMMANDS = ("append", "overwrite", "str_replace", "block_insert_after", "bl
 
 
 def _write_docx(args, bot, info, patch):
-    """文档正文写回：追加/覆盖/替换。写完回读全文验证内容真的落进去了。
+    from docio_edit import write_docx
+    return write_docx(sys.modules[__name__], args, bot, info, patch)
 
-    与表格写回同一条纪律：默认 dry-run；apply 之后独立回读，读不到就报失败，
-    不用接口的 200 当作"写成功"。
-    """
-    token = info.get("token")
-    body = patch.get("docx") or {}
-    command = str(body.get("command") or "append")
-    content = body.get("content")
-    if command not in DOCX_COMMANDS:
-        print(f"写前拒绝 · 不支持的 docx 命令：{command}（可用 {', '.join(DOCX_COMMANDS)}）")
-        return 2
-    if not isinstance(content, str) or not content.strip():
-        print("写前拒绝 · docx 补丁缺少非空 content")
-        return 2
-    if command == "str_replace" and not body.get("pattern"):
-        print("写前拒绝 · str_replace 必须给 pattern")
-        return 2
 
-    if body.get("format") != "xml":
-        print("写前拒绝 · 在线文档更新必须提供原生 XML；本地 Markdown 创建走 send --doc 编译路径")
-        return 2
+def _write_identity(args):
+    """Explicit user lane, shared by single writes and text batches; never auto-fallback."""
+    global _READ_AS_USER
+    _READ_AS_USER = None
+    if getattr(args, "as_user", None):
+        profile, user = user_read_profile(args.as_user)
+        _READ_AS_USER = profile
+        print(f"用户身份 {user['user']}（经{profile}授权），刷新凭据到期 {user['refresh_expires_at']}")
+
+
+def cmd_edit_text(args):
+    from docio_edit import edit_text
+    _write_identity(args)
     try:
-        xml_contract(content)
-    except DocStructureError as exc:
-        print(f"写前拒绝 · {exc}")
-        return 2
-
-    before = run_lark(["docs", "+fetch", "--doc", token, "--detail", "full", "--as", "bot"], profile=bot, timeout=300)
-    before_payload = _json_out(before)
-    before_doc = (before_payload.get("data") or {}).get("document") or {}
-    before_text = before_doc.get("content") or ""
-    revision = before_doc.get("revision_id")
-    if before.returncode != 0 or before_payload.get("ok") is not True or revision is None:
-        print("写前拒绝 · 未完整读到当前文档与 revision，不能绑定此次修改")
-        return 2
-    if body.get("revision_id") is not None and str(body["revision_id"]) != str(revision):
-        print("写前拒绝 · 文档版本已变化，请重读并合并用户改动")
-        return 2
-    expected = content if command == "overwrite" else (before_text + content if command == "append" else body.get("expected_document"))
-    try:
-        xml_contract(expected or '')
-    except DocStructureError as exc:
-        print(f"写前拒绝 · 局部修改须提供完整 expected_document XML：{exc}")
-        return 2
-    print(f"=== docio write · {bot} · docx · {'apply' if args.apply else 'dry-run（零写入）'} ===")
-    print(f"  文档      {info.get('title') or token}（当前 {len(before_text)} 字符）")
-    print(f"  命令      {command} · 写入 {len(content)} 字符")
-    if command == "str_replace":
-        print(f"  匹配      {body['pattern'][:60]!r} · 命中 {before_text.count(body['pattern'])} 处")
-
-    content_path = Path(args.patch).resolve().with_name(
-        Path(args.patch).stem + '.' + hashlib.sha256(content.encode('utf-8')).hexdigest()[:12] + '.xml')
-    content_path.write_text(content, encoding='utf-8')
-    cmd = ["docs", "+update", "--doc", token, "--command", command,
-           "--doc-format", "xml", "--content", '@' + str(content_path), "--revision-id", str(revision), "--as", "bot"]
-    for flag in ("pattern", "block-id", "start-block-id", "end-block-id"):
-        value = body.get(flag.replace("-", "_"))
-        if value:
-            cmd += [f"--{flag}", str(value)]
-    if not args.apply:
-        cmd.append("--dry-run")
-    result = run_lark(cmd, profile=bot, timeout=300)
-    payload = _json_out(result)
-    if (result.returncode != 0 or payload.get("ok") is not True
-            or (payload.get('data') or {}).get('result', 'success') not in ('success', 'dry_run')):
-        verdict = classify_failure((result.stdout or "") + (result.stderr or ""), bot)
-        print(f"  结果      ❌ {verdict['verdict']}")
-        if verdict.get("hint"):
-            print(f"            {verdict['hint']}")
-        return 2
-    if not args.apply:
-        print("  结果      dry-run 通过（未写入）；已获写入授权时使用 --apply")
-        return 0
-
-    after = run_lark(["docs", "+fetch", "--doc", token, "--detail", "full", "--as", "bot"], profile=bot, timeout=300)
-    after_payload = _json_out(after)
-    after_text = ((after_payload.get("data") or {}).get("document") or {}).get("content") or ""
-    try:
-        if after.returncode != 0 or after_payload.get("ok") is not True:
-            raise DocStructureError('无法完整回读')
-        verified = verify_xml(expected, after_text)
-        after_revision = ((after_payload.get('data') or {}).get('document') or {}).get('revision_id')
-        if after_revision is None or int(after_revision) <= int(revision):
-            raise DocStructureError('回读版本未前进，不能证明此次修改已生效')
-    except DocStructureError as exc:
-        print(f"  回读核验  ❌ {exc}；文档可能部分写入，禁止作为成功交付")
-        return 2
-    receipt = {**verified, 'document': token, 'before_revision': revision,
-               'after_revision': ((after_payload.get('data') or {}).get('document') or {}).get('revision_id'),
-               'covers': 'Full native XML body, ordered links, structures, styles and resource identities',
-               'caught': 'Matching first line with a missing later section is rejected by test_docio_xml_structure.py',
-               'judge': 'Mechanical structure/content; visual readability remains human review'}
-    receipt_path = Path(args.patch).with_name(Path(args.patch).stem + '.docx-receipt.json')
-    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
-    print(f"  回读核验  ✅ 全文、链接、样式、原生结构与资源一致；回执 {receipt_path}")
-    return 0
+        bot = resolve_bot(args.bot)
+        info = inspect_url(args.url, bot)
+        if not info.get("ok") or info.get("type") not in ("doc", "docx"):
+            print("批改中止：目标须为可读取的Docx/Wiki正文；先docio doctor")
+            return 2
+        return edit_text(sys.modules[__name__], args, bot, info)
+    finally:
+        global _READ_AS_USER
+        _READ_AS_USER = None
 
 
 def cmd_write(args):
     """写回：默认 dry-run；--apply 之后【独立回读逐格核验】，不核验不算写成功。"""
+    _write_identity(args)
+    try:
+        return _cmd_write(args)
+    finally:
+        global _READ_AS_USER
+        _READ_AS_USER = None
+
+
+def _cmd_write(args):
     bot = resolve_bot(args.bot)
     patch = json.loads(Path(args.patch).read_text(encoding="utf-8"))
     writes = patch.get("writes") or []
@@ -1233,6 +1172,9 @@ def cmd_write(args):
         return _write_docx(args, bot, info, patch)
     if kind not in ("sheet", "sheets", "spreadsheet") or not writes:
         print(f"write 还没有 {kind or 'unknown'} 的适配器；先用 inspect 确认类型")
+        return 2
+    if getattr(args, "recover", False):
+        print("--recover只适用于Docx写入；表格请依据原逐格回执检查")
         return 2
     token = info.get("token")
 
@@ -1504,11 +1446,24 @@ def main(argv=None):
                         help="资源没分享给 bot 时显式改用主人账号读；缺省自动选本机已登录用户授权的 profile")
     p_read.set_defaults(func=cmd_read)
 
-    p_write = sub.add_parser("write", help="写回表格；默认 dry-run，--apply 后逐格回读核验")
+    p_write = sub.add_parser("write", help="写回正文/表格；正文默认保护评论，写后独立回读")
     p_write.add_argument("url")
     p_write.add_argument("--patch", required=True, help="补丁 JSON：{\"writes\":[{sheet_id,range,cells}]}")
-    p_write.add_argument("--apply", action="store_true", help="真正写入（缺省只预览）")
+    write_action = p_write.add_mutually_exclusive_group()
+    write_action.add_argument("--apply", action="store_true", help="真正写入（缺省只预览）")
+    write_action.add_argument("--recover", action="store_true", help="只读核对上次不确定写入，绝不重发")
+    p_write.add_argument("--as-user", nargs="?", const="auto", metavar="PROFILE",
+                         help="显式使用已授权主人身份；不得跨身份续跑")
     p_write.set_defaults(func=cmd_write)
+
+    p_edit = sub.add_parser("edit-text", help="带评论文档的批量行内改稿：自动小补丁、逐处回读、断点续跑")
+    p_edit.add_argument("url")
+    p_edit.add_argument("--changes", required=True, help="JSON：{changes:[{block_id,old,new}]}")
+    p_edit.add_argument("--state", required=True, help="本次批改独占目录，保存预演与恢复记录")
+    p_edit.add_argument("--apply", action="store_true", help="执行已授权修改，缺省零写入预演")
+    p_edit.add_argument("--resume", action="store_true", help="核对已有批次后续跑，不重发不确定写入")
+    p_edit.add_argument("--as-user", nargs="?", const="auto", metavar="PROFILE")
+    p_edit.set_defaults(func=cmd_edit_text)
 
     p_share = sub.add_parser("share", help="把协作群挂为该资源的协作者（默认 dry-run）")
     p_share.add_argument("url")

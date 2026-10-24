@@ -42,8 +42,8 @@ class XmlGateTests(unittest.TestCase):
     def test_write_rejects_revision_change_before_mutation(self):
         response = SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({
             'ok': True, 'data': {'document': {'content': '<p>old</p>', 'revision_id': 5}}}))
-        with mock.patch.object(d, 'run_lark', return_value=response) as calls:
-            result = d._write_docx(SimpleNamespace(apply=True, patch='draft.json'), 'bot', {'token': 'T'},
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(d, 'run_lark', return_value=response) as calls:
+            result = d._write_docx(SimpleNamespace(apply=True, patch=str(Path(folder)/'draft.json'), url='https://example.feishu.cn/docx/T'), 'bot', {'token': 'T'},
                 {'docx': {'command': 'overwrite', 'format': 'xml', 'content': '<p>new</p>', 'revision_id': 4}})
         self.assertEqual(result, 2)
         self.assertEqual(calls.call_count, 1)
@@ -53,9 +53,10 @@ class XmlGateTests(unittest.TestCase):
         def response(content=None, revision=1):
             return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({'ok': True,
                 'data': {'document': {'content': content, 'revision_id': revision}}}))
-        with tempfile.TemporaryDirectory() as folder, mock.patch.object(d, 'run_lark', side_effect=[
-                response('<p>old</p>'), response(), response('<h1>same</h1>', 2)]):
-            result = d._write_docx(SimpleNamespace(apply=True, patch=str(Path(folder)/'draft.json')),
+        with tempfile.TemporaryDirectory() as folder, mock.patch('docio_edit.read_comments', return_value=[]), \
+                mock.patch.object(d, 'run_lark', side_effect=[
+                response('<p>old</p>'), response('<p>old</p>'), response(), response('<h1>same</h1>', 2)]):
+            result = d._write_docx(SimpleNamespace(apply=True, patch=str(Path(folder)/'draft.json'), url='https://example.feishu.cn/docx/T'),
                 'bot', {'token': 'T'}, {'docx': {'command': 'overwrite', 'format': 'xml',
                     'content': '<h1>same</h1><p>missing tail</p>'}})
         self.assertEqual(result, 2)
