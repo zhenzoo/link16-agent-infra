@@ -16,7 +16,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-24
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -33,6 +33,8 @@ last_reviewed: 2026-10-07
 入站沿用 `[飞书_from_<发送方>_to_<接收方>]`；回信仅追加 `reply_to=<原请求入站的真实 message_id>`。桥取末尾发送戳，把 `kind=a2a`、`peer`、`mid`、`dest`、`at` 和可选 `reply_to` 钉进同一条消息的信封；三种 runtime 的 answer 保留这些公开字段，后续 owner 回合不得改写旧 answer 的回址。`dest/at` 是入站坐标，跨租户回信重新按逻辑 `peer` 查名册，不能 @webhook 机器人冒充 @请求方。缺少请求 `mid` 时失败，不降级到主人 DM。
 
 自动回信和主动新请求共用 `send_feishu_msg.send_agent_message`，不另造 webhook 通道。收到关联结果仍交给 agent 读取；outbox 返回 `suppressed=true`、receipt 留 `delivered=false` 和 `peer_result_no_auto_reply`，只记本地消费 ACK，可推进该条消费游标，不伪造 message_id，也不追加成功出站 ledger。确有新问题时由 agent 主动发一条不带 `reply_to` 的新请求；禁止把“收到／谢谢”自动反射回对方。
+
+A2A 请求、回复及长回复的每个分片，正文统一以 `<发送方代号> → <接收方代号>` 独占一行开头，空一行后接原文；例如 `tb26-link16 → tb25-link16`，不加解释短语。正式投递仍有真实 @peer；本方群抄送保留相同代号首行和正文，不加真实 @。末尾发送戳及 `reply_to` 继续负责机器路由，首行仅作人读方向提示；三种 runtime 共用 `peer_text`，不要求模型自行添加。
 
 请求 final 写入 outbox 后，现有 `active=false` 表示该 peer 回合已封口。Codex/Claude 的 Stop 检查续跑没有新入站，就不能再沿用该完成回址产出网络 final；Kimi 原有 closed turn 同样停止产出。无需增加传输字段。A2A progress 不仅禁止创建消息，也禁止 PATCH 曾经的主人进度卡；Codex steering 复用同一 root turn 不能绕过这个边界。
 

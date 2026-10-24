@@ -378,12 +378,12 @@ def shared_group(sender, target, override=None):
 
 
 def peer_text(bot, peer, text, *, reply_to=None):
-    """Extend the existing identity stamp, not a second message protocol."""
+    """Show the peer direction up front; keep the trailing routing stamp."""
     for value in (bot, peer, reply_to):
         if value is not None and (not value or re.search(r"[\s\[\]]", value)):
             raise ValueError("peer 身份及 reply_to 必须是无空白的信封字段")
     relation = f" reply_to={reply_to}" if reply_to else ""
-    return f"{text} [飞书_from_{bot}_to_{peer}{relation}]"
+    return f"{bot} → {peer}\n\n{text} [飞书_from_{bot}_to_{peer}{relation}]"
 
 
 def send_agent_message(bot, peer, text, *, reply_to=None, in_chat=None,
