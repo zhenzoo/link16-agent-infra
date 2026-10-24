@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -12,6 +13,7 @@ RPC_PATH = Path(__file__).resolve().parents[1] / "wmux" / "wmux-rpc.js"
 sys.path.insert(0, str(RPC_PATH.parents[1] / "feishu"))
 
 import wmux_identity  # noqa: E402
+import wmux_session  # noqa: E402
 
 # Fake wmux pipe: answers one request with RESPONSE (env JSON) and prints what it received.
 FAKE_PIPE = r"""
@@ -92,6 +94,43 @@ class WmuxRpcIdentityBehaviour(unittest.TestCase):
                              env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("workspace not found", out.stderr)
+
+    def test_only_explicit_force_reaches_close_cli(self):
+        cli = self.fake_cli('>"%~dp0args.txt" echo %*\r\necho {"closed":true}\r\n',
+                            'echo "$*" > "$(dirname "$0")/args.txt"\necho \'{"closed":true}\'\n')
+        for force in (None, False, "true", True):
+            with self.subTest(force=force):
+                params = {"id": "ws-target"}
+                if force is not None:
+                    params["force"] = force
+                out = subprocess.run(["node", str(RPC_PATH), "rpc", "workspace.close", json.dumps(params)],
+                                     env={**os.environ, "WMUX_CLI": str(cli)}, capture_output=True,
+                                     text=True, encoding="utf-8", timeout=30)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                args = (self.tmp / "args.txt").read_text(encoding="utf-8")
+                self.assertIn("ws-target", args)
+                self.assertEqual("--force" in args, force is True)
+
+
+class WmuxSessionCloseTests(unittest.TestCase):
+    def test_force_is_explicit_and_close_is_verified(self):
+        for force in (False, True):
+            with self.subTest(force=force), mock.patch.object(wmux_session, "_ws", side_effect=[{"id": "ws-target"}, None]), \
+                    mock.patch.object(wmux_session, "_rpc", return_value={"closed": True}) as rpc:
+                wmux_session.close("ws-target", force=force)
+                params = {"id": "ws-target", **({"force": True} if force else {})}
+                rpc.assert_called_once_with("workspace.close", params)
+
+    def test_missing_workspace_is_already_closed_without_rpc(self):
+        with mock.patch.object(wmux_session, "_ws", return_value=None), mock.patch.object(wmux_session, "_rpc") as rpc:
+            self.assertTrue(wmux_session.close("ws-gone", force=True)["already_closed"])
+            rpc.assert_not_called()
+
+    def test_still_present_workspace_is_not_reported_closed(self):
+        with mock.patch.object(wmux_session, "_ws", return_value={"id": "ws-target"}), \
+                mock.patch.object(wmux_session, "_rpc", return_value={"closed": True}):
+            with self.assertRaisesRegex(RuntimeError, "仍存在"):
+                wmux_session.close("ws-target", force=True)
 
 
 class WmuxRpcContractTests(unittest.TestCase):

@@ -42,7 +42,7 @@ const { spawnSync } = require("child_process");
 const CLIENT_NAME = "link16-agent-infra";   // must equal feishu/wmux_identity.py CLIENT_NAME
 const CLI_ROUTED = {
   "workspace.new": (p) => ["new-workspace", ...(p.name ? ["--name", String(p.name)] : [])],
-  "workspace.close": (p) => ["close-workspace", String(p.id)],
+  "workspace.close": (p) => ["close-workspace", String(p.id), ...(p.force === true ? ["--force"] : [])],
   "workspace.focus": (p) => ["focus-workspace", String(p.id)],
   "workspace.current": () => ["current-workspace"],
 };

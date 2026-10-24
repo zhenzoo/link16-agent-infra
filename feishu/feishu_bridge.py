@@ -2427,10 +2427,6 @@ def _run_bot(bot_name=None):
     if imported:
         blog(bot['name'], f'迁移 {imported} 个历史接收 ID，仅用于旧事件去重，不假定旧任务完成或重新执行。')
     control = bridge_control.Control(STATE_DIR, bot['name'])
-    # 冷启动窗口 [start, end]：/close 若在这个窗口内【到达】（哪怕被 msg_lock 排到注入之后才执行），先要确认再关。
-    # 2026-09-08 机器 3050：用户在冷启动第 129 秒发 /close，排队到注入后 2 秒执行，把正要回答的会话关了。
-    startup_window = {"start": 0.0, "end": 0.0}
-    close_confirm = {"at": 0.0}
 
     def make_handler(bot, channel):
         account_default = agent_runtime.account_snapshot(bot)   # 名册默认账号快照（/account 临时切·/close 切回这个）
@@ -2615,18 +2611,13 @@ def _run_bot(bot_name=None):
                         "residual": "（输入框仍有顽固残留·去终端瞄一眼）"}.get(status, "")
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
-                _arrived = arrived or time.time()
-                _in_window = startup_window["start"] <= _arrived <= startup_window["end"] + 15
-                if _in_window and time.time() - close_confirm["at"] > 120:
-                    close_confirm["at"] = time.time()
-                    await reply(chat_id, "🚧 会话正在冷启动/刚就绪，现在关会丢掉正要生成的回答。确认要关：2 分钟内再发一次 /close；想看现场发 /screen，想打断发 /stop。")
-                    return
-                close_confirm["at"] = 0.0
+                # The authorized command itself is confirmation, including
+                # during startup and while an agent process is still running.
+                if rec and rec.get("workspace_id"):
+                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"], force=True)
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # /close=结束会话=撤销投递契约→清账（§2.13）
                 agent_runtime.reset_account(bot, account_default)         # /close = 结束本会话 = 账号切回名册默认
-                if alive:
-                    await asyncio.to_thread(wmux_session.close, rec["workspace_id"])
                 clear_session(bot["name"])                                # 清掉会话注册表（含 /cd 过的 cwd）→ 下次重开回名册默认目录
                 clear_codex_thread(bot["name"])                           # codex：连 app-server thread 指针一起清 → 下次真·新会话（否则 resume 把旧对话整根接回来）
                 default_acc = default_account()                          # reset 后 = 名册默认账号
@@ -3148,16 +3139,10 @@ def _run_bot(bot_name=None):
                                     (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}；启动失败会告警一次。"
                                      if ws_present else
                                      f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}；启动失败会告警一次。"))
-                    if not reusable:
-                        startup_window["start"] = time.time()
-                        startup_window["end"] = float("inf")
                     try:
                         ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
                     except Exception as exc:
                         raise bridge_inbox.NonRetryableHandoffError(str(exc)) from exc
-                    finally:
-                        if not reusable:
-                            startup_window["end"] = time.time()
                     # 入站附件：真下载字节到 inbox，注入【本地路径】而非 SDK 的 `![image](key)` 占位。
                     # download_resource_to_file 带 message_id → 走 im/v1/messages/{id}/resources（入站正确端点·非 image.get）。
                     caption = _strip_media_markup(text)
@@ -3570,7 +3555,9 @@ def _run_bot(bot_name=None):
                               '终端交接结果暂未确认，我会保留记录等待实际接收信号，不重复提交。')
                     try:
                         await card_send(ch, payload['message']['chat_id'],
-                                        '⏳ 消息已收下并保存。' + detail, bname)
+                                        ('❌ 控制命令执行未完成，操作结果未确认。原命令已保留，不会自动重复执行；请检查桥日志中的失败原因。'
+                                         if row.get('state') == 'command' else
+                                         '⏳ 消息已收下并保存。' + detail), bname)
                     except Exception:
                         pass  # diagnostics cannot consume or invalidate input
                 raise

@@ -4,18 +4,97 @@
 6 个破坏性命令(close/clear/cd/account/new/stop)全裸奔。这里锁死装上去的闸 + 那条静默失效的改写 bug。
 """
 import json
+import ast
+import asyncio
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "feishu"))
 
 import agent_grant  # noqa: E402
 import feishu_bridge  # noqa: E402
+
+
+def nested_bridge_function(name, env):
+    """Run the actual nested handler with isolated I/O, without a live bridge."""
+    tree = ast.parse((ROOT / "feishu" / "feishu_bridge.py").read_text(encoding="utf-8"))
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bridge-handler-test", "exec"), env)
+    return env[name]
+
+
+class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
+    def handler(self, runtime="codex"):
+        self.rec = {"workspace_id": "ws-target", "pty": "pty-target"}
+        self.env = dict(vars(feishu_bridge))
+        self.env.update(
+            asyncio=asyncio, bot={"name": "unit", "agent": runtime},
+            reply=mock.AsyncMock(), account_default={}, default_account=lambda: "profile",
+            default_cwd=lambda _: "repo", load_session=mock.Mock(return_value=self.rec),
+            clear_session=mock.Mock(), clear_codex_thread=mock.Mock(),
+            durable_inbox=mock.Mock(), bridge_outbox=mock.Mock(), agent_runtime=mock.Mock(),
+            wmux_session=SimpleNamespace(pty_alive=mock.Mock(return_value=True), close=mock.Mock()),
+            # Reproduce a close arriving during the former startup guard window.
+            startup_window={"start": 0, "end": float("inf")}, close_confirm={"at": 0},
+            _gate_verdict=mock.Mock(return_value=(True, "主人")), receipt=mock.Mock(), blog=mock.Mock())
+        return nested_bridge_function("handle_slash", self.env)
+
+    async def test_one_close_terminates_live_session_for_every_runtime(self):
+        for runtime in ("claude", "codex", "kimi"):
+            with self.subTest(runtime=runtime):
+                handler = self.handler(runtime)
+                await handler("chat", "/close", sender="owner", arrived=time.time(), inbound_id="mid")
+                self.env["wmux_session"].close.assert_called_once_with("ws-target", force=True)
+                self.env["clear_session"].assert_called_once_with("unit")
+                self.env["clear_codex_thread"].assert_called_once_with("unit")
+                self.env["durable_inbox"].cancel_before.assert_called_once_with("mid")
+                self.assertIn("已关闭会话", self.env["reply"].call_args.args[1])
+                self.env["reply"].assert_awaited_once()
+
+    async def test_workspace_is_closed_even_when_recorded_pty_is_gone(self):
+        handler = self.handler()
+        self.env["wmux_session"].pty_alive.return_value = False
+        await handler("chat", "/close", arrived=time.time())
+        self.env["wmux_session"].close.assert_called_once_with("ws-target", force=True)
+
+    async def test_failed_close_keeps_session_and_delivery_state(self):
+        handler = self.handler()
+        self.env["wmux_session"].close.side_effect = RuntimeError("close failed")
+        with self.assertRaisesRegex(RuntimeError, "close failed"):
+            await handler("chat", "/close", arrived=time.time())
+        self.env["clear_session"].assert_not_called()
+        self.env["clear_codex_thread"].assert_not_called()
+        self.env["durable_inbox"].cancel_before.assert_not_called()
+        self.env["bridge_outbox"].pending_clear.assert_not_called()
+        self.env["agent_runtime"].reset_account.assert_not_called()
+
+    async def test_group_stranger_cannot_force_close(self):
+        handler = self.handler()
+        self.env["_gate_verdict"].return_value = (False, "未授权")
+        await handler("chat", "/close", sender="stranger", from_group=True, arrived=time.time())
+        self.env["wmux_session"].close.assert_not_called()
+        self.env["clear_session"].assert_not_called()
+
+    async def test_command_failure_is_not_reported_as_terminal_handoff(self):
+        send = mock.AsyncMock()
+        inbox = mock.Mock()
+        inbox.get.return_value = {"state": "command", "attempts": 1}
+        env = dict(vars(feishu_bridge))
+        env.update(control=mock.Mock(), durable_inbox=inbox, card_send=send, bname="unit",
+                   ch=SimpleNamespace(dispatch_saved=mock.AsyncMock(side_effect=RuntimeError("refused"))),
+                   inbound_handler=None)
+        dispatch = nested_bridge_function("_dispatch", env)
+        with self.assertRaisesRegex(RuntimeError, "refused"):
+            await dispatch({"message": {"message_id": "mid", "chat_id": "chat"}}, time.time())
+        notice = send.call_args.args[2]
+        self.assertIn("控制命令执行未完成", notice)
+        self.assertNotIn("终端交接", notice)
 
 
 class UnmangleSlashTest(unittest.TestCase):

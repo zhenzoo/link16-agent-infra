@@ -238,8 +238,18 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
     return {"workspace_id": ws_id, "pty": pty, "name": name}
 
 
-def close(ws_id):
-    return _rpc("workspace.close", {"id": ws_id})
+def close(ws_id, *, force=False):
+    # Explicitly authorized /close may terminate live agents. Other callers
+    # retain wmux's normal protection unless they explicitly opt in.
+    if _ws(ws_id) is None:
+        return {"already_closed": True}
+    params = {"id": ws_id}
+    if force:
+        params["force"] = True
+    result = _rpc("workspace.close", params)
+    if _ws(ws_id) is not None:
+        raise RuntimeError("wmux 返回后目标工作区仍存在，关闭未确认")
+    return result
 
 
 def main():
