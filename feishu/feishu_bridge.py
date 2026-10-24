@@ -107,6 +107,7 @@ os.environ.setdefault("NO_PROXY", "feishu.cn,larkoffice.com")
 sys.path.insert(0, str(Path(__file__).parent))
 from jsonl_reply_extract import extract  # noqa: E402  (find_ask_picker 退役·答题侧改结构化 bridge-picker 状态·ARCH-101 §2.10)
 import wmux_session  # noqa: E402  (spawn/close/pty_alive/workspaces)
+import network_route
 import bridge_outbox  # noqa: E402  (v8 回传：hook→outbox→drainer·唯一发送引擎)
 import bridge_activity
 import bridge_outbound  # noqa: E402 (统一自动/主动出站历史)
@@ -3118,6 +3119,9 @@ def _run_bot(bot_name=None):
                         return
                     await asyncio.to_thread(clear_cd_pending, bot["name"])
                 try:
+                    network = await asyncio.to_thread(network_route.ensure_agent_proxy, apply=True)
+                    if network.get("status") == "recovered":
+                        blog(bot["name"], network["detail"])
                     rec = load_session(bot["name"])
                     # 预热提示：用 _reuse_check（与 ensure_session 同判据·含 daemon 重启指纹 + agentName 死壳）
                     # 预测要不要冷启 → daemon 重启后注进死壳的老 bug 不再静默,改成「会话已失效·起新的」。
@@ -3133,6 +3137,8 @@ def _run_bot(bot_name=None):
                     try:
                         ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
                     except Exception as exc:
+                        if wmux_session.transport_unavailable(exc):
+                            raise  # Local transport is recoverable before terminal submission.
                         raise bridge_inbox.NonRetryableHandoffError(str(exc)) from exc
                     # 入站附件：真下载字节到 inbox，注入【本地路径】而非 SDK 的 `![image](key)` 占位。
                     # download_resource_to_file 带 message_id → 走 im/v1/messages/{id}/resources（入站正确端点·非 image.get）。
@@ -3310,6 +3316,7 @@ def _run_bot(bot_name=None):
                                 break
                             await asyncio.sleep(REPLY_POLL_SEC)
                     blog(bot["name"], f"[{tid}] 已注入·回复走 hook→outbox→drainer（v8）{'·冷启动' if created else ''}")
+                    await asyncio.to_thread(wmux_session.mark_transport_recovered)
                 except Exception as e:  # noqa: BLE001
                     err = str(e)
                     blog(bot["name"], f"❌ 处理 {sender} 出错: {err[:300]}")
@@ -3538,10 +3545,16 @@ def _run_bot(bot_name=None):
                 await card_send(ch, payload['message']['chat_id'],
                                 f"❌ 启动失败：{exc}\n原消息已保存在收件队列，已停止自动重试；请排除故障后重新发送。", bname)
                 raise
-            except Exception:
+            except Exception as exc:
                 row = durable_inbox.get(payload['message']['message_id']) or {}
+                recovery = None
+                if row.get('state') == 'processing':
+                    recovery = await asyncio.to_thread(wmux_session.recover_transport, exc)
+                    if recovery:
+                        blog(bname, recovery)
                 if row.get('attempts') == 1 and row.get('state') != 'done':
-                    detail = ('交给终端前的准备尚未完成，我会从保存的待办继续重试。'
+                    detail = (('尚未送达终端。' + (recovery or getattr(exc, 'user_message', None)
+                                              or '准备步骤失败，原消息已保留，我会自动重试。'))
                               if row.get('state') == 'processing' else
                               '终端交接结果暂未确认，我会保留记录等待实际接收信号，不重复提交。')
                     try:

@@ -1720,10 +1720,22 @@ def cmd_run(auto=True):
     r8_unknown = {}                  # {bot: 上次记下的「无法确认」原因}·同一原因只记一次
     bridge_seen_alive = False
     bridge_alerted = False
+    last_proxy_notice = None
     tick = 0
     while True:
         try:
             tick += 1
+            # Local recovery works without an available model. Its persistent
+            # budgets forbid repeated launches/port toggles across watchdog ticks.
+            import network_route
+            try:
+                network = network_route.ensure_agent_proxy(apply=auto)
+                proxy_notice = network.get("detail") if network.get("status") == "recovered" else None
+            except Exception as exc:
+                proxy_notice = getattr(exc, "user_message", None) or f"代理检查未完成：{type(exc).__name__}"
+            if proxy_notice and proxy_notice != last_proxy_notice:
+                log(proxy_notice)
+            last_proxy_notice = proxy_notice
             ws_by_pty, ptys = scan_topology()
             if ptys is None:
                 silence.active.clear()

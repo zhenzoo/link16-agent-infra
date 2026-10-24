@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""为一次下载/安装探测并选择 direct 或 PROXY_URL。
+"""网络路由探测，以及消息投递前的有限本地代理恢复。
 
-它只读配置、只给被执行的子进程注入环境变量：不改 v2rayN、不改 Windows
-系统代理，也不维护网络名/地区域名表。判断依据永远是调用方给出的实际 URL。
+probe/run 命令只读配置、只给子进程注入环境变量。ensure_agent_proxy 仅在
+apply=True 时启动已验证的客户端，或经本地核心接口修复端口并同步匹配的系统代理。
+恢复有持久次数限制；不杀进程、不改订阅或节点、不改客户端持久设置。
 
 用法：
     python feishu/network_route.py probe --url https://example.com/file --prefer proxy
@@ -14,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -146,9 +148,253 @@ def discover_proxy_candidates(configured: str | None = None, system=None,
     proxies = urllib.request.getproxies() if system is None else system
     for scheme in ("https", "http", "all"):
         add((proxies or {}).get(scheme), f"Windows/{scheme}", loopback_only=True)
+    if system is None and os.name == "nt":
+        # getproxies() lets stale shell variables shadow the live Windows proxy.
+        for scheme, value in urllib.request.getproxies_registry().items():
+            add(value, f"WinInet/{scheme}", loopback_only=True)
     for port in common_ports:
         add(f"http://127.0.0.1:{int(port)}", "common mixed port")
     return tuple(rows)
+
+
+class AgentProxyUnavailable(RuntimeError):
+    """Pre-submission local dependency failure; the durable inbox retains the message."""
+    def __init__(self, message):
+        self.user_message = message
+        super().__init__(message)
+
+
+def _proxy_processes():
+    import bridge_process
+    script = """
+$ErrorActionPreference = 'Stop'
+try {
+  $session = (Get-Process -Id $PID).SessionId
+  $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop)
+  $rows = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+    $_.SessionId -eq $session -and $_.Name -match '^(CATVPN(Core)?|clash(-meta|-verge|-win64)?|verge-mihomo(-alpha)?|mihomo(-windows-amd64)?|v2rayN|sing-box)\\.exe$'
+  } | ForEach-Object {
+    $row = $_
+    [pscustomobject]@{ProcessId=$row.ProcessId; ParentProcessId=$row.ParentProcessId;
+      Name=$row.Name; ExecutablePath=$row.ExecutablePath; CommandLine=$row.CommandLine;
+      CreationDate=$row.CreationDate;
+      ListenPorts=@($listeners | Where-Object {$_.OwningProcess -eq $row.ProcessId} | Select-Object -ExpandProperty LocalPort)}
+  })
+  @{ok=$true; session=$session; processes=$rows} | ConvertTo-Json -Depth 4 -Compress
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+"""
+    value = bridge_process._envelope(bridge_process._powershell(script, 10))
+    if value.get("session") == 0 or not isinstance(value.get("processes"), list):
+        raise AgentProxyUnavailable("无法确认交互桌面上的代理进程；未启动或重启任何程序。")
+    return value["processes"]
+
+
+def _windows_argv(command):
+    import ctypes
+    from ctypes import wintypes
+    argc = ctypes.c_int()
+    split = ctypes.windll.shell32.CommandLineToArgvW
+    split.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    split.restype = ctypes.POINTER(wintypes.LPWSTR)
+    pointer = split(command, ctypes.byref(argc))
+    if not pointer:
+        raise ValueError("cannot parse proxy command line")
+    try:
+        return [pointer[i] for i in range(argc.value)]
+    finally:
+        free = ctypes.windll.kernel32.LocalFree
+        free.argtypes = [ctypes.c_void_p]
+        free(pointer)
+
+
+def _core_config(process):
+    """Read only the config named by the running core, never a guessed subscription."""
+    import yaml
+    args = _windows_argv(process.get("CommandLine") or "")
+    config = None
+    for flag in ("-f", "--config"):
+        if flag in args and args.index(flag) + 1 < len(args):
+            config = Path(args[args.index(flag) + 1])
+            break
+    if config is None or not config.is_absolute() or not config.is_file():
+        return None
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return None
+    address = _normalize_proxy(data.get("external-controller"))
+    if (not address or not _is_loopback_proxy(address)
+            or urllib.parse.urlsplit(address).port not in process.get("ListenPorts", [])):
+        return None
+    return {"url": address, "secret": str(data.get("secret") or "")}
+
+
+def _core_request(core, method="GET", payload=None):
+    # The credential stays in memory and is never included in a receipt or error.
+    request = urllib.request.Request(
+        core["url"] + "/configs", method=method,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Authorization": "Bearer " + core["secret"], "Content-Type": "application/json"})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=3) as response:
+        raw = response.read(65536)
+        return json.loads(raw) if raw else {}
+
+
+def _listening(proxy):
+    parsed = urllib.parse.urlsplit(proxy)
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=1):
+            return True
+    except ConnectionRefusedError:
+        return False
+    except OSError as exc:
+        # Unknown networking state is not proof that a listener is absent.
+        raise AgentProxyUnavailable("本机代理端口状态无法确认，未执行端口修改。") from exc
+
+
+def _remember_client(rows, port):
+    owners = [r for r in rows if port in r.get("ListenPorts", [])]
+    if len(owners) != 1:
+        return None
+    owner = owners[0]
+    clients = [r for r in rows if str(r.get("Name", "")).lower() in
+               {"catvpn.exe", "clash-verge.exe", "v2rayn.exe"}
+               and (r["ProcessId"] == owner.get("ParentProcessId") or
+                    r["ProcessId"] == owner["ProcessId"])
+               and r.get("ExecutablePath") and Path(r["ExecutablePath"]).is_file()]
+    return clients[0]["ExecutablePath"] if len(clients) == 1 else None
+
+
+def _sync_system_proxy(old_port, new_port):
+    """CAS only the simple loopback proxy belonging to the repaired core."""
+    import winreg
+    key_name = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_name, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+        try:
+            current = winreg.QueryValueEx(key, "ProxyServer")[0]
+        except FileNotFoundError:
+            return
+        if current in (f"127.0.0.1:{old_port}", f"localhost:{old_port}"):
+            updated = current.rsplit(":", 1)[0] + f":{new_port}"
+            winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, updated)
+            import ctypes
+            for option in (39, 37):  # SETTINGS_CHANGED, REFRESH
+                ctypes.windll.wininet.InternetSetOptionW(None, option, None, 0)
+
+
+def ensure_agent_proxy(*, apply=False, expected=None, probe_url="https://www.gstatic.com/generate_204"):
+    """Bounded repair of the configured local terminal proxy, without model access.
+
+    Healthy listeners are left alone. An absent client may be launched once per
+    outage; a live compatible core may have its port aligned once per process.
+    No process is killed, no subscription/node is changed, and no app settings
+    file is edited behind its GUI. Failed verification rolls the runtime port back.
+    """
+    expected = _normalize_proxy(expected or proxy_url())
+    if os.name != "nt" or not expected or not _is_loopback_proxy(expected):
+        return {"status": "unmanaged"}
+    parsed = urllib.parse.urlsplit(expected)
+    if parsed.scheme != "http" or parsed.username or parsed.password:
+        return {"status": "unmanaged"}
+    import bridge_process
+    import wmux_session
+    from bridge_injection import atomic_write_json
+    state_path = bridge_process.LOCK_DIR / "agent-proxy-recovery.json"
+    with bridge_process.service_lock("agent-proxy-recovery", control=True, timeout=12):
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            state = {}
+        if not isinstance(state, dict):
+            raise AgentProxyUnavailable("代理恢复记录无法读取，未执行自动操作。")
+        if _listening(expected):
+            # Remember the actual running client for a later absent-process recovery.
+            if apply and (not state.get("client") or state.get("launch_attempts")
+                          or time.time() - state.get("observed_at", 0) >= 300):
+                client = _remember_client(_proxy_processes(), parsed.port)
+                if client:
+                    state["client"] = client
+                else:
+                    # A new/unrecognized owner must not leave the old VPN eligible
+                    # for a later automatic launch.
+                    state.pop("client", None)
+                state["observed_at"] = time.time()
+                atomic_write_json(state_path, state)
+            if apply and state.get("launch_attempts"):
+                state["launch_attempts"] = 0
+                atomic_write_json(state_path, state)
+            return {"status": "listening", "proxy": _proxy_display(expected)}
+        rows = _proxy_processes()
+        if not rows:
+            client = state.get("client")
+            if not client or not Path(client).is_file():
+                raise AgentProxyUnavailable("终端代理端口未开启，且没有已验证的代理客户端可启动；原消息保留。")
+            if state.get("launch_attempts", 0) >= 1:
+                raise AgentProxyUnavailable("已尝试启动代理客户端 1 次，端口仍未恢复；停止自动启动，原消息保留。")
+            if not apply:
+                return {"status": "would_start", "client": Path(client).name}
+            if wmux_session._windows_shutting_down():
+                raise AgentProxyUnavailable("Windows 正在关机，保留消息，暂不启动代理客户端。")
+            state["launch_attempts"] = 1
+            atomic_write_json(state_path, state)
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = 0
+            subprocess.Popen([client], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, startupinfo=startup,
+                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            raise AgentProxyUnavailable("代理客户端未运行，已发起一次启动；等待自动连接后继续原消息。")
+        cores = []
+        for row in rows:
+            try:
+                core = _core_config(row)
+                if not core:
+                    continue
+                config = _core_request(core)
+                port = config.get("mixed-port")
+                if (type(port) is int and 0 < port < 65536 and not config.get("allow-lan")
+                        and not config.get("authentication") and port in row.get("ListenPorts", [])):
+                    cores.append((row, core, port))
+            except (OSError, ValueError, urllib.error.URLError):
+                continue
+        if len(cores) != 1:
+            raise AgentProxyUnavailable("终端代理端口不可用，无法唯一确认可控制的代理核心；未改端口或重启程序。")
+        row, core, old_port = cores[0]
+        current = f"http://127.0.0.1:{old_port}"
+        test = probe_route(probe_url, "proxy", current, timeout=4, sample_bytes=128)
+        if not test.ok:
+            raise AgentProxyUnavailable("代理程序在运行，但出口验证失败；端口修改无法证明能解决，保留消息等网络恢复。")
+        identity = f"{row['ProcessId']}:{row.get('CreationDate')}:{parsed.port}"
+        if identity in state.get("port_attempts", []):
+            raise AgentProxyUnavailable("此代理进程已尝试过端口修复，停止重复修改；请核对客户端持久端口设置。")
+        detail = f"代理运行在 {old_port}，终端配置为 {parsed.port}"
+        if not apply:
+            return {"status": "would_align", "detail": detail}
+        if wmux_session._windows_shutting_down():
+            raise AgentProxyUnavailable("Windows 正在关机，暂不修改代理端口。")
+        state["port_attempts"] = (state.get("port_attempts", []) + [identity])[-20:]
+        client = _remember_client(rows, old_port)
+        if client:
+            state["client"] = client
+        atomic_write_json(state_path, state)
+        # A concurrent owner may already have started a listener. Never take its port.
+        if _listening(expected):
+            return {"status": "listening", "proxy": _proxy_display(expected)}
+        try:
+            _core_request(core, "PATCH", {"mixed-port": parsed.port})
+            after = _core_request(core)
+            verified = probe_route(probe_url, "proxy", expected, timeout=4, sample_bytes=128)
+            if after.get("mixed-port") != parsed.port or not verified.ok:
+                raise AgentProxyUnavailable("端口修改后的出口验证失败")
+            _sync_system_proxy(old_port, parsed.port)
+        except Exception as exc:
+            try:
+                # Roll back only if the live core still has our value.
+                if _core_request(core).get("mixed-port") == parsed.port:
+                    _core_request(core, "PATCH", {"mixed-port": old_port})
+            except Exception:
+                raise AgentProxyUnavailable("代理端口修复失败，回退结果也未确认；已停止修改，需要检查客户端。") from exc
+            raise AgentProxyUnavailable("代理端口修复未通过，已结束本次尝试并回退本次端口修改。") from exc
+        return {"status": "recovered", "detail": detail + "；已热更新运行端口并验证出口，客户端持久设置未改。"}
 
 
 def diagnose_proxy_candidates(url: str, prefer: str, candidates, *, timeout: float = 5.0,
