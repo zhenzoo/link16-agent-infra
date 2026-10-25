@@ -1,0 +1,202 @@
+Wmux native workspace autonomy settings restoration
+Upstream: https://github.com/openwong2kim/wmux.git
+Baseline: v4.10.0 (615badcdc59db9a4a9a72ea423cbaeb852a458fb)
+Scope: renderer get/set only; existing store and cache notifications; no new brain/loop.
+Apply: git apply --check wmux-4.10-autonomy-settings.patch && git apply wmux-4.10-autonomy-settings.patch
+Validation: 48 targeted tests; src and tests-main typecheck passed.
+
+diff --git a/src/main/ipc/handlers/__tests__/deck.handler.test.ts b/src/main/ipc/handlers/__tests__/deck.handler.test.ts
+index eb05fbb..88e642f 100644
+--- a/src/main/ipc/handlers/__tests__/deck.handler.test.ts
++++ b/src/main/ipc/handlers/__tests__/deck.handler.test.ts
+@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+ import fs from 'node:fs';
+ import os from 'node:os';
+ import path from 'node:path';
++import type { BrowserWindow } from 'electron';
+ 
+ const ipcHandlers = new Map<string, (...args: unknown[]) => unknown>();
+ 
+@@ -19,6 +20,8 @@ import { IPC } from '../../../../shared/constants';
+ import { GENERAL_THREAD } from '../../../../shared/room';
+ import { registerDeckHandler } from '../deck.handler';
+ import { raiseDecision, raiseThreadDecisionIfFree } from '../../../deck/deckDecisionStore';
++import { getWorkspaceMirror, type WorkspaceListEntry } from '../../../workspace/WorkspaceMirror';
++import { loadWorkspaceAutonomy, onAutonomyWritten } from '../../../deck/deckAutonomyStore';
+ 
+ let dir: string;
+ let dispose: () => void;
+@@ -34,9 +37,71 @@ beforeEach(() => {
+ 
+ afterEach(() => {
+   dispose();
++  vi.restoreAllMocks();
+   fs.rmSync(dir, { recursive: true, force: true });
+ });
+ 
++describe('native workspace mode settings', () => {
++  const frame = {};
++  const contents = { mainFrame: frame, send: vi.fn() };
++  const event = { sender: contents, senderFrame: frame };
++  const invoke = async (channel: string, ...args: unknown[]) => ipcHandlers.get(channel)!(event, ...args);
++
++  beforeEach(() => {
++    dispose();
++    vi.spyOn(getWorkspaceMirror(), 'getEntries').mockReturnValue([
++      { id: 'ws-target' }, { id: 'ws-other' },
++    ] as WorkspaceListEntry[]);
++    dispose = registerDeckHandler(() => ({
++      isDestroyed: () => false, webContents: contents,
++    }) as unknown as BrowserWindow, { dir });
++  });
++
++  it('reads off without creating a policy, writes only the target and notifies after persistence', async () => {
++    expect(await invoke(IPC.DECK_MODE_GET, 'ws-target')).toMatchObject({ mode: 'off', approvalPress: false });
++    expect(fs.existsSync(path.join(dir, 'deck-autonomy.json'))).toBe(false);
++    const notified: string[] = [];
++    const unsubscribe = onAutonomyWritten(() => notified.push(loadWorkspaceAutonomy('ws-target', dir).mode));
++    try {
++      for (const mode of ['danger', 'assist', 'off']) {
++        expect(await invoke(IPC.DECK_MODE_SET, 'ws-target', mode)).toMatchObject({ ok: true, mode });
++        expect(await invoke(IPC.DECK_MODE_GET, 'ws-target')).toMatchObject({ mode, approvalPress: mode === 'danger' });
++        expect(loadWorkspaceAutonomy('ws-other', dir).mode).toBe('off');
++      }
++      expect(notified).toEqual(['danger', 'assist', 'off']);
++      expect(Object.keys(JSON.parse(fs.readFileSync(path.join(dir, 'deck-autonomy.json'), 'utf8')))).toEqual(['ws-target']);
++    } finally { unsubscribe(); }
++  });
++
++  it.each([
++    ['../escape', 'danger', 'VALIDATION_ERROR'],
++    ['', 'danger', 'VALIDATION_ERROR'],
++    [null, 'danger', 'VALIDATION_ERROR'],
++    ['ws-unknown', 'danger', 'NOT_FOUND'],
++    ['ws-target', 'on', 'VALIDATION_ERROR'],
++    ['ws-target', null, 'VALIDATION_ERROR'],
++  ])('rejects invalid target/mode without writes: %s %s', async (id, mode, code) => {
++    await expect(invoke(IPC.DECK_MODE_SET, id, mode)).rejects.toMatchObject({ code });
++    expect(fs.existsSync(path.join(dir, 'deck-autonomy.json'))).toBe(false);
++  });
++
++  it('rejects a missing live mirror, foreign sender and subframe', async () => {
++    for (const badEvent of [{ ...event, sender: {} }, { ...event, senderFrame: {} }]) {
++      await expect(ipcHandlers.get(IPC.DECK_MODE_SET)!(badEvent, 'ws-target', 'danger')).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
++    }
++    vi.mocked(getWorkspaceMirror().getEntries).mockReturnValue(null);
++    await expect(invoke(IPC.DECK_MODE_GET, 'ws-target')).rejects.toMatchObject({ code: 'NOT_FOUND' });
++    expect(fs.existsSync(path.join(dir, 'deck-autonomy.json'))).toBe(false);
++  });
++
++  it('unregisters both settings handlers on disposal', () => {
++    dispose();
++    expect(ipcHandlers.has(IPC.DECK_MODE_GET)).toBe(false);
++    expect(ipcHandlers.has(IPC.DECK_MODE_SET)).toBe(false);
++    dispose = () => undefined;
++  });
++});
++
+ describe('DECK_MOA_DECISIONS', () => {
+   it('lists a pending question a bot asked, and leaves a removed brain\'s card unlisted but on disk', async () => {
+     await raiseDecision('ws-legacy', { question: 'Old brain card?', options: ['a', 'b'] }, dir);
+diff --git a/src/main/ipc/handlers/deck.handler.ts b/src/main/ipc/handlers/deck.handler.ts
+index 6a34169..cd286d1 100644
+--- a/src/main/ipc/handlers/deck.handler.ts
++++ b/src/main/ipc/handlers/deck.handler.ts
+@@ -14,7 +14,7 @@
+ //   - once per process, the Deck state of workspaces that no longer exist is
+ //     archived and torn down (deckOrphanReconcile.ts).
+ 
+-import { ipcMain, app, type BrowserWindow } from 'electron';
++import { ipcMain, app, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
+ import { IPC } from '../../../shared/constants';
+ import type { MoaPendingDecision } from '../../../shared/moa';
+ import { wrapHandler } from '../wrapHandler';
+@@ -22,7 +22,7 @@ import { getWmuxDir } from '../../../daemon/config';
+ import { sweepOrphanAtomicTemps } from '../../../daemon/util/atomicWrite';
+ import { eventBus } from '../../events/EventBus';
+ import { getWorkspaceMirror } from '../../workspace/WorkspaceMirror';
+-import { setWorkspaceMode } from '../../deck/deckAutonomyStore';
++import { loadWorkspaceAutonomy, setWorkspaceMode } from '../../deck/deckAutonomyStore';
+ import { loadDeckDecisions, onDecisionsChanged } from '../../deck/deckDecisionStore';
+ import { operatorDecisionContext, setDeckWorkBootId } from '../../deck/deckWorkStore';
+ import { createWorkTaskReconciler, getTaskLedger, installLedgerChannelEmitter } from '../../deck/taskLedgerHost';
+@@ -69,6 +69,37 @@ export function registerDeckHandler(getWindow: GetWindow, opts: RegisterDeckHand
+     return true;
+   };
+ 
++  // Restore the native settings boundary without restoring the removed brains.
++  // The store emits onAutonomyWritten in THIS process; index.ts already clears
++  // the approval cache and publishes the changed workspace facts on that event.
++  const requireModeTarget = (event: IpcMainInvokeEvent, workspaceId: unknown): string => {
++    const win = getWindow();
++    if (!win || win.isDestroyed() || event.sender !== win.webContents
++        || event.senderFrame !== win.webContents.mainFrame) {
++      throw Object.assign(new Error('mode settings require the main window'), { code: 'PERMISSION_DENIED' });
++    }
++    if (typeof workspaceId !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/.test(workspaceId)) {
++      throw Object.assign(new Error('invalid workspace id'), { code: 'VALIDATION_ERROR' });
++    }
++    if (!getWorkspaceMirror().getEntries()?.some((entry) => entry.id === workspaceId)) {
++      throw Object.assign(new Error('workspace is not in the live workspace mirror'), { code: 'NOT_FOUND' });
++    }
++    return workspaceId;
++  };
++  ipcMain.removeHandler(IPC.DECK_MODE_GET);
++  ipcMain.handle(IPC.DECK_MODE_GET, wrapHandler(IPC.DECK_MODE_GET, async (event, workspaceId: unknown) => {
++    return loadWorkspaceAutonomy(requireModeTarget(event, workspaceId), opts.dir);
++  }));
++  ipcMain.removeHandler(IPC.DECK_MODE_SET);
++  ipcMain.handle(IPC.DECK_MODE_SET, wrapHandler(IPC.DECK_MODE_SET, async (event, workspaceId: unknown, mode: unknown) => {
++    const id = requireModeTarget(event, workspaceId);
++    if (mode !== 'off' && mode !== 'assist' && mode !== 'danger') {
++      throw Object.assign(new Error('mode must be off, assist or danger'), { code: 'VALIDATION_ERROR' });
++    }
++    const after = await setWorkspaceMode(id, mode, opts.dir);
++    return { ...after, ok: after.mode === mode };
++  }));
++
+   // Lane F: the ledger mirrors WorkTask (the identity source) on demand —
+   // every workspace the mirror knows is a candidate owner, listed through the
+   // daemon's owner-scoped `task.mission.list` (all of them in one batched
+@@ -211,6 +242,8 @@ export function registerDeckHandler(getWindow: GetWindow, opts: RegisterDeckHand
+     setPrOwnerSink(null);
+     offDecisionsChanged();
+     ipcMain.removeHandler(IPC.DECK_MOA_DECISIONS);
++    ipcMain.removeHandler(IPC.DECK_MODE_GET);
++    ipcMain.removeHandler(IPC.DECK_MODE_SET);
+   };
+   app.once('before-quit', dispose);
+   return () => {
+diff --git a/src/preload/preload.ts b/src/preload/preload.ts
+index 1243700..49911d5 100644
+--- a/src/preload/preload.ts
++++ b/src/preload/preload.ts
+@@ -975,6 +975,14 @@ const electronAPI = {
+       >,
+   },
+   deck: {
++    mode: {
++      get: (workspaceId: string) =>
++        ipcRenderer.invoke(IPC.DECK_MODE_GET, workspaceId) as Promise<import('../main/deck/deckAutonomyStore').WorkspaceAutonomy>,
++      set: (workspaceId: string, mode: import('../main/deck/deckAutonomyStore').AgentMode) =>
++        ipcRenderer.invoke(IPC.DECK_MODE_SET, workspaceId, mode) as Promise<
++          import('../main/deck/deckAutonomyStore').WorkspaceAutonomy & { ok: boolean }
++        >,
++    },
+     // Every workspace's pending decision (Fleet's tickets, the phone sidebar);
+     // onChanged says one moved.
+     moa: {
+diff --git a/src/shared/constants.ts b/src/shared/constants.ts
+index 32f94a5..ab23874 100644
+--- a/src/shared/constants.ts
++++ b/src/shared/constants.ts
+@@ -209,6 +209,9 @@ export const IPC = {
+   //   DECK_MOA_CHANGED (send, main → renderer, no payload) says it moved.
+   DECK_MOA_CHANGED: 'deck:moa:changed',
+   DECK_MOA_DECISIONS: 'deck:moa:decisions',
++  // Explicit per-workspace settings only; restoring these does not start a brain.
++  DECK_MODE_GET: 'deck:mode:get',
++  DECK_MODE_SET: 'deck:mode:set',
+   //   HOOKS_BRIDGE_* — the Claude Code hook bridge (wmux setup-hooks, in-app).
+   //   STATUS reports whether the wmux hook entries are installed in
+   //   ~/.claude/settings.json; INSTALL performs the same idempotent install as
