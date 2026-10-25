@@ -279,7 +279,7 @@ def _wait_first_pty(ws_id, tries=20):
 
 
 # ---------- shell 就绪探测（SSOT · 取代 send_line 的固定盲等 sleep）----------
-SHELL_READY_TIMEOUT = 8.0    # 单行最多探 8s shell 提示符就绪（冷机够·慢盘兜底）
+SHELL_READY_TIMEOUT = 30.0   # 冷启动可慢；超时保留同一工作区，交给持久收件队列续等。
 SHELL_POLL_SEC = 0.3         # 探屏间隔（也天然节流 read 的 node 子进程数）
 SEND_SETTLE_SEC = 0.15       # 探到就绪后、发下一行前的微沉淀（防 TUI 半帧）
 _PROMPT_TAIL_RE = re.compile(r"(?:\$|>|❯)\s*$")   # 行尾 git-bash `$ ` / PowerShell `> ` / claude `❯`
@@ -364,6 +364,60 @@ def _create_workspace(name):
     )
 
 
+def enable_autonomy(workspace_id):
+    """Apply the owner's launch policy using Wmux's own settings setter.
+
+    Wmux 4.3 exposes mode.set only over its renderer settings API, not CLI/RPC.
+    Calling that setter also invalidates the approval-policy cache; editing
+    deck-autonomy.json alone leaves the running input guard on the old value.
+    """
+    import urllib.request
+    from websockets.sync.client import connect
+
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", workspace_id):
+        raise ValueError("invalid workspace id")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    targets = []
+    for claim in (Path.home() / ".cache" / "wmux-cdp").glob("wmux-cdp-*.lock"):
+        try:
+            port = int(claim.stem.removeprefix("wmux-cdp-"))
+            if not 18800 <= port < 18900:
+                continue
+            # Dead claims survive app exit. Probe only a live owner, locally.
+            from codex_startup import process_alive
+            if not process_alive(int(claim.read_text().strip())):
+                continue
+            with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
+                rows = json.load(response)
+            targets.extend(row["webSocketDebuggerUrl"] for row in rows
+                           if row.get("type") == "page" and row.get("title") == "wmux"
+                           and row.get("url", "").endswith("/.vite/renderer/main_window/index.html")
+                           and row.get("webSocketDebuggerUrl", "").startswith(f"ws://127.0.0.1:{port}/"))
+        except (OSError, ValueError, KeyError):
+            continue
+    if len(targets) != 1:
+        raise RuntimeError(f"Wmux 设置窗口尚未唯一就绪（{len(targets)} 个），未更改 Autonomy")
+    expression = """(async () => {
+      const id = %s;
+      const api = window.electronAPI.deck.mode;
+      const changed = await api.set(id, 'danger');
+      const after = await api.get(id);
+      window.dispatchEvent(new CustomEvent('wmux:deck-agent-mode'));
+      return {ok: changed.ok && after.mode === 'danger', mode: after.mode};
+    })()""" % json.dumps(workspace_id)
+    with connect(targets[0], proxy=None, open_timeout=5) as socket:
+        socket.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {
+            "expression": expression, "awaitPromise": True, "returnByValue": True}}))
+        while True:
+            response = json.loads(socket.recv(timeout=10))
+            if response.get("id") == 1:
+                break
+    result = response.get("result", {}).get("result", {}).get("value", {})
+    if not result.get("ok"):
+        raise RuntimeError("Wmux Autonomy 开启未取得设置回执")
+    return result
+
+
 def send_command(pty, workspace_id, command):
     """Submit one launcher command with throttled bracketed paste, then Enter."""
     _wmux("paste", pty, command, "--allow-ws", workspace_id)
@@ -379,7 +433,15 @@ def _short_launcher(command):
     return f'bash "{launcher.as_posix()}"'
 
 
-def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
+class WmuxLaunchPending(RuntimeError):
+    """The workspace exists but no launcher bytes have been submitted yet."""
+
+    def __init__(self, record, reason):
+        super().__init__(reason)
+        self.record = record
+
+
+def spawn(name, cmd="ccp", cwd=None, shell_init="bash", *, resume=None):
     """Create or reconcile one workspace, then start the registry-derived command.
 
     A lost response is not a failed create. Never replay ``workspace.new``:
@@ -387,11 +449,19 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
     Shell/cd lines are sent only after that ownership check, separately, so a
     prompt that is not ready yet cannot redirect the agent into another cwd.
     """
-    ws = _create_workspace(name)
+    ws = _ws(resume["workspace_id"]) if resume else None
+    if ws is None:
+        ws = _create_workspace(name)
     ws_id = ws["id"]
+    pending = {"workspace_id": ws_id, "name": name, "command": cmd}
+    try:
+        enable_autonomy(ws_id)
+    except Exception as exc:
+        raise WmuxLaunchPending(pending, f"工作区已保留，正在等待 Autonomy 设置就绪：{exc}") from exc
     pty = _wait_first_pty(ws_id)
+    pending["pty"] = pty
     if not pty:
-        raise RuntimeError(f"workspace {ws_id} 没起出终端 pty")
+        raise WmuxLaunchPending(pending, f"workspace {ws_id} 正在等待终端 pty")
 
     def send_line(text, gate=True, echoed_hint=None):
         _wmux("send", pty, text, "--allow-ws", ws_id)
@@ -409,7 +479,7 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash"):
         tail = cwd.rstrip("/").rsplit("/", 1)[-1]     # cd 后新提示符含目录尾段 = 落地铁证
         send_line(f'cd "{cwd}"', echoed_hint=tail)    # ② 单独一行 cd(不合并)·探到新目录提示符再继续
     if not _wait_shell_ready(pty):
-        raise RuntimeError(f"workspace {ws_id} shell 未就绪，未提交启动命令")
+        raise WmuxLaunchPending(pending, f"workspace {ws_id} shell 未就绪，保留原工作区继续等待")
     send_command(pty, ws_id, _short_launcher(cmd))  # ③ 长命令落脚本，终端只收短 launcher
     return {"workspace_id": ws_id, "pty": pty, "name": name}
 

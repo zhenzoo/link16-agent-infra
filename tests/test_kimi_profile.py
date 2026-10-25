@@ -30,11 +30,11 @@ class KimiProfileTests(unittest.TestCase):
         availability = patch.object(runtime, "_require_profile_available")
         availability.start(); self.addCleanup(availability.stop)
 
-    def test_terminal_uses_native_home_and_yolo(self):
+    def test_terminal_uses_native_home_and_never_ask(self):
         command = runtime.standalone_worker_cmd("kp")
         self.assertIn('LINK16_AGENT_PROFILE="kp"', command)
         self.assertIn('KIMI_CODE_HOME="', command)
-        self.assertIn('/.kimi-personal" kimi --yolo', command)
+        self.assertIn('/.kimi-personal" kimi --auto', command)
         self.assertNotIn("CODEX_HOME=", command)
         self.assertNotIn("CLAUDE_CONFIG_DIR=", command)
         self.assertFalse(runtime.pins_jsonl({"profile": "kp"}))

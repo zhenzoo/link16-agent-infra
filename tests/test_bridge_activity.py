@@ -93,6 +93,36 @@ def test_mismatched_thread_or_completed_turn_is_unknown(rpc):
     assert a.read_activity("state", CODEX)["state"] == "unknown"
 
 
+def test_inbox_reconciliation_uses_native_user_message_only(tmp_path, rpc):
+    from bridge_inbox import Inbox
+    inbox = Inbox(tmp_path, 'bot')
+    inbox.receive({'message': {'message_id': 'om_probe'}})
+    inbox.claim()
+    prompt = 'hello [飞书 to=bot route=p2a mid=om_probe]'
+    inbox.boundary('om_probe', prompt=prompt, session='thread-1')
+    inbox.finish('om_probe')
+    rpc.turn['items'] = [{'type': 'agentMessage', 'text': prompt}]
+    assert a.reconcile_codex_inbox(tmp_path, CODEX, inbox) == 0
+    assert inbox.get('om_probe')['state'] == 'awaiting_confirmation'
+    rpc.turn['items'] = [{'type': 'userMessage', 'content': [{'type': 'text', 'text': prompt}]}]
+    assert a.reconcile_codex_inbox(tmp_path, CODEX, inbox) == 1
+    assert inbox.get('om_probe')['state'] == 'done'
+    assert set(method for method, _ in rpc.calls) == {'initialize', 'initialized', 'thread/read', 'thread/turns/list'}
+    before = len(rpc.calls)
+    assert a.reconcile_codex_inbox(tmp_path, CODEX, inbox) == 0
+    assert len(rpc.calls) == before
+
+
+def test_inbox_reconciliation_does_not_use_another_thread(tmp_path, rpc):
+    from bridge_inbox import Inbox
+    inbox = Inbox(tmp_path, 'bot')
+    inbox.receive({'message': {'message_id': 'om_probe'}})
+    inbox.claim()
+    inbox.boundary('om_probe', prompt='hello', session='different-thread')
+    assert a.reconcile_codex_inbox(tmp_path, CODEX, inbox) == 0
+    assert rpc.calls == []
+
+
 def test_endpoint_is_the_workers_own_app_server_not_the_events_mirror(tmp_path, monkeypatch):
     # 2026-09-24: observers run `--url <gateway>/events --startup-id`, which cannot
     # answer RPC; every Codex bot was reported "ValueError". Use the worker's child.

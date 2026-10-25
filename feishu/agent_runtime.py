@@ -1049,7 +1049,7 @@ def standalone_worker_cmd(
         )
         args = list(provider_args or [])
         # Subcommands and non-interactive prompts have their own permission
-        # semantics. In particular -p rejects --yolo in native kimi-code.
+        # semantics. In particular -p rejects permission flags in native kimi-code.
         subcommands = {"login", "doctor", "acp", "web", "server", "provider",
                        "export", "vis", "migrate", "upgrade", "update"}
         is_subcommand = bool(args) and args[0] in subcommands
@@ -1057,7 +1057,7 @@ def standalone_worker_cmd(
         is_prompt = any(arg in {"-p", "--prompt"} or str(arg).startswith("--prompt=")
                         for arg in args)
         if not is_subcommand and not has_mode and not is_prompt:
-            command += " --yolo"
+            command += " --auto"
     elif profile.runtime == "codex":
         # Interactive workers historically own their sandbox policy, but a
         # non-interactive ``codex exec`` caller may be deliberately supplying

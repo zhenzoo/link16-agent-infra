@@ -112,7 +112,224 @@ class WmuxRpcIdentityBehaviour(unittest.TestCase):
                 self.assertEqual("--force" in args, force is True)
 
 
+FAKE_PASTE_PIPE = r"""
+const net = require("net"), { spawn } = require("child_process");
+const addr = process.platform === "win32" ? `\\\\.\\pipe\\link16-paste-test-${process.pid}` : `${process.env.TMPDIR_FAKE}/paste.sock`;
+const requests = [], keys = [], screens = [];
+let sent = "";
+let initial = process.env.FAKE_INITIAL || "";
+const concurrent = process.env.FAKE_CONCURRENT === "1";
+const inserted = process.env.FAKE_INSERT === "1";
+function visibleText() {
+  if (initial) return initial;
+  const own = sent.replaceAll("\x1b[200~", "").replaceAll("\x1b[201~", "");
+  return (inserted && own ? "BEFORE-" : "") + own + (concurrent && own ? " USER-INPUT" : "");
+}
+function screen() {
+  const visible = visibleText();
+  if (!sent && process.env.FAKE_SCREEN) return process.env.FAKE_SCREEN;
+  if (initial.startsWith("UNFRAMED:")) return `──────────\n❯ ${initial.slice(9)}\n──────────`;
+  if (!visible) return "╭───╮\n│ > │\n╰───╯\nAsk When Needed";
+  const lines = visible.split("\n");
+  return ["╭───╮", ...lines.map((line, i) => `│ ${i === 0 ? "> " : ""}${line} │`), "╰───╯", "Ask When Needed"].join("\n");
+}
+const server = net.createServer((sock) => {
+  let buf = "";
+  sock.on("data", (chunk) => {
+    buf += chunk;
+    let at;
+    while ((at = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, at); buf = buf.slice(at + 1);
+      if (!line.trim()) continue;
+      const req = JSON.parse(line); requests.push(req);
+      let result = {};
+      if (req.method === "workspace.list") result = [{ id: "ws-test", name: "test", ptyIds: ["daemon-test"] }];
+      else if (req.method === "surface.list") result = [{ paneId: "pane-test", ptyId: "daemon-test" }];
+      else if (req.method === "input.readScreen") {
+        if (screens.length && process.env.FAKE_CLEAR_REFUSED === "1") initial = "changed draft";
+        const text = screen(); screens.push(text); result = { ptyId: req.params.ptyId, text };
+      }
+      else if (req.method === "input.sendKey") {
+        if (process.env.FAKE_APPROVAL === "1") {
+          sock.write(JSON.stringify({ id: req.id, ok: false, error: "input.sendKey: pending approval" }) + "\n");
+          continue;
+        }
+        keys.push(req.params.key);
+        if (req.params.key === "ctrl+c") { sent = ""; initial = ""; }
+      }
+      else if (req.method === "input.send" && process.env.FAKE_APPROVAL === "1") {
+        sock.write(JSON.stringify({ id: req.id, ok: false, error: "input.send: pending approval" }) + "\n");
+        continue;
+      }
+      else if (req.method === "input.send" && req.params.text.includes("DROP-RESPONSE")) {
+        sent += req.params.text; sock.end(); continue;
+      }
+      else if (req.method === "input.send" && req.params.text.includes("FAIL")) {
+        sock.write(JSON.stringify({ id: req.id, ok: false, error: "input.send: approval prompt" }) + "\n");
+        continue;
+      } else if (req.method === "input.send") sent += req.params.text;
+      sock.write(JSON.stringify({ id: req.id, ok: true, result }) + "\n");
+    }
+  });
+});
+server.listen(addr, () => {
+  const child = spawn(process.execPath, [process.env.RPC, "paste", "daemon-test", process.env.PROMPT, "--allow-ws", "ws-test",
+    ...(process.env.FAKE_REPLACE === "1" ? ["--replace-draft"] : []),
+    ...(process.env.FAKE_WIN32 === "1" ? ["--win32-input"] : [])],
+    { env: { ...process.env, WMUX_SOCKET_PATH: addr, WMUX_AUTH_TOKEN: "tok" } });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (c) => stdout += c); child.stderr.on("data", (c) => stderr += c);
+  child.on("exit", (code) => {
+    console.log(JSON.stringify({ code, stdout, stderr, requests, keys, screens, finalScreen: screen() }));
+    server.close();
+  });
+});
+"""
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class WmuxRpcPasteRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "fake_paste_pipe.js").write_text(FAKE_PASTE_PIPE, encoding="utf-8")
+
+    def via_paste(self, prompt, *, initial="", concurrent=False, inserted=False, screen="",
+                  replace=False, clear_refused=False, approval=False, win32_input=False):
+        env = {**os.environ, "RPC": str(RPC_PATH), "PROMPT": prompt,
+               "FAKE_INITIAL": initial, "FAKE_CONCURRENT": "1" if concurrent else "0",
+               "FAKE_INSERT": "1" if inserted else "0", "FAKE_SCREEN": screen,
+               "FAKE_REPLACE": "1" if replace else "0", "FAKE_CLEAR_REFUSED": "1" if clear_refused else "0",
+               "FAKE_APPROVAL": "1" if approval else "0",
+               "FAKE_WIN32": "1" if win32_input else "0",
+               "TMPDIR_FAKE": str(self.tmp)}
+        out = subprocess.run(["node", str(self.tmp / "fake_paste_pipe.js")], env=env,
+                             capture_output=True, text=True, encoding="utf-8", timeout=30)
+        return json.loads(out.stdout)
+
+    def test_mid_paste_failure_clears_only_the_owned_partial_draft(self):
+        got = self.via_paste("a" * 150 + "FAIL" + "b" * 100)
+        self.assertNotEqual(got["code"], 0)
+        self.assertIn("ctrl+c", got["keys"])
+        self.assertNotIn("enter", got["keys"])
+        self.assertNotIn("a" * 100, got["finalScreen"])
+        self.assertNotIn("USER-INPUT", got["finalScreen"])
+        self.assertIn('LINK16_HANDOFF {"state":"cleared_unsubmitted"}', got['stderr'])
+
+    def test_paste_refuses_to_overwrite_an_existing_draft(self):
+        got = self.via_paste("new text", initial="existing draft")
+        self.assertNotEqual(got["code"], 0)
+        sends = [row for row in got["requests"] if row["method"] == "input.send"]
+        self.assertEqual(sends, [])
+        self.assertEqual(got["keys"], [])
+        self.assertIn("existing draft", got["finalScreen"])
+        self.assertIn('LINK16_HANDOFF {"state":"not_written"}', got["stderr"])
+
+    def test_codex_empty_hint_is_not_a_draft(self):
+        got = self.via_paste("new text", screen="OpenAI Codex\n› Ask Codex to do anything\n GPT-6-Astra xhigh")
+        self.assertEqual(got["code"], 0, got["stderr"])
+        self.assertIn("new text", got["finalScreen"])
+        self.assertEqual(got["keys"], [])
+
+    def test_chunks_preserve_unicode_and_use_one_raw_paste_envelope(self):
+        text = 'a' * 99 + '📎\n6. 编号正文 • ± ° “引号”\n' + 'b' * 120
+        got = self.via_paste(text)
+        self.assertEqual(got['code'], 0, got['stderr'])
+        sends = [r['params'] for r in got['requests'] if r['method'] == 'input.send']
+        self.assertTrue(all(p.get('raw') is True for p in sends))
+        self.assertEqual(''.join(p['text'] for p in sends), '\x1b[200~' + text + '\x1b[201~')
+        for p in sends:
+            p['text'].encode('utf-8')  # an isolated UTF-16 surrogate would fail
+
+    def test_authorized_existing_draft_is_replaced_before_paste(self):
+        got = self.via_paste("new text", initial="old draft", replace=True)
+        self.assertEqual(got["code"], 0, got["stderr"])
+        self.assertEqual(got["keys"], ["ctrl+c"])
+        self.assertNotIn("old draft", got["finalScreen"])
+        self.assertIn("new text", got["finalScreen"])
+        self.assertTrue(all(row["method"] in {
+            "workspace.list", "surface.list", "input.readScreen", "input.send", "input.sendKey"
+        } for row in got["requests"]))  # no private Wmux patch required on peers
+
+    @unittest.skipUnless(os.name == "nt", "native Windows console protocol")
+    def test_windows_codex_preserves_surrogate_pairs_and_newlines_on_the_wire(self):
+        # The CRLF straddles the original 100-character chunk boundary.
+        body = 'a' * 99 + '\r\n📄🧭\n3. 竖板 ±10°'
+        got = self.via_paste(body, win32_input=True)
+        self.assertEqual(got['code'], 0, got['stderr'])
+        wire = ''.join(r['params']['text'] for r in got['requests'] if r['method'] == 'input.send')
+        self.assertEqual(wire.count('\x1b[13;28;13;1;16;1_'), 2)
+        self.assertIn('\x1b[0;0;55357;1;0;1_\x1b[0;0;56516;1;0;1_', wire)
+        self.assertNotIn('\r', wire)
+        self.assertNotIn('\n', wire)
+        self.assertNotIn('📄', wire)
+
+    def test_changed_draft_is_not_blindly_cleared_or_submitted(self):
+        got = self.via_paste("new text", initial="old draft", replace=True, clear_refused=True)
+        self.assertNotEqual(got["code"], 0)
+        self.assertEqual(got["keys"], [])
+        self.assertFalse(any(r["method"] == "input.send" and r["params"].get("text") for r in got["requests"]))
+        self.assertIn('LINK16_HANDOFF {"state":"not_written"}', got["stderr"])
+
+    def test_draft_replacement_does_not_answer_a_real_approval(self):
+        got = self.via_paste("new text", initial="1. Approve command", replace=True, approval=True)
+        self.assertNotEqual(got["code"], 0)
+        self.assertEqual(got["keys"], [])
+        self.assertFalse(any(r["method"] == "input.conditionalClear" for r in got["requests"]))
+
+    def test_lost_write_response_does_not_repeat_the_chunk(self):
+        got = self.via_paste("DROP-RESPONSE")
+        self.assertNotEqual(got["code"], 0)
+        sends = [r for r in got["requests"] if r["method"] == "input.send" and 'DROP-RESPONSE' in r['params']['text']]
+        self.assertEqual(len(sends), 1)
+        self.assertNotIn('not_written', got['stderr'])
+
+    def test_empty_current_prompt_does_not_reuse_history(self):
+        for glyph in ("›", "❯", ">"):
+            with self.subTest(glyph=glyph):
+                got = self.via_paste("new text", screen=f"{glyph} old delivered message\nanswer\n{glyph}\nstatus")
+                self.assertEqual(got["code"], 0, got["stderr"])
+
+    def test_old_framed_draft_does_not_shadow_empty_current_prompt(self):
+        got = self.via_paste("new text", screen="╭──╮\n│ > old message │\n╰──╯\nanswer\n›\nstatus")
+        self.assertEqual(got["code"], 0, got["stderr"])
+
+    def test_real_draft_containing_hint_is_still_protected(self):
+        got = self.via_paste("new text", screen="› Ask Codex to do anything about this bug\nstatus")
+        self.assertNotEqual(got["code"], 0)
+        self.assertFalse(any(r["method"] == "input.send" for r in got["requests"]))
+
+    def test_partial_paste_does_not_claim_zero_writes(self):
+        got = self.via_paste("a" * 150 + "FAIL", concurrent=True)
+        self.assertNotEqual(got["code"], 0)
+        self.assertNotIn("not_written", got["stderr"])
+
+    def test_cleanup_refuses_unconfirmed_concurrent_input(self):
+        got = self.via_paste("a" * 150 + "FAIL", concurrent=True)
+        self.assertNotEqual(got["code"], 0)
+        self.assertNotIn("ctrl+c", got["keys"])
+        self.assertIn("USER-INPUT", got["finalScreen"])
+
+    def test_cleanup_refuses_text_inserted_before_the_owned_suffix(self):
+        got = self.via_paste("a" * 150 + "FAIL", inserted=True)
+        self.assertNotEqual(got["code"], 0)
+        self.assertNotIn("ctrl+c", got["keys"])
+        self.assertIn("BEFORE-", got["finalScreen"])
+
+    def test_paste_refuses_an_unframed_existing_draft(self):
+        got = self.via_paste("new text", initial="UNFRAMED:existing draft")
+        self.assertNotEqual(got["code"], 0)
+        sends = [row for row in got["requests"] if row["method"] == "input.send"]
+        self.assertEqual(sends, [])
+        self.assertEqual(got["keys"], [])
+        self.assertIn("existing draft", got["finalScreen"])
+
+
 class WmuxSessionCreateRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        setting = mock.patch.object(wmux_session, "enable_autonomy", return_value={"ok": True, "mode": "danger"})
+        self.autonomy = setting.start()
+        self.addCleanup(setting.stop)
+
     def test_uncertain_create_adopts_only_the_new_matching_workspace(self):
         rows = [{"id": "ws-old", "name": "bot-kp"}]
 
@@ -133,6 +350,7 @@ class WmuxSessionCreateRecoveryTests(unittest.TestCase):
                     mock.patch.object(wmux_session.time, "sleep"):
                 result = wmux_session.spawn("bot-kp", cmd=command, shell_init=None)
                 self.assertEqual(result["workspace_id"], "ws-new")
+                self.autonomy.assert_called_with("ws-new")
                 self.assertEqual(wmux.call_count, 2)
                 wmux.assert_any_call("paste", "pty-new", command, "--allow-ws", "ws-new")
                 wmux.assert_any_call("enter", "pty-new", "--allow-ws", "ws-new")
@@ -146,6 +364,30 @@ class WmuxSessionCreateRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "shell 未就绪"):
                 wmux_session.spawn("bot-kp", cmd="codex-worker", shell_init=None)
         wmux.assert_not_called()
+
+    def test_slow_shell_resumes_the_same_workspace_and_launches_once(self):
+        with mock.patch.object(wmux_session, "_create_workspace", return_value={"id": "ws-new"}) as create, \
+                mock.patch.object(wmux_session, "_ws", return_value={"id": "ws-new"}), \
+                mock.patch.object(wmux_session, "_wait_first_pty", return_value="pty-new"), \
+                mock.patch.object(wmux_session, "_wait_shell_ready", side_effect=[False, True]), \
+                mock.patch.object(wmux_session, "send_command") as send:
+            with self.assertRaises(wmux_session.WmuxLaunchPending) as pending:
+                wmux_session.spawn("bot-cxp", cmd="codex-worker", shell_init=None)
+            send.assert_not_called()
+            result = wmux_session.spawn("bot-cxp", cmd=pending.exception.record["command"],
+                                        shell_init=None, resume=pending.exception.record)
+        create.assert_called_once()
+        send.assert_called_once_with("pty-new", "ws-new", "codex-worker")
+        self.assertEqual(result["workspace_id"], "ws-new")
+
+    def test_autonomy_failure_preserves_created_workspace_without_launching(self):
+        self.autonomy.side_effect = RuntimeError("settings not ready")
+        with mock.patch.object(wmux_session, "_create_workspace", return_value={"id": "ws-new"}), \
+                mock.patch.object(wmux_session, "send_command") as send:
+            with self.assertRaises(wmux_session.WmuxLaunchPending) as pending:
+                wmux_session.spawn("bot-cxp", cmd="codex-worker", shell_init=None)
+        self.assertEqual(pending.exception.record["workspace_id"], "ws-new")
+        send.assert_not_called()
 
     def test_long_command_becomes_a_short_launcher(self):
         with tempfile.TemporaryDirectory() as temp, \

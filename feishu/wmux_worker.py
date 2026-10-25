@@ -418,6 +418,8 @@ def cmd_plan(args) -> None:
 def cmd_start(args) -> None:
     contract = _contract(args)
     workspace_id = contract["workspace_id"]
+    from wmux_session import enable_autonomy
+    enable_autonomy(workspace_id)
     pty_id, pane_id = _split_here(workspace_id, args.direction)
     contract.update({
         "pty_id": pty_id,

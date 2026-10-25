@@ -67,13 +67,36 @@ class InjectBusyGuardTest(unittest.TestCase):
         self.assertFalse(fb._busy_or_queued(STUCK))                           # 纯卡死·无忙信号
         self.assertFalse(fb._busy_or_queued(""))                             # 空屏
 
+    def test_kimi_angle_composer_is_not_mistaken_for_submitted(self):
+        self.assertTrue(fb._composer_holds_paste("╭──╮\n│ > " + MARK + "\n╰──╯", MARK))
+        self.assertFalse(fb._composer_holds_paste("╭──╮\n│ > │\n╰──╯", MARK))
+
+    def test_codex_stuck_input_retries_enter_and_stops_when_cleared(self):
+        res, enters = self._run(["› " + MARK, "›\n GPT-6-Astra"])
+        self.assertTrue(res)
+        self.assertEqual(enters, 2)
+
+    def test_codex_paste_placeholder_and_empty_prompt_after_history(self):
+        self.assertTrue(fb._composer_holds_paste("› [Pasted Content 5000 chars]", MARK))
+        self.assertFalse(fb._composer_holds_paste("› " + MARK + "\nanswer\n›\nstatus", MARK))
+        self.assertFalse(fb._composer_holds_paste("❯ " + MARK + "\nanswer\n›\nstatus", MARK))
+
+    def test_paste_failure_requires_explicit_safe_retry_proof(self):
+        for state in ('not_written', 'cleared_unsubmitted', 'unknown'):
+            with self.subTest(state=state):
+                result = mock.Mock(returncode=1, stderr='LINK16_HANDOFF {"state":"' + state + '"}', stdout='')
+                with mock.patch.object(fb.subprocess, 'run', return_value=result):
+                    with self.assertRaises(RuntimeError) as caught:
+                        fb.wmux('paste', 'pty', 'hello')
+                self.assertEqual(isinstance(caught.exception, fb.bridge_inbox.RetryableHandoffError), state != 'unknown')
+
     def _run_runtime(self, runtime, state):
         calls = []
         bot = {"name": "unit-bot", "agent": runtime}
         with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
              mock.patch.object(fb, "read_screen", return_value=CLEAR), \
              mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": state}) as activity, \
-             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=False), \
+             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=True), \
              mock.patch("time.sleep"):
             result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
         return result, calls, activity
@@ -88,7 +111,7 @@ class InjectBusyGuardTest(unittest.TestCase):
              mock.patch("time.sleep"):
             result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
         self.assertTrue(result)
-        self.assertEqual([call[0] for call in calls], ["paste", "enter", "send"])
+        self.assertEqual([call[0] for call in calls], ["paste", "send"])
 
     def test_kimi_active_without_native_receipt_never_repeats_enter(self):
         calls = []
@@ -100,13 +123,37 @@ class InjectBusyGuardTest(unittest.TestCase):
              mock.patch("time.sleep"):
             result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
         self.assertFalse(result)
-        self.assertEqual([call[0] for call in calls], ["paste", "enter", "send"])
+        self.assertEqual([call[0] for call in calls], ["paste", "send"])
 
-    def test_kimi_active_enters_then_steers(self):
+    def test_kimi_clear_screen_means_steer_submitted_before_delayed_wire(self):
+        calls = []
+        bot = {"name": "unit-bot", "agent": "kimi"}
+        with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
+             mock.patch.object(fb, "read_screen", return_value=CLEAR), \
+             mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": "active"}), \
+             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=False), \
+             mock.patch("time.sleep"):
+            result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
+        self.assertTrue(result)
+        self.assertEqual([call[0] for call in calls], ["paste", "send"])
+
+    def test_kimi_busy_composer_without_native_receipt_is_not_success(self):
+        calls = []
+        bot = {"name": "unit-bot", "agent": "kimi"}
+        with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
+             mock.patch.object(fb, "read_screen", return_value=BUSY_STUCK), \
+             mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": "active"}), \
+             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=False), \
+             mock.patch("time.sleep"):
+            result = fb._inject("pty", "ws", MARK, runtime_bot=bot)
+        self.assertFalse(result)
+        self.assertEqual([call[0] for call in calls], ["paste", "send"])
+
+    def test_kimi_active_steers_without_enter_or_queue(self):
         result, calls, _ = self._run_runtime("kimi", "active")
         self.assertTrue(result)
-        self.assertEqual([call[0] for call in calls], ["paste", "enter", "send"])
-        self.assertEqual(calls[-1][2], "\x13")
+        self.assertEqual([call[0] for call in calls], ["paste", "send"])
+        self.assertEqual(calls[-1][2], "\x1b[115;5u")
 
     def test_kimi_non_active_does_not_steer(self):
         for state in ("idle", "waiting", "unknown"):

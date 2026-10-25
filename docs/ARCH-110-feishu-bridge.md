@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-10-24
+last_reviewed: 2026-10-25
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -249,14 +249,17 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 | 状态 | 重启后的行为 |
 |---|---|
-| queued / processing | 尚未越过终端操作边界；恢复准备、下载或会话接入 |
+| queued / processing | 尚未提交，或驱动已证明零写入／未提交残稿已完整清除；自动恢复准备与投递 |
 | submitting | 已准备开始粘贴/回车；异常退出后转 uncertain，不能直接再次粘贴 |
 | awaiting_confirmation | 桥已完成注入操作，等待真实输入确认；不自动重贴 |
 | done | 实际输入 hook 已确认或桥内命令处理完成；不重做，清空队列中的原始 payload |
+| received_modified | 目标会话的原生用户消息包含同一 bot/mid，但正文摘要有变化；记录实际摘要、保留原文，不重投 |
 | command / uncertain | 强制结束恰好跨越命令或终端副作用时，保留结果不明记录；不盲目执行第二次 |
 | cancelled | `/stop`、已确认 `/close`、`/clear`、`/new` 等撤销此前待办；不恢复旧任务 |
 
-普通提示词提交前保存精确内容摘要，信封带该条飞书消息 ID。现有 `UserPromptSubmit` hook 对本次真实输入求摘要，匹配后记录实际 session 并完成交接；换行仅规范 CRLF/CR。它证明会话接收了这条输入，不代表模型已经回答。桥先退出而 hook 后到时，hook 仍能独立提交同一条确认。
+普通提示词提交前保存精确内容摘要，信封带该条飞书消息 ID；Codex 同时绑定目标 thread。现有 `UserPromptSubmit` hook 对本次真实输入求摘要，匹配且会话一致后完成交接；换行仅规范 CRLF/CR。它证明会话接收了这条输入，不代表模型已经回答。桥先退出而 hook 后到时，hook 仍能独立提交同一条确认。用户在终端补字导致摘要不同但信封和会话一致时，记 `received_modified`，不能冒充正文完全一致，也不能继续误报未接收。
+
+Codex 缺少 hook 回执时，现有 doctor 通过同一 worker 的 app-server 只读查询目标 thread 最近最多 30 个 turn，仅以 `userMessage` 核对；assistant 引用与其它 thread 均不计接收，未查到也不盲目重投。`/delivery` 与 CLI `status` 显示落盘状态、真实接收会话和正文核对结果。零写入或已确认清空的失败由原收件队列退避重试；持续核对结果保留在账本和日志中，不因为短暂失败或升级后发现历史待核记录就发送“终端未确认”卡片。
 
 受控 `start` / `stop` 给当前 handler 3 秒宽限，超时直接结束进程；强杀、断电恰好跨越不可查询的 TUI/斜杠副作用时，仍有无法自动判定的窗口，这是保留 uncertain 的明确边界（最坏是那一条需要重发，不会重复执行）。正常的桥重启不靠重复发任务解决它。入站未收到平台事件、磁盘损坏和平台撤回资源不属于本地收件确认保证。
 
@@ -584,11 +587,12 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **修法（SSOT 在 `wmux_session.py`）**：
 
-- `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=8` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
+- `spawn` 创建工作区后先通过 `enable_autonomy` 调用 Wmux 自身 `deck.mode.set(..., 'danger')` 并回读，再启动终端命令；独立 worker 的 `cmd_start` 共用该设置入口。Wmux 4.3 的设置接口只在 renderer 暴露，因此从其存活进程的本地 CDP claim 定位唯一设置窗口；不扫描任意浏览器、不直写设置文件。原生 setter 同时刷新审批缓存，单改 JSON 不足以生效。主人 2026-10-25 已选择受管会话统一 Autonomy on。
+- `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=30` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
 - 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。app-server 分支不读屏判就绪、不重发启动命令，也不再等待模型预热。
-- **超时兜底**：探不到提示符 → 回退原 `sleep(0.4)` 照发，最坏不比旧版差、绝不卡死 / 少发。
+- **尚未提交 launcher 的超时**：保留工作区、pty、命令和 startup_id 到原会话记录的 `pending_launch`；持久队列在同一工作区续等，不报永久启动失败、不要求主人重发、不另建窗口。launcher 已提交后的响应不确定仍按原生启动回执判断，不能套用此安全重试分支。
 
 **2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。手动 `/handoff` 另以 `bridge-handoff-attempt-<bot>.json` 记录 pending/failed/complete：旧会话已经关掉但新会话没起成时，6 小时内再次发 `/handoff` 会复用原快照重试，不会要求已经不存在的旧会话再活一次；complete 后同一快照不可重放。
 
@@ -631,13 +635,19 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 ## § 2.12b · 注入消息怎么保证【真提交】（线性分档 settle + 回车后闭环校验 + 喊人 · 2026-07-16 根治「消息卡输入框没发出去」）
 
-> 现行入口（2026-10-24）：普通换行（Shift+Enter）与短文本一样原文内联；只有含 TAB 或超过 16000 UTF-16 单元的消息，才由 `_prepare_tui_text` 复用消息专属 inbox 文件交接。文件先按 UTF-8 原字节保存，再只 paste 单行读取指令和原路由信封。保存失败则不进入注入边界，不截断提交。下述 settle / 回车机制继续用于这些输入。
+> 现行入口（2026-10-25 下午纠正）：普通换行、编号、Emoji 均按原文内联；撤除“Windows Codex 含非 BMP 字符就转 TXT”的新增例外。仅原有 TAB／超过 16000 UTF-16 单元的消息继续使用专属文件交接。文件保存失败不进入注入边界、不截断提交。
 
-**编号长文截断（2026-10-11 baseball-2）**：5716 单元正文没有触发原来的 16000 命令行上限策略；分块粘贴到第 3800 字时，Wmux 3.66.0 将输入框中的 `› 6. 录制与存储` 当成审批，拒绝剩余输入，桥因 paste 抛错没有发送 Enter。长度计数没有算错，旧策略只覆盖命令行容量与 TAB，没有覆盖终端解析和审批误判。隔离 Codex 0.162.1 验证：仅加 raw 或一次完整粘贴均不能保证原文，后者仍丢失 `•`、`±`、`°`、弯引号等字符；这两个候选已撤回。2026-10-12 曾以多行这一输入结构触发现有文件交接；主人 2026-10-24 明确普通换行应直接发送，现行规则不再以换行作为文件交接理由，也不改审批保护或 Wmux 安装包。
+**编号长文截断（2026-10-11 baseball-2）**：5716 单元正文没有触发原来的 16000 命令行上限策略；分块粘贴到第 3800 字时，Wmux 3.66.0 将输入框中的 `› 6. 录制与存储` 当成审批，拒绝剩余输入，桥因 paste 抛错没有发送 Enter。长度计数没有算错，旧策略只覆盖命令行容量与 TAB，没有覆盖终端解析和审批误判。隔离 Codex 0.162.1 验证：仅加 raw 或一次完整粘贴均不能保证原文，后者仍丢失 `•`、`±`、`°`、弯引号等字符；这两个候选已撤回。2026-10-12 曾以多行这一输入结构触发现有文件交接；主人 2026-10-24 明确普通换行应直接发送，现行规则不再以换行作为文件交接理由。
+
+**编号 composer 与失败清理（2026-10-25）**：原 autonomy-off 审批猜测会把 `> 3. …` 正文当作选项。按主人最新决定，受管启动入口统一开启 Autonomy，普通输入不再依赖这类编号正文例外。Link16 paste 仍只取最后一个当前提示符，包含裸 `›` 空框；Codex 的精确占位文字 `Ask Codex to do anything` 不算草稿，历史消息不得遮蔽当前空框。受管 `_inject` 传 `--replace-draft`，复读并比对当前草稿后，经正式 `input.sendKey` 单发 Ctrl+C，回读为空才粘贴；独立 CLI 默认仍保留草稿。此路径沿用原 /stop 清理方式，无需私人 Wmux 补丁；读屏和按键之间并非原子事务，发现变化或无法确认清空时不继续提交。开启 Autonomy 允许 Wmux 自动审批，不等于删除消息落盘、输入框识别、提交或接收回执。
+
+paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，防止 Wmux 重复包装。Windows Codex 使用 `--win32-input`：非 BMP 字符按两个连续 key-down 的 UTF-16 单元编码，换行编码为 Shift+Enter；CRLF 在分块前归一，避免跨块成为两次换行。只改传输编码，消息正文、信封与回执摘要不变。166／3781 字编号原文（含 `📄🧭`、换行、`±10°`、弯引号）均在 Codex 0.164.0 真机取得精确原生回执。该编码依据 [Microsoft Win32 输入格式](https://github.com/microsoft/terminal/blob/main/src/terminal/input/terminalInput.cpp)，字符丢失机制与 [crossterm 的代理对事件缺陷](https://github.com/crossterm-rs/crossterm/issues/1072) 一致；Claude／Kimi 不启用此编码，本轮仅覆盖共享回归。
+
+任一块失败都不发送 Enter，尝试闭合粘贴；只有完整 composer 仍等于本次写入时，才复读比对并通过正式按键清除。清理后回读为空，才向队列返回可安全重试的证明；归属不明、已观察到并发变化或清理未确认保留待核。写请求发出后丢响应不重复该块、不换传输重放。提交检查识别 Codex `›` 与 `[Pasted Content …]`，最终接收仍以同一会话的原生正文回执为准。跨机发布前已以正式接口完成旧草稿覆盖与 3757 字真机精确回执，TB24 4.10.0／TB25 3.55.0 均无 `input.conditionalClear`，该未发布接口不再是运行依赖。
 
 **文件交接合同**：三个 runtime 共用同一入口；文件名按 bot 与原 message id 摘要隔离，正文用 `write_bytes(text.encode('utf-8'))` 避免 Windows 换行改写。先用原文确定 sender / A2A / 群路由，再替换正文，保留同一 mid。文件交接信封省去会在 Windows Codex 输入中丢失的装饰性中点，使输入回执摘要一致。真机验收覆盖 Codex：原始 5809 字符测试材料文件字节一致，231 字符读取指令导出回读也字节一致；Claude / Kimi 仅覆盖共享入口回归，未声称三平台真机全测。需要重启对应 bot 的桥进程加载 Python 改动，不需重启 Wmux 或业务会话；未确认消息不自动重投。
 
-**短输入提交**：`_inject` paste 后按字数等待，再发送 Enter 并检查 composer。Kimi 额外按 `bridge_activity` 的结构状态分流：`active` 时 Enter 后立即补一次 Ctrl+S，让主人、Cron、看门狗等所有来源的新输入 steer 进当前回合；`idle` / `waiting` / `unknown` 只发送 Enter。Codex 与 Claude 不发送 Ctrl+S。Kimi 同时用 Wire `turn.prompt` / `turn.steer` 的精确文本确认原生消费；活跃时结构回执尚未出现不重复 Enter，避免屏幕校验滞后造成假失败和重复提交。以下是该机制的历史证据；Codex 是否消费仍以原生 prompt 回执和入站 digest 为准，不能用 RPC 成功或输入框空代替。
+**短输入提交**：`_inject` paste 后按字数等待，再按 runtime 状态提交并检查 composer。Kimi 按 `bridge_activity` 的结构状态分流：`active` 时直接发送一次 Ctrl+S 的增强键盘 CSI-u 序列 `\x1b[115;5u`，让主人、Cron、看门狗等所有来源的新输入 steer 进当前回合，不先 Enter 入队；`idle` / `waiting` / `unknown` 只发送 Enter。Codex 与 Claude 不发送 Ctrl+S。Wmux 命名键不支持 ctrl+s；CSI-u 路径已取得真实原生 steer 回执。Kimi 用 Wire `turn.prompt` / `turn.steer` 精确文本或已清空 composer 确认提交；活跃时消息仍在 composer 就不能以忙屏幕冒充成功，也不重复提交。长前台工具后的 Wire 回执可能延迟，验收必须覆盖完整回合。受管 Kimi 交互启动默认 `--auto`（Never Ask），plan 退出自动批准；`--yolo` 不跳过该审批，不能用于无人值守会话。既有 PreToolUse 继续硬拦 AskUserQuestion，确需主人决定时只以普通文字说明。以下是该机制的历史证据；Codex 是否消费仍以原生 prompt 回执和入站 digest 为准，不能用 RPC 成功或输入框空代替。
 
 **病根（2026-07-16 用户实证 + 真机复现）**：旧 `_inject` = `paste → time.sleep(0.3) → enter`，固定 0.3s 是**唯一赌注**。paste 是分块限速的（`wmux paste` 100字/块·长文本 paste 本身要 4~5s），paste 返回只代表「字节已交 daemon」，**不代表 Claude 的 TUI 已把粘贴消化+提交进输入框**。长文本 / 后台命令刚完 TUI 正忙时，0.3s 不够 → 回车抢在消化完成前按下 → 被吞 → 文字卡输入框。**是负载相关的偶发竞态**（干净环境真 paste+0.3+enter 复现不出·印证用户「有的时候」）→ 修法必须走**闭环自愈**，不是把 0.3 调大赌一个够用的值。
 

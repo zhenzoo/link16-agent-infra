@@ -113,10 +113,12 @@ function attempt(target, token, method, params) {
     const sock = net.connect(target);
     let buf = "";
     let done = false;
+    let written = false;
+    const transportError = (e) => { e.requestWritten = written; return e; };
     const timer = setTimeout(() => {
-      if (!done) { done = true; sock.destroy(); reject(new Error(`RPC timeout: ${method}`)); }
+      if (!done) { done = true; sock.destroy(); reject(transportError(new Error(`RPC timeout: ${method}`))); }
     }, 10000);
-    sock.on("connect", () => sock.write(req));
+    sock.on("connect", () => { written = true; sock.write(req); });
     sock.on("data", (chunk) => {
       buf += chunk.toString("utf8");
       const lines = buf.split("\n");
@@ -133,8 +135,8 @@ function attempt(target, token, method, params) {
         } catch {}
       }
     });
-    sock.on("error", (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
-    sock.on("close", () => { if (!done) { done = true; clearTimeout(timer); reject(new Error("closed before response")); } });
+    sock.on("error", (e) => { if (!done) { done = true; clearTimeout(timer); reject(transportError(e)); } });
+    sock.on("close", () => { if (!done) { done = true; clearTimeout(timer); reject(transportError(new Error("closed before response"))); } });
   });
 }
 
@@ -146,11 +148,12 @@ async function rpc(method, params = {}) {
   targets.push(pipeName());
   const port = process.platform === "win32" ? tcpPort() : undefined;
   let lastErr;
+  const unsafeReplay = (e) => e.fromServer || (e.requestWritten && ["input.send", "input.sendKey"].includes(method));
   for (const t of targets) {
-    try { return await attempt(t, token, method, params); } catch (e) { if (e.fromServer) throw e; lastErr = e; }
+    try { return await attempt(t, token, method, params); } catch (e) { if (unsafeReplay(e)) throw e; lastErr = e; }
   }
   if (port) {
-    try { return await attempt({ host: "127.0.0.1", port }, token, method, params); } catch (e) { if (e.fromServer) throw e; lastErr = e; }
+    try { return await attempt({ host: "127.0.0.1", port }, token, method, params); } catch (e) { if (unsafeReplay(e)) throw e; lastErr = e; }
   }
   throw lastErr ?? new Error("no transport");
 }
@@ -176,6 +179,10 @@ let ALLOW_WS = null;
   const i = process.argv.indexOf("--allow-ws");
   if (i !== -1) { ALLOW_WS = process.argv[i + 1] || null; process.argv.splice(i, 2); }
 }
+const REPLACE_DRAFT = process.argv.includes("--replace-draft");
+if (REPLACE_DRAFT) process.argv.splice(process.argv.indexOf("--replace-draft"), 1);
+const WIN32_INPUT = process.argv.includes("--win32-input");
+if (WIN32_INPUT) process.argv.splice(process.argv.indexOf("--win32-input"), 1);
 
 // ---- blind pane.split refusal (2026-06-16) ----
 // pane.split targets the GLOBAL active pane: the daemon hardcodes activeWorkspaceId and ignores
@@ -275,19 +282,125 @@ async function main() {
       // 这里用 100字/90ms 留余量）。桥 _inject 用它取代直接 send，根治长消息截断（2026-06-23）。
       const [ptyId, ...textParts] = rest;
       const text = textParts.join(" ");
-      const ws = await guardPty(ptyId, "paste");
+      let ws;
+      try { ws = await guardPty(ptyId, "paste"); }
+      catch (error) { error.handoff = "not_written"; throw error; }
       const CHUNK = 100, DELAY = 90, BP_START = "\x1b[200~", BP_END = "\x1b[201~";
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const sendChunk = async (t) => {
-        for (let a = 0; a < 3; a++) {
-          try { return await rpc("input.send", { text: t, ptyId, workspaceId: ws }); }
-          catch (e) { if (a === 2) throw e; await sleep(150); }   // 抗瞬时 ECONNRESET
-        }
+      const readComposer = async () => {
+        const result = await rpc("input.readScreen", { ptyId, workspaceId: ws, tail_lines: 200 });
+        if (!result || typeof result.text !== "string") throw new Error("composer screen unavailable");
+        return result.text;
       };
-      await sendChunk(BP_START);
-      let n = 0;
-      for (let i = 0; i < text.length; i += CHUNK) { await sendChunk(text.slice(i, i + CHUNK)); n++; await sleep(DELAY); }
-      await sendChunk(BP_END);
+      const framedComposer = (screen) => {
+        const lines = screen.split("\n");
+        for (let end = lines.length - 1; end >= 0; end--) {
+          if (!/^[╰└]/.test(lines[end].trimStart())) continue;
+          for (let start = end - 1; start >= 0; start--) {
+            if (!/^[╭┌]/.test(lines[start].trimStart())) continue;
+            const body = lines.slice(start + 1, end);
+            const first = body.find((row) => row.trim());
+            if (!first) break;
+            const content = first.replace(/^[\s│║┃]*/, "").trimStart();
+            return /^[❯>›»]\s+/.test(content) ? body.join("\n") : null;
+          }
+        }
+        return null;
+      };
+      const composerContent = (screen) => {
+        const lines = screen.split("\n");
+        // An empty current prompt is still a prompt. Never fall back to an old
+        // submitted message (or a framed composer) in scrollback.
+        const lastPrompt = lines.findLastIndex((row) => /^[\s│║┃]*[❯>›»](?:\s|$)/.test(row));
+        if (lastPrompt < 0) return "";
+        const framed = framedComposer(lines.slice(lastPrompt - 1).join("\n"));
+        if (framed !== null) {
+          return framed.split("\n").map((row) => row.replace(/^[\s│║┃]*|[\s│║┃]*$/g, "").trim())
+            .join("\n").replace(/^[❯>›»](?:\s+|$)/, "");
+        }
+        const prompt = lines[lastPrompt].trimStart();
+        const content = prompt.replace(/^[❯>›»](?:\s+|$)/, "");
+        // Codex paints this hint inside its empty composer. It is not input.
+        // Keep the match exact: a real draft containing the words stays a draft.
+        if (/^›(?:\s|$)/.test(prompt) && content === "Ask Codex to do anything") return "";
+        return content;
+      };
+      const hasDraft = (screen) => composerContent(screen).trim().length > 0;
+      const squash = (value) => value.replace(/[\s─-╿]/g, "");
+      const clearComposer = async (expected) => {
+        // Use stock Wmux, like the bridge's existing /stop cleanup. Recheck the
+        // visible draft before one Ctrl+C; the official key handler also checks
+        // workspace access and approvals. Never rely on a locally patched RPC.
+        if (!expected || squash(composerContent(await readComposer())) !== expected)
+          return { cleared: false, reason: "composer-changed" };
+        await rpc("input.sendKey", { ptyId, workspaceId: ws, key: "ctrl+c" });
+        await sleep(150);
+        return { cleared: !hasDraft(await readComposer()) };
+      };
+      // A lost response may follow a successful write. Never repeat a chunk.
+      // This command owns the bracketed-paste envelope. Without raw, Wmux
+      // wraps newline-containing chunks again; an inner end marker ends our
+      // outer paste early and subsequent newlines become keystrokes.
+      // Native Windows Codex reads console key records: ordinary LF is lost,
+      // and interleaved surrogate key-up records erase non-BMP characters.
+      // ConPTY's win32-input protocol preserves paired key-downs and Shift+Enter.
+      // Only the wire encoding changes; the prompt and receipt stay original.
+      const encode = (t) => WIN32_INPUT && process.platform === "win32"
+        ? t.replace(/\r\n|[\r\n]|[\u{10000}-\u{10ffff}]/gu, (c) =>
+            /[\r\n]/.test(c) ? "\x1b[13;28;13;1;16;1_" :
+              `\x1b[0;0;${c.charCodeAt(0)};1;0;1_\x1b[0;0;${c.charCodeAt(1)};1;0;1_`)
+        : t;
+      const sendChunk = (t) => rpc("input.send", { text: encode(t), raw: true, ptyId, workspaceId: ws });
+      let before;
+      try {
+        before = await readComposer();
+        if (hasDraft(before) && REPLACE_DRAFT) {
+          // Owner-authorized replacement; never submit the old draft.
+          const cleared = await clearComposer(squash(composerContent(before)));
+          if (!cleared?.cleared) throw new Error(`draft replacement deferred: ${cleared?.reason || "unknown"}`);
+          await sleep(150);
+          before = await readComposer();
+        }
+        if (hasDraft(before)) throw new Error("paste refused: composer already contains a draft");
+      } catch (error) {
+        // This proof is emitted only before the first write, never for a lost
+        // transport response after writing. The inbox can safely retry it.
+        error.handoff = "not_written";
+        throw error;
+      }
+      let started = false, written = "", n = 0;
+      try {
+        await sendChunk(BP_START);
+        started = true;
+        const characters = Array.from(WIN32_INPUT ? text.replace(/\r\n/g, "\n") : text);
+        for (let i = 0; i < characters.length; i += CHUNK) {
+          const chunk = characters.slice(i, i + CHUNK).join("");
+          await sendChunk(chunk);
+          written += chunk; n++; await sleep(DELAY);
+        }
+        await sendChunk(BP_END);
+        started = false;
+      } catch (error) {
+        if (!started && !written && error.fromServer) error.handoff = "not_written";
+        if (started) { try { await sendChunk(BP_END); } catch {} }
+        if (written) {
+          const current = await readComposer();
+          const own = squash(written);
+          const currentComposer = squash(composerContent(current));
+          const beforeComposer = squash(composerContent(before));
+          const owned = own && currentComposer === own && beforeComposer === "";
+          if (!owned) {
+            throw new Error(`${error.message}; partial paste left untouched because ownership could not be confirmed`);
+          }
+          const cleared = await clearComposer(own);
+          if (!cleared?.cleared) throw new Error(`${error.message}; partial paste cleanup refused: ${cleared?.reason || "unknown"}`);
+          if (hasDraft(await readComposer())) throw new Error(`${error.message}; partial paste cleanup failed`);
+          // No Enter was sent. The exact owned draft has been cleared and
+          // verified, so the durable inbox can retry the whole message.
+          error.handoff = "cleared_unsubmitted";
+        }
+        throw error;
+      }
       out = { pasted: text.length, chunks: n };
       break;
     }
@@ -442,4 +555,8 @@ async function main() {
   console.log(typeof out === "string" ? out : JSON.stringify(out, null, 2));
 }
 
-main().catch((e) => { console.error("ERR:", e.message); process.exit(1); });
+main().catch((e) => {
+  if (e.handoff) console.error("LINK16_HANDOFF " + JSON.stringify({ state: e.handoff }));
+  console.error("ERR:", e.message);
+  process.exit(1);
+});

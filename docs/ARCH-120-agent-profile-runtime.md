@@ -407,7 +407,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 新安装按用户指定 home 注册，例如 `~/.kimi-personal`。新版使用 `KIMI_CODE_HOME`，
 不是旧 Python kimi-cli 的 `KIMI_SHARE_DIR`；默认官方数据目录为 `~/.kimi-code`。
 
-- `standalone_worker_cmd()` 为 Kimi 设置 registry home 和 profile，交互启动默认 `--yolo`；
+- `standalone_worker_cmd()` 为 Kimi 设置 registry home 和 profile，受管交互启动默认 `--auto`（Never Ask），plan 退出自动批准且不弹交互提问；
   `login` / `acp` / `doctor` / `-p` 等入口不追加冲突的交互权限参数。
 - 子 shell 清除继承的临时 `KIMI_MODEL_*`，避免旧模型覆盖改变实际 provider；不迁移任何其他 home 的凭据。
 - `kp login` 登录隔离账户；`kp --version` 与 Link16 `selftest --profile kp` 检查真实启动。
@@ -416,7 +416,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
   治理脚本与 launcher 必须解析同一个 effective registry，不能各自管理 committed 与 local 两份名单。
 - 飞书 `/account` 可显式选择已注册的 Kimi profile。额度状态保持 unknown；未验收可靠额度接口前，自动选号不选择 Kimi。
 - `worker_cmd()` 启动 `kimi_native_worker.py`，后者启动官方原生 TUI 和独立观察子进程；沿用现有桥注入、路由、outbox、卡片与 durable ACK，不复制发送引擎。
-- 所有注入来源共用 Kimi 状态规则：`bridge_activity=active` 时先 `Enter` 再 `Ctrl+S`，把新输入 steer 进当前回合；`idle` / `waiting` / `unknown` 只按 `Enter`。Codex 与 Claude 不发送 `Ctrl+S`。
+- 所有注入来源共用 Kimi 状态规则：`bridge_activity=active` 时直接发送 Ctrl+S 的增强键盘 CSI-u 序列 `\x1b[115;5u`，把新输入 steer 进当前回合，不先按 `Enter` 入队；`idle` / `waiting` / `unknown` 只按 `Enter`。Codex 与 Claude 不发送 `Ctrl+S`。
 
 ### 11.1 会话与观察者身份
 

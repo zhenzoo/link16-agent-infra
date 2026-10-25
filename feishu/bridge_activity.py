@@ -256,6 +256,51 @@ def _codex_activity(state_dir, name, bot, inspect_tools):
 _READERS = {"codex": _codex_activity, "claude": _claude_activity, "kimi": _kimi_activity}
 
 
+def reconcile_codex_inbox(state_dir, bot, inbox):
+    """Recover missing hook receipts from this worker's native user messages.
+
+    No input is sent and absence never authorizes a replay. Normal deliveries
+    have a hook receipt already and do not pay for this read-only query.
+    """
+    if not inbox.awaiting_receipts():
+        return 0
+    from codex_app_server_worker import RpcConnection
+    url, thread = _observer_endpoint(state_dir, bot["name"])
+    pending = inbox.awaiting_receipts()
+    if not any(row["session"] in (None, thread) for row in pending):
+        return 0
+    rpc = RpcConnection(url)
+    confirmed = 0
+    try:
+        rpc.request("initialize", {
+            "clientInfo": {"name": "link16-inbox-receipt", "version": "1"},
+            "capabilities": {"experimentalApi": True},
+        }, timeout=5)
+        rpc.notify("initialized")
+        live = rpc.request("thread/read", {"threadId": thread, "includeTurns": False}, timeout=5)
+        if (live.get("thread") or {}).get("id") != thread:
+            raise ValueError("回执会话标识不匹配")
+        cursor = None
+        for _ in range(3):
+            params = {"threadId": thread, "limit": 10, "sortDirection": "desc", "itemsView": "full"}
+            if cursor:
+                params["cursor"] = cursor
+            page = rpc.request("thread/turns/list", params, timeout=5)
+            for turn in page.get("data") or []:
+                for item in turn.get("items") or []:
+                    if item.get("type") != "userMessage":
+                        continue
+                    prompt = "\n".join(part.get("text", "") for part in item.get("content") or []
+                                       if part.get("type") == "text")
+                    confirmed += inbox.confirm(prompt, thread)
+            cursor = page.get("nextCursor")
+            if not cursor or not inbox.awaiting_receipts():
+                break
+        return confirmed
+    finally:
+        rpc.close()
+
+
 def progress_time(state_dir, bot):
     try:
         return os.path.getmtime(Path(state_dir) / f"bridge-outbox-{bot}.jsonl")

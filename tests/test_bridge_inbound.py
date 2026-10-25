@@ -118,6 +118,13 @@ class TuiTextHandoffTests(unittest.TestCase):
             self.assertEqual(feishu_bridge._prepare_tui_text("unit", "om_short", "继续检查"), ("继续检查", ""))
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
+    def test_emoji_does_not_replace_the_original_prompt_with_a_file_pointer(self):
+        body = '1. 原文 📄\r\n2. 云台 • ± 10°\n🧭 当前进度'
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(feishu_bridge, 'STATE_DIR', Path(tmp)):
+            self.assertEqual(feishu_bridge._prepare_tui_text('unit', 'om_unicode', body), (body, ''))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def test_tab_and_utf16_limits_keep_existing_file_policy(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)):
             for mid, body in [("om_tab", "name\tvalue"), ("om_emoji", "😀" * 8001)]:

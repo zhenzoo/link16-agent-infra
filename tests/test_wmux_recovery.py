@@ -15,6 +15,7 @@ import bridge_process
 import windows_bootstrap
 import wmux_session as ws
 import bridge_inbox
+import feishu_bridge as bridge
 
 UNAVAILABLE = RuntimeError("wmux-rpc rpc workspace.list failed: ERR: connect ECONNREFUSED 127.0.0.1:5912")
 
@@ -110,6 +111,35 @@ class WmuxRecoveryTests(unittest.TestCase):
 
 
 class InboundRecoveryBoundaryTests(unittest.TestCase):
+    def test_unready_shell_is_saved_and_resumed_instead_of_abandoned(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(bridge, "STATE_DIR", Path(tmp)), \
+                patch.object(bridge, "_reuse_check", return_value=(False, False, "")), \
+                patch.object(bridge.agent_runtime, "profile_name", return_value="cxp"), \
+                patch.object(bridge.agent_runtime, "runtime_name", return_value="codex"), \
+                patch.object(bridge.agent_runtime, "profile_login_state", return_value={"status": "unknown"}), \
+                patch.object(bridge.agent_runtime, "profile_spec"), \
+                patch.object(bridge.agent_runtime, "ensure_launch_cwd_trust"), \
+                patch.object(bridge, "_project_jsonls", return_value=[]), \
+                patch.object(bridge, "current_cwd", return_value=tmp), \
+                patch.object(bridge, "_worker_launcher", return_value="start-worker"), \
+                patch.object(bridge, "_finish_worker_startup", return_value=True), \
+                patch.object(bridge, "_detect_new_jsonl", return_value=None), \
+                patch.object(ws, "daemon_fingerprint", return_value="same-daemon"), \
+                patch.object(ws, "spawn") as spawn:
+            bot = {"name": "unit", "profile": "cxp"}
+            pending = {"workspace_id": "ws-slow", "pty": "pty-slow",
+                       "name": "bot-unit", "command": "start-worker"}
+            spawn.side_effect = [ws.WmuxLaunchPending(pending, "shell 未就绪"), pending]
+            with self.assertRaises(bridge_inbox.RetryableHandoffError):
+                bridge._ensure_session_unlocked(bot)
+            saved = bridge.load_session("unit")
+            self.assertEqual(saved["pending_launch"]["workspace_id"], "ws-slow")
+            result = bridge._ensure_session_unlocked(bot)
+            self.assertEqual(result[:2], ("ws-slow", "pty-slow"))
+            self.assertEqual(spawn.call_args.kwargs["resume"], saved["pending_launch"])
+            self.assertIsNone(bridge.load_session("unit")["pending_launch"])
+
     def dispatch(self, row):
         # Run the actual nested dispatcher with a controlled channel/inbox. No
         # real bot connection, terminal, or GUI is touched by these probes.
@@ -124,6 +154,7 @@ class InboundRecoveryBoundaryTests(unittest.TestCase):
             control=Mock(), durable_inbox=Mock(get=Mock(return_value=row)),
             ch=SimpleNamespace(dispatch_saved=AsyncMock(side_effect=UNAVAILABLE)),
             card_send=card, bname="unit", blog=Mock(), inbound_handler=Mock(),
+            bot={'name': 'unit'}, agent_runtime=SimpleNamespace(uses_app_server=lambda bot: False),
         )
         exec(compile(ast.Module(body=[node], type_ignores=[]), "dispatcher", "exec"), context)
         payload = {"message": {"message_id": "om_unit", "chat_id": "oc_unit"}}
@@ -142,7 +173,7 @@ class InboundRecoveryBoundaryTests(unittest.TestCase):
             with self.subTest(state=state):
                 recover, card = self.dispatch({"state": state, "attempts": 1})
                 recover.assert_not_called()
-                self.assertIn("不重复提交", card.call_args.args[2])
+                card.assert_not_called()  # native receipt check precedes any delayed notice
 
     def test_later_retry_checks_recovery_without_repeating_notice(self):
         recover, card = self.dispatch({"state": "processing", "attempts": 7})

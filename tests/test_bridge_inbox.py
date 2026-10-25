@@ -49,6 +49,17 @@ class InboxTests(unittest.TestCase):
         ch.inbox_loop = ch.inbox_wake = None
         return ch
 
+    def test_delivery_status_includes_unsent_input_and_ignores_query_command(self):
+        self.inbox.receive(payload('om_pending'))
+        self.assertEqual(self.inbox.delivery_status()['state'], 'queued')
+        self.inbox.claim()
+        self.inbox.boundary('om_pending', prompt='hello', session='target')
+        self.inbox.confirm('hello', 'target')
+        self.inbox.receive(payload('om_query', '/delivery'))
+        self.inbox.claim()
+        self.inbox.boundary('om_query')
+        self.assertEqual(self.inbox.delivery_status()['id'], 'om_pending')
+
     def test_sync_callback_commits_before_ack_and_duplicate_is_one(self):
         ch = self.channel()
         item = payload()
@@ -191,6 +202,40 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(restored.get('om_test')['state'], 'done')
         self.assertIsNone(restored.get('om_test')['payload'])
 
+    def test_proven_zero_write_failure_retries_original_without_resend(self):
+        self.inbox.receive(payload())
+        self.inbox.claim()
+        marker = '你好 [飞书 route=p2a mid=om_test]'
+        self.inbox.boundary('om_test', prompt=marker)
+        self.inbox.fail('om_test', bi.RetryableHandoffError('composer not ready'))
+        row = self.inbox.get('om_test')
+        self.assertEqual(row['state'], 'queued')
+        self.assertIsNotNone(row['payload'])
+        with patch.object(bi.time, 'time', return_value=row['retry_at'] + 1):
+            retry = self.inbox.claim()
+        self.assertEqual(retry['id'], 'om_test')
+        self.inbox.boundary('om_test', prompt=marker)
+        self.inbox.confirm(marker, 'real-session')
+        self.inbox.finish('om_test')
+        self.assertEqual(self.inbox.get('om_test')['state'], 'done')
+        self.assertIsNone(self.inbox.claim())
+
+    def test_unknown_write_failure_never_becomes_a_blind_retry(self):
+        self.inbox.receive(payload())
+        self.inbox.claim()
+        self.inbox.boundary('om_test', prompt='original')
+        self.inbox.fail('om_test', RuntimeError('connection lost after write'))
+        self.assertEqual(self.inbox.get('om_test')['state'], 'uncertain')
+        self.assertIsNone(self.inbox.claim())
+
+    def test_late_failure_does_not_reopen_a_confirmed_message(self):
+        self.inbox.receive(payload())
+        self.inbox.claim()
+        self.inbox.boundary('om_test', prompt='original')
+        self.inbox.confirm('original', 'real-session')
+        self.inbox.fail('om_test', bi.RetryableHandoffError('late failure'))
+        self.assertEqual(self.inbox.get('om_test')['state'], 'done')
+
     def test_hook_receipt_survives_bridge_exit_and_does_not_confirm_other_prompt(self):
         self.inbox.receive(payload())
         self.inbox.claim()
@@ -207,6 +252,33 @@ class InboxTests(unittest.TestCase):
         self.inbox.recover()
         self.assertEqual(self.inbox.get('om_test')['session'], 'thread-real')
         self.assertIsNone(self.inbox.claim())
+
+    def test_native_edited_prompt_is_received_but_original_is_preserved(self):
+        self.inbox.receive(payload())
+        self.inbox.claim()
+        marker = 'original [飞书 from=host to=unit via=DM route=p2a mid=om_test]'
+        self.inbox.boundary('om_test', prompt=marker, session='thread-1')
+        self.assertEqual(self.inbox.confirm(marker + '\n/us', 'thread-1'), 1)
+        row = self.inbox.get('om_test')
+        self.assertEqual(row['state'], 'received_modified')
+        self.assertIsNotNone(row['payload'])
+        self.assertNotEqual(row['digest'], row['received_digest'])
+        self.inbox.fail('om_test', RuntimeError('late RPC failure'))
+        self.inbox.finish('om_test')
+        self.inbox.recover()
+        self.assertIsNone(self.inbox.claim())
+        self.assertEqual(self.inbox.delivery_status()['state'], 'received_modified')
+
+    def test_receipt_cannot_confirm_wrong_session_bot_or_message(self):
+        self.inbox.receive(payload())
+        self.inbox.claim()
+        marker = 'original [飞书 from=host to=unit via=DM route=p2a mid=om_test]'
+        self.inbox.boundary('om_test', prompt=marker, session='thread-1')
+        for text, session in [(marker, 'other-thread'),
+                              (marker.replace('to=unit', 'to=other') + ' edit', 'thread-1'),
+                              (marker.replace('mid=om_test', 'mid=unknown') + ' edit', 'thread-1')]:
+            self.assertEqual(self.inbox.confirm(text, session), 0)
+        self.assertEqual(self.inbox.get('om_test')['state'], 'submitting')
 
     def test_same_text_different_message_ids_are_independent(self):
         for mid in ('a', 'b'):

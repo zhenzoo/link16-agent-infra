@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import time
 
@@ -22,10 +23,15 @@ class NonRetryableHandoffError(RuntimeError):
     """Preparation failed before terminal submission; keep the input without replay."""
 
 
+class RetryableHandoffError(RuntimeError):
+    """Driver proved no submission: zero writes, or owned draft fully cleared."""
+
+
 class Inbox:
     def __init__(self, state_dir, bot):
         # Hash the namespace: neither remote IDs nor bot names become paths.
         key = hashlib.sha256(str(bot).encode()).hexdigest()[:24]
+        self.bot = str(bot)
         self.path = Path(state_dir) / f"bridge-inbox-{key}.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
@@ -36,6 +42,8 @@ class Inbox:
                 attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0)""")
             if 'retry_at' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
                 db.execute('ALTER TABLE messages ADD COLUMN retry_at REAL NOT NULL DEFAULT 0')
+            if 'received_digest' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+                db.execute('ALTER TABLE messages ADD COLUMN received_digest TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS resources (
                 message_id TEXT, resource_hash TEXT, path TEXT,
                 PRIMARY KEY(message_id, resource_hash))''')
@@ -117,12 +125,12 @@ class Inbox:
                        (time.time(), row['id']))
             return dict(row)
 
-    def boundary(self, mid, *, prompt=None):
+    def boundary(self, mid, *, prompt=None, session=None):
         with self.connect() as db:
-            cur = db.execute("""UPDATE messages SET state=?,digest=?,updated=?
+            cur = db.execute("""UPDATE messages SET state=?,digest=?,session=?,updated=?
                 WHERE id=? AND state='processing'""",
                 ('submitting' if prompt is not None else 'command',
-                 prompt_digest(prompt) if prompt is not None else None, time.time(), mid))
+                 prompt_digest(prompt) if prompt is not None else None, session, time.time(), mid))
             if cur.rowcount != 1:
                 raise RuntimeError(f"inbound handoff is not in preparation: {mid}")
             if prompt is not None:
@@ -143,10 +151,29 @@ class Inbox:
             db.execute("DELETE FROM meta WHERE key='last_prompt'")
 
     def confirm(self, prompt, session=None):
+        observed = prompt_digest(prompt)
         with self.connect() as db:
-            cur = db.execute("""UPDATE messages SET state='done',payload=NULL,session=?,updated=?
-                WHERE digest=? AND state IN ('submitting','awaiting_confirmation','uncertain')""",
-                (session, time.time(), prompt_digest(prompt)))
+            cur = db.execute("""UPDATE messages SET state='done',payload=NULL,session=?,
+                received_digest=?,updated=? WHERE digest=?
+                AND (session IS NULL OR session=?)
+                AND state IN ('submitting','awaiting_confirmation','uncertain')""",
+                (session, observed, time.time(), observed, session))
+            if cur.rowcount:
+                return cur.rowcount
+            # A trusted native hook can prove receipt even when the user edits
+            # the composer before Enter. Keep both digests and the original;
+            # do not misreport exact delivery or replay the already accepted task.
+            envelopes = re.findall(r'\[飞书 [^\]]*\]', str(prompt))
+            if not envelopes or not session:
+                return 0
+            fields = dict(re.findall(r'(?:^|\s)(to|mid|route)=([^\]\s]+)', envelopes[-1]))
+            if fields.get('to') != self.bot or fields.get('route') not in {'p2a', 'p2a-ext', 'a2a'}:
+                return 0
+            cur = db.execute("""UPDATE messages SET state='received_modified',session=?,
+                received_digest=?,updated=? WHERE id=? AND digest IS NOT NULL
+                AND (session IS NULL OR session=?)
+                AND state IN ('submitting','awaiting_confirmation','uncertain')""",
+                (session, observed, time.time(), fields.get('mid'), session))
             return cur.rowcount
 
     def finish(self, mid):
@@ -163,9 +190,10 @@ class Inbox:
             retry_at = time.time() + min(60, 2 ** min(row[0] if row else 1, 6))
             db.execute("""UPDATE messages SET
                 state=CASE WHEN ?=0 AND state='processing' THEN 'failed'
-                           WHEN state='processing' THEN 'queued' ELSE 'uncertain' END,
-                error=?,updated=?,retry_at=? WHERE id=? AND state NOT IN ('done','confirmed')""",
-                (int(retryable), str(error)[:300], time.time(),
+                           WHEN state='processing' OR (?=1 AND state='submitting')
+                           THEN 'queued' ELSE 'uncertain' END,
+                error=?,updated=?,retry_at=? WHERE id=? AND state NOT IN ('done','confirmed','received_modified','cancelled')""",
+                (int(retryable), int(isinstance(error, RetryableHandoffError)), str(error)[:300], time.time(),
                  retry_at if retryable else 0, mid))
 
     def resource(self, mid, key, path=None):
@@ -187,6 +215,20 @@ class Inbox:
         with self.connect() as db:
             return dict(db.execute("SELECT state,COUNT(*) FROM messages GROUP BY state").fetchall())
 
+    def delivery_status(self):
+        """Latest ordinary handoff, including its real native receipt (no body)."""
+        with self.connect() as db:
+            row = db.execute("""SELECT id,state,session,received,updated,attempts,
+                digest,received_digest FROM messages WHERE digest IS NOT NULL
+                OR state IN ('queued','processing','failed')
+                ORDER BY seq DESC LIMIT 1""").fetchone()
+            return dict(row) if row else None
+
+    def awaiting_receipts(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT id,session,received,updated
+                FROM messages WHERE state IN ('submitting','awaiting_confirmation','uncertain')
+                AND digest IS NOT NULL ORDER BY seq DESC""")]
 
 def confirm_prompt(state_dir, bot, prompt, session=None):
     # Ordinary terminal submissions must not create empty per-bot databases.
