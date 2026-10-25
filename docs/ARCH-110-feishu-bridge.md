@@ -589,7 +589,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **修法（SSOT 在 `wmux_session.py`）**：
 
-- `spawn` 创建工作区后先通过 `enable_autonomy` 调用 Wmux 自身 `deck.mode.set(..., 'danger')` 并回读，再启动终端命令；独立 worker 的 `cmd_start` 共用该设置入口。Wmux 4.3 的设置接口只在 renderer 暴露，因此从其存活进程的本地 CDP claim 定位唯一设置窗口；不扫描任意浏览器、不直写设置文件。原生 setter 同时刷新审批缓存，单改 JSON 不足以生效。主人 2026-10-25 已选择受管会话统一 Autonomy on。
+- `spawn` 创建工作区后先通过 `enable_autonomy` 调用 Wmux 自身 `deck.mode.set(..., 'danger')` 并回读，再启动终端命令；独立 worker 的 `cmd_start` 共用该设置入口。Wmux 3.55/4.3 的设置接口只在 renderer 暴露，优先从存活进程的本地 CDP claim 定位；3.55 没有 claim 时仅探测其官方固定 18800–18899 本机端口范围，限定打包 Wmux 页面且必须唯一。不直写设置文件；原生 setter 同时刷新审批缓存，单改 JSON 不足以生效。Wmux 4.10 已删除公开 `deck.mode`，但输入守卫仍读取 Autonomy 缓存：该版本明确报缺原生接口并保留启动恢复点，不能跳过设置冒称 on。主人 2026-10-25 已选择受管会话统一 Autonomy on。
 - `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=30` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。

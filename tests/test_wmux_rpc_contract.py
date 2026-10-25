@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shutil
@@ -322,6 +323,58 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         self.assertEqual(sends, [])
         self.assertEqual(got["keys"], [])
         self.assertIn("existing draft", got["finalScreen"])
+
+
+class WmuxAutonomySettingsTests(unittest.TestCase):
+    def test_legacy_without_claims_finds_only_packaged_wmux_in_known_range(self):
+        seen = []
+
+        def open_url(url, timeout):
+            port = int(url.split(":")[2].split("/")[0])
+            seen.append(port)
+            if port not in (18803, 18804):
+                raise OSError("not listening")
+            row = dict(type="page", title="wmux",
+                       url="file:///C:/wmux/.vite/renderer/main_window/index.html",
+                       webSocketDebuggerUrl=f"ws://127.0.0.1:{port}/devtools/page/main")
+            if port == 18804:
+                row["url"] = "https://example.test/.vite/renderer/main_window/index.html"
+            return io.BytesIO(json.dumps([row, row]).encode())
+
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(wmux_session.Path, "home", return_value=Path(temp)):
+            targets = wmux_session._wmux_settings_targets(mock.Mock(open=open_url))
+        self.assertEqual(targets, ["ws://127.0.0.1:18803/devtools/page/main"])
+        self.assertEqual(sorted(seen), list(range(18800, 18900)))
+
+    def test_live_claim_limits_discovery_to_its_port(self):
+        with tempfile.TemporaryDirectory() as temp:
+            claims = Path(temp) / ".cache" / "wmux-cdp"
+            claims.mkdir(parents=True)
+            (claims / "wmux-cdp-18808.lock").write_text("123")
+            opener = mock.Mock()
+            opener.open.return_value = io.BytesIO(b"[]")
+            with mock.patch.object(wmux_session.Path, "home", return_value=Path(temp)), \
+                    mock.patch("codex_startup.process_alive", return_value=True):
+                self.assertEqual(wmux_session._wmux_settings_targets(opener), [])
+            opener.open.assert_called_once_with("http://127.0.0.1:18808/json/list", timeout=0.5)
+
+    def test_multiple_windows_never_mutate_either(self):
+        with mock.patch.object(wmux_session, "_wmux_settings_targets", return_value=["a", "b"]), \
+                mock.patch("websockets.sync.client.connect") as connect:
+            with self.assertRaisesRegex(RuntimeError, "2 个"):
+                wmux_session.enable_autonomy("ws-test")
+        connect.assert_not_called()
+
+    def test_missing_native_api_is_an_explicit_failure(self):
+        socket = mock.MagicMock()
+        socket.__enter__.return_value = socket
+        socket.recv.return_value = json.dumps({"id": 1, "result": {"result": {"value": {
+            "ok": False, "error": "Wmux 缺少原生 deck.mode 设置接口；未更改 Autonomy"}}}})
+        with mock.patch.object(wmux_session, "_wmux_settings_targets", return_value=["ws://local"]), \
+                mock.patch("websockets.sync.client.connect", return_value=socket):
+            with self.assertRaisesRegex(RuntimeError, "缺少原生 deck.mode"):
+                wmux_session.enable_autonomy("ws-test")
 
 
 class WmuxSessionCreateRecoveryTests(unittest.TestCase):

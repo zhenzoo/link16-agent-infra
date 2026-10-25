@@ -364,20 +364,23 @@ def _create_workspace(name):
     )
 
 
-def enable_autonomy(workspace_id):
-    """Apply the owner's launch policy using Wmux's own settings setter.
+def _wmux_settings_targets(opener):
+    """Find the unique settings window, including Wmux before CDP lock files."""
+    from concurrent.futures import ThreadPoolExecutor
 
-    Wmux 4.3 exposes mode.set only over its renderer settings API, not CLI/RPC.
-    Calling that setter also invalidates the approval-policy cache; editing
-    deck-autonomy.json alone leaves the running input guard on the old value.
-    """
-    import urllib.request
-    from websockets.sync.client import connect
+    def probe(port):
+        try:
+            with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=0.5) as response:
+                rows = json.load(response)
+            return [row["webSocketDebuggerUrl"] for row in rows
+                    if isinstance(row, dict) and row.get("type") == "page"
+                    and row.get("title") == "wmux" and row.get("url", "").startswith("file:///")
+                    and row.get("url", "").endswith("/.vite/renderer/main_window/index.html")
+                    and row.get("webSocketDebuggerUrl", "").startswith(f"ws://127.0.0.1:{port}/")]
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
 
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", workspace_id):
-        raise ValueError("invalid workspace id")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    targets = []
+    ports = set()
     for claim in (Path.home() / ".cache" / "wmux-cdp").glob("wmux-cdp-*.lock"):
         try:
             port = int(claim.stem.removeprefix("wmux-cdp-"))
@@ -387,19 +390,36 @@ def enable_autonomy(workspace_id):
             from codex_startup import process_alive
             if not process_alive(int(claim.read_text().strip())):
                 continue
-            with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
-                rows = json.load(response)
-            targets.extend(row["webSocketDebuggerUrl"] for row in rows
-                           if row.get("type") == "page" and row.get("title") == "wmux"
-                           and row.get("url", "").endswith("/.vite/renderer/main_window/index.html")
-                           and row.get("webSocketDebuggerUrl", "").startswith(f"ws://127.0.0.1:{port}/"))
+            ports.add(port)
         except (OSError, ValueError, KeyError):
             continue
+    # v3.55 chooses a random port in this exact loopback range without a claim.
+    # Probe only Wmux's documented range; retain the unique-window requirement.
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        targets = [target for group in pool.map(probe, ports or range(18800, 18900)) for target in group]
+    return sorted(set(targets))
+
+
+def enable_autonomy(workspace_id):
+    """Apply and read back the owner's policy through Wmux's native setter.
+
+    The setter invalidates the live approval cache; writing its JSON does not.
+    Missing native APIs remain explicit failures, never an assumed permission.
+    """
+    import urllib.request
+    from websockets.sync.client import connect
+
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", workspace_id):
+        raise ValueError("invalid workspace id")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    targets = _wmux_settings_targets(opener)
     if len(targets) != 1:
         raise RuntimeError(f"Wmux 设置窗口尚未唯一就绪（{len(targets)} 个），未更改 Autonomy")
     expression = """(async () => {
       const id = %s;
-      const api = window.electronAPI.deck.mode;
+      const api = window.electronAPI?.deck?.mode;
+      if (typeof api?.set !== 'function' || typeof api?.get !== 'function')
+        return {ok: false, error: 'Wmux 缺少原生 deck.mode 设置接口；未更改 Autonomy'};
       const changed = await api.set(id, 'danger');
       const after = await api.get(id);
       window.dispatchEvent(new CustomEvent('wmux:deck-agent-mode'));
@@ -414,7 +434,7 @@ def enable_autonomy(workspace_id):
                 break
     result = response.get("result", {}).get("result", {}).get("value", {})
     if not result.get("ok"):
-        raise RuntimeError("Wmux Autonomy 开启未取得设置回执")
+        raise RuntimeError(result.get("error") or "Wmux Autonomy 开启未取得设置回执")
     return result
 
 
