@@ -24,17 +24,17 @@ last_reviewed: 2026-10-25
 目标：按主人最新决定，当前工作区与 Link16 创建的新工作区统一开启 Autonomy；消息先持久化、按原文提交并取得目标会话回执，异常自动续接且不重复创建或提交。前驱为已归档 `PLAN-1150-wmux-paste-framing.md`。
 
 用户输入与已证事实：
-1. `tb26-baseball-3` 的 `om_x100b62faaea6d4a0c069e5f5cbcef69` 正文 4172 字、无 TAB，按现行规则应直接内联；完整原文在 per-bot inbox，状态 `uncertain`，Kimi 尚未创建 session。
-2. 当前 `bot-tb26-baseball-3` / `daemon-a73e7471` 的 composer 只含未提交残稿，日志明确为 WMUX `input.send` 在 autonomy-off 下误判审批并拒绝后续块。
+1. 起始故障证据：`tb26-baseball-3` 的 `om_x100b62faaea6d4a0c069e5f5cbcef69` 正文 4172 字、无 TAB，应直接内联；完整原文已在 per-bot inbox。当时状态为 `uncertain`，Kimi 尚未创建 session；后续取消及恢复以 Stage 4、§2 回执为准，不将该初始状态当作当前待办。
+2. 起始故障中的 `bot-tb26-baseball-3` / `daemon-a73e7471` composer 只含未提交残稿，日志明确为 WMUX `input.send` 在 autonomy-off 下误判审批并拒绝后续块；该记录用于说明修复来源，当前结果见 Stage 5–6。
 3. 用户最新拍板（2026-10-25 下午，替代凌晨保持 off 的决定）：全部 Autonomy on，允许自动审批；在既有启动工具中固化，不另加常驻脚本。回顾旧提交，撤除不必要的审批误判特例，但仍须原文落盘、真正提交与目标会话接收确认；草稿可覆盖，空输入框不能误判。
-4. WMUX 本机版本 4.3.0；源码按 tag `v4.3.0` 在 `scratch/wmux-approval-20261025/wmux` 检出。上游 main 尚未包含此修复，不公开提交 issue/PR。
-5. 保留其他会话的 Kimi 等改动。主人已授权重启 12 个桥；只替换桥进程，保留 Wmux、终端及智能体工作进程。
+4. WMUX 本机版本 4.3.0；源码按 tag `v4.3.0` 在 `scratch/wmux-approval-20261025/wmux` 检出。当时核查上游 main 未包含该修复，不公开提交 issue/PR；后续三机版本差异及 4.10 补丁见 Stage 6。
+5. 保留其他会话的 Kimi 等改动；按第 7 项全部发布授权，最终将已验收的 Kimi 改动一并提交。本机早期恢复获授权重启 12 个桥，保留 Wmux、终端及智能体工作进程；后续三机守护进程重载及 TB24 保留 daemon 的 app 重启见 Stage 6。
 6. baseball-4 的 shell 启动等待超时曾被判永久失败；改为保存原工作区与未提交的 launcher，队列自动在同一工作区续等。长文自动改 TXT 被主人纠正；撤除“含 Emoji 就转文件”的新增规则，保留原 TAB／命令行容量限制。
 7. 主人要求本轮改动全部 commit、push，通知 TB24、TB25 拉取并直接重启所有飞书桥与看门狗，本机同样重启；不再询问重启许可。验收必须取得对端执行回执、实际提交号与新进程加载证据，不能把通知送达或 Git 拉取成功当成代码已生效。
 
 当前 Step／恢复点：Stage 1–6 已完成，三机源码加载与功能验收齐全。运行桥代码为 d9af031，TB24 原生接口补丁为 68369f6；TB24 16 桥、TB25 35 桥、TB26 12 桥及各机 cron/唯一看门狗均有新进程与心跳。现有工作区分别 7/7、9/9、15/15 on，隔离新建自动 on 通过；TB24 真机证明 off 拒绝同一输入、helper 开 on 后允许，后台 daemon、原 PTY 和业务进程保留。Wmux 4.10 补丁已保存到 `wmux/patches/wmux-4.10-autonomy-settings.patch`，版本升级后需重新核原生接口，不能把本次验证外推为任意未来版本都兼容。外部上游建议仅为未授权候选，不是当前未完成工作。
 
-写入归属：本 session 维护桥入站、Wmux 启动／注入入口、对应测试与本 PLAN／ARCH；同文件中已有 Kimi 改动原样保留。不修改 Wmux 产品默认值或另造消息通道。
+写入归属：本 session 维护桥入站、Wmux 启动／注入入口、对应测试与本 PLAN／ARCH；同文件中已有 Kimi 改动原样保留。不修改 Wmux 产品默认值或另造消息通道。Stage 1–3 保留原 autonomy-off 方案的完成历史；现行实现与验收以 Stage 5–6 及 ARCH-110 为准，旧私人清理接口已由正式按键路径替代。
 
 ## §1 交付与执行
 
