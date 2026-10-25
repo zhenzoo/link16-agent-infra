@@ -376,7 +376,7 @@ class NativeBindingTests(unittest.TestCase):
             self.assertIn("原生会话未就位", record["detail"])
             self.assertNotIn("secret output", record["detail"])
 
-    def test_worker_persists_ready_stage_after_launching_native_tui(self):
+    def test_native_exit_restarts_same_session_and_resets_after_stable_runtime(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             cwd = root / "repo"
@@ -388,35 +388,49 @@ class NativeBindingTests(unittest.TestCase):
                        "initial_offset": wire.stat().st_size}
             args = SimpleNamespace(bot="test", cwd=str(cwd), state_dir=str(root))
             profile = SimpleNamespace(name="kp", home_path=root)
-            native = Mock(pid=456, returncode=0)
+            natives = [Mock(pid=456 + i, returncode=0) for i in range(5)]
             observer = Mock()
             observer.reducer.closed = True
+            clock = {"now": 0.0}
+            uptimes = [0, 0, 301, 0, 0]
+
+            def native_runtime(*_args, **_kwargs):
+                clock["now"] += uptimes.pop(0)
+
             with patch.dict(os.environ, {worker.agent_runtime.PROFILE_ENV: "kp"}), \
                     patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
                     patch.object(worker.bridge_injection, "ProcessFileLock",
                                  return_value=nullcontext()), \
                     patch.object(worker, "start_or_resume", return_value=(binding, wire, set())), \
                     patch.object(worker, "ensure_workspace_trust"), \
-                    patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="kimi"), \
+                    patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="kimi") as command, \
                     patch.object(worker.agent_runtime, "resolve_shell", return_value="bash"), \
                     patch.object(worker.agent_runtime, "cli_version", return_value="2.3.1"), \
-                    patch.object(worker.subprocess, "Popen", return_value=native), \
-                    patch.object(worker, "supervise"), \
+                    patch.object(worker.subprocess, "Popen", side_effect=natives) as launch, \
+                    patch.object(worker, "supervise", side_effect=native_runtime), \
+                    patch.object(worker.time, "monotonic", side_effect=lambda: clock["now"]), \
+                    patch.object(worker.time, "sleep"), \
                     patch.object(worker, "WireObserver", return_value=observer):
-                self.assertEqual(worker.run(args), 0)
-            record = json.loads(
-                (root / "bridge-kimi-ready-test.json").read_text(encoding="utf-8"))
-            self.assertEqual(record["stage"], "ready")
-            self.assertEqual(record["native_pid"], 456)
-            self.assertEqual(record["session"], "session_test")
-            self.assertEqual(record["cli_version"], "2.3.1")
+                self.assertEqual(worker.run(args), 1)
+            self.assertEqual(launch.call_count, 5)
+            self.assertTrue(all(call.kwargs["provider_args"] == ["--session", "session_test"]
+                                for call in command.call_args_list))
+            self.assertEqual(launch.call_args_list[0].kwargs["stderr"].name,
+                             str(root / "bridge-kimi-native-test.log"))
+            rows = [json.loads(line) for line in
+                    (root / "bridge-kimi-exits-test.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["exit_code"] for row in rows], [0, 0, 0, 0, 0])
+            self.assertEqual([row["attempt"] for row in rows], [1, 2, 1, 2, 3])
+            self.assertEqual([row["outcome"] for row in rows],
+                             ["restart_scheduled"] * 4 + ["crash_loop_stopped"])
+            self.assertFalse(any(row["recovery"] for row in rows))
 
-    def test_worker_is_ready_before_first_prompt_creates_a_session(self):
+    def test_native_exit_without_lazy_session_restarts_without_observer(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             args = SimpleNamespace(bot="test", cwd=str(root), state_dir=str(root))
             profile = SimpleNamespace(name="kp", home_path=root)
-            native = Mock(pid=456, returncode=0)
+            natives = [Mock(pid=456 + i, returncode=0) for i in range(3)]
             with patch.dict(os.environ, {worker.agent_runtime.PROFILE_ENV: "kp"}), \
                     patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
                     patch.object(worker.bridge_injection, "ProcessFileLock",
@@ -427,17 +441,154 @@ class NativeBindingTests(unittest.TestCase):
                                  return_value="kimi") as command, \
                     patch.object(worker.agent_runtime, "resolve_shell", return_value="bash"), \
                     patch.object(worker.agent_runtime, "cli_version", return_value="2.3.1"), \
-                    patch.object(worker.subprocess, "Popen", return_value=native), \
+                    patch.object(worker.subprocess, "Popen", side_effect=natives), \
                     patch.object(worker, "supervise") as supervise, \
+                    patch.object(worker.time, "sleep"), \
                     patch.object(worker, "WireObserver") as observer:
-                self.assertEqual(worker.run(args), 0)
-            record = json.loads(
-                (root / "bridge-kimi-ready-test.json").read_text(encoding="utf-8"))
-            self.assertEqual(record["stage"], "ready")
-            self.assertIsNone(record["session"])
-            self.assertEqual(command.call_args.kwargs["extra_env"]["KIMI_CODE_WATCH"], "0")
-            self.assertIsNotNone(supervise.call_args.kwargs["bind"])
+                self.assertEqual(worker.run(args), 1)
+            self.assertEqual(command.call_count, 3)
+            self.assertTrue(all(call.kwargs["extra_env"]["KIMI_CODE_WATCH"] == "0"
+                                for call in command.call_args_list))
+            self.assertTrue(all(call.kwargs["bind"] is not None for call in supervise.call_args_list))
             observer.assert_not_called()
+
+    def test_active_native_exit_recovery_prompt_forbids_tool_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cwd = root / "repo"
+            cwd.mkdir()
+            wire = root / "sessions/wd_repo_0123456789ab/session_test/agents/main/wire.jsonl"
+            wire.parent.mkdir(parents=True)
+            wire.write_text(json.dumps(fixture()[0]) + "\n", encoding="utf-8")
+            binding = {"session": "session_test", "profile": "kp", "cwd": str(cwd),
+                       "initial_offset": wire.stat().st_size}
+            args = SimpleNamespace(bot="test", cwd=str(cwd), state_dir=str(root))
+            profile = SimpleNamespace(name="kp", home_path=root)
+            first, second, third = (Mock(pid=456 + i, returncode=0) for i in range(3))
+            observer = Mock()
+            observer.reducer.closed = False
+            observer.reducer.turn = "turn-old"
+            observer.reducer.route = {
+                "kind": "a2a", "dest": "oc_group", "at": "ou_peer", "peer": "peer-bot",
+                "mid": "om_old", "turn_key": "turn-old",
+            }
+            with patch.dict(os.environ, {worker.agent_runtime.PROFILE_ENV: "kp"}), \
+                    patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
+                    patch.object(worker.bridge_injection, "ProcessFileLock",
+                                 return_value=nullcontext()), \
+                    patch.object(worker, "start_or_resume", return_value=(binding, wire, set())), \
+                    patch.object(worker, "ensure_workspace_trust"), \
+                    patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="kimi"), \
+                    patch.object(worker.agent_runtime, "resolve_shell", return_value="bash"), \
+                    patch.object(worker.agent_runtime, "cli_version", return_value="2.3.1"), \
+                    patch.object(worker.subprocess, "Popen", side_effect=[first, second, third]), \
+                    patch.object(worker, "supervise"), \
+                    patch.object(worker.time, "sleep"), \
+                    patch.object(worker.bridge_injection, "inject_bot_prompt",
+                                 side_effect=[{"ok": True}, {"ok": False, "error": "not ready"}]) as inject, \
+                    patch.object(worker, "WireObserver", return_value=observer):
+                self.assertEqual(worker.run(args), 1)
+            self.assertEqual(inject.call_count, 2)
+            prompts = [call.args[1] for call in inject.call_args_list]
+            self.assertNotEqual(prompts[0], prompts[1])
+            self.assertIn("不要重放最后一个工具调用或命令", prompts[0])
+            self.assertIn("只读检查", prompts[0])
+            self.assertIn("exit=0", prompts[0])
+            self.assertIn("route=a2a", prompts[0])
+            self.assertIn("dest=oc_group", prompts[0])
+            self.assertTrue(all(call.kwargs["wait_ready"] for call in inject.call_args_list))
+            third.terminate.assert_not_called()
+            observer.report_failure.assert_called_with(terminal=True)
+
+    def test_recovery_injection_requires_native_ready_before_paste(self):
+        bot = {"name": "test", "agent": "kimi"}
+        with patch("feishu_bridge.load_bots", return_value=[bot]), \
+                patch("feishu_bridge.ensure_session", return_value=("ws", "pty", False, None)), \
+                patch("feishu_bridge._wait_agent_ready", return_value=False) as ready, \
+                patch("feishu_bridge._inject") as inject:
+            result = worker.bridge_injection.inject_bot_prompt("test", "recovery", wait_ready=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("未就绪", result["error"])
+        ready.assert_called_once_with(bot, "pty", "ws", since=0, require_screen_change=True)
+        inject.assert_not_called()
+
+    def test_recovery_ready_rejects_stale_screen_and_dead_native(self):
+        import feishu_bridge as fb
+        bot = {"name": "test", "agent": "kimi", "profile": "kp"}
+        old_screen = "│ > │"
+        record = {
+            "stage": "ready", "native_pid": 123,
+            "previous_screen_sha256": worker.hashlib.sha256(old_screen.encode()).hexdigest(),
+        }
+        with patch.object(fb, "_kimi_startup_record", return_value=record), \
+                patch.object(fb, "_kimi_ready_signal", return_value=True), \
+                patch.object(fb.codex_startup, "process_alive", return_value=True), \
+                patch.object(fb, "read_screen", return_value=old_screen), \
+                patch.object(fb.time, "sleep"):
+            self.assertFalse(fb._wait_agent_ready(
+                bot, "pty", "ws", timeout=0.01, since=0, require_screen_change=True,
+            ))
+        with patch.object(fb, "_kimi_startup_record", return_value=record), \
+                patch.object(fb, "_kimi_ready_signal", return_value=True), \
+                patch.object(fb.codex_startup, "process_alive", return_value=True), \
+                patch.object(fb, "read_screen", return_value=old_screen + "\nnew native"):
+            self.assertTrue(fb._wait_agent_ready(
+                bot, "pty", "ws", timeout=0.1, since=0, require_screen_change=True,
+            ))
+        with patch.object(fb, "_kimi_startup_record", return_value=record), \
+                patch.object(fb.codex_startup, "process_alive", return_value=False):
+            self.assertFalse(fb._wait_agent_ready(
+                bot, "pty", "ws", timeout=0.1, since=0, require_screen_change=True,
+            ))
+
+    def test_real_native_process_exit_restarts_and_preserves_exit_codes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cwd = root / "repo"
+            cwd.mkdir()
+            wire = root / "sessions/wd_repo_0123456789ab/session_test/agents/main/wire.jsonl"
+            wire.parent.mkdir(parents=True)
+            wire.write_text(json.dumps(fixture()[0]) + "\n", encoding="utf-8")
+            binding = {"session": "session_test", "profile": "kp", "cwd": str(cwd),
+                       "initial_offset": wire.stat().st_size}
+            args = SimpleNamespace(bot="test", cwd=str(cwd), state_dir=str(root))
+            profile = SimpleNamespace(name="kp", home_path=root)
+            observer = Mock()
+            observer.reducer.closed = True
+            real_popen = worker.subprocess.Popen
+            launches = []
+
+            def launch_native(_argv, *, cwd, stderr):
+                code = [0, 23, 0][len(launches)]
+                process = real_popen([sys.executable, "-c", f"raise SystemExit({code})"],
+                                     cwd=cwd, stdin=worker.subprocess.DEVNULL,
+                                     stdout=worker.subprocess.DEVNULL, stderr=stderr)
+                launches.append(process)
+                return process
+
+            def wait_native(native, *_args, **_kwargs):
+                return native.wait(timeout=5)
+
+            with patch.dict(os.environ, {worker.agent_runtime.PROFILE_ENV: "kp"}), \
+                    patch.object(worker.agent_runtime, "profile_from_env", return_value=profile), \
+                    patch.object(worker.bridge_injection, "ProcessFileLock",
+                                 return_value=nullcontext()), \
+                    patch.object(worker, "start_or_resume", return_value=(binding, wire, set())), \
+                    patch.object(worker, "ensure_workspace_trust"), \
+                    patch.object(worker.agent_runtime, "standalone_worker_cmd", return_value="kimi"), \
+                    patch.object(worker.agent_runtime, "resolve_shell", return_value="bash"), \
+                    patch.object(worker.agent_runtime, "cli_version", return_value="2.3.1"), \
+                    patch.object(worker.subprocess, "Popen", side_effect=launch_native), \
+                    patch.object(worker, "supervise", side_effect=wait_native), \
+                    patch.object(worker.time, "sleep"), \
+                    patch.object(worker, "WireObserver", return_value=observer):
+                self.assertEqual(worker.run(args), 1)
+            self.assertEqual([process.returncode for process in launches], [0, 23, 0])
+            rows = [json.loads(line) for line in
+                    (root / "bridge-kimi-exits-test.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["exit_code"] for row in rows], [0, 23, 0])
+            self.assertEqual([row["native_pid"] for row in rows],
+                             [process.pid for process in launches])
 
     def test_exact_binding_resumes_and_handoff_rejects_closed_or_wrong_workspace(self):
         with tempfile.TemporaryDirectory() as temp:

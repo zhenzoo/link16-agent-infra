@@ -23,6 +23,7 @@ per-bot 会话注册表：feishu/_state/bridge-session-<bot>.json（各进程自
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -1087,7 +1088,7 @@ def _ready_timeout(bot, explicit=None):
     return float(READY_TIMEOUT_SEC)
 
 
-def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
+def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None, require_screen_change=False):
     """spawn worker 后轮询屏幕，看到该 runtime 的 ready marker = 就绪可注入。"""
     timeout = _ready_timeout(bot, timeout)
     wait_started = float(since) if since is not None else time.time()
@@ -1113,6 +1114,12 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
                 return False
             if record.get("worker_pid") and not codex_startup.process_alive(record["worker_pid"]):
                 return False
+            if require_screen_change:
+                native_pid = int(record.get("native_pid") or 0)
+                if not native_pid or not codex_startup.process_alive(native_pid):
+                    return False
+                if not record.get("previous_screen_sha256"):
+                    return False
         try:
             # A startup modal can be at the top of a tall terminal, above the
             # normal 30-line tail. Use the existing uncapped screen read here.
@@ -1138,11 +1145,13 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None):
             is_kimi = agent_runtime.runtime_spec(bot).name == "kimi"
             if not is_kimi and agent_runtime.is_ready(bot, scr):
                 return True
-            # Kimi: same two-part rule. The handshake proves this spawn's worker
-            # started the native TUI; the composer proves it can take keystrokes.
-            # A composer left by an orphaned TUI is not evidence for this spawn.
+            screen_changed = True
+            if require_screen_change:
+                current_hash = hashlib.sha256(scr.encode("utf-8")).hexdigest()
+                screen_changed = current_hash != record.get("previous_screen_sha256")
             if (
                 is_kimi
+                and screen_changed
                 and _kimi_ready_signal(bot, wait_started)
                 and re.search(r"(?m)^\s*│\s*>\s*│\s*$", scr) is not None
             ):
@@ -1573,7 +1582,7 @@ def _kimi_active_turn(runtime_bot):
     )
 
 
-def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
+def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_native_receipt=False):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
@@ -1582,7 +1591,8 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
       ③ N 次仍卡 → 返回 False（调用方 DM 喊主人·绝不静默）。
     paste 仍走限速分块 bracketed-paste（CC 输入框有吞吐上限·裸 send 会丢字截断·2026-06-28 实证）；marker 不含 TAB（上游已拦）。
     Kimi 活跃回合直接按 Ctrl+S（增强键盘 CSI-u \\x1b[115;5u）steer，不先 Enter 入队；其他状态与平台保持原 Enter 行为。
-    Kimi 以 Wire turn.prompt/turn.steer 或已清空的 composer 确认提交；活跃时不以忙屏幕代替回执、不重复提交。"""
+    Kimi 以 Wire turn.prompt/turn.steer 或已清空的 composer 确认提交；活跃时不以忙屏幕代替回执、不重复提交。
+    require_native_receipt 用于崩溃恢复：没有本次 Wire 回执时，空 composer 也不能冒充提交成功。"""
     allow = ["--allow-ws", workspace_id]
     is_kimi = bool(runtime_bot and agent_runtime.runtime_name(runtime_bot) == "kimi")
     steer_kimi = _kimi_active_turn(runtime_bot)
@@ -1607,6 +1617,12 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
         except RuntimeError:
             scr = ""
         holds = _composer_holds_paste(scr, marker)
+        if require_native_receipt:
+            if is_kimi and bridge_activity.read_activity(STATE_DIR, runtime_bot).get("state") == "active":
+                continue
+            if holds:
+                wmux("enter", pty, *allow)
+            continue
         if is_kimi:
             if not holds:
                 return True                      # steer 已离开 composer；长工具后的 Wire 可延迟
@@ -1622,12 +1638,13 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None):
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
-def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None):
+def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None, require_native_receipt=False):
     """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
     with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
         if idle_bot and bridge_activity.read_activity(STATE_DIR, idle_bot).get("state") != "idle":
             raise RuntimeError("会话已不空闲；一次性 effort 任务未注入，请等当前回合结束后重发")
-        return _inject_unlocked(pty, workspace_id, marker, runtime_bot=runtime_bot)
+        return _inject_unlocked(pty, workspace_id, marker, runtime_bot=runtime_bot,
+                                require_native_receipt=require_native_receipt)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):

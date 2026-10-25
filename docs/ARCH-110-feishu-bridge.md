@@ -187,6 +187,8 @@ python feishu/install_codex_bridge_hooks.py --write
 
 飞书/wmux 托管的 Kimi 禁止交互提问：UserPromptSubmit 在每轮上下文开头声明不得调用 `AskUserQuestion`，`bridge_kimi_pretool.py` 再在工具执行前以 exit 2 硬拦截；确需主人决定时改用普通文字，不弹终端 picker。该拦截只检查桥会话环境标识与工具名，桥外 Kimi、Codex、Claude 均不受影响。桥内 TUI 使用 `KIMI_CODE_WATCH=0`，因此新安装或升级的 PreToolUse hook 从下一次原生进程启动起生效，不能冒称已热加载进旧进程。
 
+Kimi 原生进程异常消失时，worker 将退出码与 stderr 留在本机，按原 session 自动重启；活动回合先核验新 native PID 存活与画面代际变化，再通过现有注入链发送带唯一 recovery ID 和原路由的“先只读核对、不得重放最后工具”恢复提示；提交只认本次 Wire 回执，旧 composer 或空输入框不算成功。空闲退出不创建新任务。恢复提示未确认时保留新原生进程受监督并报警，不留下孤儿进程；每次稳定运行不足 5 分钟而连续退出 3 次则熔断。主动 `/close` / `/new` 先结束 worker，不受自动恢复影响。完整生命周期合同见 ARCH-120 §11.1。
+
 Kimi 可能在 composer 前弹出可选升级菜单。ready loop 只在同时看到 `Kimi Code Update Available`、两个选项和 `Esc continue` 时发送一次 Escape，选择继续当前已验证版本；不使用 `Down+Enter`，避免丢键后误触升级，也不把 worker 已启动误判成 composer 可注入。
 
 hook 不承担“读取思维链”。桥会话里的 Kimi 把可公开的当前动作写成 Wire `content.part(type=text)`；同一步随后发生工具调用时，observer 把这段 text 当 commentary，再附安全工具摘要。原生 `content.part(type=think)`、工具参数、工具结果和错误正文全部丢弃。`turn.ended` 只把未归入工具步骤的公开 text 组成 final。这样用户能看到“现在在做什么”和阶段发现，但看不到模型私有推理。

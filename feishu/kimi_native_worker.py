@@ -371,12 +371,78 @@ def supervise(native, command, log, bind=None):
             except KeyboardInterrupt:
                 # Only the native TUI interprets Ctrl-C as cancellation or exit.
                 continue
-        # Native exit writes its terminal journal record before returning.
+        # Let the native process flush any final journal records before the
+        # observer is stopped and the exit supervisor reads the remaining tail.
         time.sleep(0.3)
     finally:
         if child is not None and child.poll() is None:
             child.terminate()
             child.wait(timeout=5)
+
+
+def _record_native_exit(state_dir, bot, native, session, *, started, attempt, recovery, outcome):
+    record = {
+        "schema": "kimi-native-exit-v1",
+        "ts": time.time(),
+        "bot": bot,
+        "session": session,
+        "native_pid": native.pid,
+        "exit_code": native.returncode,
+        "uptime_sec": round(time.monotonic() - started, 3),
+        "attempt": attempt,
+        "recovery": recovery,
+        "outcome": outcome,
+    }
+    _append(Path(state_dir) / f"bridge-kimi-exits-{bot}.jsonl", record)
+    return record
+
+
+def _native_recovery_prompt(bot, exit_code, route, recovery_id):
+    envelope = turn_delivery_guard.envelope_fields(route)
+    return (
+        f"【Link16 自动恢复 recovery={recovery_id}】"
+        f"Kimi 原生进程意外退出（exit={exit_code}），现已恢复同一个 session。"
+        "不要重放最后一个工具调用或命令；先用只读检查确认它是否已经生效，并核对当前计划恢复点，"
+        "再从未完成步骤继续。向主人简报本次退出与恢复结果。"
+        f" [飞书 from=watchdog:kimi-native-recovery to={bot} via=自动恢复 · {envelope}]"
+    )
+
+
+def _observer_after_native_exit(args, state_dir, cwd, binding, wire, *, terminal=False):
+    if binding is None:
+        return None
+    with bridge_injection.ProcessFileLock(
+        bridge_injection.lock_path(state_dir, "observer", args.bot), timeout=2,
+    ):
+        observer = WireObserver(bot=args.bot, session=binding["session"], wire=wire,
+                                state_dir=state_dir, cwd=cwd,
+                                initial_offset=binding["initial_offset"])
+        try:
+            observer.poll()
+            if terminal and not observer.reducer.closed:
+                observer.report_failure(terminal=True)
+        except Exception:
+            if terminal:
+                observer.report_failure(terminal=True)
+            raise
+        return observer
+
+
+def _native_screen_baseline(state_dir, bot):
+    try:
+        pty = os.environ.get("WMUX_PTY_ID")
+        if not pty:
+            session = json.loads(
+                (Path(state_dir) / f"bridge-session-{bot}.json").read_text(encoding="utf-8"),
+            )
+            pty = session["pty"]
+        if not pty:
+            return None
+        import feishu_bridge as fb
+        screen = fb.read_screen(pty, tail=None)
+        return hashlib.sha256(screen.encode("utf-8")).hexdigest()
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return None
 
 
 def run(args):
@@ -394,20 +460,12 @@ def run(args):
             binding, wire, before_ids = start_or_resume(
                 args.bot, profile.name, cwd, state_dir, progress=progress)
             ensure_workspace_trust(profile.home_path, cwd)
-            provider_args = ["--session", binding["session"]] if binding else []
-            command = agent_runtime.standalone_worker_cmd(
-                profile.name, provider_args=provider_args,
-                extra_env={
-                    "FEISHU_BRIDGE_SESSION": args.bot,
-                    "FEISHU_BRIDGE_OUTBOX_DIR": str(state_dir),
-                    "KIMI_CODE_WATCH": "0",
-                },
-            )
             observer_command = [sys.executable, str(Path(__file__).resolve()), "--observe-only",
                                 "--bot", args.bot, "--cwd", str(cwd), "--state-dir", str(state_dir)]
+            session_accepted = False
 
             def accept_binding(result):
-                nonlocal binding, wire
+                nonlocal binding, wire, session_accepted
                 if result is None:
                     return False
                 binding, wire = result
@@ -418,40 +476,93 @@ def run(args):
                     KimiEvents(binding["session"], cwd).consume(json.loads(handle.readline()), 0)
                 progress.update("session_ready", "Kimi 原生终端与会话已绑定",
                                 session=binding["session"])
+                session_accepted = True
                 return True
 
-            with (state_dir / f"bridge-kimi-observer-{args.bot}.log").open("a", encoding="utf-8") as log:
-                native = subprocess.Popen([agent_runtime.resolve_shell(), "-lc", command], cwd=cwd)
-                if binding is not None:
-                    accept_binding((binding, wire))
-                # A lazy native session is not a startup prerequisite. The first
-                # real prompt creates it; the supervisor then binds from byte zero.
-                progress.update(
-                    "ready", "Kimi 原生终端已启动，正在确认输入框",
-                    session=(binding or {}).get("session"), native_pid=native.pid,
-                    wire_version=WIRE_VERSION, cli_version=agent_runtime.cli_version("kimi"),
-                )
-                supervise(
-                    native, observer_command, log,
-                    bind=(None if binding is not None else lambda: accept_binding(
-                        bind_new_session(args.bot, profile, cwd, state_dir, before_ids)
-                    )),
-                )
-            if binding is not None:
-                with bridge_injection.ProcessFileLock(
-                    bridge_injection.lock_path(state_dir, "observer", args.bot), timeout=2,
-                ):
-                    observer = WireObserver(bot=args.bot, session=binding["session"], wire=wire,
-                                            state_dir=state_dir, cwd=cwd,
-                                            initial_offset=binding["initial_offset"])
-                    try:
-                        observer.poll()
-                        if not observer.reducer.closed:
+            with (state_dir / f"bridge-kimi-observer-{args.bot}.log").open("a", encoding="utf-8") as log, \
+                    (state_dir / f"bridge-kimi-native-{args.bot}.log").open("a", encoding="utf-8") as native_log:
+                crashes = []
+                recovery_required = False
+                recovery_route = None
+                blocked_recovery_turn = None
+                previous_exit = None
+                while True:
+                    started = time.monotonic()
+                    command = agent_runtime.standalone_worker_cmd(
+                        profile.name,
+                        provider_args=(["--session", binding["session"]] if binding else []),
+                        extra_env={
+                            "FEISHU_BRIDGE_SESSION": args.bot,
+                            "FEISHU_BRIDGE_OUTBOX_DIR": str(state_dir),
+                            "KIMI_CODE_WATCH": "0",
+                        },
+                    )
+                    screen_baseline = _native_screen_baseline(state_dir, args.bot)
+                    native = subprocess.Popen(
+                        [agent_runtime.resolve_shell(), "-lc", command], cwd=cwd, stderr=native_log,
+                    )
+                    if binding is not None and not session_accepted:
+                        accept_binding((binding, wire))
+                    progress.update(
+                        "ready", "Kimi 原生终端已启动，正在确认输入框",
+                        session=(binding or {}).get("session"), native_pid=native.pid,
+                        wire_version=WIRE_VERSION, cli_version=agent_runtime.cli_version("kimi"),
+                        recovery=recovery_required, previous_exit=previous_exit,
+                        previous_screen_sha256=screen_baseline,
+                    )
+                    if recovery_required:
+                        handed = bridge_injection.inject_bot_prompt(
+                            args.bot,
+                            _native_recovery_prompt(
+                                args.bot, previous_exit, recovery_route, uuid.uuid4().hex[:12],
+                            ),
+                            wait_ready=True,
+                        )
+                        if not handed.get("ok"):
+                            blocked_recovery_turn = recovery_route.get("turn_key")
+                            _observer_after_native_exit(
+                                args, state_dir, cwd, binding, wire, terminal=True,
+                            )
+                            progress.update(
+                                "native_recovery_degraded",
+                                f"Kimi 原会话恢复提示未确认；新原生进程仍受监督：{handed.get('error')}",
+                                exit_code=native.returncode,
+                            )
+                    supervise(
+                        native, observer_command, log,
+                        bind=(None if binding is not None else lambda: accept_binding(
+                            bind_new_session(args.bot, profile, cwd, state_dir, before_ids)
+                        )),
+                    )
+                    observer = _observer_after_native_exit(args, state_dir, cwd, binding, wire)
+                    recovery_required = bool(
+                        observer and not observer.reducer.closed and observer.reducer.route
+                        and observer.reducer.turn != blocked_recovery_turn,
+                    )
+                    recovery_route = dict(observer.reducer.route) if recovery_required else None
+                    previous_exit = native.returncode
+                    if time.monotonic() - started >= 300:
+                        crashes = []
+                    crashes.append(time.monotonic())
+                    outcome = "crash_loop_stopped" if len(crashes) >= 3 else "restart_scheduled"
+                    _record_native_exit(
+                        state_dir, args.bot, native, (binding or {}).get("session"), started=started,
+                        attempt=len(crashes), recovery=recovery_required, outcome=outcome,
+                    )
+                    if len(crashes) >= 3:
+                        if observer and not observer.reducer.closed:
                             observer.report_failure(terminal=True)
-                    except Exception:
-                        observer.report_failure(terminal=True)
-                        raise
-            return native.returncode
+                        progress.update(
+                            "failed", "Kimi 原生进程未稳定运行 5 分钟而连续退出 3 次，已停止自动恢复",
+                            exit_code=native.returncode,
+                        )
+                        return native.returncode or 1
+                    progress.update(
+                        "native_restart", "Kimi 原生进程退出，准备恢复原会话",
+                        session=(binding or {}).get("session"), native_pid=native.pid,
+                        exit_code=native.returncode, recovery=recovery_required,
+                    )
+                    time.sleep(min(2 ** (len(crashes) - 1), 5))
     except Exception as exc:
         progress.update("failed", _startup_failure_detail(exc), error_type=type(exc).__name__)
         raise
