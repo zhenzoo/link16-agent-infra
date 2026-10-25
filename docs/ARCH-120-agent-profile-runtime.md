@@ -432,7 +432,9 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 
 `bridge-kimi-thread-<bot>.json` 保存 profile/cwd/session/initial_offset；恢复要求 profile 与目录一致。`/close`、`/new` 必须回收本 bot 的旧受管 Kimi 进程并验证 worker/observer 锁释放，再封存指针；窗口消失不能替代进程退出。关闭前按精确脚本、bot、状态目录及进程出生时间保留旧子树身份，关闭后回收残留，身份不明或锁未释放就明确失败，禁止继续 new。两条命令与 ensure-session 共用生命周期互斥；provider 历史与投递游标保持不变。交接仍先生成精确 session 主 agent Wire 的交接包并说明格式；找不到绑定就先失败，不关闭旧会话。实现与生产加载状态见 [PLAN-1180](PLAN-1180-kimi-close-new-release.md)。原生交互选择器尚未适配飞书按钮，不据此宣称全部交互能力可用。
 
-观察子进程持有共享 per-bot observer 锁，父 worker 另持 Kimi worker 锁。观察者异常退出后由父进程退避拉起，可单独恢复而不停止 TUI。解析异常按当前已锁定的 route 报告回传中断；没有新 turn 时不误发历史告警。原生进程退出后再读完 journal 尾部，缺少终结事件则报告结果未确认。
+观察子进程持有共享 per-bot observer 锁，父 worker 另持 Kimi worker 锁。观察者异常退出后由父进程退避拉起，可单独恢复而不停止 TUI。解析异常按当前已锁定的 route 报告回传中断；没有新 turn 时不误发历史告警。
+
+原生 TUI 退出后，worker 先读完 journal 尾部，再把 PID、退出码、运行时长、session、恢复动作与结果追加到本机 `bridge-kimi-exits-<bot>.jsonl`；原生 stderr 单独写入 `bridge-kimi-native-<bot>.log`，不进入 outbox 或飞书。只要受管 worker 仍存活，退出码 0 与非 0 都按意外退出恢复原 `--session`，不把 0 当作主人主动 `/close`。活动回合先核验新 native PID 存活及画面相对启动前哈希已变化，再以带唯一 recovery ID 和原路由信封的恢复提示继续：先只读核对最后一个工具是否已生效，再从未完成点继续；空闲会话只恢复终端，不新建模型任务。提交成功只认本次提示的 Wire `turn.prompt` / `turn.steer`，旧 composer 或空输入框不能冒充回执。唯一 ID 防止旧提示冒充本次原生回执，A2A / p2a-ext 不退回主人 DM。恢复提示未确认时保留新原生进程由 worker 监督，报告结果未确认并暂停该 turn 的自动恢复，不能只杀外层 Bash 而留下孤儿 Kimi；新 turn 可重新恢复。每次稳定运行不足 5 分钟而连续退出 3 次则熔断，避免无限重启。显式 `/close` / `/new` 仍先终止 worker 并验证锁释放，因此不会被自动恢复重新拉起。该监督只适用于 Kimi，Claude hooks 与 Codex app-server 不经过此路径。
 
 ### 11.2 Wire 1.5 → 共享 milestone 合同
 

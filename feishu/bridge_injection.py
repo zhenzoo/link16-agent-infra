@@ -125,7 +125,7 @@ def atomic_write_json(path: Path, value: dict):
         os.replace(tmp, path)
 
 
-def inject_bot_prompt(bot_name: str, marker: str) -> dict:
+def inject_bot_prompt(bot_name: str, marker: str, *, wait_ready=False) -> dict:
     """Wake a roster bot and submit one prompt through the normal wmux TUI."""
     import feishu_bridge as fb
 
@@ -134,7 +134,10 @@ def inject_bot_prompt(bot_name: str, marker: str) -> dict:
         return {"ok": False, "error": f"bot 不在本机 roster: {bot_name}"}
     try:
         ws, pty, created, pinned = fb.ensure_session(bot)
-        submitted = fb._inject(pty, ws, marker, runtime_bot=bot)
+        if wait_ready and not fb._wait_agent_ready(bot, pty, ws, since=0, require_screen_change=True):
+            return {"ok": False, "error": "Kimi 原生输入框未就绪，未执行恢复提示粘贴"}
+        submitted = fb._inject(pty, ws, marker, runtime_bot=bot,
+                               require_native_receipt=wait_ready)
     except Exception as exc:  # noqa: BLE001 - caller needs a durable error summary
         return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
     if submitted is False:

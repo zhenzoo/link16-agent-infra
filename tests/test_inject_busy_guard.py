@@ -102,6 +102,18 @@ class InjectBusyGuardTest(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual([call[0] for call in calls], ["paste", "enter", "send"])
 
+    def test_kimi_recovery_never_uses_empty_composer_as_receipt(self):
+        calls = []
+        bot = {"name": "unit-bot", "agent": "kimi"}
+        with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
+             mock.patch.object(fb, "read_screen", return_value=CLEAR), \
+             mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": "idle"}), \
+             mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=False), \
+             mock.patch("time.sleep"):
+            result = fb._inject("pty", "ws", MARK, runtime_bot=bot, require_native_receipt=True)
+        self.assertFalse(result)
+        self.assertEqual([call[0] for call in calls], ["paste", "enter"])
+
     def test_kimi_active_enters_then_steers(self):
         result, calls, _ = self._run_runtime("kimi", "active")
         self.assertTrue(result)
