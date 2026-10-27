@@ -11,13 +11,20 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-10-25
+last_reviewed: 2026-10-27
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.41.4 — 2026-10-27 · Codex 官方独立安装与 Git Bash 更新修复
+
+- **官方 standalone 落地**：本机 Codex 从残缺的 npm 全局包迁到 OpenAI 官方独立程序，Git Bash 包装器与持久 PATH 均指向 `%LOCALAPPDATA%/Programs/OpenAI/Codex/bin/codex.exe`；npm 旧包已卸载，`cx`、`cxp` 启动检查及真实 `codex update` 均通过。
+- **Git Bash 解包修复**：官方 PowerShell 安装器继承 GNU tar 时会把 `C:\...` 当成远程主机。Link16 新机安装与统一更新入口现将 `%SystemRoot%/System32` 置于子进程 PATH 首位，确保使用 Windows tar；SOP-160 同步改为 standalone 迁移路径，不再建议 npm 修复。
+- **更新失败边界**：官方安装器先校验下载、临时解包并验证新版本，再切换 current；Link16 继续保持并发互斥、失败或 60 秒超时后启动旧版。相关 23 项测试与全仓 1009 项测试通过。
+- **计划文档校正**：PLAN-1151 区分桥故障的初始证据与后续已验收现状，保留历史记录而不再误导恢复会话重做已取消步骤。
 
 ## v0.41.3 — 2026-10-25 · 三机 Autonomy 与运行提交验收闭环
 

@@ -63,6 +63,8 @@ class CodexUpdateTests(unittest.TestCase):
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0], ["codex.exe", "update"])
         self.assertNotIn("stdout", json.dumps(result))
+        self.assertEqual(run.call_args.kwargs["env"]["PATH"].split(os.pathsep)[0],
+                         str(Path(os.environ["SystemRoot"]) / "System32"))
         config = (self.root / "config.toml").read_text(encoding="utf-8")
         self.assertIn("check_for_update_on_startup = false", config)
 

@@ -17,6 +17,7 @@ import tomlkit
 
 import agent_runtime
 import bridge_injection
+import network_route
 
 
 DISABLE_ENV = "LINK16_AGENT_UPDATE"
@@ -92,6 +93,8 @@ def _update_official(profile, state_dir: Path, timeout: float) -> dict:
             if runtime == "claude":
                 env.pop("DISABLE_AUTOUPDATER", None)
                 env.pop("DISABLE_UPDATES", None)
+            elif runtime == "codex":
+                network_route.prefer_windows_system_tar(env)
             try:
                 result = subprocess.run(
                     [executable, *UPDATE_ARGS[runtime]], stdin=subprocess.DEVNULL,

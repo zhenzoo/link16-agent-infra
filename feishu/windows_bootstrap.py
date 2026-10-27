@@ -639,6 +639,7 @@ def apply_missing(rows):
             # The official installer otherwise offers to launch Codex in a TTY.
             # Authentication belongs to the selected profile's later login step.
             env["CODEX_NON_INTERACTIVE"] = "1"
+            network_route.prefer_windows_system_tar(env)
         done = subprocess.run(command, env=env, check=False)
         results.append({"key": row["key"], "returncode": done.returncode,
                         "route": decision.selected, "reason": decision.reason})

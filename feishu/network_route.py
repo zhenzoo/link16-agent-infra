@@ -60,6 +60,16 @@ class RouteDecision:
     results: tuple[ProbeResult, ...]
 
 
+def prefer_windows_system_tar(env: dict[str, str]) -> dict[str, str]:
+    """Keep Git Bash's GNU tar from rejecting Windows archive paths."""
+    if os.name == "nt":
+        system_root = env.get("SystemRoot") or os.environ.get("SystemRoot")
+        if system_root:
+            system32 = str(Path(system_root) / "System32")
+            env["PATH"] = os.pathsep.join(part for part in (system32, env.get("PATH", "")) if part)
+    return env
+
+
 @dataclass(frozen=True)
 class ProxyCandidate:
     url: str
