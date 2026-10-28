@@ -122,14 +122,13 @@ let initial = process.env.FAKE_INITIAL || "";
 const concurrent = process.env.FAKE_CONCURRENT === "1";
 const inserted = process.env.FAKE_INSERT === "1";
 function visibleText() {
-  if (initial) return initial;
   const own = sent.replaceAll("\x1b[200~", "").replaceAll("\x1b[201~", "");
-  return (inserted && own ? "BEFORE-" : "") + own + (concurrent && own ? " USER-INPUT" : "");
+  return initial + (inserted && own ? "BEFORE-" : "") + own + (concurrent && own ? " USER-INPUT" : "");
 }
 function screen() {
   const visible = visibleText();
   if (!sent && process.env.FAKE_SCREEN) return process.env.FAKE_SCREEN;
-  if (initial.startsWith("UNFRAMED:")) return `──────────\n❯ ${initial.slice(9)}\n──────────`;
+  if (initial.startsWith("UNFRAMED:")) return `──────────\n❯ ${visible.slice(9)}\n──────────`;
   if (!visible) return "╭───╮\n│ > │\n╰───╯\nAsk When Needed";
   const lines = visible.split("\n");
   return ["╭───╮", ...lines.map((line, i) => `│ ${i === 0 ? "> " : ""}${line} │`), "╰───╯", "Ask When Needed"].join("\n");
@@ -147,7 +146,6 @@ const server = net.createServer((sock) => {
       if (req.method === "workspace.list") result = [{ id: "ws-test", name: "test", ptyIds: ["daemon-test"] }];
       else if (req.method === "surface.list") result = [{ paneId: "pane-test", ptyId: "daemon-test" }];
       else if (req.method === "input.readScreen") {
-        if (screens.length && process.env.FAKE_CLEAR_REFUSED === "1") initial = "changed draft";
         const text = screen(); screens.push(text); result = { ptyId: req.params.ptyId, text };
       }
       else if (req.method === "input.sendKey") {
@@ -156,7 +154,6 @@ const server = net.createServer((sock) => {
           continue;
         }
         keys.push(req.params.key);
-        if (req.params.key === "ctrl+c") { sent = ""; initial = ""; }
       }
       else if (req.method === "input.send" && process.env.FAKE_APPROVAL === "1") {
         sock.write(JSON.stringify({ id: req.id, ok: false, error: "input.send: pending approval" }) + "\n");
@@ -195,41 +192,42 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         (self.tmp / "fake_paste_pipe.js").write_text(FAKE_PASTE_PIPE, encoding="utf-8")
 
     def via_paste(self, prompt, *, initial="", concurrent=False, inserted=False, screen="",
-                  replace=False, clear_refused=False, approval=False, win32_input=False):
+                  replace=False, approval=False, win32_input=False):
         env = {**os.environ, "RPC": str(RPC_PATH), "PROMPT": prompt,
                "FAKE_INITIAL": initial, "FAKE_CONCURRENT": "1" if concurrent else "0",
                "FAKE_INSERT": "1" if inserted else "0", "FAKE_SCREEN": screen,
-               "FAKE_REPLACE": "1" if replace else "0", "FAKE_CLEAR_REFUSED": "1" if clear_refused else "0",
+               "FAKE_REPLACE": "1" if replace else "0",
                "FAKE_APPROVAL": "1" if approval else "0",
                "FAKE_WIN32": "1" if win32_input else "0",
                "TMPDIR_FAKE": str(self.tmp)}
         out = subprocess.run(["node", str(self.tmp / "fake_paste_pipe.js")], env=env,
                              capture_output=True, text=True, encoding="utf-8", timeout=30)
-        return json.loads(out.stdout)
+        got = json.loads(out.stdout)
+        self.assertEqual(got["keys"], [], "paste must never clear, interrupt, or submit input")
+        self.assertEqual(got["screens"], [], "paste must not infer draft state from rendered text")
+        return got
 
-    def test_mid_paste_failure_clears_only_the_owned_partial_draft(self):
+    def test_mid_paste_failure_preserves_partial_input_without_retry_proof(self):
         got = self.via_paste("a" * 150 + "FAIL" + "b" * 100)
         self.assertNotEqual(got["code"], 0)
-        self.assertIn("ctrl+c", got["keys"])
-        self.assertNotIn("enter", got["keys"])
-        self.assertNotIn("a" * 100, got["finalScreen"])
+        self.assertIn("a" * 100, got["finalScreen"])
         self.assertNotIn("USER-INPUT", got["finalScreen"])
-        self.assertIn('LINK16_HANDOFF {"state":"cleared_unsubmitted"}', got['stderr'])
+        self.assertNotIn("LINK16_HANDOFF", got["stderr"])
+        sends = [r["params"]["text"] for r in got["requests"] if r["method"] == "input.send"]
+        self.assertEqual(sends[-1], "\x1b[201~")
 
-    def test_paste_refuses_to_overwrite_an_existing_draft(self):
+    def test_paste_preserves_existing_input_and_appends_new_text(self):
         got = self.via_paste("new text", initial="existing draft")
-        self.assertNotEqual(got["code"], 0)
-        sends = [row for row in got["requests"] if row["method"] == "input.send"]
-        self.assertEqual(sends, [])
-        self.assertEqual(got["keys"], [])
-        self.assertIn("existing draft", got["finalScreen"])
-        self.assertIn('LINK16_HANDOFF {"state":"not_written"}', got["stderr"])
-
-    def test_codex_empty_hint_is_not_a_draft(self):
-        got = self.via_paste("new text", screen="OpenAI Codex\n› Ask Codex to do anything\n GPT-6-Astra xhigh")
         self.assertEqual(got["code"], 0, got["stderr"])
-        self.assertIn("new text", got["finalScreen"])
-        self.assertEqual(got["keys"], [])
+        self.assertIn("existing draftnew text", got["finalScreen"])
+
+    def test_codex_placeholder_and_padding_do_not_change_paste(self):
+        for hint in ("Ask Codex to do anything", "Ask Codex to do anything   "):
+            with self.subTest(hint=hint):
+                got = self.via_paste("new text", screen=f"OpenAI Codex\n› {hint}\n GPT-6-Astra xhigh",
+                                     replace=True)
+                self.assertEqual(got["code"], 0, got["stderr"])
+                self.assertIn("new text", got["finalScreen"])
 
     def test_chunks_preserve_unicode_and_use_one_raw_paste_envelope(self):
         text = 'a' * 99 + '📎\n6. 编号正文 • ± ° “引号”\n' + 'b' * 120
@@ -241,14 +239,13 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         for p in sends:
             p['text'].encode('utf-8')  # an isolated UTF-16 surrogate would fail
 
-    def test_authorized_existing_draft_is_replaced_before_paste(self):
+    def test_running_bridge_legacy_replace_flag_is_ignored(self):
         got = self.via_paste("new text", initial="old draft", replace=True)
         self.assertEqual(got["code"], 0, got["stderr"])
-        self.assertEqual(got["keys"], ["ctrl+c"])
-        self.assertNotIn("old draft", got["finalScreen"])
-        self.assertIn("new text", got["finalScreen"])
+        self.assertIn("old draftnew text", got["finalScreen"])
+        self.assertNotIn("--replace-draft", got["finalScreen"])
         self.assertTrue(all(row["method"] in {
-            "workspace.list", "surface.list", "input.readScreen", "input.send", "input.sendKey"
+            "workspace.list", "input.send"
         } for row in got["requests"]))  # no private Wmux patch required on peers
 
     @unittest.skipUnless(os.name == "nt", "native Windows console protocol")
@@ -264,18 +261,17 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         self.assertNotIn('\n', wire)
         self.assertNotIn('📄', wire)
 
-    def test_changed_draft_is_not_blindly_cleared_or_submitted(self):
-        got = self.via_paste("new text", initial="old draft", replace=True, clear_refused=True)
-        self.assertNotEqual(got["code"], 0)
-        self.assertEqual(got["keys"], [])
-        self.assertFalse(any(r["method"] == "input.send" and r["params"].get("text") for r in got["requests"]))
-        self.assertIn('LINK16_HANDOFF {"state":"not_written"}', got["stderr"])
+    def test_concurrent_input_is_not_cleared(self):
+        got = self.via_paste("new text", initial="old draft", replace=True, concurrent=True)
+        self.assertEqual(got["code"], 0, got["stderr"])
+        self.assertIn("old draftnew text USER-INPUT", got["finalScreen"])
 
-    def test_draft_replacement_does_not_answer_a_real_approval(self):
+    def test_approval_rejection_before_first_write_stays_retryable(self):
         got = self.via_paste("new text", initial="1. Approve command", replace=True, approval=True)
         self.assertNotEqual(got["code"], 0)
-        self.assertEqual(got["keys"], [])
-        self.assertFalse(any(r["method"] == "input.conditionalClear" for r in got["requests"]))
+        self.assertIn('LINK16_HANDOFF {"state":"not_written"}', got["stderr"])
+        self.assertIn("1. Approve command", got["finalScreen"])
+        self.assertNotIn("new text", got["finalScreen"])
 
     def test_lost_write_response_does_not_repeat_the_chunk(self):
         got = self.via_paste("DROP-RESPONSE")
@@ -294,35 +290,32 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         got = self.via_paste("new text", screen="╭──╮\n│ > old message │\n╰──╯\nanswer\n›\nstatus")
         self.assertEqual(got["code"], 0, got["stderr"])
 
-    def test_real_draft_containing_hint_is_still_protected(self):
-        got = self.via_paste("new text", screen="› Ask Codex to do anything about this bug\nstatus")
-        self.assertNotEqual(got["code"], 0)
-        self.assertFalse(any(r["method"] == "input.send" for r in got["requests"]))
+    def test_real_input_containing_hint_is_preserved(self):
+        got = self.via_paste("new text", initial="Ask Codex to do anything about this bug")
+        self.assertEqual(got["code"], 0, got["stderr"])
+        self.assertIn("Ask Codex to do anything about this bugnew text", got["finalScreen"])
 
     def test_partial_paste_does_not_claim_zero_writes(self):
         got = self.via_paste("a" * 150 + "FAIL", concurrent=True)
         self.assertNotEqual(got["code"], 0)
         self.assertNotIn("not_written", got["stderr"])
 
-    def test_cleanup_refuses_unconfirmed_concurrent_input(self):
+    def test_partial_failure_preserves_concurrent_input(self):
         got = self.via_paste("a" * 150 + "FAIL", concurrent=True)
         self.assertNotEqual(got["code"], 0)
         self.assertNotIn("ctrl+c", got["keys"])
         self.assertIn("USER-INPUT", got["finalScreen"])
 
-    def test_cleanup_refuses_text_inserted_before_the_owned_suffix(self):
+    def test_partial_failure_preserves_text_inserted_before_the_paste(self):
         got = self.via_paste("a" * 150 + "FAIL", inserted=True)
         self.assertNotEqual(got["code"], 0)
         self.assertNotIn("ctrl+c", got["keys"])
         self.assertIn("BEFORE-", got["finalScreen"])
 
-    def test_paste_refuses_an_unframed_existing_draft(self):
+    def test_paste_preserves_unframed_existing_input(self):
         got = self.via_paste("new text", initial="UNFRAMED:existing draft")
-        self.assertNotEqual(got["code"], 0)
-        sends = [row for row in got["requests"] if row["method"] == "input.send"]
-        self.assertEqual(sends, [])
-        self.assertEqual(got["keys"], [])
-        self.assertIn("existing draft", got["finalScreen"])
+        self.assertEqual(got["code"], 0, got["stderr"])
+        self.assertIn("existing draftnew text", got["finalScreen"])
 
 
 class WmuxAutonomySettingsTests(unittest.TestCase):

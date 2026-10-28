@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-10-25
+last_reviewed: 2026-10-29
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -641,11 +641,11 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **编号长文截断（2026-10-11 baseball-2）**：5716 单元正文没有触发原来的 16000 命令行上限策略；分块粘贴到第 3800 字时，Wmux 3.66.0 将输入框中的 `› 6. 录制与存储` 当成审批，拒绝剩余输入，桥因 paste 抛错没有发送 Enter。长度计数没有算错，旧策略只覆盖命令行容量与 TAB，没有覆盖终端解析和审批误判。隔离 Codex 0.162.1 验证：仅加 raw 或一次完整粘贴均不能保证原文，后者仍丢失 `•`、`±`、`°`、弯引号等字符；这两个候选已撤回。2026-10-12 曾以多行这一输入结构触发现有文件交接；主人 2026-10-24 明确普通换行应直接发送，现行规则不再以换行作为文件交接理由。
 
-**编号 composer 与失败清理（2026-10-25）**：原 autonomy-off 审批猜测会把 `> 3. …` 正文当作选项。按主人最新决定，受管启动入口统一开启 Autonomy，普通输入不再依赖这类编号正文例外。Link16 paste 仍只取最后一个当前提示符，包含裸 `›` 空框；Codex 的精确占位文字 `Ask Codex to do anything` 不算草稿，历史消息不得遮蔽当前空框。受管 `_inject` 传 `--replace-draft`，复读并比对当前草稿后，经正式 `input.sendKey` 单发 Ctrl+C，回读为空才粘贴；独立 CLI 默认仍保留草稿。此路径沿用原 /stop 清理方式，无需私人 Wmux 补丁；读屏和按键之间并非原子事务，发现变化或无法确认清空时不继续提交。开启 Autonomy 允许 Wmux 自动审批，不等于删除消息落盘、输入框识别、提交或接收回执。
+**普通投递不再自动清稿（2026-10-29）**：`paste` 不再读屏判断草稿、拒绝已有文字或发送 Ctrl+C 清稿，直接沿用限速粘贴；已有文字保留在输入框中，可能随新消息一起提交，这是主人选择取消清稿后的明确边界。旧桥进程仍传入的 `--replace-draft` 仅被消费并忽略，不进入正文，因此更新实际使用的 JS 后无需重启桥即可停止自动清稿。工作区守卫、Wmux 审批、消息落盘、提交后检查与原生接收回执保持原逻辑；明确 `/stop` 仍走 §2.12c 的原有行为。受管启动入口的 Autonomy 设置不变。
 
 paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，防止 Wmux 重复包装。Windows Codex 使用 `--win32-input`：非 BMP 字符按两个连续 key-down 的 UTF-16 单元编码，换行编码为 Shift+Enter；CRLF 在分块前归一，避免跨块成为两次换行。只改传输编码，消息正文、信封与回执摘要不变。166／3781 字编号原文（含 `📄🧭`、换行、`±10°`、弯引号）均在 Codex 0.164.0 真机取得精确原生回执。该编码依据 [Microsoft Win32 输入格式](https://github.com/microsoft/terminal/blob/main/src/terminal/input/terminalInput.cpp)，字符丢失机制与 [crossterm 的代理对事件缺陷](https://github.com/crossterm-rs/crossterm/issues/1072) 一致；Claude／Kimi 不启用此编码，本轮仅覆盖共享回归。
 
-任一块失败都不发送 Enter，尝试闭合粘贴；只有完整 composer 仍等于本次写入时，才复读比对并通过正式按键清除。清理后回读为空，才向队列返回可安全重试的证明；归属不明、已观察到并发变化或清理未确认保留待核。写请求发出后丢响应不重复该块、不换传输重放。提交检查识别 Codex `›` 与 `[Pasted Content …]`，最终接收仍以同一会话的原生正文回执为准。跨机发布前已以正式接口完成旧草稿覆盖与 3757 字真机精确回执，TB24 4.10.0／TB25 3.55.0 均无 `input.conditionalClear`，该未发布接口不再是运行依赖。
+任一块失败都不发送 Enter，尝试闭合粘贴并保留已写入内容，不再清理失败残稿或产生 `cleared_unsubmitted` 证明。仅工作区守卫拒绝、首次写入被服务端明确拒绝等可证明未写入的情况返回 `not_written`；部分写入或响应丢失沿用收件箱的投递不确定处理，不重复该块、不自动重放整条消息。提交检查识别 Codex `›` 与 `[Pasted Content …]`，最终接收仍以同一会话的原生正文回执为准。此改动不依赖私人 Wmux 接口。
 
 **文件交接合同**：三个 runtime 共用同一入口；文件名按 bot 与原 message id 摘要隔离，正文用 `write_bytes(text.encode('utf-8'))` 避免 Windows 换行改写。先用原文确定 sender / A2A / 群路由，再替换正文，保留同一 mid。文件交接信封省去会在 Windows Codex 输入中丢失的装饰性中点，使输入回执摘要一致。真机验收覆盖 Codex：原始 5809 字符测试材料文件字节一致，231 字符读取指令导出回读也字节一致；Claude / Kimi 仅覆盖共享入口回归，未声称三平台真机全测。需要重启对应 bot 的桥进程加载 Python 改动，不需重启 Wmux 或业务会话；未确认消息不自动重投。
 
@@ -678,9 +678,9 @@ paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，
 
 > 一句话：`/stop` 打断后把「退回 composer 的被打断消息」用**有界轮询**清掉，取代旧「固定 `sleep(0.8s)` 读一次」的时机竞态（慢会话消息晚退回 → 那次读到空 → 漏清·主人实证）。
 
-**真机实测钉死的事实（2026-07-18 · throwaway 逐键验）**：
+**历史验证范围（2026-07-18 · Claude throwaway 逐键验，仅用于显式 /stop）**：
 - **能清空整个输入框的键只有【单 `ctrl+c`】**（框非空 → 清空且不退出）。`escape` 实测**清不掉**；`ctrl+u` wmux **根本不支持发**（支持键仅 enter/tab/ctrl+c/ctrl+d/ctrl+z/ctrl+l/escape/方向键）→ 旧注释提 `ctrl+u` 作废。
-- **单 `ctrl+c` 永远安全**（单发绝不退会话）；退会话需**无间隔快速连按 2~3 记**。有间隔（≥~0.4s）就安全 → 轮询间隔天然当保险。
+- 当时 Claude 样本中，单次 Ctrl+C 清稿、快速连按才退出；这不是跨平台安全保证。2026-10-29 已证 Codex 普通投递中的自动 Ctrl+C 会触发回合中断，不能将本节经验用于自动清稿；该投递路径已按 §2.12b 移除。
 - **旧 `_composer_draft`（只认【行首】❯）有渲染漏判**：composer 的 `❯` 有时黏在 ─── 分隔线**行尾**（不在行首）→ 旧检测漏看草稿、误判「空」→ 不清。已退役，换成 §2.12b 的 `_composer_holds_paste`（`rfind("❯")`·rendering-robust）。
 
 **修法（SSOT：`feishu_bridge._stop_clear_composer` + `/stop` 分支）**：
