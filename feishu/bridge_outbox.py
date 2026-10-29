@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 
 import session_work
+import card_tables
 
 PROGRESS_TAIL = 20          # 合并进度卡最多显示最近 N 步（旧·已不用）
 
@@ -650,6 +651,7 @@ ANSWER_GUARD_CHARS = 10
 ANSWER_TARGET_BUDGET = CARD_BUDGET - ANSWER_GUARD_CHARS
 ANSWER_SPLIT_POLICY_LEGACY = "answer-v1-hard2800"
 ANSWER_SPLIT_POLICY_GUARD10 = "answer-v2-target2790-guard10"
+ANSWER_SPLIT_POLICY_TABLES = "answer-v3-tables-target2790"
 
 
 def _text_sha(text):
@@ -719,17 +721,19 @@ def _split_exact(text, capacity):
 
 
 def _answer_fragment(answer_id, content, index, total, content_start, *,
-                     render_target, hard_budget, split_policy):
+                     render_target, hard_budget, split_policy, display=None, recipe=None):
     """Render one fragment and expose enough metadata for a body-free manifest."""
     content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    fragment_id = hashlib.sha256(
-        f"{answer_id}:{index}:{total}:{content_sha}".encode("utf-8")
-    ).hexdigest()
-    rendered = content if total == 1 else f"**回复 {index}/{total}**\n\n{content}"
+    display = content if display is None else display
+    identity = f"{answer_id}:{index}:{total}:{content_sha}"
+    if split_policy == ANSWER_SPLIT_POLICY_TABLES:
+        identity += f":{split_policy}:{_text_sha(display)}"
+    fragment_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    rendered = display if total == 1 else f"**回复 {index}/{total}**\n\n{display}"
     if len(rendered) > hard_budget:
         raise ValueError("fragment 超出 CARD_BUDGET")
     guard_chars = max(0, len(rendered) - render_target)
-    return {
+    result = {
         "answer_id": answer_id, "fragment_id": fragment_id,
         "part": index, "total": total, "content_sha256": content_sha,
         "content_start": content_start, "content_end": content_start + len(content),
@@ -738,6 +742,9 @@ def _answer_fragment(answer_id, content, index, total, content_start, *,
         "hard_budget": hard_budget, "guard_used": bool(guard_chars),
         "guard_chars": guard_chars,
     }
+    if split_policy == ANSWER_SPLIT_POLICY_TABLES:
+        result.update(render_recipe=recipe or {}, rendered_sha256=_text_sha(rendered))
+    return result
 
 
 def _answer_fragments(record, text, route, budget=CARD_BUDGET, *,
@@ -747,6 +754,27 @@ def _answer_fragments(record, text, route, budget=CARD_BUDGET, *,
     if budget <= 0 or hard_budget < budget:
         raise ValueError("answer fragment budget 非法")
     answer_id = _answer_id(record, text, route)
+    if split_policy == ANSWER_SPLIT_POLICY_TABLES:
+        total = 1 if len(text) <= budget else 2
+        while True:
+            title = "" if total == 1 else f"**回复 {total}/{total}**\n\n"
+            slices = card_tables.split_tables(text, budget - len(title), _split_exact)
+            actual = len(slices)
+            needed = "" if actual == 1 else f"**回复 {actual}/{actual}**\n\n"
+            # Reserve monotonically. Vertical rendering can shrink the body;
+            # requiring an exact fixed point could oscillate between 1/2 cards.
+            if len(needed) <= len(title):
+                total = actual
+                break
+            total = actual
+        return [
+            _answer_fragment(
+                answer_id, text[start:end], index, total, start,
+                render_target=budget, hard_budget=hard_budget, split_policy=split_policy,
+                display=card_tables.render_slice(text, start, end, recipe), recipe=recipe,
+            )
+            for index, (start, end, recipe) in enumerate(slices, 1)
+        ]
     if len(text) <= budget:
         contents = [text]
     else:
@@ -776,7 +804,8 @@ def _fragment_manifest(fragments):
         "part", "total", "content_start", "content_end", "content_sha256",
         "fragment_id", "guard_chars",
     )
-    return [{key: row[key] for key in keys} for row in fragments]
+    return [{key: row[key] for key in keys + ("render_recipe", "rendered_sha256")
+             if key in row} for row in fragments]
 
 
 def _answer_fragments_from_manifest(record, text, route, manifest, *,
@@ -800,14 +829,25 @@ def _answer_fragments_from_manifest(record, text, route, manifest, *,
         if (part != index or saved_total != total or start != cursor
                 or end < start or end > len(text)):
             raise RuntimeError("answer fragment manifest conflict")
+        recipe, display = None, None
+        if split_policy == ANSWER_SPLIT_POLICY_TABLES:
+            recipe = saved.get("render_recipe")
+            if not isinstance(recipe, dict):
+                raise RuntimeError("answer fragment manifest conflict")
+            try:
+                display = card_tables.render_slice(text, start, end, recipe)
+            except (ValueError, TypeError, IndexError):
+                raise RuntimeError("answer fragment manifest conflict") from None
         fragment = _answer_fragment(
             answer_id, text[start:end], index, total, start,
             render_target=render_target, hard_budget=hard_budget,
-            split_policy=split_policy,
+            split_policy=split_policy, display=display, recipe=recipe,
         )
         if (saved.get("content_sha256") != fragment["content_sha256"]
                 or saved.get("fragment_id") != fragment["fragment_id"]
-                or saved_guard != fragment["guard_chars"]):
+                or saved_guard != fragment["guard_chars"]
+                or (split_policy == ANSWER_SPLIT_POLICY_TABLES
+                    and saved.get("rendered_sha256") != fragment["rendered_sha256"])):
             raise RuntimeError("answer fragment manifest conflict")
         fragments.append(fragment)
         cursor = end
@@ -817,8 +857,9 @@ def _answer_fragments_from_manifest(record, text, route, manifest, *,
 
 
 def _ans_chunks(text, budget=CARD_BUDGET):
-    """Compatibility helper for progress/ask cards; preserves every char."""
-    return _split_exact(text, budget)
+    """Progress/ask cards share table pagination; pending sends freeze the text."""
+    return [card_tables.render_slice(text, start, end, recipe)
+            for start, end, recipe in card_tables.split_tables(text, budget, _split_exact)]
 
 
 class RetrySend(Exception):
@@ -898,9 +939,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             # The replayed context was already delivered in full; one card
             # with its tail is enough (2026-10-01 tb26-baseball-2 re-sent an
             # 11k-char plan as 5 messages per replay).
-            keep = CARD_BUDGET - len(header) - 4
-            tail = "\n\n".join(labels)[-keep:]
-            text = _card_text(header, ["…" + tail])
+            keep = CARD_BUDGET - len(header) - 6
+            tail = _ans_chunks("\n\n".join(labels), keep)[-1]
+            text = _card_text(header, ["…\n\n" + tail])
         return text
 
     def _has_body(steps):
@@ -1172,11 +1213,15 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         if saved is None or not saved.get("split_policy"):
             split_policy = (ANSWER_SPLIT_POLICY_GUARD10 if saved is None
                             else ANSWER_SPLIT_POLICY_LEGACY)
+            if (saved is None and (route or {}).get("kind") != "a2a"
+                    and card_tables.table_spans(text)):
+                split_policy = ANSWER_SPLIT_POLICY_TABLES
         else:
             split_policy = saved.get("split_policy")
         policy_targets = {
             ANSWER_SPLIT_POLICY_LEGACY: CARD_BUDGET,
             ANSWER_SPLIT_POLICY_GUARD10: ANSWER_TARGET_BUDGET,
+            ANSWER_SPLIT_POLICY_TABLES: ANSWER_TARGET_BUDGET,
         }
         if split_policy not in policy_targets:
             raise RuntimeError("answer split policy conflict")

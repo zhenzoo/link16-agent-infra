@@ -16,7 +16,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-10-24
+last_reviewed: 2026-10-29
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -62,8 +62,8 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 
 - `answer_id` 必须由规范化正文和公开 route 确定性计算；同一输入跨进程重启得到相同 ID，不得用 Python 进程随机 `hash()`。
 - 单卡安全容量为 2800 字符，包含长答案显示用的 `回复 i/N` 标题。短答案只有一个 fragment；长答案按原顺序无损拆分，并携带稳定 `fragment_id`、`part`、`total`。
-- 去掉显示用分片标题后，各片正文按 part 拼接必须逐字符等于原 answer；不得截断、重叠或补写模型未输出的内容。
-- 分片搜索使用半开区间 `[start,end)`：位于右边界 `end` 的换行不得被纳入当前片，任何正文片都不得超过扣除标题后的 capacity。修复非法边界时不得顺带重排其它已合法分片；否则旧 answer-state 中已 ACK 的 fragment identity 会漂移。
+- 各片的源正文 `content` 按 part 拼接必须逐字符等于原 answer；不得截断、重叠或补写业务内容。显示层可重复原表头及分隔行，其范围单独记录在 `render_recipe`，不混入源正文或业务数据。旧 v1/v2 没有显示层补充，仍可直接去掉分片标题后拼接。
+- 分片搜索使用半开区间 `[start,end)`：位于右边界 `end` 的换行不得被纳入当前片，任何显示正文片都不得超过扣除标题后的 capacity。修复非法边界时不得顺带重排其它已合法分片；否则旧 answer-state 中已 ACK 的 fragment identity 会漂移。
 - Answer 使用双层预算：`2800` 是不可越过的 hard limit，`2790` 是新 answer 的正常 render target，二者之间固定 `10` 字符只作 splitter guard。正确分片不得使用 guard；若异常分片比 target 多 `1～10` 字符，可在仍不超过 hard limit 时继续投递，但 receipt/ledger 必须记录 `guard_used=true` 与实际 `guard_chars`。超过 `10` 字符必须失败且不推进 HWM。这个 guard 只用于 final answer，不顺带改变 progress/ask 的既有容量合同。
 - 每个成功片段立刻写 durable ACK。重启或重试只发送未 ACK 的 fragment；同一个 answer 的已 ACK 片不得再次发送。
 - 应发送的消息失败、返回空 message_id 或等待超过时间都不得推进 answer HWM。明确无需发送的 A2A 关联结果按 §1 记消费 ACK；这不是发送成功。不得用“超过 600 秒”把未送达伪装成已处理。
@@ -72,6 +72,10 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 - 应用 API 的 provider UUID 只负责远端一小时窗口内的请求去重；本地合同仍以 `fragment_id` 和 durable ACK 为准，不宣称网络模糊失败下无条件 exactly-once。自定义机器人 webhook 不支持该 UUID；其 `webhook-<时间戳>` 是本地确认号，不是飞书真实消息 ID。已确认片不重发，但远端收到、响应丢失的模糊失败不能保证恰好一次。webhook 失败不在同次投递中再走 text fallback 重发；本群镜像失败也不能推翻对方已确认的成功。
 - 旧 outbox、HWM 与 answer-state 不做迁移或清空：未 ACK 的旧 fragment 在重放时按原 `fragment_id` 派生合法 provider UUID，已 ACK 的 fragment 继续跳过。
 - 新 answer 在第一次网络请求前必须把 `split_policy`、`render_target` 和无正文 fragment manifest 原子写入 answer-state。manifest 至少含每片的 `part/total/content_start/content_end/content_sha256/fragment_id/guard_chars`；重启必须按 manifest 从原 answer 重建并校验，禁止按当前 splitter 重新切。已有 answer-state 若缺少这些字段，按 legacy `2800` policy 重建并回填 manifest，确保旧 ACK/ID 不漂移。升级或回滚到不认识某 policy 的二进制前，必须机械确认该 policy 的 incomplete answer 为 `0`。
+- 新建的真人卡片 answer 含有效 GFM 表格时使用 `answer-v3-tables-target2790`；纯文本及 a2a 保留 v2，已有 v1/v2 继续按原策略/manifest 补缺片，不重新切分已开始的回复。三种 runtime 共用 `card_tables.py`；进度/ask 的新分片也调用该模块，进度 pending 仍直接冻结正文。
+- 表格通过 GFM 解析器识别表头、分隔行及行边界，排除代码围栏、无效表格；保留转义竖线及对齐语法。放得下一张卡的表格优先整体移到下一张；大表只在完整数据行之间换卡，每张续卡补同一张表的原表头和分隔行，不能把表头与首行拆开。标题与补入表头一起计入预算，不借用 guard。
+- 表头加任一数据行超过可用容量时，该表按行、列展开为字段文本，保留列名、值及额外列；续片带所属行列提示。源表仍留在 outbox，fragment 的源切片合并仍无损。此异常呈现不承诺超长单个 Markdown 链接跨卡后仍可点击；正常整行表格保留完整链接。原文自身的语法错误不被猜测修正。
+- v3 manifest 另存 `render_recipe` 与 `rendered_sha256`，只含原表头范围或原表及展开文本的切片坐标，不复制答案正文；fragment ID 包含显示内容摘要。重放按冻结坐标重建并校验哈希，不能调用当前分片器重新划分。展开表格的首片持有整张表的源范围，后续片持有空源范围及不同显示切片，因此恢复既可核源无损，也不会误把两个续片当成相同内容。
 - 非网络逻辑异常同样不得推进 HWM。drainer 在既有 per-bot bridge log 留下 `bot/offset/kind/error_type/error`；`kind` 必须指向批内实际出错 record，未知异常的 `error` 只能是摘要哈希，不能带正文、路径、token 或 secret。同一 `(offset,kind,error_type,error_digest)` 在 HWM 未变化时只记一次，避免永久毒记录制造日志洪水。
 
 ### 2.1 Milestone 进度卡跨进程续接
@@ -117,3 +121,5 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 ## 5. 变更闸
 
 修改本合同承重代码后至少覆盖：route 格式矩阵、卡失败降级、换行恰在 capacity 右边界时仍有界且无损、正常片不占 10 字符 guard、旧 off-by-one 最多占 1 字符 guard 仍送达、超过 guard 硬失败、manifest 在异常分片 ACK 后重启仍只补缺片、legacy state 回填后旧 identity 不漂移、逻辑异常不推 HWM且去重留痕、本地 `fragment_id` 与 36 字符 provider UUID 分离、三种发送格式共用同一派生键、active route 同目标拒绝、proactive override、三类 runtime final 生命周期、message_id 精确去重与同文不同 ID 保留。自动测试只用 fake channel/临时账本；生产桥重启与真人群 E2E 必须另取维护窗口授权。
+
+表格分片另验：TB26 竞品表原案例、连续跨三张以上卡、表头/首行临界点、多表不同表头、带链接与转义竖线、CRLF/Unicode、代码围栏与无效表格负例、超长行/表头的字段展开、续表预算、v3 manifest 显示哈希及已 ACK 片不重发。规则依据为 [GFM Tables](https://github.github.com/gfm/#tables-extension-) 与 [飞书 Markdown 组件](https://open.feishu.cn/document/feishu-cards/card-components/content-components/rich-text)；本仓发送 Card JSON 2.0，不能把普通 text/旧版卡片的能力混为表格渲染。
