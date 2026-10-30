@@ -1597,7 +1597,7 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     is_kimi = bool(runtime_bot and agent_runtime.runtime_name(runtime_bot) == "kimi")
     steer_kimi = _kimi_active_turn(runtime_bot)
     win32_input = os.name == "nt" and runtime_bot and agent_runtime.runtime_name(runtime_bot) == "codex"
-    wmux("paste", pty, marker, *allow, *(["--replace-draft"] if runtime_bot else []),
+    wmux("paste", pty, marker, *allow,
          *(["--win32-input"] if win32_input else []))
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
     chunks = max(1, -(-len(marker) // 100))

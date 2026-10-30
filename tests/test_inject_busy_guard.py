@@ -182,6 +182,17 @@ class InjectBusyGuardTest(unittest.TestCase):
                 self.assertEqual([call[0] for call in calls], ["paste", "enter"])
                 activity.assert_not_called()
 
+    def test_all_runtimes_paste_without_automatic_draft_replacement(self):
+        for runtime in ("claude", "codex", "kimi"):
+            for state in ("active", "idle"):
+                with self.subTest(runtime=runtime, state=state):
+                    result, calls, _ = self._run_runtime(runtime, state)
+                    self.assertTrue(result)
+                    expected = ("paste", "pty", MARK, "--allow-ws", "ws")
+                    if os.name == "nt" and runtime == "codex":
+                        expected += ("--win32-input",)
+                    self.assertEqual(calls[0], expected)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

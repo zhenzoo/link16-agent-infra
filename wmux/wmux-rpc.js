@@ -179,8 +179,10 @@ let ALLOW_WS = null;
   const i = process.argv.indexOf("--allow-ws");
   if (i !== -1) { ALLOW_WS = process.argv[i + 1] || null; process.argv.splice(i, 2); }
 }
-const REPLACE_DRAFT = process.argv.includes("--replace-draft");
-if (REPLACE_DRAFT) process.argv.splice(process.argv.indexOf("--replace-draft"), 1);
+// Retired flag: running bridge processes may still pass it until their next
+// restart. Consume it without clearing input or adding it to the pasted text.
+const legacyReplaceDraft = process.argv.indexOf("--replace-draft");
+if (legacyReplaceDraft !== -1) process.argv.splice(legacyReplaceDraft, 1);
 const WIN32_INPUT = process.argv.includes("--win32-input");
 if (WIN32_INPUT) process.argv.splice(process.argv.indexOf("--win32-input"), 1);
 
@@ -287,56 +289,8 @@ async function main() {
       catch (error) { error.handoff = "not_written"; throw error; }
       const CHUNK = 100, DELAY = 90, BP_START = "\x1b[200~", BP_END = "\x1b[201~";
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const readComposer = async () => {
-        const result = await rpc("input.readScreen", { ptyId, workspaceId: ws, tail_lines: 200 });
-        if (!result || typeof result.text !== "string") throw new Error("composer screen unavailable");
-        return result.text;
-      };
-      const framedComposer = (screen) => {
-        const lines = screen.split("\n");
-        for (let end = lines.length - 1; end >= 0; end--) {
-          if (!/^[╰└]/.test(lines[end].trimStart())) continue;
-          for (let start = end - 1; start >= 0; start--) {
-            if (!/^[╭┌]/.test(lines[start].trimStart())) continue;
-            const body = lines.slice(start + 1, end);
-            const first = body.find((row) => row.trim());
-            if (!first) break;
-            const content = first.replace(/^[\s│║┃]*/, "").trimStart();
-            return /^[❯>›»]\s+/.test(content) ? body.join("\n") : null;
-          }
-        }
-        return null;
-      };
-      const composerContent = (screen) => {
-        const lines = screen.split("\n");
-        // An empty current prompt is still a prompt. Never fall back to an old
-        // submitted message (or a framed composer) in scrollback.
-        const lastPrompt = lines.findLastIndex((row) => /^[\s│║┃]*[❯>›»](?:\s|$)/.test(row));
-        if (lastPrompt < 0) return "";
-        const framed = framedComposer(lines.slice(lastPrompt - 1).join("\n"));
-        if (framed !== null) {
-          return framed.split("\n").map((row) => row.replace(/^[\s│║┃]*|[\s│║┃]*$/g, "").trim())
-            .join("\n").replace(/^[❯>›»](?:\s+|$)/, "");
-        }
-        const prompt = lines[lastPrompt].trimStart();
-        const content = prompt.replace(/^[❯>›»](?:\s+|$)/, "");
-        // Codex paints this hint inside its empty composer. It is not input.
-        // Keep the match exact: a real draft containing the words stays a draft.
-        if (/^›(?:\s|$)/.test(prompt) && content === "Ask Codex to do anything") return "";
-        return content;
-      };
-      const hasDraft = (screen) => composerContent(screen).trim().length > 0;
-      const squash = (value) => value.replace(/[\s─-╿]/g, "");
-      const clearComposer = async (expected) => {
-        // Use stock Wmux, like the bridge's existing /stop cleanup. Recheck the
-        // visible draft before one Ctrl+C; the official key handler also checks
-        // workspace access and approvals. Never rely on a locally patched RPC.
-        if (!expected || squash(composerContent(await readComposer())) !== expected)
-          return { cleared: false, reason: "composer-changed" };
-        await rpc("input.sendKey", { ptyId, workspaceId: ws, key: "ctrl+c" });
-        await sleep(150);
-        return { cleared: !hasDraft(await readComposer()) };
-      };
+      // Paste does not inspect or clear existing input. Ctrl+C can interrupt
+      // an active turn even when a screen snapshot looks like a draft.
       // A lost response may follow a successful write. Never repeat a chunk.
       // This command owns the bracketed-paste envelope. Without raw, Wmux
       // wraps newline-containing chunks again; an inner end marker ends our
@@ -351,23 +305,6 @@ async function main() {
               `\x1b[0;0;${c.charCodeAt(0)};1;0;1_\x1b[0;0;${c.charCodeAt(1)};1;0;1_`)
         : t;
       const sendChunk = (t) => rpc("input.send", { text: encode(t), raw: true, ptyId, workspaceId: ws });
-      let before;
-      try {
-        before = await readComposer();
-        if (hasDraft(before) && REPLACE_DRAFT) {
-          // Owner-authorized replacement; never submit the old draft.
-          const cleared = await clearComposer(squash(composerContent(before)));
-          if (!cleared?.cleared) throw new Error(`draft replacement deferred: ${cleared?.reason || "unknown"}`);
-          await sleep(150);
-          before = await readComposer();
-        }
-        if (hasDraft(before)) throw new Error("paste refused: composer already contains a draft");
-      } catch (error) {
-        // This proof is emitted only before the first write, never for a lost
-        // transport response after writing. The inbox can safely retry it.
-        error.handoff = "not_written";
-        throw error;
-      }
       let started = false, written = "", n = 0;
       try {
         await sendChunk(BP_START);
@@ -383,22 +320,8 @@ async function main() {
       } catch (error) {
         if (!started && !written && error.fromServer) error.handoff = "not_written";
         if (started) { try { await sendChunk(BP_END); } catch {} }
-        if (written) {
-          const current = await readComposer();
-          const own = squash(written);
-          const currentComposer = squash(composerContent(current));
-          const beforeComposer = squash(composerContent(before));
-          const owned = own && currentComposer === own && beforeComposer === "";
-          if (!owned) {
-            throw new Error(`${error.message}; partial paste left untouched because ownership could not be confirmed`);
-          }
-          const cleared = await clearComposer(own);
-          if (!cleared?.cleared) throw new Error(`${error.message}; partial paste cleanup refused: ${cleared?.reason || "unknown"}`);
-          if (hasDraft(await readComposer())) throw new Error(`${error.message}; partial paste cleanup failed`);
-          // No Enter was sent. The exact owned draft has been cleared and
-          // verified, so the durable inbox can retry the whole message.
-          error.handoff = "cleared_unsubmitted";
-        }
+        // Leave partial input untouched. Without a proven zero-write failure,
+        // the existing inbox treats delivery as uncertain and does not replay.
         throw error;
       }
       out = { pasted: text.length, chunks: n };

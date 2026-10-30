@@ -15,7 +15,7 @@ does_not_own:
 read_when:
   - 要让 Codex 复用 Claude 的 skill/workflow
   - 安装或升级 Codex CLI
-last_reviewed: 2026-09-06
+last_reviewed: 2026-10-27
 ---
 # SOP-160 · Claude Personal → Codex Personal compatibility
 
@@ -28,17 +28,17 @@ last_reviewed: 2026-09-06
 
 ## 安装 / 升级 Codex（官方 standalone 优先）
 
-Windows 新装统一走 OpenAI 官方 standalone installer，不再默认依赖 Node/npm：
+Windows 新装统一走 OpenAI 官方 standalone installer，不再默认依赖 Node/npm。System32 必须排在 Git Bash 的 GNU tar 前面；后者会把 `C:\...` 压缩包路径当成远程主机，导致下载完成后无法解包：
 
 ```powershell
-python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 --prefer proxy -- powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://chatgpt.com/codex/install.ps1 | iex"
+python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 --prefer proxy -- powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$env:Path = "$env:SystemRoot\System32;$env:Path"; irm https://chatgpt.com/codex/install.ps1 | iex'
 codex --version
 ```
 
 已有安装先看 `Get-Command codex | Select-Object -ExpandProperty Source`：
 
 - 命中 `...\Programs\OpenAI\Codex\...`：继续用上面的官方 standalone installer 更新。
-- 命中 npm 全局目录：可以先沿用 `codex update` / npm 更新，不在装机时偷偷迁移；计划迁移时再明确卸载旧入口，避免 PATH 双份。
+- 命中 npm 全局目录：不要再运行 npm 更新；先用上述官方安装器装好并验证，再卸载旧包，同时检查自定义 wrapper 与 PATH，避免继续命中旧入口。
 
 若 `PROXY_URL` 未设或端口不确定，先运行 `python feishu/network_route.py proxy-doctor`。
 每次都对真实官方 URL 选路，不写死某个网络或端口。

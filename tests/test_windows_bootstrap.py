@@ -79,6 +79,9 @@ class ComponentPlanTests(unittest.TestCase):
                 self.assertEqual(call.args[0], list(row.install_command))
                 self.assertEqual(call.kwargs["env"].get("CODEX_NON_INTERACTIVE"),
                                  "1" if row.key == "codex" else None)
+                if row.key == "codex":
+                    self.assertEqual(call.kwargs["env"]["PATH"].split(os.pathsep)[0],
+                                     str(Path(os.environ["SystemRoot"]) / "System32"))
 
     def test_installed_kimi_is_never_reinstalled(self):
         with mock.patch.object(wb, "detect_component", return_value=Path("existing/kimi.exe")), \
