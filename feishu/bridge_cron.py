@@ -28,6 +28,7 @@
   python bridge_cron.py board                       # ⭐ 全舰队总览：每个 agent 排了啥·下次/上次·本机●/别机○
   python bridge_cron.py add --bot X --name N --cron "0 9 * * *" --sop docs/SOP-xxx   # 加：--sop 引到该仓 SOP（或 --prompt "…"）
   python bridge_cron.py rm | enable | disable --bot X --name N   # 删 / 启用 / 停用
+  python bridge_cron.py session-policy --bot X --name N --policy idle-fresh  # 忙则跳过；空闲先关再新建
   python bridge_cron.py list [--bot X]              # 列 json（全部 / 某 bot）
   python bridge_cron.py fire <name> [--dry-run]     # 立刻手动触发一个 job（--dry-run 只打印 marker 不注入·测试用）
   python bridge_cron.py run                          # 前台跑守护循环（start 用它起后台）
@@ -44,6 +45,7 @@ import json
 import time
 import subprocess
 import bridge_process
+from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -292,6 +294,116 @@ def _watchdog_waiting_for_short_limit(bot_name):
     return isinstance(jobs, dict) and isinstance(jobs.get(bot_name), dict)
 
 
+def _idle_reset_check(fb, bot):
+    """Read-only gate. A window/agent label is not proof of an active turn."""
+    name = bot["name"]
+    path = fb.STATE_DIR / f"bridge-session-{name}.json"
+    # load_session intentionally tolerates corruption; destructive cron must not.
+    rec = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(rec, dict):
+        raise RuntimeError("会话绑定无法确认")
+    counts = fb.bridge_inbox.Inbox(fb.STATE_DIR, name).counts()
+    if any(counts.get(s, 0) for s in (
+        "queued", "processing", "submitting", "awaiting_confirmation", "uncertain",
+    )):
+        raise RuntimeError("有待处理或尚未确认的消息")
+    if fb.bridge_outbox.picker_load(str(fb.STATE_DIR), name):
+        raise RuntimeError("正在等待用户选择")
+    workspaces = fb.wmux_session.workspaces()  # RPC failure must propagate.
+    ws = next((w for w in workspaces if w.get("id") == rec.get("workspace_id")), None)
+    if not ws:
+        if any(w.get("name") == f"bot-{name}" for w in workspaces):
+            raise RuntimeError("存在未绑定的同名工作区")
+        # A closed window can leave a live native worker behind (notably Kimi).
+        activity = fb.bridge_activity.read_activity(fb.STATE_DIR, bot)
+        if activity.get("state") in ("active", "waiting"):
+            raise RuntimeError("工作区已不在，但原生回合仍未结束")
+        if fb.agent_runtime.runtime_name(bot) == "kimi" and activity.get("state") != "idle":
+            if any(fb.kimi_process.owned(r, name, fb.STATE_DIR) for r in fb.kimi_process.inventory()):
+                raise RuntimeError("残留 Kimi worker 未确认空闲")
+        return rec
+    if rec.get("pending_launch") or not rec.get("pty"):
+        raise RuntimeError("会话仍在启动或缺少终端绑定")
+    if rec.get("pty") not in (ws.get("ptyIds") or []):
+        raise RuntimeError("工作区与终端绑定不一致")
+    if rec.get("profile") != fb.agent_runtime.profile_name(bot, required=True):
+        raise RuntimeError("会话账号与当前名册不一致")
+    activity = fb.bridge_activity.read_activity(fb.STATE_DIR, bot)
+    if activity.get("state") != "idle":
+        raise RuntimeError(f"{activity.get('state', 'unknown')}：{activity.get('reason', '未确认空闲')}")
+    return rec
+
+
+def _codex_close_processes(fb, bot, rec):
+    """Capture identities to verify exit, never terminate by an old PID file."""
+    if fb.agent_runtime.runtime_name(bot) != "codex":
+        return {}
+    record = fb._codex_startup_record(bot)
+    if not record.get("worker_pid"):
+        if not rec.get("workspace_id"):
+            return {}
+        raise RuntimeError("缺少 Codex worker 身份，无法确认彻底关闭")
+    rows = fb.kimi_process.inventory()  # Shared validated OS inventory; read only.
+    seeds = {r["pid"]: r for r in rows if r["pid"] in {
+        record.get("worker_pid"), record.get("observer_pid"), record.get("tui_pid"),
+    }}
+    return fb.kimi_process.descendants(rows, seeds)
+
+
+def _wait_closed(fb, rec, processes, timeout=15):
+    deadline = time.monotonic() + timeout
+    while True:
+        windows = fb.wmux_session.workspaces()
+        window_live = any(w.get("id") == rec.get("workspace_id") for w in windows)
+        live = fb.kimi_process.inventory() if processes else []
+        process_live = any(r["pid"] in processes and
+                           r["birth"] == processes[r["pid"]]["birth"] for r in live)
+        if not window_live and not process_live:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("旧工作区或旧运行进程尚未退出；不启动巡航")
+        time.sleep(.25)
+
+
+def _fire_idle_fresh(fb, bot, job, marker):
+    """One lifecycle transaction: idle -> confirmed close -> fresh -> submit.
+
+    Opt-in per job. Busy/waiting/unknown are skips, never delayed retries. The
+    normal scheduler records this minute even when this function returns False.
+    """
+    name = bot["name"]
+    try:
+        with fb.bridge_injection.injection_lock(fb.STATE_DIR, "ensure-session", name, timeout=1):
+            rec = _idle_reset_check(fb, bot)
+            old_ws = rec.get("workspace_id")
+            lock = (fb.bridge_injection.injection_lock(fb.STATE_DIR, "tui-inject", old_ws, timeout=1)
+                    if old_ws else nullcontext())
+            with lock:
+                processes = _codex_close_processes(fb, bot, rec)
+                # Recheck after waiting for locks/process observation, immediately before close.
+                if _idle_reset_check(fb, bot) != rec:
+                    raise RuntimeError("会话绑定已变化")
+                fb._close_session_unlocked(bot)  # Same primitive as /close, including Kimi cleanup.
+                _wait_closed(fb, rec, processes)
+                fb.clear_session(name)
+                fb.clear_codex_thread(name)  # New context, never resume the old thread.
+                fb.bridge_outbox.pending_clear(str(fb.STATE_DIR), name)
+                fb.session_work.clear(name, fb.STATE_DIR)
+                log(f"fire[{job['name']}] {name} 旧会话关闭已确认")
+            ws, pty, created, _ = fb._ensure_session_unlocked(bot)
+            if not created:
+                raise RuntimeError("未创建全新会话")
+            # Do not create a legacy pending retry: a failed/uncertain submit
+            # must not later bypass this gate through the doctor loop.
+            if fb._inject(pty, ws, marker, runtime_bot=bot) is False:
+                raise RuntimeError("新会话提示词未确认提交")
+            log(f"fire[{job['name']}] → {name} pty={pty} created=True policy=idle-fresh OK")
+            return True
+    except Exception as exc:
+        log(f"fire[{job['name']}] 跳过（idle-fresh）：{exc}")
+        return False
+
+
 def fire(job, dry_run=False):
     """把 job 的 prompt 注入 job['bot'] 的 Claude Code 会话。返回 True=已注入。"""
     name = job.get("name", "job")
@@ -300,8 +412,12 @@ def fire(job, dry_run=False):
     if not bot_name or not job.get("prompt"):
         log(f"fire[{name}] 跳过：缺 bot 或 prompt")
         return False
+    policy = job.get("session_policy", "reuse")
+    if policy not in ("reuse", "idle-fresh"):
+        log(f"fire[{name}] 跳过：未知 session_policy={policy!r}")
+        return False
     if dry_run:
-        print(f"[dry-run] job={name} → bot={bot_name}\n  marker= {marker}")
+        print(f"[dry-run] job={name} → bot={bot_name} session_policy={policy}\n  marker= {marker}")
         return True
     if _watchdog_waiting_for_short_limit(bot_name):
         log(f"fire[{name}] 跳过：{bot_name} 正在等短时额度恢复；由看门狗到点唤醒一次")
@@ -315,6 +431,8 @@ def fire(job, dry_run=False):
     if not bot:
         log(f"fire[{name}] 目标 bot '{bot_name}' 不在名册")
         return False
+    if policy == "idle-fresh":
+        return _fire_idle_fresh(fb, bot, job, marker)
     try:
         ws, pty, created, _ = fb.ensure_session(bot)   # 复用活会话 / 没有则唤起一个新的
     except Exception as e:                             # noqa: BLE001
@@ -518,6 +636,22 @@ def cmd_set_enabled(bot, name, on):
     _save_bot_file(bot, jobs)
     log(f"📝 手动{'启用' if on else '停用'} {bot}/{name}（bridge_cron.py {'enable' if on else 'disable'}·留痕）")
     print(f"✅ {bot} / {name} → {'启用' if on else '停用'}")
+
+
+def cmd_session_policy(bot, name, policy):
+    """Configure only this job; existing prompts, schedules and enable flags survive."""
+    if policy not in ("reuse", "idle-fresh"):
+        raise ValueError("session policy 必须为 reuse 或 idle-fresh")
+    if yaml is None:
+        raise RuntimeError("缺少 pyyaml，未改任务")
+    _require_roster_bot(bot)
+    jobs = _load_bot_file(bot)
+    target = next((j for j in jobs if j.get("name") == name), None)
+    if target is None:
+        raise ValueError(f"找不到 {bot}/{name}")
+    target["session_policy"] = policy
+    _save_bot_file(bot, jobs)
+    log(f"📝 {bot}/{name} session_policy={policy}")
 
 
 def cmd_list(bot=None):
@@ -865,13 +999,15 @@ def main():
         cmd_menu()
     elif cmd == "list":
         cmd_list(_opt("--bot"))
-    elif cmd in ("add", "rm", "enable", "disable"):
+    elif cmd in ("add", "rm", "enable", "disable", "session-policy"):
         bot, name = _opt("--bot"), _opt("--name")
         if not bot or not name:
-            print("用法：add/rm/enable/disable --bot <bot> --name <name> "
+            print("用法：add/rm/enable/disable/session-policy --bot <bot> --name <name> "
                   "[add: --cron \"0 9 * * *\" (--sop <仓内SOP路径> | --prompt \"…\") --tz .. --desc ..]", file=sys.stderr)
             sys.exit(2)
-        if cmd == "add":
+        if cmd == "session-policy":
+            cmd_session_policy(bot, name, _opt("--policy"))
+        elif cmd == "add":
             cmd_add(bot, name, _opt("--cron"), prompt=_opt("--prompt"), sop=_opt("--sop"),
                     tz=_opt("--tz"), desc=_opt("--desc"))
         elif cmd == "rm":
