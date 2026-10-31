@@ -3,9 +3,11 @@ doc_type: SOP
 doc_id: SOP-100
 title: 把飞书桥装到一台新电脑（新机器部署 runbook）
 status: active
+url: ""
 purpose: 新机器从 clone 到桥跑起来并配好开机自启的唯一入口操作手册。
 owns:
   - 依赖安装顺序与验证
+  - 本机代理入口、DNS 分流、出口与浏览器/CLI 一致性验收及回退
   - wmux 与 RPC 客户端的就位检查
   - private GitHub collaborator 登录、main-only clone 与同步验收
   - 新机机型/年份前缀与用户显式命名的隔离 Claude/Codex/Kimi profile
@@ -21,12 +23,13 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-09-26
+last_reviewed: 2026-11-01
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
 > **用途**：在一台**新机器**上从零跑起 `feishu/feishu_bridge.py`（飞书桥），挂上能被手机飞书 @ 的本机 bot，并配好**开机自启**（§9）。
 > **这是新机器部署的唯一入口文档** —— 真空白机先做下面 Stage 0；已有 Git/gh/Python 的机器 clone 后从 §1 顺着做到 §9。
+> **只配置网络**：直接执行 [§1.2](#12--代理与真实站点检测)，无需注册飞书 bot。Windows/macOS/Linux 共用验收标准，设置按本机客户端与系统适配；拉取本仓不会自动修改网卡、DNS 或代理。
 > **配套**：架构见 [`ARCH-110-feishu-bridge.md`](ARCH-110-feishu-bridge.md)（§4.1 跨机可移植）· 依赖见 [`feishu/requirements.txt`](../feishu/requirements.txt) · 注册 bot 细节见 [`SOP-120-feishu-register.md`](SOP-120-feishu-register.md)。
 > **实证**：2026-06-16 第二台机（`machine-a` / `D:`）跑通 §1–§8；2026-07-25 第一台机（`machine-b` / `E:`）跑通 §9 开机自启。
 > **原名** `feishu/SETUP-new-machine.md`（2026-07-25 按全局 `TYPE-NNN-slug` 规范搬进 `docs/` 并编号）。
@@ -44,7 +47,7 @@ agent 负责运行后文的命令、选路、修复和验收。用户只会经�
 | 你会看到 | 你要做 | agent 此时在做 |
 |---|---|---|
 | GitHub 浏览器登录/设备码页 | 用自己的 GitHub 账号登录、接受 private 仓邀请 | 验真账号并只 clone `main` |
-| 网络检测结果 | 若被提示，打开 v2rayN；不需要猜端口 | 对真实 GitHub/PyPI URL 测直连和候选 mixed port |
+| 网络检测结果 | 若被提示，打开本机代理客户端；不需要猜端口 | 按 §1.2 核对代理入口、DNS、出口与浏览器/CLI；已有健康配置保持 |
 | 「机型 + 建议前缀」 | 仅当年份不对或名称冲突时纠正 | 只读型号/BIOS 年份，不读序列号/UUID |
 | Claude / Codex / Kimi 登录页 | 登录用户本轮选择并命名的隔离 profile；不用的 provider 可明确跳过 | 建立 local registry、隔离 home 与对应入口，不复制任何认证 |
 | 「你已有的记忆 / 活跃项目 / 建议 bot 名」勾选清单 | 勾掉不想导入的来源；bot 名不满意就改 | `context_scan.py` 只读盘点 `~/.claude`、Claude 桌面版 Cowork 记忆、`~/.codex`、官方导出包与近 7 天活跃项目 |
@@ -222,15 +225,145 @@ git rev-list --left-right --count origin/main...HEAD
 
 ### 1.2 · 代理与真实站点检测
 
+**目标**：海外应用按用户选定地区出站，国内业务与局域网维持原有可用路径；浏览器和 CLI 对同一目标使用一致的分流策略。
+同名节点不保证同一出口，更不保证其他电脑已配置正确。以下“美国 IPv4”仅是用户选定该目标时的验收示例，不是所有用户的默认地区。
+
+#### 1.2.1 · 发现入口，保留现场
+
 ```powershell
 python feishu/network_route.py proxy-doctor --url https://github.com/ --prefer proxy
 python feishu/network_route.py probe --url https://pypi.org/simple/lark-oapi/
 ```
 
-`proxy-doctor` 候选来源 = 当前 `PROXY_URL` + Windows 系统代理 + 常见本地 mixed port。
+`proxy-doctor` 候选来源 = 当前 `PROXY_URL` + 系统/进程代理 + 常见本地 mixed port；Windows 额外读系统代理注册表。
 它会通过真实 URL 验证，所以「端口能连但代理不能访问」仍会判失败。
 不得根据 Wi-Fi 名称写 Remote/Staff/企业租户A 特例，也不得把 `7897` 写成所有人的默认。
-若候选全失败，让用户打开 v2rayN 的「参数设置 → 本地监听 → 本地混合端口」，再重测。
+若候选全失败，在本机 Clash Verge、v2rayN 或其他客户端查看实际监听地址、端口与协议，再重测。
+这些命令只检测并建议路径；`probe/run` 可能选更快的直连，**不能用它们证明固定海外出口**。
+工具里的 `direct` 表示不使用应用层代理，开启 TUN 后仍可能被虚拟网卡接管。
+
+修改前记录本机客户端/内核版本、当前订阅、规则模式、分组与节点、系统代理、CLI 代理变量、网卡 DNS/IPv6 和其他 VPN 状态。
+只读相关字段，回执中的代理 URL 去掉用户名/密码；订阅、控制接口密钥、完整环境变量和配置备份不进入 Git。
+将要改的客户端配置、增强规则和分组选择备份到客户端数据目录下的独立备份目录；逐项记录 before/after。
+已有企业 VPN、内网域名或专用 DNS 时保留其例外，不自动停掉其他 VPN，也不按本章覆盖企业策略。
+
+#### 1.2.2 · 最小配置清单
+
+1. **代理入口统一**：系统代理与实际需要代理的 CLI 使用同一个有效 HTTP/mixed 入口。核对 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、小写同名变量及 `NO_PROXY`，修正旧端口/协议或过宽绕过；按 CLI 支持项配置，不全机盲设。`PROXY_URL` 是 Link16 配置，其他 CLI 不会自动读取它。
+2. **TUN 接管补漏**：需要覆盖未读取代理的程序时开启 TUN，核对实际路由、DNS 接管和客户端权限；开关亮不等于所有协议/IPv6 已接管。系统代理、TUN 应指向同一客户端，避免两个 VPN 嵌套。现有网络已覆盖需求时无需重复接管。
+3. **海外分组统一**：AI、媒体、通用海外与兜底组指向本机一个主选择组；主组再选实测合格节点。保留国内与内网直连，避免一页里的登录、视频、DNS 请求落到不同故障节点。
+4. **节点实测选择**：按地区、连续出口结果、连通性和订阅倍率选择；不写死“美国 06”、某个供应商或个人出口 IP。自动测速/故障切换若会跨地区，限制候选地区或改用手动选择。
+5. **DNS 国内外分流**：海外域名经代理访问加密 DNS，国内域名/直连目标使用本地合适的解析器；节点域名保留可用的独立解析路径，避免先有代理才能解析代理节点的循环。企业内网域名继续用原专用 DNS。
+6. **IPv6 出口管控**：选择 IPv4 目标时核对内核与 DNS 的 IPv6 设置，再测实际出口。Clash 的 `ipv6: false`、`dns.ipv6: false` 不等于禁用系统网卡，也不能强制远端节点用 IPv4 访问网站。远端仍出 IPv6 就换合格节点或由供应商调整；本机 IPv6 绕行则定位 TUN/路由覆盖，未解决不得验收通过。默认保留 WLAN IPv6，不作全机关闭。
+7. **国内局域网直连**：保留原国内、私网和企业例外；检测用 `my.ip.cn` 可单独加高优先级代理规则，不删除整条 `.cn` 直连规则。不要为检测页面分数把所有国内业务送到海外。
+8. **保存并保留连接**：用客户端保存分组、增强配置和规则；关闭“切换节点时自动关闭连接”（如有），保留正在进行的 CLI/会议。旧连接可能沿用旧出口，验收另建请求；在业务空闲时重启客户端及终端，再复测持久性。
+
+**浏览器与终端为何不同**：Chrome 通常读取系统代理，还可能受扩展、启动参数、安全 DNS 与 UDP/QUIC 影响；
+终端里的每个 CLI 分别读取自己的环境变量/应用配置。即使进入同一个 Clash，不同目标也可能命中不同分组；
+已建立的连接还可能保留旧路径。按“入口 → 命中规则 → 节点 → 实际出口”逐层对照，不能只凭“CLI 正常”认定浏览器或供应商正常。
+
+Windows 在系统代理与客户端内核中核对配置；macOS 在当前网络服务的代理/客户端中核对；Linux 按桌面代理、CLI 环境与 TUN/路由核对。
+三种 CLI（Claude Code、Codex、Kimi）共用上述原则，各自支持哪些代理变量以其当前版本为准。
+仅更新当前用户所需启动配置；持久变量修改后重开对应终端，生产桥/wmux 的重启仍遵守维护窗口。
+
+#### 1.2.3 · Clash Verge / Mihomo 落位示例
+
+在客户端内打开**当前订阅的增强规则/合并配置**，使用本机已有主选择组名替换下面的 `主选择组`。
+不要新建重复组，不覆盖整份订阅；保留现有内网 DNS、fake-ip 例外和其他不相关字段。
+
+增强规则里，把这一条加入 `prepend`（其余 prepend/append/delete 项保留），使它先于 `.cn,DIRECT` 命中：
+
+```yaml
+prepend:
+  - DOMAIN,my.ip.cn,主选择组
+```
+
+合并配置的 DNS 示例适用于中国大陆网络、且用户选择海外 IPv4 出口的场景。
+它基于 Clash Verge Rev 2.3.1 / Mihomo 1.19.10 的已测字段；其他版本先核官方文档与实际配置合并行为。
+只在确有缺项/错误时改对应字段，`geosite:cn` 需要内核可用的规则数据；下列公共 DNS 地址不是企业内网 DNS 的替代品。
+
+```yaml
+ipv6: false
+dns:
+  enable: true
+  ipv6: false
+  respect-rules: true
+  default-nameserver: [223.5.5.5, 119.29.29.29]
+  proxy-server-nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  nameserver:
+    - 'https://1.1.1.1/dns-query#主选择组'
+    - 'https://dns.google/dns-query#主选择组'
+  nameserver-policy:
+    'geosite:cn': [223.5.5.5, 119.29.29.29]
+  direct-nameserver: [223.5.5.5, 119.29.29.29]
+  fallback: []
+```
+
+本例清空旧 fallback，防止海外查询回到原来的国内后备解析器；原本另有必要策略时先逐条评估。
+`default-nameserver` / `proxy-server-nameserver` 负责解析 DNS 服务器/代理节点，海外业务解析由 `nameserver` 经主组完成；
+DNS 结果或解析器所在地本身不能证明请求走了哪条路，还要看客户端连接记录和浏览器的随机域名检测。
+字段依据见 [Mihomo DNS 文档](https://wiki.metacubex.one/config/dns/)。
+
+用本机实际内核执行 `mihomo -t -d <客户端数据目录> -f <待加载配置>`，检查组名、规则数据和语法后再加载；
+Clash Verge 内核文件名可能是 `verge-mihomo.exe`，从实际进程/安装目录取得，不硬编码路径。
+加载后回读实际生效配置、规则与选择组，确认增强内容被消费。只改生成的 `clash-verge.yaml` 会被重新生成覆盖；
+只调内核 API 切节点也不等于客户端已持久保存，分组选择应在客户端保存并经重启回读。
+
+#### 1.2.4 · 终端、浏览器与业务验收
+
+先在实际使用的终端测试。以下 PowerShell 示例从已有工具读取本机 `PROXY_URL`，不会改系统设置；
+无配置时先按 doctor 的结果写入本机 `.env`，不要照抄另一台电脑的端口。
+
+```powershell
+$networkProxy = python -c "import sys; sys.path.insert(0, 'feishu'); import network_route as n; print(n.proxy_url() or '')"
+if (-not $networkProxy) { throw '请先配置本机 PROXY_URL' }
+# 显式代理：排除 NO_PROXY 绕过，分别观察返回的 ip=、loc=
+curl.exe --silent --show-error --fail --max-time 20 --proxy "$networkProxy" --noproxy "localhost,127.0.0.1" https://claude.ai/cdn-cgi/trace
+curl.exe --silent --show-error --fail --max-time 20 --proxy "$networkProxy" --noproxy "localhost,127.0.0.1" https://1.1.1.1/cdn-cgi/trace
+# 不使用应用代理：TUN 开启时检验 TUN 路径，不能称为物理直连
+curl.exe --silent --show-error --fail --max-time 20 --noproxy "*" https://claude.ai/cdn-cgi/trace
+# IPv6 专项：能返回 IPv6 就记录实际地址与路径；失败需区分 DNS/超时/站点故障
+curl.exe --silent --show-error --fail --max-time 20 --noproxy "*" https://api6.ipify.org
+```
+
+macOS/Linux 用 `python3`、`curl`；Bash/zsh 赋值写成
+`networkProxy=$(python3 -c "import sys; sys.path.insert(0, 'feishu'); import network_route as n; print(n.proxy_url() or '')")`，
+先用 `test -n "$networkProxy"` 检查，再运行上面同样的 curl 参数。
+HTTP/mixed 代理使用 `http://`；SOCKS-only 客户端用 curl 支持的 `socks5h://` 进行远端解析，现有 Python doctor 不支持该协议，不能把它的失败算成节点故障。
+不要加 `-k` 跳过证书校验。`curl --ipv4` 只约束 curl 自己的连接，连接到本地代理时不能据此证明远端出口是 IPv4。
+IPv6-only 测试地址依据 [ipify 文档](https://www.ipify.org/)；单个站点失败不等于整机不存在 IPv6 绕行。
+IPv6-only 站点返回地址时，在客户端连接记录核对该目标的规则、出站链和实际节点：经过代理节点的远端 IPv6，
+与本机运营商 IPv6 直出是两种情况。前者仍可能与“Claude 当前使用 IPv4”同时成立；若用户要求**所有海外请求仅用 IPv4**，
+则远端 IPv6 也不合格，需要支持该限制的节点/服务端策略，不能通过关闭 WLAN IPv6 解决或宣称已完成。
+
+再用**这台电脑实际使用的 Chrome**打开 [IP.Net.Coffee Claude 检测页](https://ip.net.coffee/claude/)，
+并打开上述两个 trace URL，与终端同一时段的新请求对照。网页多个卡片来自不同目标，`my.ip.cn` 中国出口并不能单独证明 Claude 也走中国；
+“IPv6 环境”提示同样要定位是哪张卡、哪个地址。远端网页抓取工具、云浏览器或只测 Python，均不能代替本机 Chrome。
+
+逐项填写“通过 / 失败 / 未验证”，附时间、目标、实际结果；遇到服务拒绝探测时记录 HTTP 状态，换可验证端点并保留原项未验证，不能按成功处理。
+
+| 验收项 | 通过条件 |
+|---|---|
+| **IPv4 出口** | 显式代理、TUN 路径（使用时）、本机 Chrome 对相同目标各新建请求至少 3 次；地区与地址族符合用户目标。固定单出口方案应一致；不同 IP 时查规则和节点出口池，未解释差异不得通过。跨目标不强求供应商永远只用一个 IP。 |
+| **IPv6 绕行** | IPv4 方案下，目标业务不返回 IPv6；额外 IPv6 探测与客户端路由核对未发现绕行。出现本地运营商 IPv6 就失败；超时、无结果仅是证据不足，不能当作“已禁用”。 |
+| **DNS 分流** | 检测页完成新的随机域名测试，结合客户端记录确认海外查询按策略解析；国内与内网域名仍用预期解析器。只看“未泄露”文字、缓存或解析器国家不够。 |
+| **WebRTC 路径** | 本机浏览器测试完成，没有通过 STUN 暴露非预期的公网出口；私网/mDNS 地址不当作公网泄露。无测试结果标未验证，不为通过而全局禁用 WebRTC、影响会议。 |
+| **CLI 与视频** | 用户所用 CLI 连续对话/流式响应至少 10 分钟无 reconnecting，并播放 YouTube 视频；记录实际时长。短 HTTP 200/204 或 API 405 只说明相应请求可达，不能替代长连接验收。 |
+| **国内与内网** | 国内会议入口及需要的局域网服务正常，客户端规则/连接记录符合直连预期；真实会议音视频未试就单列未验证，不拿首页 200 冒充。 |
+| **持久与恢复** | 在空闲时重启客户端/新开终端后，分组、增强规则、DNS 与同目标出口再次通过；本机 before/after 和备份可定位。未实际重启则持久性未验证。 |
+
+#### 1.2.5 · 失败定位与回退
+
+- **CLI 通、浏览器不通**：先对照系统代理、CLI 变量/应用覆盖、浏览器扩展/安全 DNS；再看登录、视频/CDN、DNS 分别命中哪个组。仅在证据指向 UDP/QUIC 时做可恢复的单项对照，不全局禁 UDP 或 WebRTC。
+- **检测页中国出口**：查具体卡片目标的规则；如 `my.ip.cn` 被 `.cn,DIRECT` 命中，加该域名例外即可。Claude 的实际出口单独验，不为提高分数批量改国内规则。
+- **频繁 reconnecting**：保留报错时间，核节点/TUN/DNS 错误与长连接是否被切组强制关闭；再看本机 CPU/内存。不能凭网页能开就归因电脑性能，也不能凭一次超时认定供应商故障。
+- **国内业务受影响**：停止扩大修改，优先恢复本次相关分流/DNS/代理项；仅当现场仍等于本次 after 才恢复 before，后来已有其他改动时先核差异。客户端加载恢复配置后重测失败业务，不覆盖整份订阅或清空全部连接。
+
+提交到 Git 的只有通用方法与工具；本机订阅、节点选择、备份和含公网 IP 的验收记录留本机。
+TB24/TB25 或同事拉取后，直接让 agent “按 SOP-100 §1.2 配置并验收本机网络”。
+回执列出实际改动、各项通过/失败/未验证及回退位置；检测评分不作为账号安全或永不封禁的保证。
 
 ### 1.3 · 机器前缀与用户选择的隔离 profiles
 
