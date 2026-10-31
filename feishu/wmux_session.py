@@ -245,6 +245,27 @@ def pty_agent_status(pty):
 WMUX_HOME = Path.home() / ".wmux"
 
 
+def runtime_processes(pty, runtime):
+    """Pin native processes under this terminal, with OS birth identities.
+
+    Older wmux versions without shell identities return no evidence. A screen
+    label or a persisted PID without a matching creation time is insufficient.
+    """
+    import kimi_process
+    try:
+        sessions = json.loads((WMUX_HOME / "sessions.json").read_text(encoding="utf-8"))["sessions"]
+        saved = next(r for r in sessions if r.get("id") == pty)
+        rows = kimi_process.inventory()
+        shell = next(r for r in rows if r["pid"] == saved["pid"]
+                     and int(r["birth"]) // 10 == int(saved["pidCreatedAtFt"]) // 10)
+        tree = kimi_process.descendants(rows, {shell["pid"]: shell})
+        return [{"pid": r["pid"], "birth": r["birth"]} for r in tree.values()
+                if r["pid"] != shell["pid"]
+                and r.get("name", "").lower() in {runtime, runtime + ".exe"}]
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, kimi_process.Error):
+        return []  # Missing observation never authorizes a later unbind.
+
+
 def daemon_fingerprint():
     """wmux daemon 实例指纹 = ~/.wmux/daemon.pid 的 `内容:mtime`。
 

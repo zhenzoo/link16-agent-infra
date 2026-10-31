@@ -1,4 +1,5 @@
 """An exited native runtime must not remain bound to a restored terminal."""
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -34,10 +35,13 @@ def dead(tmp_path, monkeypatch):
                            close=close, thread=thread, startup=startup)
 
 
-@pytest.mark.parametrize("runtime", ["codex", "kimi"])
+@pytest.mark.parametrize("runtime", ["codex", "kimi", "claude"])
 def test_confirmed_exit_releases_only_runtime_and_resume_pointers(dead, runtime):
     dead.bot["agent"] = runtime
     dead.start["native_pid"] = 104
+    if runtime == "claude":
+        bridge.save_session(dead.bot["name"], {**dead.rec, "agent": "claude",
+                            "runtime_processes": [{"pid": 101, "birth": "10"}]})
     assert bridge._release_exited_session_unlocked(dead.bot)
     saved = bridge.load_session(dead.bot["name"])
     assert saved["pty"] is saved["workspace_id"] is saved["jsonl"] is None
@@ -137,3 +141,20 @@ def test_nightly_unknown_old_activity_can_start_after_verified_process_exit(dead
     create.assert_called_once()
     inject.assert_called_once()
     assert not dead.thread.exists()
+
+
+def test_native_identity_requires_matching_shell_birth_and_tree(tmp_path, monkeypatch):
+    wmux = bridge.wmux_session
+    monkeypatch.setattr(wmux, "WMUX_HOME", tmp_path)
+    saved = {"sessions": [{"id": "pty", "pid": 10, "pidCreatedAtFt": "1009"}]}
+    (tmp_path / "sessions.json").write_text(json.dumps(saved))
+    rows = [{"pid": 10, "ppid": 1, "birth": "1000", "name": "bash.exe"},
+            {"pid": 20, "ppid": 10, "birth": "2000", "name": "claude.exe"},
+            {"pid": 30, "ppid": 2, "birth": "3000", "name": "claude.exe"}]
+    inventory = Mock(return_value=rows)
+    monkeypatch.setattr(bridge.kimi_process, "inventory", inventory)
+    assert wmux.runtime_processes("pty", "claude") == [{"pid": 20, "birth": "2000"}]
+    rows[0]["birth"] = "9000"  # A reused shell PID cannot identify the terminal.
+    assert wmux.runtime_processes("pty", "claude") == []
+    inventory.side_effect = bridge.kimi_process.Error("unknown")
+    assert wmux.runtime_processes("pty", "claude") == []

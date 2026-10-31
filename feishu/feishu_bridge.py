@@ -1365,10 +1365,19 @@ def _release_exited_session_unlocked(bot):
     runtime = agent_runtime.runtime_name(bot)
     keys = {"codex": ("worker_pid", "tui_pid", "observer_pid"),
             "kimi": ("worker_pid", "native_pid")}.get(runtime)
-    if (not keys or start.get("profile") != rec.get("profile")
-            or any(type(start.get(k)) is not int or start[k] <= 0 for k in keys)):
-        return False  # No exact process evidence: keep the existing lifecycle checks.
-    pids = {start[k] for k in keys}
+    if keys:
+        if (start.get("profile") != rec.get("profile")
+                or any(type(start.get(k)) is not int or start[k] <= 0 for k in keys)):
+            return False
+        pids = {start[k] for k in keys}
+    else:
+        identities = rec.get("runtime_processes")
+        if (runtime != "claude" or rec.get("agent") != runtime
+                or not isinstance(identities, list) or not identities
+                or any(not isinstance(r, dict) or type(r.get("pid")) is not int
+                       or r["pid"] <= 0 or not str(r.get("birth", "")).isdigit() for r in identities)):
+            return False  # Legacy records without exact evidence keep existing checks.
+        pids = {r["pid"] for r in identities}
 
     def exited():
         rows = kimi_process.inventory()  # Raises on unknown/incomplete OS observation.
@@ -1390,7 +1399,7 @@ def _release_exited_session_unlocked(bot):
             raise RuntimeError("旧进程已结束，但旧工作区尚未关闭；保留绑定待重试")
     clear_codex_thread(name)
     _merge_session(name, {"workspace_id": None, "pty": None, "jsonl": None,
-                         "daemon_fp": None, "pending_launch": None})
+                         "daemon_fp": None, "pending_launch": None, "runtime_processes": None})
     blog(name, "♻️ 已核实旧运行进程及其子进程退出，释放运行绑定，下次使用全新会话")
     return True
 
@@ -1461,6 +1470,10 @@ def _ensure_session_unlocked(bot):
         raise RuntimeError("待启动工作区的账号已变化，请通过 /new 切换会话")
     reusable, ws_present, why = (False, False, "") if pending_launch else _reuse_check(bot, rec)
     if reusable:
+        if agent_runtime.runtime_name(bot) == "claude" and not rec.get("runtime_processes"):
+            identities = wmux_session.runtime_processes(rec["pty"], "claude")
+            if identities:
+                _merge_session(bot["name"], {"runtime_processes": identities})
         if not rec.get("daemon_fp"):
             # 过渡补强：老记录(本修复前建·无指纹)首次确认存活复用时补盖当前 daemon 指纹。
             # 只在【已判定可复用=确认存活】时盖 → 绝不把死壳误盖成「当前 daemon」。盖上后,
@@ -1529,6 +1542,8 @@ def _ensure_session_unlocked(bot):
     _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl,
                                  "profile": agent_runtime.profile_name(bot, required=True),
                                  "agent": agent_runtime.runtime_name(bot),
+                                 "runtime_processes": (wmux_session.runtime_processes(pty, "claude")
+                                                       if agent_runtime.runtime_name(bot) == "claude" else None),
                                  "daemon_fp": wmux_session.daemon_fingerprint(),  # 钉死起这会话时的 daemon 实例·下次复用前比对(变了=daemon 重启过=会话已死)
                                  "cwd": cwd, "pending_launch": None})  # 未发 launcher 的等待状态到此才结束。
     return ws, pty, True, jsonl
