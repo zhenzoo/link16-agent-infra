@@ -7,7 +7,7 @@ purpose: 给出升级 wmux 桌面端与 daemon 的顺序、验收与回退，避
 owns:
   - 认准正确 wmux 项目（有同名项目）
   - 升级前必须确认的契约与方法
-  - 两条升级路径的取舍
+  - 官方应用内更新与残留后台排查
   - 五步验收与 10 分钟回退
 does_not_own:
   - wmux 怎么驱动面板（见 ARCH-010）
@@ -16,7 +16,7 @@ does_not_own:
 read_when:
   - 要升级 wmux
   - 升级后面板行为异常需要回退
-last_reviewed: 2026-08-26
+last_reviewed: 2026-10-31
 ---
 # SOP-010 · 升级 wmux（桌面端 + daemon）
 
@@ -68,25 +68,15 @@ ls ~/AppData/Local/wmux/packages/wmux-<旧版>-full.nupkg      # 本机 Squirrel
 gh release view v<旧版> -R openwong2kim/wmux                 # GitHub 上的 Setup.exe
 ```
 
-## 3 · 升级（两条路，任选）
+## 3 · 升级（官方应用内流程）
 
-**A · 应用内（最省事）**：wmux → Settings → Updates → **Restart to install**。
-后台自动更新平时就已经把包下好并校验过了（应用日志里 `[AutoUpdater] Update downloaded + verified (sha256 match) — ready to install`），这一步只是触发安装。**需要人点。**
+先保存会话恢复指针并暂停桥的新启动，再从 Wmux 更新提示点击 **Install now**（部分旧版本显示 Restart to install）。后台负责下载并校验，应用生成安装等待助手，助手等待旧 GUI 与后台实际退出后才运行官方安装器。自动化可以点击同一按钮；不要自行执行缓存 Setup.exe，不以 npm 重装或修改 app.asar 作为日常更新前提。
 
-**B · 命令行（可自动化，本文推荐给 agent 用）**：
+Windows 安装会要求后台退出；工作区布局可恢复，不代表原终端进程跨安装存活。维护前核活动任务及恢复指针，不能沿用“安装只关 GUI，daemon 一定保留”的旧结论。
 
-```bash
-# 先对实际 GitHub 目标双路探测，只给本次 gh 子进程注入所选线路
-python feishu/network_route.py run --url https://github.com/openwong2kim/wmux/releases -- \
-  gh release download v<新版> -R openwong2kim/wmux -p "update-manifest.json" -p "wmux-<新版>.Setup.exe" -D <scratch>
-# 必须校验：manifest 里的 sha256 == 实际文件的
-python -c "import hashlib,json,sys;m=json.load(open(r'<scratch>/update-manifest.json'));h=hashlib.sha256(open(r'<scratch>/'+m['setupExe'],'rb').read()).hexdigest();print('MATCH' if h==m['sha256'] else 'MISMATCH 拒绝安装')"
-python feishu/feishu_bridge.py stop        # 停桥（避免升级中途有消息进来起会话）
-<scratch>/wmux-<新版>.Setup.exe            # 安装器自己会关掉在跑的 wmux 窗口，装完重新拉起
-```
+若显示 “The last update did not install. Your current version is unchanged.”，同时核更新日志、生成的安装助手日志和残留进程。TB25 的 3.55.0 曾保存状态并打印 `process.exit(0)`，但 Windows 进程仍在，助手等待 60 秒后放弃，安装器尚未启动。日志打印退出意图不能代替 PID 已结束。已授权维护时只处理确认无工作的残留 Wmux 后台，再让原官方流程继续；不要盲杀 Node、Codex 或其他终端。4.13.0 本机实测正常退出约 1 秒，未来版本仍按 §4 验收，不承诺上游永不回归。
 
-- **终端会话在升级中存活**：安装器只终止 wmux 窗口，**daemon 是故意留着的**（上游 v3.28.0）。
-- 若 daemon 也被换代（上游 v3.17.0 的 daemon 自替换）：旧 daemon 先把每个会话**durably suspend**，新 daemon 起来后恢复面板。
+Link16 按官方能力适配：旧版有 `deck.mode` 时通过原生 setter 设置并回读；新版未提供该入口时返回 `supported=false`、保留现有权限并继续启动，不冒称开启 Autonomy，也不再要求安装本地接口补丁。接口存在却写入失败、设置窗口不唯一等真实错误仍保留工作区并等待恢复。此规则由主人 2026-10-31 明确替代 PLAN-1151 中“缺少接口也必须补丁开启”的历史要求；不改其他机器的安装文件。
 
 ## 4 · 验收（全绿才算完成 · 不许跳）
 

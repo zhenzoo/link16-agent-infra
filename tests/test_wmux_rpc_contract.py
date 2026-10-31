@@ -369,12 +369,55 @@ class WmuxAutonomySettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "缺少原生 deck.mode"):
                 wmux_session.enable_autonomy("ws-test")
 
+    def test_official_removed_api_reports_unsupported_without_granting_permission(self):
+        socket = mock.MagicMock()
+        socket.__enter__.return_value = socket
+        value = dict(supported=False, changed=False, mode=None, reason="official_api_removed")
+        socket.recv.return_value = json.dumps({"id": 1, "result": {"result": {"value": value}}})
+        with mock.patch.object(wmux_session, "_wmux_settings_targets", return_value=["ws://local"]), \
+                mock.patch("websockets.sync.client.connect", return_value=socket), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as warning:
+            self.assertEqual(wmux_session.enable_autonomy("ws-test"), value)
+        self.assertIn("未开启 Autonomy", warning.getvalue())
+        expression = json.loads(socket.send.call_args.args[0])["params"]["expression"]
+        # Execute the actual browser expression against absent, valid and broken
+        # official APIs: absence is distinct from a setter that refused a write.
+        script = """const expression = %s;
+const cases = [
+  {deck:{}},
+  {deck:{mode:{set:async()=>({ok:true}),get:async()=>({mode:'danger'})}}},
+  {deck:{mode:{get:async()=>({mode:'off'})}}},
+  {deck:{mode:{set:async()=>({ok:false}),get:async()=>({mode:'off'})}}}
+];
+(async()=>{let results=[];for(const api of cases){
+ global.window={electronAPI:api,dispatchEvent:()=>{}};
+ global.CustomEvent=class{};
+ results.push(await eval(expression));
+}console.log(JSON.stringify(results));})();""" % json.dumps(expression)
+        rows = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+        self.assertEqual(rows[0], value)
+        self.assertEqual(rows[1], {"ok": True, "mode": "danger"})
+        self.assertFalse(rows[2]["ok"])
+        self.assertFalse(rows[3]["ok"])
+
 
 class WmuxSessionCreateRecoveryTests(unittest.TestCase):
     def setUp(self):
         setting = mock.patch.object(wmux_session, "enable_autonomy", return_value={"ok": True, "mode": "danger"})
         self.autonomy = setting.start()
         self.addCleanup(setting.stop)
+
+    def test_official_without_legacy_mode_launches_once_and_returns_capability(self):
+        self.autonomy.return_value = dict(supported=False, changed=False, mode=None,
+                                          reason="official_api_removed")
+        with mock.patch.object(wmux_session, "_create_workspace", return_value={"id": "ws-new"}), \
+                mock.patch.object(wmux_session, "_wait_first_pty", return_value="pty-new"), \
+                mock.patch.object(wmux_session, "_wait_shell_ready", return_value=True), \
+                mock.patch.object(wmux_session, "send_command") as send:
+            result = wmux_session.spawn("bot-cxp", cmd="codex-worker", shell_init=None)
+        send.assert_called_once_with("pty-new", "ws-new", "codex-worker")
+        self.assertFalse(result["autonomy"]["supported"])
+        self.assertIsNone(result["autonomy"]["mode"])
 
     def test_uncertain_create_adopts_only_the_new_matching_workspace(self):
         rows = [{"id": "ws-old", "name": "bot-kp"}]

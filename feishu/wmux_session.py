@@ -401,10 +401,12 @@ def _wmux_settings_targets(opener):
 
 
 def enable_autonomy(workspace_id):
-    """Apply and read back the owner's policy through Wmux's native setter.
+    """Apply the legacy preference only when the official native API exists.
 
     The setter invalidates the live approval cache; writing its JSON does not.
-    Missing native APIs remain explicit failures, never an assumed permission.
+    Official v4 removed deck.mode. Report unsupported without granting or
+    claiming autonomy; do not make launching depend on a patched Wmux package.
+    Partial APIs, setter failures and ambiguous windows still fail closed.
     """
     import urllib.request
     from websockets.sync.client import connect
@@ -418,6 +420,9 @@ def enable_autonomy(workspace_id):
     expression = """(async () => {
       const id = %s;
       const api = window.electronAPI?.deck?.mode;
+      if (window.electronAPI?.deck && api === undefined)
+        return {supported: false, changed: false, mode: null,
+          reason: 'official_api_removed'};
       if (typeof api?.set !== 'function' || typeof api?.get !== 'function')
         return {ok: false, error: 'Wmux 缺少原生 deck.mode 设置接口；未更改 Autonomy'};
       const changed = await api.set(id, 'danger');
@@ -433,6 +438,10 @@ def enable_autonomy(workspace_id):
             if response.get("id") == 1:
                 break
     result = response.get("result", {}).get("result", {}).get("value", {})
+    if (result.get("supported") is False and result.get("changed") is False
+            and result.get("mode") is None and result.get("reason") == "official_api_removed"):
+        print("[wmux] 官方版未提供 deck.mode；保持现有权限并继续启动，未开启 Autonomy", file=sys.stderr)
+        return result
     if not result.get("ok"):
         raise RuntimeError(result.get("error") or "Wmux Autonomy 开启未取得设置回执")
     return result
@@ -475,7 +484,7 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash", *, resume=None):
     ws_id = ws["id"]
     pending = {"workspace_id": ws_id, "name": name, "command": cmd}
     try:
-        enable_autonomy(ws_id)
+        autonomy = enable_autonomy(ws_id)
     except Exception as exc:
         raise WmuxLaunchPending(pending, f"工作区已保留，正在等待 Autonomy 设置就绪：{exc}") from exc
     pty = _wait_first_pty(ws_id)
@@ -501,7 +510,7 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash", *, resume=None):
     if not _wait_shell_ready(pty):
         raise WmuxLaunchPending(pending, f"workspace {ws_id} shell 未就绪，保留原工作区继续等待")
     send_command(pty, ws_id, _short_launcher(cmd))  # ③ 长命令落脚本，终端只收短 launcher
-    return {"workspace_id": ws_id, "pty": pty, "name": name}
+    return {"workspace_id": ws_id, "pty": pty, "name": name, "autonomy": autonomy}
 
 
 def close(ws_id, *, force=False):

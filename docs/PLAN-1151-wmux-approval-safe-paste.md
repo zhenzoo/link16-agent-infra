@@ -21,7 +21,7 @@ last_reviewed: 2026-10-25
 
 ## §0 目标、输入与恢复点
 
-目标：按主人最新决定，当前工作区与 Link16 创建的新工作区统一开启 Autonomy；消息先持久化、按原文提交并取得目标会话回执，异常自动续接且不重复创建或提交。前驱为已归档 `PLAN-1150-wmux-paste-framing.md`。
+目标（历史已交付）：按 2026-10-25 决定开启受管工作区 Autonomy；消息持久化、原文提交及异常续接的成果继续保留。**2026-10-31 主人已改定跟随官方 Wmux：官方移除设置接口时不再强制开启或要求本地补丁，保留现有权限并继续启动。现行规则见 [SOP-010](SOP-010-wmux-upgrade.md) §3，实施见 [PLAN-1190](PLAN-1190-wmux-update-and-xhs-autostart.md)。** 下文 Stage 1–6 与原验收仅为历史。前驱为已归档 `PLAN-1150-wmux-paste-framing.md`。
 
 用户输入与已证事实：
 1. 起始故障证据：`tb26-baseball-3` 的 `om_x100b62faaea6d4a0c069e5f5cbcef69` 正文 4172 字、无 TAB，应直接内联；完整原文已在 per-bot inbox。当时状态为 `uncertain`，Kimi 尚未创建 session；后续取消及恢复以 Stage 4、§2 回执为准，不将该初始状态当作当前待办。
