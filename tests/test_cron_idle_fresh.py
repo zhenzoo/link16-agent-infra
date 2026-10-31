@@ -32,6 +32,7 @@ def scene(tmp_path, monkeypatch):
         kimi_process=SimpleNamespace(inventory=Mock(return_value=[]), descendants=lambda rows, seeds: seeds),
         session_work=SimpleNamespace(clear=Mock()),
         clear_codex_thread=Mock(side_effect=lambda name: events.append("clear-thread")),
+        _release_exited_session_unlocked=Mock(return_value=False),
     )
     def close(b):
         events.append("close")
