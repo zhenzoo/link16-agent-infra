@@ -26,6 +26,8 @@ import sys
 import urllib.parse
 from pathlib import Path
 
+import official_install
+
 # ── 鸡生蛋：本脚本要检查「输出编码是不是 UTF-8」，那它自己就绝不能因为编码而崩。
 #    所以第一件事是把自己的 stdout 顶成 UTF-8，并【先记下原始编码】留作后面那一项的判据。
 _ORIGINAL_STDOUT_ENCODING = (getattr(sys.stdout, "encoding", "") or "").strip()
@@ -326,6 +328,34 @@ def check_wmux_default_shell():
                   "wmux 探测不到，可忽略或把 Git 装到 C:\\Program Files\\Git")
 
 
+def check_wmux_update_settings():
+    """Inspect the official GUI's persisted preference, without changing it."""
+    fix = "Wmux Settings → Updates 开启自动更新；安装/残留排查见 docs/SOP-010-wmux-upgrade.md §3。"
+    try:
+        value = json.loads((Path(os.environ["APPDATA"]) / "wmux" / "session.json").read_text(encoding="utf-8"))
+        enabled = value.get("autoUpdateEnabled")
+    except (KeyError, OSError, ValueError, AttributeError):
+        return Result("wmux 官方更新", WARN, "无法确认 GUI 自动更新设置", fix)
+    if enabled is False:
+        return Result("wmux 官方更新", WARN, "自动更新已关闭；不会自动检查/下载", fix)
+    if enabled is not True:
+        return Result("wmux 官方更新", WARN, "未保存明确的自动更新设置，需在 GUI 核实", fix)
+    return Result("wmux 官方更新", OK, "自动更新已开启；Install now 使用官方安装流程，不依赖 npm 或旧 deck.mode")
+
+
+def check_codex_installation():
+    if os.name != "nt":
+        return Result("Codex 安装渠道", WARN, "本项只验证 Windows standalone 布局；其他平台按官方原生安装验收")
+    row = official_install.codex_windows_installation(_fresh_which("codex"))
+    if row["status"] == "missing":
+        return Result("Codex 安装渠道", OK, "未安装 Codex；是否需要由所选 profile 决定")
+    if row["status"] == "standalone":
+        return Result("Codex 安装渠道", OK, "官方 standalone：" + row["standalone"])
+    detail = {"npm": "仍解析到旧 npm 安装", "unknown": "安装来源无法确认，未发现官方 standalone",
+              "shadowed": "官方 standalone 已在，但 PATH/包装器尚未确认指向它"}[row["status"]]
+    return Result("Codex 安装渠道", FAIL, detail + "；当前入口=" + (row["resolved"] or "未找到"), row["fix"])
+
+
 def check_encoding():
     """中文 Windows 默认 GBK(cp936)，脚本一打中文/emoji 就 UnicodeEncodeError 整条命令崩。
 
@@ -535,9 +565,9 @@ def check_profile_login():
 
 CHECKS = (check_python, check_deps, check_node, check_github_cli, check_repository_main, check_git_bash,
           check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_identity,
-          check_wmux_default_shell,
+          check_wmux_default_shell, check_wmux_update_settings,
           check_encoding, check_env_file, check_proxy_config, check_local_roster, check_registry,
-          check_agent_cli, check_profile_login)
+          check_agent_cli, check_codex_installation, check_profile_login)
 
 
 def run_checks(checks=CHECKS):

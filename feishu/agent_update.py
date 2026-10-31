@@ -18,6 +18,7 @@ import tomlkit
 import agent_runtime
 import bridge_injection
 import network_route
+import official_install
 
 
 DISABLE_ENV = "LINK16_AGENT_UPDATE"
@@ -50,6 +51,14 @@ def _version(executable: str) -> str | None:
 
 def _executable(runtime: str) -> str:
     found = shutil.which(runtime) or agent_runtime._persistent_path_which(runtime)
+    if runtime == "codex":
+        if os.name == "nt":
+            installation = official_install.codex_windows_installation(found)
+            if Path(installation["standalone"]).is_file():
+                return installation["standalone"]
+            raise RuntimeError(official_install.CODEX_FIX)
+        if official_install.is_npm_entry(found):
+            raise RuntimeError("Codex npm 入口不执行自动更新；先迁移至官方原生安装。")
     if not found:
         raise FileNotFoundError(f"{runtime} executable not found")
     return found
@@ -74,9 +83,9 @@ def _centralize_codex_updates(profile) -> None:
 
 def _update_official(profile, state_dir: Path, timeout: float) -> dict:
     runtime = profile.runtime
+    executable = _executable(runtime)
     if runtime == "codex":
         _centralize_codex_updates(profile)
-    executable = _executable(runtime)
     digest = hashlib.sha256(os.path.normcase(executable).encode()).hexdigest()[:16]
     lock = state_dir / f"{runtime}-{digest}.lck"
     receipt_path = state_dir / f"{profile.name}.json"
@@ -134,7 +143,15 @@ def ensure(profile_name: str, *, state_dir=None, timeout=UPDATE_TIMEOUT_SEC) -> 
         return {"runtime": profile.runtime, "profile": profile.name, "status": "disabled"}
     destination = _state_dir(state_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    return _update_official(profile, destination, timeout)
+    try:
+        return _update_official(profile, destination, timeout)
+    except RuntimeError as exc:
+        if str(exc) != official_install.CODEX_FIX:
+            raise
+        record = {"runtime": profile.runtime, "profile": profile.name,
+                  "status": "migration_required", "fix": official_install.CODEX_FIX}
+        bridge_injection.atomic_write_json(destination / f"{profile.name}.json", record)
+        return record
 
 
 def main(argv=None) -> int:

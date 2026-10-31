@@ -15,7 +15,7 @@ does_not_own:
 read_when:
   - 以 Claude Code 身份在本仓开工
   - 用户要求开始部署 Link16
-last_reviewed: 2026-08-26
+last_reviewed: 2026-11-01
 ---
 
 # Link16 · Claude 部署工程师入口
@@ -39,7 +39,7 @@ last_reviewed: 2026-08-26
 
 先读 [`.agents/skills/link16-init/SKILL.md`](.agents/skills/link16-init/SKILL.md)（首次安装剧本：装依赖 →
 profile 登录 → 盘点已有记忆与活跃项目 → 勾选导入 → 按「机器代号-项目简称」建 2～3 只 bot → 验收），
-按它的顺序调用仓内工具；ROLE 与 SOP 仍是合同与 runbook，不在入口复制第二份安装教程。对只读检测、已确认范围内的
+按它的顺序调用仓内工具；ROLE 与 SOP 仍是合同与 runbook，不在入口复制第二份安装教程。Wmux/Codex 官方安装渠道、旧 npm 迁移及新版 Wmux 能力检查以 SOP-100 和 SOP-010 为准。对只读检测、已确认范围内的
 可恢复安装和机械验收自主执行；只在 ROLE 列出的人工停点暂停。需要跨 turn 等人的流程按 SOP 使用持久后台
 registrar + Monitor，不得把同步授权轮询放进一次短 tool timeout。装完的完成判据：用户私聊 bot 问「我在做什么
 项目、我有什么偏好」它答得出来。

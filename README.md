@@ -302,9 +302,9 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 
 | 能干什么 | 什么时候用 |
 |---|---|
-| `windows_bootstrap.py` | 新机器第一步，8 项 Windows 清单；三种 CLI 默认选中、可取消 |
+| `windows_bootstrap.py` | 新机器第一步，8 项 Windows 清单；三种 CLI 默认选中、可取消；Wmux/Codex 官方渠道，旧 npm 迁移见 SOP-100 |
 | `profile_bootstrap.py` | 建隔离 profile、shell 入口、装仓内 feishu / feishu-workline skills |
-| `preflight.py` | 装之前体检：Python / node / wmux / 编码 / 凭据 / 名册 |
+| `preflight.py` | 装之前体检：Python / node / wmux / 编码 / 凭据 / 名册；另查 Codex standalone/PATH 遮蔽与 Wmux 自动更新 |
 | `service_doctor.py` · `bridge_doctor.py` | 装之后验收：文件 / 配置 / 运行 / 真实收发四层 |
 
 ### ⑦ 注册与权限

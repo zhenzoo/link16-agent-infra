@@ -16,7 +16,7 @@ does_not_own:
 read_when:
   - 要升级 wmux
   - 升级后面板行为异常需要回退
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-01
 ---
 # SOP-010 · 升级 wmux（桌面端 + daemon）
 
@@ -58,6 +58,8 @@ last_reviewed: 2026-10-31
 「wmux 客户端身份」必须 [ OK ]。**升级后第一件事仍是验 §4 第 2 条。**
 
 ## 2 · 前置（做完再动手）
+
+首次安装以 SOP-100 为准；`preflight.py` 核官方更新开关，`windows_bootstrap.py` 给出对应收尾结果。仓内 `wmux/patches/wmux-4.10-autonomy-settings.patch` 仅留历史证据，现行首次安装与升级不再应用它。
 
 ```bash
 # ① 快照：谁在跑、谁有活会话（升完逐条对）
@@ -109,14 +111,11 @@ python feishu/feishu_bridge.py start                          # 全量
 python feishu/feishu_bridge.py status                         # 逐条对 pre-upgrade.txt
 ```
 
-## 5 · 回退（10 分钟内）
+## 5 · 回退
 
-```bash
-python feishu/feishu_bridge.py stop
-gh release download v<旧版> -R openwong2kim/wmux -p "wmux-<旧版>.Setup.exe" -D <scratch>
-<scratch>/wmux-<旧版>.Setup.exe     # 或直接用本机 packages/wmux-<旧版>-full.nupkg
-python feishu/feishu_bridge.py start
-```
+Link16 兼容修改可回到维护前提交；先确认旧代码是否仍要求已移除的 `deck.mode`，不要回退后又给官方应用打补丁。保留原 profile、线程指针与收件账本，只在已授权维护窗口重载受影响桥。
+
+Wmux 自身降级不属于日常更新流程。本仓不通过 npm、直接执行缓存 Setup.exe 或替换 app.asar 自动降级；官方更新失败时保留原版本和助手日志，先按 §3 定位卡点，再决定是否需要官方支持的恢复方式。不要把重新安装成功冒充原更新器已修复。
 
 ## 6 · 已知副作用（正常现象，别当故障）
 

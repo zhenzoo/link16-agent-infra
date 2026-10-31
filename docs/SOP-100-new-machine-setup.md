@@ -144,10 +144,28 @@ python feishu/windows_bootstrap.py --skip claude,codex --apply --yes
 脚本会同时读取当前进程与持久化用户/系统 PATH，避免桌面客户端开得太久，
 把刚装好的 Node/Claude 误报成“未安装”。执行每个缺失项前还会对该组件的真实官方来源 URL
 比较直连与已配置代理，沿用 `LINK16_ROUTE_DEFAULT` 预设，只有另一条明显更快时才切换；两路都失败就停。
-已有安装保持现有安装管理器，不在装机时偷偷迁移或重复覆盖；因此已有 WinGet/npm 版本的机器
-不能仅凭“使用默认安装”就宣称已迁移成官方原生版，应先报告实际路径和安装方式。
+已有安装先报告实际路径和渠道，不在装机时偷偷迁移或重复覆盖。Wmux 与 Codex 不通过 npm 安装或更新。
+bootstrap 和 preflight 会核 Codex standalone 与 PATH 遮蔽；旧 npm/未知入口不能因版本命令有输出就验收通过。
+Claude/Kimi 保持原有渠道规则。
 脚本还会持久化当前用户的 `PYTHONUTF8=1`；这是 Python 运行时设置，不会改 Windows 的系统区域或影响旧软件。
 由于已经启动的终端、wmux 和计划任务不会倒灌新环境，设置后必须重开终端；生产桥只在安排好的维护窗口重启。
+
+---
+
+### Codex 官方迁移与更新（已有机器同样适用）
+
+先运行 `python feishu/preflight.py --json`、`Get-Command codex -All` 和 Git Bash 的 `type -a codex`。已是官方 standalone 且入口正确则跳过安装；账号、模型、权限和会话不属于本步骤。
+
+仅有 npm、缺少 standalone 或来源不明时，在已授权安装范围内使用同一 OpenAI 官方安装器，不调用 npm install/update：
+
+```powershell
+python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 -- powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$env:CODEX_NON_INTERACTIVE="1"; $env:Path="$env:SystemRoot\System32;$env:Path"; irm https://chatgpt.com/codex/install.ps1 | iex'
+& "$env:LOCALAPPDATA/Programs/OpenAI/Codex/bin/codex.exe" --version
+```
+
+官方程序已在但 PATH 被遮蔽时无需重装。核清命中的旧入口与包装器实际目标，先备份再只修明确属于旧 Codex 的入口；未知自定义脚本保留并报告，不删除整个 npm 目录、不改其他 npm 工具。重新打开终端后体检「Codex 安装渠道」须为 OK。
+
+日常由 `agent_update.py ensure --profile <本机已登记profile>` 调用官方 `codex.exe update`。Windows 更新器直接选择 standalone 稳定入口，不调用 PATH 中的 npm shim；缺少 standalone 时回执为 `migration_required`，不写 profile 的更新设置、不运行旧 npm 更新器，原会话仍可继续。更新改变磁盘程序，已有会话不为此强制终止；新进程再验证版本。
 
 ---
 
@@ -481,7 +499,7 @@ jina read "https://example.com" | head -3
 
 ## 3 · wmux + handler（⚠️ 最易卡 · 见 §0 那段）
 
-1. **装 wmux 并打开它**（GUI）。`windows_bootstrap.py --apply --yes` 会创建桌面 `wmux.lnk`，目标指向不随版本号变化的稳定 `wmux.exe`；开始菜单入口仍保留。打开后 daemon 起来，home 下会有：`~/.wmux/`（含 `config.json`）、`~/.wmux-auth-token`、`~/.wmux-tcp-port`。
+1. **从 openwong2kim/wmux 官方发行版安装并打开 GUI**。新机 bootstrap 经 WinGet 的 `openwong2kim.wmux` 包调用官方安装器；包不可用时按同一项目官网/Release 的官方安装说明处理，不找同名 npm 包。已有安装的更新只走 GUI **Install now**，不自行启动缓存 Setup.exe。`windows_bootstrap.py --apply --yes` 创建桌面 `wmux.lnk`，目标为稳定 `wmux.exe`；打开后核后台及 `~/.wmux-tcp-port`。
 2. **`wmux-rpc.js` —— ✅ 现在仓库自带，不用手放**（2026-06-17 永久修复）。正本在 [`wmux/wmux-rpc.js`](../wmux/wmux-rpc.js)，桥/`wmux_session.py` 经 `bridge_env.resolve_wmux_rpc()` 自动引用它（`~/wmux-rpc.js` 存在则优先 → 否则用这份仓库副本）。
    - 它是基于 wmux 仓库 `examples/event-recorder/wmux-rpc.mjs` 改的 + 加了「workspace 守卫」（跨 workspace 写默认 DENY，只放行 `--allow-ws`；`pane.split` 盲劈拒绝，改用 `split-here`）。
    - 脚本用 `os.homedir()` / `os.userInfo().username` 动态取路径 → **机器无关**。
@@ -493,6 +511,8 @@ jina read "https://example.com" | head -3
    python feishu/wmux_session.py list    # 桥实际用的封装（走 resolve_wmux_rpc）· 应返回 workspace 列表
    ```
    两条都出 JSON = handler 通了。
+
+4. **核官方更新设置及真实工作区**：体检只读检查 `autoUpdateEnabled`；关闭或无法确认时到 Settings → Updates 核实，不趁应用运行手改 session.json。按 [SOP-010](SOP-010-wmux-upgrade.md) §4 验一次新建/执行/读屏/关闭。新版不提供 `deck.mode` 时 Link16 返回不支持并正常启动、保留权限；不要为了首次配置恢复旧接口或给官方 app.asar 打补丁。接口存在却调用失败仍须保留原工作区排查。更新停在安装前时按 SOP-010 §3 核旧后台是否真正退出，维护窗口外不结束业务进程。
 
 > **传输小知识**：`wmux-rpc.js` 连 daemon 的顺序 = 命名管道 `\\.\pipe\wmux-<user>` → **TCP fallback `127.0.0.1:<~/.wmux-tcp-port>`**。新版 wmux daemon 的管道名是 `wmux-daemon-<user>`（多了 `daemon-`），跟脚本算的 `wmux-<user>` 对不上 → **实际走的是 TCP fallback**。所以 `~/.wmux-tcp-port` 必须存在（wmux 一开就有）。
 

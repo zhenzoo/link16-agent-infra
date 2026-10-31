@@ -7,15 +7,16 @@ purpose: 让 Codex Personal 复用主人维护的 Claude workflow，同时保持
 owns:
   - 兼容适配器的生成与放置
   - Codex 侧复用 Claude workflow 的读取方式
-  - Codex 官方 Windows standalone 的安装/升级与旧 npm 安装兼容
+  - 个人兼容层与通用安装步骤的边界
 does_not_own:
+  - 通用 Codex 安装/更新与旧 npm 迁移（见 SOP-100）
   - Claude 侧的任何配置（不得修改）
   - Codex bot 的注册（见 SOP-121）
   - Link16 profile 注册（见本仓 profile_bootstrap.py）
 read_when:
   - 要让 Codex 复用 Claude 的 skill/workflow
   - 安装或升级 Codex CLI
-last_reviewed: 2026-10-27
+last_reviewed: 2026-11-01
 ---
 # SOP-160 · Claude Personal → Codex Personal compatibility
 
@@ -26,25 +27,9 @@ last_reviewed: 2026-10-27
 > **这是维护者主动选择的私人兼容层，不是 SOP-100/120/121 的部署基线。** Link16 核心 `feishu`
 > skill、profile registry、hooks 与 bridge 都能只靠本仓安装；没有本文中的私人源、govctl 或 adapters 也应完整工作。
 
-## 安装 / 升级 Codex（官方 standalone 优先）
+## 安装 / 升级 Codex（沿用通用部署入口）
 
-Windows 新装统一走 OpenAI 官方 standalone installer，不再默认依赖 Node/npm。System32 必须排在 Git Bash 的 GNU tar 前面；后者会把 `C:\...` 压缩包路径当成远程主机，导致下载完成后无法解包：
-
-```powershell
-python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 --prefer proxy -- powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$env:Path = "$env:SystemRoot\System32;$env:Path"; irm https://chatgpt.com/codex/install.ps1 | iex'
-codex --version
-```
-
-已有安装先看 `Get-Command codex | Select-Object -ExpandProperty Source`：
-
-- 命中 `...\Programs\OpenAI\Codex\...`：继续用上面的官方 standalone installer 更新。
-- 命中 npm 全局目录：不要再运行 npm 更新；先用上述官方安装器装好并验证，再卸载旧包，同时检查自定义 wrapper 与 PATH，避免继续命中旧入口。
-
-若 `PROXY_URL` 未设或端口不确定，先运行 `python feishu/network_route.py proxy-doctor`。
-每次都对真实官方 URL 选路，不写死某个网络或端口。
-
-**升级时机注意**：安装器会替换磁盘二进制，但**已经跑着的 Codex 进程仍用旧版**（进程持旧码）。
-飞书桥上的 Codex bot 要等各自会话重建才吃到新版；不必为升级专门重启整个桥。
+安装、旧 npm 迁移、PATH 检查和日常 `codex update` 统一遵循 [SOP-100「Codex 官方迁移与更新」](SOP-100-new-machine-setup.md#codex-官方迁移与更新已有机器同样适用)。通用安装不依赖本篇的私人兼容层；不通过 npm 安装/更新 Codex，不为更新删除认证或强制重建活动会话。
 
 ## Boundary
 

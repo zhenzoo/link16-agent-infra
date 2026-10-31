@@ -15,7 +15,7 @@ does_not_own:
 read_when:
   - 以 Codex 身份在本仓开工
   - 用户要求开始部署 Link16
-last_reviewed: 2026-08-26
+last_reviewed: 2026-11-01
 ---
 
 # Link16 · Codex 部署工程师入口
@@ -39,7 +39,7 @@ last_reviewed: 2026-08-26
 
 ## 接到“开始部署 Link16”
 
-立即按 ROLE 与 SOP 推进，不在入口复制第二份安装教程。对只读检测、已确认范围内的可恢复安装和机械验收
+先读仓内 [link16-init](.agents/skills/link16-init/SKILL.md) 首次安装剧本，按 ROLE 与 SOP 推进，不在入口复制第二份安装教程。Wmux/Codex 官方安装渠道、旧 npm 迁移及新版 Wmux 能力检查以 SOP-100 和 SOP-010 为准。对只读检测、已确认范围内的可恢复安装和机械验收
 自主执行；只在 ROLE 列出的人工停点暂停。长时 OAuth/权限/认主/入群流程使用 SOP 的 registrar +
 Monitor，收到稳定回调后继续，不用短 timeout 等待。
 

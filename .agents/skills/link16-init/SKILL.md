@@ -39,6 +39,8 @@ pip install -r feishu/requirements.txt
 ```
 装完 **让用户新开一个终端 / 重启 wmux**（旧窗口 PATH 是旧的）。从桌面快捷方式打开 wmux。
 
+首次安装和已有机器补配置都按 SOP-100 的官方渠道检查：Wmux/Codex 不走 npm；Codex 体检须确认 standalone 及实际 PATH/wrapper，旧 npm 或遮蔽不算合格，按 SOP-100 迁移并保留认证/会话。Wmux 已安装后的升级走 GUI Install now，退出卡点见 SOP-010；不手动运行缓存安装器。官方新版移除 `deck.mode` 时不要求本地补丁，按 SOP-010 验真实新建工作区，不冒称已开启 Autonomy。
+
 ### 2.2 机器代号 + 隔离 profile + 登录（SOP-100 §1）
 ```powershell
 python feishu/machine_identity.py             # 建议 tb26 / tuf19 这类前缀；推不出就用 hostname，不用问

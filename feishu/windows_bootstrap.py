@@ -207,10 +207,14 @@ def detect_component(key):
                 or _winget_package("Anthropic.ClaudeCode_*/claude.exe"))
     if key == "codex":
         found = preflight._fresh_which("codex")
+        # Keep legacy installations detectable, but do not certify them merely
+        # because a command exists. post-install reports their migration gate.
+        installed = preflight.official_install.codex_windows_installation(found)
+        if Path(installed["standalone"]).is_file():
+            return Path(installed["standalone"])
         if found:
             return Path(found)
-        local = os.environ.get("LOCALAPPDATA")
-        return _first_file([Path(local) / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe"] if local else [])
+        return None
     if key == "kimi":
         found = preflight._fresh_which("kimi")
         return Path(found) if found else _first_file([Path.home() / ".kimi-code" / "bin" / "kimi.exe"])
@@ -685,6 +689,10 @@ def main(argv=None):
     installs = apply_missing(initial_rows) if args.apply else []
     rows = installation_plan(skipped) if args.apply else initial_rows
     post = [configure_python_utf8(apply=args.apply), configure_user_path(apply=args.apply)]
+    if "codex" not in skipped:
+        channel = preflight.check_codex_installation()
+        post.append({"task": "codex-official-install", "status": "blocked" if channel.status == preflight.FAIL else "ok",
+                     "detail": channel.detail, "fix": channel.fix})
     if "wmux" not in skipped:
         post.extend([
             configure_windows_terminal_git_bash(apply=args.apply),
@@ -692,6 +700,9 @@ def main(argv=None):
             configure_wmux_git_bash(apply=args.apply),
             wmux_identity.ensure(apply=args.apply),
         ])
+        update = preflight.check_wmux_update_settings()
+        post.append({"task": "wmux-official-update", "status": "ok" if update.status == preflight.OK else "needs-gui",
+                     "detail": update.detail, "fix": update.fix})
     failures = deployment_failures(rows, installs, post) if args.apply else []
     raw_health = service_doctor.collect_raw()
     evaluated_health = service_doctor.evaluate(raw_health)
