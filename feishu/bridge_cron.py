@@ -374,6 +374,7 @@ def _fire_idle_fresh(fb, bot, job, marker):
     name = bot["name"]
     try:
         with fb.bridge_injection.injection_lock(fb.STATE_DIR, "ensure-session", name, timeout=1):
+            fb._release_exited_session_unlocked(bot)
             rec = _idle_reset_check(fb, bot)
             old_ws = rec.get("workspace_id")
             lock = (fb.bridge_injection.injection_lock(fb.STATE_DIR, "tui-inject", old_ws, timeout=1)
