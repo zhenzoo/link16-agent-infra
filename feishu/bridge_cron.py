@@ -31,6 +31,7 @@
   python bridge_cron.py session-policy --bot X --name N --policy idle-fresh  # 忙则跳过；空闲先关再新建
   python bridge_cron.py list [--bot X]              # 列 json（全部 / 某 bot）
   python bridge_cron.py fire <name> [--dry-run]     # 立刻手动触发一个 job（--dry-run 只打印 marker 不注入·测试用）
+  python bridge_cron.py recover <name> [--bot X] [--adopt-draft]  # 原生接收确认；旧版遗留草稿须显式接管
   python bridge_cron.py run                          # 前台跑守护循环（start 用它起后台）
   python bridge_cron.py start | stop | status        # 后台守护进程 起 / 停 / 看
   python bridge_cron.py check "0 9 * * *" [--n 5]    # 调试：打印该 cron 表达式未来 N 次触发（本地时区）
@@ -394,15 +395,61 @@ def _fire_idle_fresh(fb, bot, job, marker):
             ws, pty, created, _ = fb._ensure_session_unlocked(bot)
             if not created:
                 raise RuntimeError("未创建全新会话")
-            # Do not create a legacy pending retry: a failed/uncertain submit
-            # must not later bypass this gate through the doctor loop.
-            if fb._inject(pty, ws, marker, runtime_bot=bot) is False:
+            # Codex requires its native exact-prompt receipt, never just a clear screen.
+            if _deliver(fb, bot, job, pty, ws, marker) is False:
                 raise RuntimeError("新会话提示词未确认提交")
             log(f"fire[{job['name']}] → {name} pty={pty} created=True policy=idle-fresh OK")
             return True
     except Exception as exc:
         log(f"fire[{job['name']}] 跳过（idle-fresh）：{exc}")
         return False
+
+
+def _deliver(fb, bot, job, pty, ws, marker):
+    if fb.agent_runtime.runtime_name(bot) == 'codex':
+        import cron_delivery
+        return cron_delivery.submit(fb, bot, job, ws, pty, marker)
+    return fb._inject(pty, ws, marker, runtime_bot=bot)
+
+
+def recover_scheduled(job, *, adopt_draft=False):
+    """Public recovery entry: same receipt/submit gate as the scheduled fire."""
+    import feishu_bridge as fb
+    import cron_delivery
+    if not job.get('enabled', True):
+        raise RuntimeError('定时任务已关闭；不恢复')
+    bot = next((b for b in fb.load_bots() if b['name'] == job['bot']), None)
+    if not bot or fb.agent_runtime.runtime_name(bot) != 'codex':
+        raise RuntimeError('此接收回执恢复入口只处理本机 Codex 任务')
+    with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', bot['name']):
+        ok = cron_delivery.recover(fb, bot, job, adopt_draft=adopt_draft)
+        row = cron_delivery.Inbox(fb.STATE_DIR, bot['name']).scheduled_latest(job['name'])
+        log(f"recover[{job['name']}] → {bot['name']} 原生接收已确认 session={row['session']} attempts={row['attempts']}")
+        return ok
+
+
+def _recover_pending(jobs):
+    """Continue persisted Codex handoffs after the scheduled minute or restart."""
+    import feishu_bridge as fb
+    import cron_delivery
+    bots = {b['name']: b for b in fb.load_bots()}
+    for job in jobs:
+        bot = bots.get(job.get('bot'))
+        if not job.get('enabled', True) or not bot or fb.agent_runtime.runtime_name(bot) != 'codex':
+            continue
+        inbox = cron_delivery.Inbox(fb.STATE_DIR, bot['name'])
+        for row in inbox.scheduled_pending():
+            payload = json.loads(row['payload'])
+            if payload.get('scheduled', {}).get('job') != job['name']:
+                continue
+            try:
+                with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', bot['name'], timeout=1):
+                    cron_delivery.confirm(fb, bot, job, row, timeout=0)
+                log(f"recover[{job['name']}] → {bot['name']} 原生接收已确认 session={row['session']}")
+            except Exception as exc:
+                if row.get('error') != str(exc)[:300]:
+                    log(f"recover[{job['name']}] 未确认：{exc}")
+                    inbox.scheduled_error(row['id'], exc)
 
 
 def fire(job, dry_run=False):
@@ -432,6 +479,15 @@ def fire(job, dry_run=False):
     if not bot:
         log(f"fire[{name}] 目标 bot '{bot_name}' 不在名册")
         return False
+    if fb.agent_runtime.runtime_name(bot) == 'codex':
+        import cron_delivery
+        row = cron_delivery.Inbox(fb.STATE_DIR, bot_name).scheduled_latest(name)
+        if row and row['state'] in {'awaiting_confirmation', 'uncertain'}:
+            try:
+                return recover_scheduled(job)
+            except Exception as exc:
+                log(f"fire[{name}] 原投递尚未确认：{exc}")
+                return False
     if policy == "idle-fresh":
         return _fire_idle_fresh(fb, bot, job, marker)
     try:
@@ -443,7 +499,8 @@ def fire(job, dry_run=False):
     try:
         obx = fb.bridge_outbox.outbox_path(str(fb.STATE_DIR), bot_name)
         sz0 = os.path.getsize(obx) if os.path.exists(obx) else 0
-        fb.bridge_outbox.pending_write(str(fb.STATE_DIR), bot_name, text=marker, size0=sz0)
+        if fb.agent_runtime.runtime_name(bot) != 'codex':
+            fb.bridge_outbox.pending_write(str(fb.STATE_DIR), bot_name, text=marker, size0=sz0)
     except Exception:                                  # noqa: BLE001 — 记账失败不致命
         pass
     try:
@@ -451,7 +508,7 @@ def fire(job, dry_run=False):
     except Exception:                                  # noqa: BLE001
         busy = None
     try:
-        if fb._inject(pty, ws, marker, runtime_bot=bot) is False:
+        if _deliver(fb, bot, job, pty, ws, marker) is False:
             log(f"fire[{name}] 注入未确认提交：prompt 仍卡在输入框")
             return False
     except Exception as e:                             # noqa: BLE001
@@ -463,13 +520,14 @@ def fire(job, dry_run=False):
 
 # ---------- 守护循环 ----------
 def cmd_run():
-    log(f"cron 守护进程启动 · tick={TICK_SEC}s · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
+    log(f"cron 守护进程启动 · tick={TICK_SEC}s · Codex投递=原生回执确认 · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
     if blind := yaml_blind_warning():
         log(blind)
     lastfire = _load_lastfire()
     while True:
         try:
             roster = _roster_bots()                    # 每 tick 重取·只跑【本机 bot】的任务（多机不撞·不写死 host）
+            _recover_pending(load_jobs())
             for job in load_jobs():                    # 每 tick 热读 → 加 / 改 / 停 job 无需重启
                 if not job.get("enabled", True):
                     continue
@@ -1015,6 +1073,14 @@ def main():
             cmd_rm(bot, name)
         else:
             cmd_set_enabled(bot, name, cmd == "enable")
+    elif cmd == "recover":
+        name = argv[1] if len(argv) > 1 else None
+        job = next((j for j in load_jobs() if j.get('name') == name
+                    and (not _opt('--bot') or j.get('bot') == _opt('--bot'))), None)
+        if not job:
+            raise SystemExit('用法：recover <job-name> [--bot X] [--adopt-draft]')
+        ok = recover_scheduled(job, adopt_draft='--adopt-draft' in argv)
+        print('RESULT', json.dumps({'job': name, 'confirmed': ok}, ensure_ascii=False))
     elif cmd == "fire":
         if len(argv) < 2:
             print("用法：fire <job-name> [--dry-run]", file=sys.stderr)

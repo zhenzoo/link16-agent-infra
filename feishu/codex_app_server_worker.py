@@ -191,6 +191,18 @@ class ObserverSlotTaken(RuntimeError):
     """这只 bot 已经有速记员在岗 —— 第二个必须当场退场，不能并肩上工。"""
 
 
+def record_turn_receipt(state_dir, bot, request, turn_id):
+    """A successful official turn/start response confirms this exact input."""
+    if not turn_id:
+        return
+    import bridge_inbox
+    params = request.get("params") or {}
+    prompt = "\n".join(part.get("text", "") for part in params.get("input", [])
+                       if isinstance(part, dict) and part.get("type") == "text")
+    bridge_inbox.confirm_prompt(state_dir, bot, prompt, params.get("threadId"),
+                                {"source": "turn/start", "turn_id": turn_id})
+
+
 def acquire_observer_slot(state_dir, bot):
     """占住「速记员席位」：同一只 bot，同一时刻只允许一个进程在抄。
 
@@ -736,9 +748,13 @@ def run(args) -> int:
                 observer = _wait_observer(state_dir, args.bot, startup_id, observer_box, thread_id=thread["id"])
                 progress.record["observer_pid"] = observer["observer_pid"]
 
+            def turn_result(request, turn_id):
+                turn_effort.result(request, turn_id)
+                record_turn_receipt(state_dir, args.bot, request, turn_id)
+
             gateway = codex_startup.TuiGateway(url, session_received, on_request=lambda method: progress.update(
                 "tui_session_requested", "官方终端正在" + ("创建新会话" if method == "thread/start" else "恢复已有会话")),
-                turn_modifier=turn_effort.apply, on_turn_result=turn_effort.result)
+                turn_modifier=turn_effort.apply, on_turn_result=turn_result)
             tui_url = gateway.start()
             progress.update("observer_connecting", "正在接入飞书回传观察连接")
             # 速记员搬进自己的进程（不再是本进程里的线程）：这样「重启回程」不必掐掉主人的会话。
