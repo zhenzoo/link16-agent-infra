@@ -44,6 +44,8 @@ class Inbox:
                 db.execute('ALTER TABLE messages ADD COLUMN retry_at REAL NOT NULL DEFAULT 0')
             if 'received_digest' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
                 db.execute('ALTER TABLE messages ADD COLUMN received_digest TEXT')
+            if 'receipt' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+                db.execute('ALTER TABLE messages ADD COLUMN receipt TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS resources (
                 message_id TEXT, resource_hash TEXT, path TEXT,
                 PRIMARY KEY(message_id, resource_hash))''')
@@ -150,14 +152,57 @@ class Inbox:
                 AND state IN ('queued','awaiting_confirmation','uncertain','failed')""", (time.time(), mid))
             db.execute("DELETE FROM meta WHERE key='last_prompt'")
 
-    def confirm(self, prompt, session=None):
+    def track_scheduled(self, mid, prompt, session, context):
+        """Reserve an external cron handoff, never enqueue it as a Feishu message.
+
+        The native hook uses the same exact-body/session confirmation as a DM.
+        The cron driver owns retries; the ordinary consumer must not paste it.
+        """
+        now = time.time()
+        with self.connect() as db:
+            db.execute("""INSERT OR IGNORE INTO messages
+                (id,payload,state,received,updated,digest,session)
+                VALUES (?,?,'awaiting_confirmation',?,?,?,?)""",
+                (mid, json.dumps({'scheduled': context, 'prompt': prompt}, ensure_ascii=False),
+                 now, now, prompt_digest(prompt), session))
+            row = dict(db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone())
+            if row['digest'] != prompt_digest(prompt) or row['session'] != session:
+                raise ValueError('定时投递记录与目标会话或正文不一致')
+            return row
+
+    def scheduled_pending(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT * FROM messages
+                WHERE id LIKE 'cron:%' AND payload IS NOT NULL
+                AND state IN ('awaiting_confirmation','uncertain') ORDER BY seq""")]
+
+    def scheduled_latest(self, job):
+        with self.connect() as db:
+            return next((dict(row) for row in db.execute(
+                "SELECT * FROM messages WHERE id LIKE 'cron:%' ORDER BY seq DESC")
+                if row['id'].startswith(f'cron:{job}:')), None)
+
+    def scheduled_attempt(self, mid):
+        with self.connect() as db:
+            cur = db.execute("""UPDATE messages SET attempts=attempts+1,updated=?
+                WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""", (time.time(), mid))
+            return cur.rowcount == 1
+
+    def scheduled_error(self, mid, error):
+        with self.connect() as db:
+            db.execute("""UPDATE messages SET state='uncertain',error=?,updated=?
+                WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""",
+                (str(error)[:300], time.time(), mid))
+
+    def confirm(self, prompt, session=None, receipt=None):
         observed = prompt_digest(prompt)
+        proof = json.dumps(receipt or {'source': 'UserPromptSubmit'}, ensure_ascii=False)
         with self.connect() as db:
             cur = db.execute("""UPDATE messages SET state='done',payload=NULL,session=?,
-                received_digest=?,updated=? WHERE digest=?
+                received_digest=?,receipt=?,updated=? WHERE digest=?
                 AND (session IS NULL OR session=?)
                 AND state IN ('submitting','awaiting_confirmation','uncertain')""",
-                (session, observed, time.time(), observed, session))
+                (session, observed, proof, time.time(), observed, session))
             if cur.rowcount:
                 return cur.rowcount
             # A trusted native hook can prove receipt even when the user edits
@@ -230,13 +275,13 @@ class Inbox:
                 FROM messages WHERE state IN ('submitting','awaiting_confirmation','uncertain')
                 AND digest IS NOT NULL ORDER BY seq DESC""")]
 
-def confirm_prompt(state_dir, bot, prompt, session=None):
+def confirm_prompt(state_dir, bot, prompt, session=None, receipt=None):
     # Ordinary terminal submissions must not create empty per-bot databases.
     key = hashlib.sha256(str(bot).encode()).hexdigest()[:24]
     path = Path(state_dir) / f"bridge-inbox-{key}.sqlite3"
     if not path.exists():
         return 0
-    return Inbox(state_dir, bot).confirm(prompt, session)
+    return Inbox(state_dir, bot).confirm(prompt, session, receipt)
 
 
 async def consume(inbox, handler, wake, stopping, report):

@@ -53,6 +53,9 @@ def scene(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "feishu_bridge", fb)
     monkeypatch.setattr(cron, "_watchdog_waiting_for_short_limit", lambda name: False)
     monkeypatch.setattr(cron, "log", lambda message: None)
+    # Lifecycle tests isolate delivery, which has its own native-receipt tests.
+    monkeypatch.setattr(cron, "_deliver", lambda fb, bot, job, pty, ws, marker:
+                        fb._inject(pty, ws, marker, runtime_bot=bot))
     return SimpleNamespace(fb=fb, bot=bot, job=job, path=path, windows=windows, events=events)
 
 

@@ -16,7 +16,7 @@ read_when:
   - 要给某个 bot 加/改/停定时任务
   - 定时任务没触发或触发到了错误的机器
   - 改动 bridge_cron.py
-last_reviewed: 2026-08-17
+last_reviewed: 2026-11-02
 ---
 # ARCH-150 · 给智能体排定时任务（CRON）—— 闹钟 vs 大脑 · 每 bot 专属 · 零硬编码
 
@@ -53,6 +53,27 @@ feishu/cron-jobs/
 ```
 `route=p2a` → 那个 bot 干完**回复恒回主人 DM**（不漏进群·不串台·ARCH-140 §3）。
 
+### 4.1 Codex：原生接收回执才算投递成功
+
+Codex 的输入框出现文字、Wmux 返回按键成功、读屏暂时为空，都不能证明任务被接受。
+`cron_delivery.py` 在粘贴前将任务、原文摘要和目标 thread 写入现有 `bridge_inbox`；
+成功只认同一 thread、同一完整原文的原生回执：已有 `UserPromptSubmit` hook，或
+TUI 网关收到官方 `turn/start` 成功响应及 turn ID。两者都更新同一记录，不另建发送队列。
+官方接口合同见 [Codex App Server](https://learn.chatgpt.com/docs/app-server)。
+
+没有回执时保持待确认。当前原生线程必须明确 idle，且 Wmux 读到输入框仍是完整原稿，才经
+受工作区保护的 `input.sendKey` 补 Enter；不重新粘贴、不清稿、不新建会话。首次投递与恢复共用
+终端互斥锁，已确认记录重复恢复零发送。确认窗口为 20 秒，登记的提交尝试最多 3 次，
+次数跨 cron 重启保留；超过上限明确记录未确认，不能当成功。首次底层投递仍沿用桥的有界按键处理。
+
+待确认记录由后续 tick 续查，不受“本分钟已触发”挡住。开关关闭、用户 `/stop` 取消、
+账号/会话变化、内容变化或原生状态未知时不补交。接口缺失、异常或历史为空不是未接收证明；
+本机 0.166.0 的历史分页接口实测不支持，因此本链不依赖历史查询，更不解析终端排版来确认成功。
+Claude/Kimi 仍走其原有提交分支，本次没有改它们的接收机制。
+
+`idle-fresh` 只在确认旧会话空闲并彻底关闭后创建新会话。新会话的提交未确认时，后续恢复在原会话
+核对回执和草稿，不再执行关闭/重建；执行记录见 [PLAN-1200](PLAN-1200-cron-native-receipt.md)。
+
 ## 5. 工具（CLI · 不用手改文件）
 
 ### 5.1 主人自己开关：`python feishu/cron.py`（复选菜单 · 不用喊 agent）
@@ -79,6 +100,8 @@ bridge_cron.py add --bot X --name N --cron "…" --prompt "自定义触发词"  
 bridge_cron.py rm | enable | disable --bot X --name N
 bridge_cron.py list [--bot X]                     # json
 bridge_cron.py fire <name> --dry-run              # 测：只打印 marker 不注入
+bridge_cron.py recover <name> --bot X             # 核原生回执，必要时补交同一草稿；已确认不重发
+bridge_cron.py recover <name> --bot X --adopt-draft # 显式接管旧版没有登记的完整遗留草稿
 bridge_cron.py start | stop | status              # 守护进程（随 feishu_bridge 整体 start/stop 起停·起停它不重启任何 bot 桥）
 bridge_cron.py check "0 9 * * *" [--n 5]          # 调试 cron 表达式未来 N 次
 ```
