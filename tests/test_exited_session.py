@@ -125,7 +125,8 @@ def test_regular_session_creation_releases_before_reuse(dead, monkeypatch):
 
 def test_nightly_unknown_old_activity_can_start_after_verified_process_exit(dead, monkeypatch):
     monkeypatch.setattr(bridge, "load_bots", lambda: [dead.bot])
-    monkeypatch.setattr(bridge.bridge_inbox, "Inbox", Mock(return_value=SimpleNamespace(counts=lambda: {})))
+    monkeypatch.setattr(bridge.bridge_inbox, "Inbox", Mock(return_value=SimpleNamespace(
+        counts=lambda: {}, scheduled_latest=lambda name: None)))
     monkeypatch.setattr(bridge.bridge_outbox, "picker_load", lambda *a: None)
     monkeypatch.setattr(bridge.bridge_outbox, "pending_clear", lambda *a: None)
     monkeypatch.setattr(bridge.session_work, "clear", lambda *a: None)
@@ -135,6 +136,9 @@ def test_nightly_unknown_old_activity_can_start_after_verified_process_exit(dead
     inject = Mock(return_value=True)
     monkeypatch.setattr(bridge, "_ensure_session_unlocked", create)
     monkeypatch.setattr(bridge, "_inject", inject)
+    # This case exercises releasing a dead session, not native delivery receipts.
+    monkeypatch.setattr(cron, "_deliver", lambda fb, bot, job, pty, ws, marker:
+                        fb._inject(pty, ws, marker, runtime_bot=bot))
     monkeypatch.setattr(cron, "_watchdog_waiting_for_short_limit", lambda *a: False)
     monkeypatch.setattr(cron, "log", lambda *a: None)
     assert cron.fire({"name": "nightly", "bot": dead.bot["name"], "prompt": "go", "session_policy": "idle-fresh"})
