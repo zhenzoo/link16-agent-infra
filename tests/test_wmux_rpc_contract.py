@@ -256,10 +256,29 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         self.assertEqual(got['code'], 0, got['stderr'])
         wire = ''.join(r['params']['text'] for r in got['requests'] if r['method'] == 'input.send')
         self.assertEqual(wire.count('\x1b[13;28;13;1;16;1_'), 2)
+        self.assertEqual(wire.count('\x1b[13;28;13;0;16;1_'), 2)
         self.assertIn('\x1b[0;0;55357;1;0;1_\x1b[0;0;56516;1;0;1_', wire)
         self.assertNotIn('\r', wire)
         self.assertNotIn('\n', wire)
         self.assertNotIn('📄', wire)
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows console protocol')
+    def test_windows_codex_one_guarded_write_cannot_leave_mid_chunk_policy_draft(self):
+        got = self.via_paste('a' * 150 + 'FAIL' + 'b' * 100, win32_input=True)
+        self.assertNotEqual(got['code'], 0)
+        sends = [r for r in got['requests'] if r['method'] == 'input.send']
+        self.assertEqual(len(sends), 1)
+        self.assertTrue(sends[0]['params']['text'].startswith('\x1b[200~'))
+        self.assertTrue(sends[0]['params']['text'].endswith('\x1b[201~'))
+        self.assertNotIn('a' * 100, got['finalScreen'])
+        self.assertIn('LINK16_HANDOFF {"state":"not_written"}', got['stderr'])
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows console protocol')
+    def test_windows_codex_lost_atomic_write_response_is_unknown_and_never_replayed(self):
+        got = self.via_paste('DROP-RESPONSE', win32_input=True)
+        self.assertNotEqual(got['code'], 0)
+        self.assertEqual(len([r for r in got['requests'] if r['method'] == 'input.send']), 1)
+        self.assertNotIn('not_written', got['stderr'])
 
     def test_concurrent_input_is_not_cleared(self):
         got = self.via_paste("new text", initial="old draft", replace=True, concurrent=True)

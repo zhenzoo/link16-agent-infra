@@ -71,6 +71,41 @@ def accepted(row):
                 in {'UserPromptSubmit', 'turn/start'})
 
 
+def confirm_inbound(fb, bot, row):
+    """One ordinary-message recovery tick; never paste, clear or answer a dialog.
+
+    Shares cron's native receipt, exact draft and live binding checks. A partial
+    paste or unreadable screen stays pending; Wmux's policy remains authoritative.
+    """
+    inbox = Inbox(fb.STATE_DIR, bot['name'])
+    current = inbox.get(row['id'])
+    if accepted(current):
+        return True
+    if not current or current['state'] not in {'submitting', 'awaiting_confirmation', 'uncertain'}:
+        return False
+    context = json.loads(current.get('handoff') or '{}')
+    marker = context.get('prompt')
+    if not marker or prompt_digest(marker) != current['digest']:
+        raise RuntimeError('待交完整原文缺失或摘要变化；不补交')
+    ws, pty = context['workspace_id'], context['pty']
+    if context['profile'] != fb.agent_runtime.profile_name(bot, required=True):
+        raise RuntimeError('待交账号已变化；不补交')
+    with injection_lock(fb.STATE_DIR, 'tui-inject', ws):
+        if accepted(inbox.get(row['id'])):
+            return True
+        _binding(fb, bot, ws, pty, current['session'])
+        if fb.bridge_activity.read_activity(fb.STATE_DIR, bot).get('state') != 'idle':
+            return False
+        if not draft_matches(fb.read_screen(pty, None), marker):
+            return False
+        # Recheck the receipt after reading the screen; never replay accepted input.
+        if accepted(inbox.get(row['id'])):
+            return True
+        if inbox.handoff_attempt(row['id'], limit=MAX_SUBMITS, delay=RETRY_DELAY_SEC):
+            fb.wmux('enter', pty, '--allow-ws', ws)
+    return accepted(inbox.get(row['id']))
+
+
 def _register(fb, bot, job, ws, pty, marker, stamp=None):
     thread = _binding(fb, bot, ws, pty)
     stamp = stamp or datetime.now(ZoneInfo(job.get('tz', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M')

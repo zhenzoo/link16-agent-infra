@@ -48,6 +48,8 @@ class Inbox:
                 db.execute('ALTER TABLE messages ADD COLUMN receipt TEXT')
             if 'retry_safe' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
                 db.execute('ALTER TABLE messages ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0')
+            if 'handoff' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+                db.execute('ALTER TABLE messages ADD COLUMN handoff TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS resources (
                 message_id TEXT, resource_hash TEXT, path TEXT,
                 PRIMARY KEY(message_id, resource_hash))''')
@@ -129,7 +131,7 @@ class Inbox:
                        (time.time(), row['id']))
             return dict(row)
 
-    def boundary(self, mid, *, prompt=None, session=None):
+    def boundary(self, mid, *, prompt=None, session=None, handoff=None):
         with self.connect() as db:
             cur = db.execute("""UPDATE messages SET state=?,digest=?,session=?,updated=?
                 WHERE id=? AND state='processing'""",
@@ -139,6 +141,48 @@ class Inbox:
                 raise RuntimeError(f"inbound handoff is not in preparation: {mid}")
             if prompt is not None:
                 db.execute("INSERT OR REPLACE INTO meta VALUES ('last_prompt',?)", (prompt,))
+            if handoff is not None:
+                context = dict(handoff, prompt=prompt, submits=0, notice=None)
+                previous = db.execute('SELECT handoff FROM messages WHERE id=?', (mid,)).fetchone()
+                if previous and previous[0]:
+                    saved = json.loads(previous[0])
+                    if all(saved.get(k) == context.get(k) for k in ('prompt', 'workspace_id', 'pty', 'profile')):
+                        context = saved
+                db.execute('UPDATE messages SET handoff=? WHERE id=?',
+                           (json.dumps(context, ensure_ascii=False), mid))
+
+    def inbound_handoffs(self):
+        """Owned ordinary handoffs survive restart, including delayed receipts."""
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT * FROM messages
+                WHERE handoff IS NOT NULL AND state IN
+                ('queued','submitting','awaiting_confirmation','uncertain','done','received_modified')
+                ORDER BY seq""")
+                if json.loads(row['handoff']).get('notice') not in ('done', 'received_modified')]
+
+    def handoff_notice(self, mid, notice):
+        with self.connect() as db:
+            row = db.execute('SELECT handoff FROM messages WHERE id=?', (mid,)).fetchone()
+            if row and row[0]:
+                context = json.loads(row[0]); context['notice'] = notice
+                db.execute('UPDATE messages SET handoff=? WHERE id=?',
+                           (json.dumps(context, ensure_ascii=False), mid))
+
+    def handoff_attempt(self, mid, *, limit, delay):
+        """Reserve a bounded Enter BEFORE writing; a restart cannot reset it."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
+            if not row or not row['handoff'] or row['state'] not in (
+                    'submitting', 'awaiting_confirmation', 'uncertain'):
+                return False
+            context = json.loads(row['handoff'])
+            if context['submits'] >= limit or time.time() < context.get('next_submit', 0):
+                return False
+            context.update(submits=context['submits'] + 1, next_submit=time.time() + delay)
+            db.execute('UPDATE messages SET handoff=? WHERE id=?',
+                       (json.dumps(context, ensure_ascii=False), mid))
+            return True
 
     def last_prompt(self):
         with self.connect() as db:
@@ -240,10 +284,10 @@ class Inbox:
             if fields.get('to') != self.bot or fields.get('route') not in {'p2a', 'p2a-ext', 'a2a'}:
                 return 0
             cur = db.execute("""UPDATE messages SET state='received_modified',session=?,
-                received_digest=?,updated=? WHERE id=? AND digest IS NOT NULL
+                received_digest=?,receipt=?,updated=? WHERE id=? AND digest IS NOT NULL
                 AND (session IS NULL OR session=?)
                 AND state IN ('submitting','awaiting_confirmation','uncertain')""",
-                (session, observed, time.time(), fields.get('mid'), session))
+                (session, observed, proof, time.time(), fields.get('mid'), session))
             return cur.rowcount
 
     def finish(self, mid):
