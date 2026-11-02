@@ -46,6 +46,8 @@ class Inbox:
                 db.execute('ALTER TABLE messages ADD COLUMN received_digest TEXT')
             if 'receipt' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
                 db.execute('ALTER TABLE messages ADD COLUMN receipt TEXT')
+            if 'retry_safe' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+                db.execute('ALTER TABLE messages ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0')
             db.execute('''CREATE TABLE IF NOT EXISTS resources (
                 message_id TEXT, resource_hash TEXT, path TEXT,
                 PRIMARY KEY(message_id, resource_hash))''')
@@ -184,8 +186,31 @@ class Inbox:
 
     def scheduled_attempt(self, mid):
         with self.connect() as db:
-            cur = db.execute("""UPDATE messages SET attempts=attempts+1,updated=?
+            # Consume non-submission proof BEFORE crossing the write boundary.
+            # A crash after this commit must be treated as unknown, not replayed.
+            cur = db.execute("""UPDATE messages SET attempts=attempts+1,retry_safe=0,updated=?
                 WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""", (time.time(), mid))
+            return cur.rowcount == 1
+
+    def scheduled_not_submitted(self, mid, error, *, limit, delay):
+        """Only the driver's typed zero-write proof permits a later new paste."""
+        if not isinstance(error, RetryableHandoffError):
+            raise TypeError('non-submission requires typed driver proof')
+        with self.connect() as db:
+            db.execute("""UPDATE messages SET
+                state=CASE WHEN attempts>=? THEN 'failed' ELSE 'uncertain' END,
+                retry_safe=1,retry_at=?,error=?,updated=?
+                WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""",
+                (limit, time.time() + delay, str(error)[:300], time.time(), mid))
+
+    def scheduled_cancel(self, mid, reason):
+        """Cancel one superseded cron handoff; never assert a native receipt."""
+        if not mid.startswith('cron:') or not reason:
+            raise ValueError('an exact cron ID and cancellation reason are required')
+        with self.connect() as db:
+            cur = db.execute("""UPDATE messages SET state='cancelled',error=?,updated=?
+                WHERE id=? AND state IN ('awaiting_confirmation','uncertain','failed')""",
+                (str(reason)[:300], time.time(), mid))
             return cur.rowcount == 1
 
     def scheduled_error(self, mid, error):

@@ -520,7 +520,7 @@ def fire(job, dry_run=False):
 
 # ---------- 守护循环 ----------
 def cmd_run():
-    log(f"cron 守护进程启动 · tick={TICK_SEC}s · Codex投递=原生回执确认 · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
+    log(f"cron 守护进程启动 · tick={TICK_SEC}s · Codex投递=原生回执确认 · 零写入=有证重投 · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
     if blind := yaml_blind_warning():
         log(blind)
     lastfire = _load_lastfire()
