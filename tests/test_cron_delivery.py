@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / 'feishu'))
 import bridge_cron as cron
 import bridge_injection
 import codex_startup
-from bridge_inbox import Inbox
+from bridge_inbox import Inbox, RetryableHandoffError
 from codex_app_server_worker import record_turn_receipt
 import cron_delivery as delivery
 
@@ -229,3 +229,104 @@ def test_repeated_initial_submit_recovers_without_pasting_twice(scene, monkeypat
     assert delivery.submit(scene.fb, scene.bot, scene.job, 'ws', 'pty', scene.marker)
     assert delivery.submit(scene.fb, scene.bot, scene.job, 'ws', 'pty', scene.marker)
     scene.fb._inject.assert_called_once()
+
+
+def not_written(scene, monkeypatch):
+    monkeypatch.setattr(delivery, '_register', lambda *a: scene.inbox.get(scene.row['id']))
+    monkeypatch.setattr(delivery, 'RETRY_DELAY_SEC', 0)
+    scene.fb._inject.side_effect = RetryableHandoffError('driver proved zero writes')
+    with pytest.raises(RetryableHandoffError):
+        delivery.submit(scene.fb, scene.bot, scene.job, 'ws', 'pty', scene.marker)
+    assert scene.inbox.get(scene.row['id'])['retry_safe'] == 1
+    scene.fb.read_screen.return_value = 'Welcome\n› \n\nstatus'
+
+
+def test_proven_zero_write_recovers_after_restart_via_protected_injection(scene, monkeypatch):
+    not_written(scene, monkeypatch)
+    # Diagnostic updates must not erase proof; a fresh Inbox must retain it.
+    scene.inbox.scheduled_error(scene.row['id'], 'waiting for idle')
+    def inject(*a, **kw):
+        row = Inbox(scene.fb.STATE_DIR, 'target').get(scene.row['id'])
+        assert row['retry_safe'] == 0  # committed before any possible write
+        scene.inbox.confirm(scene.marker, 'thread')
+    scene.fb._inject.side_effect = inject
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert delivery.recover(scene.fb, scene.bot, scene.job)
+    assert scene.fb._inject.call_count == 2
+    scene.fb.wmux.assert_not_called()
+
+
+@pytest.mark.parametrize('screen', ['', 'unreadable', '› someone else\n\nstatus'])
+def test_zero_write_proof_does_not_overwrite_or_bypass_unreadable_composer(scene, monkeypatch, screen):
+    not_written(scene, monkeypatch)
+    scene.fb.read_screen.return_value = screen
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 1
+    scene.fb.wmux.assert_not_called()
+
+
+def test_zero_write_retry_waits_and_has_durable_failure_limit(scene, monkeypatch):
+    not_written(scene, monkeypatch)
+    scene.inbox.scheduled_not_submitted(scene.row['id'], RetryableHandoffError('blocked'), limit=3, delay=60)
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 1
+    scene.inbox.scheduled_not_submitted(scene.row['id'], RetryableHandoffError('blocked'), limit=3, delay=0)
+    for _ in range(4):
+        with pytest.raises(RuntimeError):
+            delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    row = scene.inbox.get(scene.row['id'])
+    assert scene.fb._inject.call_count == row['attempts'] == delivery.MAX_SUBMITS
+    assert row['state'] == 'failed'
+    assert not delivery.accepted(row)
+    assert scene.inbox.scheduled_pending() == []
+    assert scene.inbox.claim() is None
+
+
+def test_unknown_retry_result_consumes_proof_and_never_repastes(scene, monkeypatch):
+    not_written(scene, monkeypatch)
+    scene.fb._inject.side_effect = RuntimeError('response lost after possible write')
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 2
+    assert scene.inbox.get(scene.row['id'])['retry_safe'] == 0
+
+
+def test_cancellation_during_read_prevents_zero_write_retry(scene, monkeypatch):
+    not_written(scene, monkeypatch)
+    def screen(*a):
+        scene.inbox.scheduled_cancel(scene.row['id'], 'business completed manually')
+        return '› \n\nstatus'
+    scene.fb.read_screen.side_effect = screen
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 1
+    row = scene.inbox.get(scene.row['id'])
+    assert row['state'] == 'cancelled'
+    assert not delivery.accepted(row)
+
+
+def test_late_receipt_prevents_zero_write_retry(scene, monkeypatch):
+    not_written(scene, monkeypatch)
+    def screen(*a):
+        scene.inbox.confirm(scene.marker, 'thread')
+        return '› \n\nstatus'
+    scene.fb.read_screen.side_effect = screen
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 1
+
+
+def test_cancelling_one_scheduled_record_keeps_other_tasks(scene):
+    other = scene.inbox.track_scheduled('cron:other:today', 'other', 'thread', {'job': 'other'})
+    assert scene.inbox.scheduled_cancel(scene.row['id'], 'public post verified')
+    assert scene.inbox.get(other['id'])['state'] == 'awaiting_confirmation'
+    assert not scene.inbox.scheduled_cancel(scene.row['id'], 'again')
+    assert not delivery.accepted(scene.inbox.get(scene.row['id']))
+
+
+def test_error_text_alone_is_not_non_submission_proof(scene):
+    with pytest.raises(TypeError):
+        scene.inbox.scheduled_not_submitted(scene.row['id'], RuntimeError('not_written'), limit=3, delay=0)
+    assert scene.inbox.get(scene.row['id'])['retry_safe'] == 0

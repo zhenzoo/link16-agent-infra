@@ -94,7 +94,8 @@ class InjectBusyGuardTest(unittest.TestCase):
         calls = []
         bot = {"name": "unit-bot", "agent": runtime}
         with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
-             mock.patch.object(fb, "read_screen", return_value=CLEAR), \
+             mock.patch.object(fb, "read_screen", return_value=(
+                 '› Ask Codex to do anything\n\nstatus' if runtime == 'codex' else CLEAR)), \
              mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": state}) as activity, \
              mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=True), \
              mock.patch("time.sleep"):
