@@ -602,6 +602,10 @@ def _record_startup_failure(bot, *, workspace_id, pty, cwd, stage, reason, scree
     try:
         STATE_DIR.mkdir(exist_ok=True)
         bridge_injection.atomic_write_json(_startup_failure_file(bot["name"]), rec)
+        # A later successful /new clears the current warning, not the evidence.
+        with (STATE_DIR / f"bridge-startup-failures-{bot['name']}.jsonl").open(
+                "a", encoding="utf-8") as history:
+            history.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 — 诊断留痕失败不得掀翻原启动错误
         pass
     return rec
@@ -1208,13 +1212,44 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
 
     if agent_runtime.uses_app_server(bot):
         record = _codex_startup_record(bot)
-        detail = record.get("detail") or "启动命令已提交，但 worker 未确认开始执行"
-        if record.get("stage") != "failed":
-            detail += "；未取得终端会话响应和同线程回传确认"
         try:
             screen = read_screen(pty, 100)
         except RuntimeError:
             screen = ""
+        # No current worker receipt + a verified idle shell permits one retry.
+        # An exact owned launcher draft needs Enter only; never paste it twice.
+        retried = False
+        if (not record and bot.get("_startup_id")
+                and _startup_retryable_shell(bot, pty, screen)
+                and wmux_session.shell_has_no_children(pty)):
+            launcher = STATE_DIR / f"agent-launch-{bot['name']}-{bot['_startup_id']}.sh"
+            command = f'bash "{launcher.as_posix()}"'
+            last = screen.rstrip().rsplit("\n", 1)[-1].strip()
+            if last == "$" or last == "$ " + command:
+                # Recheck the worker receipt immediately before touching input.
+                if not _codex_startup_record(bot):
+                    retried = True
+                    blog(bot["name"], "启动仍停在无子进程的 shell，自动恢复一次；原业务消息尚未提交")
+                    try:
+                        if last == "$ " + command:
+                            wmux("enter", pty, "--allow-ws", workspace_id)
+                        else:
+                            wmux_session.send_command(pty, workspace_id, command)
+                        if _wait_agent_ready(bot, pty, workspace_id, since=startup_started):
+                            _clear_startup_failure(bot["name"])
+                            return True
+                    except RuntimeError as exc:
+                        blog(bot["name"], f"启动恢复未完成：{exc}")
+                    record = _codex_startup_record(bot)
+                    try:
+                        screen = read_screen(pty, 100)
+                    except RuntimeError:
+                        pass
+        detail = record.get("detail") or "启动命令已提交，但 worker 未确认开始执行"
+        if retried:
+            detail += "；已按裸 shell 证据自动恢复一次，仍未就绪"
+        if record.get("stage") != "failed":
+            detail += "；未取得终端会话响应和同线程回传确认"
         _record_startup_failure(bot, workspace_id=workspace_id, pty=pty, cwd=cwd,
                                 stage=record.get("stage") or "worker-not-started", reason=detail, screen=screen)
         return False
@@ -1406,10 +1441,28 @@ def _release_exited_session_unlocked(bot):
 
 def _worker_cmd(bot, cwd=None):
     """起 worker 的命令。CLI/runtime 差异集中在 agent_runtime.py，桥只关心 outbox 合约。"""
-    command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd)
+    # The bridge completes the official update before starting its ready clock.
+    command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd, auto_update=False)
     if (agent_runtime.uses_app_server(bot) or agent_runtime.runtime_name(bot) == "kimi") and bot.get("_startup_id"):
         command += " --startup-id " + shlex.quote(bot["_startup_id"])
     return command
+
+
+def _prepare_worker_update(bot):
+    """Run the bounded updater before the separate native startup deadline.
+
+    Previously an updater allowed 60s (plus version probes) lived inside the
+    same 60s ready window, so the bridge could close a healthy pending launch.
+    The updater's program lock, fail-open policy and profile rules are unchanged.
+    """
+    try:
+        import agent_update
+        profile = agent_runtime.profile_name(bot, required=True)
+        result = agent_update.ensure(profile)
+        blog(bot["name"], f"启动前官方更新检查：{result.get('status', 'unknown')}；随后开始原生就绪检查")
+    except Exception as exc:
+        # Match the existing agent_update CLI: update failure never blocks use.
+        blog(bot["name"], f"官方更新检查失败（{type(exc).__name__}），继续使用当前版本启动")
 
 
 def _worker_launcher(bot, cwd):
@@ -1509,10 +1562,12 @@ def _ensure_session_unlocked(bot):
     # Permission bypass flags do not bypass either runtime's directory-trust gate.
     agent_runtime.ensure_launch_cwd_trust(bot, cwd)
     startup_bot = {**bot, "_startup_id": (pending_launch or {}).get("startup_id") or uuid.uuid4().hex}
-    startup_started = time.time()
+    if not pending_launch:
+        _prepare_worker_update(bot)
     # Codex already proved this shape: one script performs cd + worker launch,
     # and the terminal receives one short command from either default shell.
     command = (pending_launch or {}).get("command") or _worker_launcher(startup_bot, cwd)
+    startup_started = time.time()
     try:
         r = wmux_session.spawn(
             f"bot-{bot['name']}", cmd=command, cwd=None, shell_init=None,

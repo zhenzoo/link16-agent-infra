@@ -1100,7 +1100,7 @@ def standalone_worker_cmd(
     return command
 
 
-def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
+def worker_cmd(bot, project: Path, autopilot: Path, cwd=None, *, auto_update=True) -> str:
     """Return the agent launch command. The wmux spawn call owns the preceding cd."""
     spec = runtime_spec(bot)
     profile = resolve_profile(bot, required=spec.name != "custom")
@@ -1110,7 +1110,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None) -> str:
         # a Scheduled Task's reduced SHELL/PATH must not veto an otherwise valid
         # profile before wmux gets a chance to run and probe the real command.
         _require_profile_available(profile, check_execution_env=False)
-    update = auto_update_prefix(profile, project) if profile else ""
+    update = auto_update_prefix(profile, project) if profile and auto_update else ""
     name = bot["name"] if isinstance(bot, dict) else str(bot)
     cwd = (cwd or (bot.get("cwd") if isinstance(bot, dict) else None) or str(project))
     cwd = str(cwd).replace("\\", "/")

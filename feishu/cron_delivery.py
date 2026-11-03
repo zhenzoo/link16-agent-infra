@@ -108,7 +108,7 @@ def confirm_inbound(fb, bot, row):
 
 def _register(fb, bot, job, ws, pty, marker, stamp=None):
     thread = _binding(fb, bot, ws, pty)
-    stamp = stamp or datetime.now(ZoneInfo(job.get('tz', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M')
+    stamp = stamp or job.get('_scheduled_stamp') or datetime.now(ZoneInfo(job.get('tz', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M')
     mid = f"cron:{job['name']}:{stamp}"
     context = dict(job=job['name'], workspace_id=ws, pty=pty,
                    job_digest=prompt_digest(job['prompt']), stamp=stamp)
