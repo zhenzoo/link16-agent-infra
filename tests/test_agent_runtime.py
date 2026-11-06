@@ -223,10 +223,15 @@ class AgentProfileTests(unittest.TestCase):
                 bridge = agent_runtime.worker_cmd(
                     {"name": "update-test", "profile": profile}, ROOT, ROOT / "feishu" / "_state",
                 )
+                prepared = agent_runtime.worker_cmd(
+                    {"name": "update-test", "profile": profile}, ROOT, ROOT / "feishu" / "_state",
+                    auto_update=False,
+                )
             self.assertEqual(interactive.count("agent_update.py"), 1)
             self.assertIn(f'ensure --profile "{profile}"', interactive)
             self.assertNotIn("agent_update.py", probe)
             self.assertEqual(bridge.count("agent_update.py"), 1)
+            self.assertNotIn("agent_update.py", prepared)
 
     def test_cxp_saved_model_wins_when_default_home_is_a_project_config(self):
         with tempfile.TemporaryDirectory() as tmp:

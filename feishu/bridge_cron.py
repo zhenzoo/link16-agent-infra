@@ -46,6 +46,7 @@ import json
 import time
 import subprocess
 import bridge_process
+import cron_due
 from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -277,10 +278,12 @@ def _save_lastfire(d):
 
 
 # ---------- 触发（真正把任务注入目标 bot 的 Claude Code）----------
-def _marker(job):
+def _marker(job, *, stamp=None):
     name = job.get("name", "job")
     bot = job.get("bot", "?")
-    return f"{job.get('prompt', '').strip()} [飞书 from=cron:{name} to={bot} via=定时 · route=p2a]"
+    stamp = stamp or job.get('_scheduled_stamp')
+    occurrence = f" mid=cron:{name}:{stamp.replace(' ', 'T')}" if stamp else ''
+    return f"{job.get('prompt', '').strip()} [飞书 from=cron:{name} to={bot} via=定时 · route=p2a{occurrence}]"
 
 
 def _watchdog_waiting_for_short_limit(bot_name):
@@ -303,11 +306,16 @@ def _idle_reset_check(fb, bot):
     rec = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     if not isinstance(rec, dict):
         raise RuntimeError("会话绑定无法确认")
-    counts = fb.bridge_inbox.Inbox(fb.STATE_DIR, name).counts()
+    # Only a native current-thread identity can scope uncertain old handoffs.
+    # The live idle check below still has to pass before any close operation.
+    thread = None
+    if fb.agent_runtime.runtime_name(bot) == "codex":
+        thread = fb._codex_startup_record(bot).get("thread_id")
+    counts = fb.bridge_inbox.Inbox(fb.STATE_DIR, name).reset_blockers(thread)
     if any(counts.get(s, 0) for s in (
         "queued", "processing", "submitting", "awaiting_confirmation", "uncertain",
     )):
-        raise RuntimeError("有待处理或尚未确认的消息")
+        raise RuntimeError("当前会话有待处理或尚未确认的消息")
     if fb.bridge_outbox.picker_load(str(fb.STATE_DIR), name):
         raise RuntimeError("正在等待用户选择")
     workspaces = fb.wmux_session.workspaces()  # RPC failure must propagate.
@@ -369,12 +377,16 @@ def _wait_closed(fb, rec, processes, timeout=15):
 def _fire_idle_fresh(fb, bot, job, marker):
     """One lifecycle transaction: idle -> confirmed close -> fresh -> submit.
 
-    Opt-in per job. Busy/waiting/unknown are skips, never delayed retries. The
-    normal scheduler records this minute even when this function returns False.
+    Opt-in per job. The daemon persists due occurrences before entering here;
+    busy/waiting/unknown defer without consuming the startup budget.
     """
     name = bot["name"]
     try:
         with fb.bridge_injection.injection_lock(fb.STATE_DIR, "ensure-session", name, timeout=1):
+            if cron_due.resume(fb, bot, job):
+                cron_due.start(fb, bot, job)
+                ws, pty, created, _ = cron_due.ensure(fb, bot, job)
+                return _deliver(fb, bot, job, pty, ws, marker) is not False
             fb._release_exited_session_unlocked(bot)
             rec = _idle_reset_check(fb, bot)
             old_ws = rec.get("workspace_id")
@@ -385,6 +397,7 @@ def _fire_idle_fresh(fb, bot, job, marker):
                 # Recheck after waiting for locks/process observation, immediately before close.
                 if _idle_reset_check(fb, bot) != rec:
                     raise RuntimeError("会话绑定已变化")
+                cron_due.start(fb, bot, job)
                 fb._close_session_unlocked(bot)  # Same primitive as /close, including Kimi cleanup.
                 _wait_closed(fb, rec, processes)
                 fb.clear_session(name)
@@ -392,7 +405,7 @@ def _fire_idle_fresh(fb, bot, job, marker):
                 fb.bridge_outbox.pending_clear(str(fb.STATE_DIR), name)
                 fb.session_work.clear(name, fb.STATE_DIR)
                 log(f"fire[{job['name']}] {name} 旧会话关闭已确认")
-            ws, pty, created, _ = fb._ensure_session_unlocked(bot)
+            ws, pty, created, _ = cron_due.ensure(fb, bot, job)
             if not created:
                 raise RuntimeError("未创建全新会话")
             # Codex requires its native exact-prompt receipt, never just a clear screen.
@@ -401,6 +414,7 @@ def _fire_idle_fresh(fb, bot, job, marker):
             log(f"fire[{job['name']}] → {name} pty={pty} created=True policy=idle-fresh OK")
             return True
     except Exception as exc:
+        cron_due.error(fb, bot, job, exc)
         log(f"fire[{job['name']}] 跳过（idle-fresh）：{exc}")
         return False
 
@@ -409,6 +423,12 @@ def _deliver(fb, bot, job, pty, ws, marker):
     if fb.agent_runtime.runtime_name(bot) == 'codex':
         import cron_delivery
         return cron_delivery.submit(fb, bot, job, ws, pty, marker)
+    if job.get('_due_id'):
+        inbox = cron_due.Inbox(fb.STATE_DIR, bot['name'])
+        row = inbox.track_scheduled(job['_due_id'], marker, None,
+                                   dict(job=job['name'], workspace_id=ws, pty=pty))
+        if row['state'] != 'awaiting_confirmation' or not inbox.scheduled_attempt(row['id']):
+            raise RuntimeError('到点任务已取消或已提交')
     return fb._inject(pty, ws, marker, runtime_bot=bot)
 
 
@@ -439,6 +459,8 @@ def _recover_pending(jobs):
             continue
         inbox = cron_delivery.Inbox(fb.STATE_DIR, bot['name'])
         for row in inbox.scheduled_pending():
+            if row.get('schedule'):
+                continue  # Durable occurrences own their retry/alert budget.
             payload = json.loads(row['payload'])
             if payload.get('scheduled', {}).get('job') != job['name']:
                 continue
@@ -479,10 +501,14 @@ def fire(job, dry_run=False):
     if not bot:
         log(f"fire[{name}] 目标 bot '{bot_name}' 不在名册")
         return False
-    if fb.agent_runtime.runtime_name(bot) == 'codex':
-        import cron_delivery
-        row = cron_delivery.Inbox(fb.STATE_DIR, bot_name).scheduled_latest(name)
-        if row and row['state'] in {'awaiting_confirmation', 'uncertain'}:
+    import cron_delivery
+    pending = cron_delivery.Inbox(fb.STATE_DIR, bot_name).scheduled_pending()
+    row = next((r for r in pending if r['id'].startswith(f'cron:{name}:')), None)
+    if row:
+        if job.get('_due_id') or fb.agent_runtime.runtime_name(bot) != 'codex':
+            cron_due.error(fb, bot, job, '前一笔定时投递尚未确认；不创建重复任务')
+            return False
+        else:
             try:
                 return recover_scheduled(job)
             except Exception as exc:
@@ -491,15 +517,21 @@ def fire(job, dry_run=False):
     if policy == "idle-fresh":
         return _fire_idle_fresh(fb, bot, job, marker)
     try:
-        ws, pty, created, _ = fb.ensure_session(bot)   # 复用活会话 / 没有则唤起一个新的
+        if job.get('_due_id'):
+            with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', bot_name, timeout=1):
+                cron_due.start(fb, bot, job)
+                ws, pty, created, _ = cron_due.ensure(fb, bot, job)
+        else:
+            ws, pty, created, _ = fb.ensure_session(bot)
     except Exception as e:                             # noqa: BLE001
+        cron_due.error(fb, bot, job, e)
         log(f"fire[{name}] ensure_session 失败：{e!r}")
         return False
     # 复刻 on_message 的投递保证（撞 auto-compact 被吃 → 该 bot 自己的 doctor_loop 会重投·feishu_bridge.py:1509-1515）
     try:
         obx = fb.bridge_outbox.outbox_path(str(fb.STATE_DIR), bot_name)
         sz0 = os.path.getsize(obx) if os.path.exists(obx) else 0
-        if fb.agent_runtime.runtime_name(bot) != 'codex':
+        if fb.agent_runtime.runtime_name(bot) != 'codex' and not job.get('_due_id'):
             fb.bridge_outbox.pending_write(str(fb.STATE_DIR), bot_name, text=marker, size0=sz0)
     except Exception:                                  # noqa: BLE001 — 记账失败不致命
         pass
@@ -512,6 +544,7 @@ def fire(job, dry_run=False):
             log(f"fire[{name}] 注入未确认提交：prompt 仍卡在输入框")
             return False
     except Exception as e:                             # noqa: BLE001
+        cron_due.error(fb, bot, job, e)
         log(f"fire[{name}] 注入失败：{e!r}")
         return False
     log(f"fire[{name}] → {bot_name} pty={pty} created={created} agentStatus={busy} OK")
@@ -519,38 +552,43 @@ def fire(job, dry_run=False):
 
 
 # ---------- 守护循环 ----------
+def _tick(lastfire):
+    import feishu_bridge as fb
+    jobs = load_jobs()
+    bots = {b['name']: b for b in fb.load_bots()}
+    # Register ALL due work before slow startup/delivery of any single bot.
+    for job in jobs:
+        bot = bots.get(job.get('bot'))
+        if not bot or not job.get('enabled', True) or not job.get('name') or not job.get('cron'):
+            continue
+        try:
+            now = datetime.now(ZoneInfo(job.get('tz', DEFAULT_TZ)))
+            stamp = now.strftime('%Y-%m-%d %H:%M')
+            key = f"{bot['name']}:{job['name']}"
+            if not cron_match(job['cron'], now) or lastfire.get(key, lastfire.get(job['name'])) == stamp:
+                continue
+            cron_due.Inbox(fb.STATE_DIR, bot['name']).due_register(
+                job, stamp, fb.agent_runtime.profile_name(bot, required=True), _marker(job, stamp=stamp))
+            lastfire[key] = stamp  # Legacy file now means registered, never delivered.
+            _save_lastfire(lastfire)
+        except Exception as exc:
+            log(f"due[{job.get('name')}] 登记失败：{exc}")
+    _recover_pending(jobs)
+    for bot in bots.values():
+        try:
+            cron_due.process(fb, bot, jobs, fire, log)
+        except Exception as exc:
+            log(f"due[{bot['name']}] 恢复失败：{exc}")
+
+
 def cmd_run():
-    log(f"cron 守护进程启动 · tick={TICK_SEC}s · Codex投递=原生回执确认 · 零写入=有证重投 · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
+    log(f"cron 守护进程启动 · tick={TICK_SEC}s · 到点持久登记/延期恢复 · 启动上限3次 · 原生回执确认 · 目录={JOBS_DIR}（+legacy {JOBS_PATH.name}）")
     if blind := yaml_blind_warning():
         log(blind)
     lastfire = _load_lastfire()
     while True:
         try:
-            roster = _roster_bots()                    # 每 tick 重取·只跑【本机 bot】的任务（多机不撞·不写死 host）
-            _recover_pending(load_jobs())
-            for job in load_jobs():                    # 每 tick 热读 → 加 / 改 / 停 job 无需重启
-                if not job.get("enabled", True):
-                    continue
-                if roster and job.get("bot") not in roster:   # 非本机 bot 的任务 → 本机不触发
-                    continue
-                name = job.get("name")
-                expr = job.get("cron")
-                if not name or not expr:
-                    continue
-                tz = job.get("tz", DEFAULT_TZ)
-                jnow = datetime.now(ZoneInfo(tz))
-                stamp = jnow.strftime("%Y-%m-%d %H:%M")
-                if lastfire.get(name) == stamp:        # 同一分钟只触发一次（tick 快于分钟）
-                    continue
-                try:
-                    hit = cron_match(expr, jnow)
-                except ValueError as e:
-                    log(f"job[{name}] cron 表达式错误：{e}")
-                    continue
-                if hit:
-                    fire(job)
-                    lastfire[name] = stamp
-                    _save_lastfire(lastfire)
+            _tick(lastfire)
         except Exception as e:                         # noqa: BLE001 — 单轮异常绝不拖垮守护进程
             log(f"loop 异常：{e!r}")
         time.sleep(TICK_SEC)
@@ -571,6 +609,10 @@ def cmd_start():
 
 def cmd_stop():
     return bridge_process.stop_daemon(Path(__file__).resolve(), 'cron')
+
+
+def _last_registered(lastfire, job):
+    return lastfire.get(f"{job.get('bot')}:{job.get('name')}", lastfire.get(job.get('name'), '—'))
 
 
 def cmd_status():
@@ -595,7 +637,7 @@ def cmd_status():
         except Exception:                              # noqa: BLE001
             nxt = "(cron 表达式错误)"
         print(f"  [{state}] {nm:<24} cron={j.get('cron',''):<14} bot={j.get('bot',''):<14} "
-              f"下次≈{nxt}  上次={lastfire.get(nm, '—')}")
+              f"下次≈{nxt}  上次登记={_last_registered(lastfire, j)}")
 
 
 def cmd_board():
@@ -622,7 +664,7 @@ def cmd_board():
                 nxt = nf[0] if nf else "—"
             except Exception:                          # noqa: BLE001
                 nxt = "(cron 错)"
-            print(f"    [{st}] {j.get('name','?'):<26} {j.get('cron',''):<14} 下次≈{nxt}  上次={lastfire.get(j.get('name'), '—')}")
+            print(f"    [{st}] {j.get('name','?'):<26} {j.get('cron',''):<14} 下次≈{nxt}  上次登记={_last_registered(lastfire, j)}")
             if j.get("desc"):
                 print(f"           ↳ {j['desc']}")
     print("\n本机只【真触发】标 ●本机 的任务（roster 过滤·多机同读一份 cron-jobs/ 不撞车）。")
@@ -821,7 +863,7 @@ def _menu_load():
             on = bool(j.get("enabled", True))
             rows.append({"bot": p.stem, "name": j.get("name", "?"), "cron": j.get("cron", ""),
                          "desc": j.get("desc", "") or "", "next": nxt,
-                         "last": lastfire.get(j.get("name"), "—"),
+                         "last": _last_registered(lastfire, j),
                          "mine": (not roster) or p.stem in roster, "was": on, "on": on})
     return rows
 

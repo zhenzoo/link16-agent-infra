@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-10-29
+last_reviewed: 2026-11-04
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -597,7 +597,8 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 - `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=30` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
-- 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。app-server 分支不读屏判就绪、不重发启动命令，也不再等待模型预热。
+- 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。三平台的官方更新检查先经 `agent_update.ensure` 完成，随后才开始原生就绪计时；更新失败继续启动当前版本，更新的 60 秒上限和版本探针不会挤占原生启动窗口。app-server 分支只按协议确认就绪，不等待模型预热。
+- Codex 未取得本次 worker 回执时，若工作区仍是无 agent 标签的 shell、系统核对 shell 的进程创建时间且没有子进程、输入行是空 `$` 或本次完整 launcher，则自动恢复一次：空行重发 launcher，完整草稿只补 Enter。慢 worker、未知读屏、其他草稿或原生失败不重贴。恢复后仍须同一 startup_id 的原生 ready；失败当前提示可清除，但 `bridge-startup-failures-<bot>.jsonl` 保留现场历史。
 - **尚未提交 launcher 的超时**：保留工作区、pty、命令和 startup_id 到原会话记录的 `pending_launch`；持久队列在同一工作区续等，不报永久启动失败、不要求主人重发、不另建窗口。launcher 已提交后的响应不确定仍按原生启动回执判断，不能套用此安全重试分支。
 
 **2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。手动 `/handoff` 另以 `bridge-handoff-attempt-<bot>.json` 记录 pending/failed/complete：旧会话已经关掉但新会话没起成时，6 小时内再次发 `/handoff` 会复用原快照重试，不会要求已经不存在的旧会话再活一次；complete 后同一快照不可重放。

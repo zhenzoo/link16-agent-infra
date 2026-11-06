@@ -122,6 +122,7 @@ class InboundRecoveryBoundaryTests(unittest.TestCase):
                 patch.object(bridge.agent_runtime, "ensure_launch_cwd_trust"), \
                 patch.object(bridge, "_project_jsonls", return_value=[]), \
                 patch.object(bridge, "current_cwd", return_value=tmp), \
+                patch.object(bridge, "_prepare_worker_update") as update, \
                 patch.object(bridge, "_worker_launcher", return_value="start-worker"), \
                 patch.object(bridge, "_finish_worker_startup", return_value=True), \
                 patch.object(bridge, "_detect_new_jsonl", return_value=None), \
@@ -139,6 +140,7 @@ class InboundRecoveryBoundaryTests(unittest.TestCase):
             self.assertEqual(result[:2], ("ws-slow", "pty-slow"))
             self.assertEqual(spawn.call_args.kwargs["resume"], saved["pending_launch"])
             self.assertIsNone(bridge.load_session("unit")["pending_launch"])
+            update.assert_called_once_with(bot)
 
     def dispatch(self, row):
         # Run the actual nested dispatcher with a controlled channel/inbox. No

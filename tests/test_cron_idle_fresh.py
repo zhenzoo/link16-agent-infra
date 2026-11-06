@@ -24,7 +24,7 @@ def scene(tmp_path, monkeypatch):
     fb = SimpleNamespace(
         STATE_DIR=tmp_path, bridge_injection=bridge_injection,
         load_bots=lambda: [bot],
-        bridge_inbox=SimpleNamespace(Inbox=Mock(return_value=SimpleNamespace(counts=Mock(return_value={})))),
+        bridge_inbox=SimpleNamespace(Inbox=Mock(return_value=SimpleNamespace(reset_blockers=Mock(return_value={})))),
         bridge_outbox=SimpleNamespace(picker_load=Mock(return_value=None), pending_clear=Mock()),
         agent_runtime=SimpleNamespace(profile_name=lambda *a, **k: "test", runtime_name=lambda b: b["agent"]),
         bridge_activity=SimpleNamespace(read_activity=Mock(return_value={"state": "idle"})),
@@ -86,9 +86,18 @@ def test_becomes_busy_before_close_is_skipped(scene):
 
 @pytest.mark.parametrize("state", ["queued", "processing", "submitting", "awaiting_confirmation", "uncertain"])
 def test_pending_message_blocks_reset(scene, state):
-    scene.fb.bridge_inbox.Inbox.return_value.counts.return_value = {state: 1}
+    scene.fb.bridge_inbox.Inbox.return_value.reset_blockers.return_value = {state: 1}
     assert not cron.fire(scene.job)
     assert not scene.events
+
+
+@pytest.mark.parametrize("runtime", ["claude", "codex", "kimi"])
+def test_only_codex_native_thread_scopes_historical_handoffs(scene, runtime):
+    scene.bot["agent"] = runtime
+    scene.fb._codex_startup_record.return_value = {"worker_pid": 123, "thread_id": "current"}
+    assert cron.fire(scene.job)
+    expected = "current" if runtime == "codex" else None
+    scene.fb.bridge_inbox.Inbox.return_value.reset_blockers.assert_called_with(expected)
 
 
 def test_bad_binding_or_rpc_never_means_no_session(scene):
