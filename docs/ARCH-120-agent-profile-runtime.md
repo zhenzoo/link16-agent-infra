@@ -16,7 +16,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-10-24
+last_reviewed: 2026-11-06
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -291,9 +291,10 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 `kimi update --yes`，Link16 不另写下载器。Codex 自己的 `check_for_update_on_startup` 关闭，
 因为更新已由 Link16 集中执行，避免重复检查拖慢 TUI。
 更新按可执行文件跨进程互斥，记录 before/after 版本和脱敏回执；锁忙表示已有更新继续运行，
-当前 session 不等待；其他情况更新成功后启动新进程，失败或 60 秒超时则跳过并启动旧版。
-更新不是选号输入，只有 Codex 的重复检查设置写入所选 profile。`LINK16_AGENT_UPDATE=0`
-是故障时的紧急绕过；已经运行的 CLI 不被更新流程重启或中断。
+当前 session 不等待。updater 的 stdout/stderr 在 5 秒内产生实际输出即视为已响应：显示正在更新，
+不再限制更新总时长，待官方命令退出后回读版本；5 秒完全无响应则结束本次尝试并启动当前已装版本。
+更新失败同样不阻止启动。更新不是选号输入，只有 Codex 的重复检查设置写入所选 profile。
+`LINK16_AGENT_UPDATE=0` 是故障时的紧急绕过；已经运行的 CLI 不被更新流程重启或中断。
 
 ## 6. Fail closed
 
