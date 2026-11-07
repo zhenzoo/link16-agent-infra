@@ -17,6 +17,7 @@ import time
 
 
 DB_TIMEOUT_SEC = 30.0
+DB_LOCK_RETRY_SEC = 0.05
 DB_LOCK_LOG_AFTER_SEC = 1.0
 CONSUMER_LOCK_RETRY_SEC = 0.5
 
@@ -66,7 +67,15 @@ class Inbox:
         return {'retry_at', 'received_digest', 'receipt', 'retry_safe', 'handoff', 'schedule'} <= columns
 
     def _migrate(self, db):
-        db.execute('PRAGMA journal_mode=WAL')
+        deadline = time.monotonic() + DB_TIMEOUT_SEC
+        while True:
+            try:
+                db.execute('PRAGMA journal_mode=WAL')
+                break
+            except sqlite3.OperationalError as exc:
+                if not is_lock_error(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(DB_LOCK_RETRY_SEC)
         db.execute('BEGIN IMMEDIATE')
         db.execute("""CREATE TABLE IF NOT EXISTS messages (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
