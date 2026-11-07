@@ -52,6 +52,38 @@ def draft_matches(screen, prompt):
     return bool(draft) and compact(draft) == compact(prompt)
 
 
+def is_compacting(screen):
+    """Recognize only Codex's live footer, never a word in history or a draft."""
+    lines = screen.splitlines()
+    composers = [i for i, line in enumerate(lines) if re.match(r'^›(?:\s|$)', line)]
+    if composers:
+        lines = lines[:composers[-1]]
+    queues = [i for i, line in enumerate(lines) if line.startswith(
+        '• Messages to be submitted after next tool call (press esc to interrupt')]
+    if queues:
+        # Queued text is indented by the TUI. Later output means this is history.
+        tail = lines[queues[-1] + 1:]
+        if all(not line.strip() or line.startswith(('  ↳', '    ')) for line in tail):
+            lines = lines[:queues[-1]]
+    lines = [line.rstrip() for line in lines if line.strip()]
+    return bool(len(lines) >= 2
+                and re.fullmatch(r'• Compacting context \((?:\d+[hms] ?)+ [•·] esc to interrupt\)', lines[-2])
+                and lines[-1].strip() == '└ Making room to continue.')
+
+
+def inbound_compacting(fb, bot, row):
+    """Read only the original, still-bound Codex pane for a waiting notice."""
+    context = json.loads(row.get('handoff') or '{}')
+    if (not row.get('session') or fb.agent_runtime.runtime_name(bot) != 'codex'
+            or context.get('profile') != fb.agent_runtime.profile_name(bot, required=True)):
+        return False
+    ws, pty = context['workspace_id'], context['pty']
+    _binding(fb, bot, ws, pty, row['session'])
+    screen = fb.read_screen(pty, None)
+    _binding(fb, bot, ws, pty, row['session'])
+    return is_compacting(screen)
+
+
 def _paste(fb, bot, inbox, row, pty, ws, marker):
     if inbox.scheduled_attempt(row['id']):
         try:
@@ -96,7 +128,8 @@ def confirm_inbound(fb, bot, row):
         _binding(fb, bot, ws, pty, current['session'])
         if fb.bridge_activity.read_activity(fb.STATE_DIR, bot).get('state') != 'idle':
             return False
-        if not draft_matches(fb.read_screen(pty, None), marker):
+        screen = fb.read_screen(pty, None)
+        if is_compacting(screen) or not draft_matches(screen, marker):
             return False
         # Recheck the receipt after reading the screen; never replay accepted input.
         if accepted(inbox.get(row['id'])):
@@ -146,7 +179,9 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
             activity = fb.bridge_activity.read_activity(fb.STATE_DIR, bot)
             if activity.get('state') == 'idle' and current['attempts'] < MAX_SUBMITS:
                 screen = fb.read_screen(pty, None)
-                if (current.get('retry_safe') and _draft(screen) == ''
+                if is_compacting(screen):
+                    reason = 'compacting context'
+                elif (current.get('retry_safe') and _draft(screen) == ''
                         and time.time() >= current.get('retry_at', 0)):
                     if accepted(inbox.get(row['id'])):
                         return True

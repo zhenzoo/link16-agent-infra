@@ -74,6 +74,21 @@ def test_busy_or_unknown_native_state_never_retries(scene, state):
     scene.fb.wmux.assert_not_called()
 
 
+@pytest.mark.parametrize('retry_safe', [False, True])
+def test_compacting_footer_blocks_enter_and_repasting_even_if_native_state_says_idle(scene, retry_safe):
+    if retry_safe:
+        scene.inbox.scheduled_not_submitted(scene.row['id'], RetryableHandoffError('not written'), limit=3, delay=0)
+    scene.fb.read_screen.return_value = (
+        '• Compacting context (1m 34s • esc to interrupt)\n'
+        '  └ Making room to continue.\n\n'
+        f'› {"" if retry_safe else scene.marker}\n\nstatus')
+    with pytest.raises(RuntimeError, match='compacting context'):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    scene.fb.wmux.assert_not_called()
+    scene.fb._inject.assert_not_called()
+    assert not delivery.accepted(scene.inbox.get(scene.row['id']))
+
+
 def test_lost_enter_retries_only_owned_draft_and_waits_for_receipt(scene):
     def enter(*args):
         if scene.fb.wmux.call_count == 2:

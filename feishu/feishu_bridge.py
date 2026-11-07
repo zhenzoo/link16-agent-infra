@@ -2233,14 +2233,28 @@ async def settle_inbound_handoffs(bot, inbox, channel):
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'received_modified')
         elif (row['state'] in {'queued', 'awaiting_confirmation', 'uncertain'}
-              and time.time() - row['received'] >= 30 and context.get('notice') != 'pending'):
+              and time.time() - row['received'] >= 30 and context.get('notice') != 'compacting'):
+            compacting = False
+            try:
+                compacting = await asyncio.to_thread(cron_delivery.inbound_compacting,
+                                                    sys.modules[__name__], bot, row)
+            except Exception as exc:
+                inbox.scheduled_error(row['id'], exc)
+            # A receipt can arrive while reading the pane; it always wins.
+            row = inbox.get(row['id'])
+            if cron_delivery.accepted(row):
+                if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
+                    inbox.handoff_notice(row['id'], 'done')
+                continue
+            if row['state'] not in {'queued', 'awaiting_confirmation', 'uncertain'}:
+                continue
+            if not compacting and context.get('notice') == 'pending':
+                continue
             result = await card_send(channel, context['chat_id'],
-                                    '⏳ 消息已保存，但尚未取得 Codex 的原文接收回执，因此还没有点赞。'
-                                    '若原会话空闲且完整原稿仍在，桥会有界补 Enter；审批拦截、残稿或无法读屏时保留现场，'
-                                    '不会清稿、重复粘贴或冒称成功。'
-                                    f"\n记录：{row['id']}\n阻塞：{row.get('error') or '原生回执尚未到达'}", bot['name'])
+                                    'compacting context' if compacting else
+                                    '⏳ 等待 Codex 处理这条消息。', bot['name'])
             if result != 'failed':
-                inbox.handoff_notice(row['id'], 'pending')
+                inbox.handoff_notice(row['id'], 'compacting' if compacting else 'pending')
 
 
 async def card_send(channel, target, text, name):
