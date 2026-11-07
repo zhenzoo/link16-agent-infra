@@ -540,6 +540,7 @@ def _read_bitable(url, token, bot, out_dir, manifest):
 
 def _read_whiteboard(url, token, bot, out_dir, manifest):
     """白板：导出原始节点结构（raw），节点数进覆盖账本。"""
+    manifest["resources"]["whiteboard"] = {"declared": None, "fetched": 0, "complete": False}
     target = out_dir / "whiteboard.json"
     result = run_lark(["whiteboard", "+export", "--whiteboard-token", token,
                        "--output-type", "raw", "--output", target.name, "--as", "bot"],
@@ -556,9 +557,43 @@ def _read_whiteboard(url, token, bot, out_dir, manifest):
         manifest["resources"]["whiteboard"] = {"declared": None, "fetched": 0}
         return
     nodes = data.get("nodes") if isinstance(data, dict) else data
-    count = len(nodes) if isinstance(nodes, list) else 0
+    if not isinstance(nodes, list) or any(not isinstance(node, dict) for node in nodes):
+        manifest["missing"].append({"kind": "whiteboard", "verdict": "白板导出缺少有效节点列表，不能当作空白板"})
+        return
+    count = len(nodes)
     manifest["inventory"] = {"complete": True, "source": "whiteboard.export", "nodes": count}
-    manifest["resources"]["whiteboard"] = {"declared": count, "fetched": count}
+    manifest["resources"]["whiteboard"] = {"declared": count, "fetched": count, "complete": True}
+
+
+def _read_docx_whiteboards(blocks, bot, out_dir, assets, manifest):
+    """Read embedded boards through the same identity and exporter as standalone boards."""
+    boards = [block for block in blocks if "board" in block]
+    if not boards:
+        return
+    records = []
+    for index, block in enumerate(boards, 1):
+        board = block.get("board") or {}
+        token = board.get("token") if isinstance(board, dict) else None
+        record = {"block_id": block.get("block_id"), "token": token, "complete": False}
+        records.append(record)
+        if not token:
+            manifest["missing"].append({"kind": "whiteboard", "block_id": block.get("block_id"),
+                                        "verdict": "原生白板块缺少token"})
+            continue
+        folder = assets / f"whiteboard-{index:04d}"
+        folder.mkdir(parents=True)
+        child = {"inventory": {"complete": False}, "resources": {}, "missing": []}
+        _read_whiteboard(manifest["url"], token, bot, folder, child)
+        fetched = child["resources"].get("whiteboard", {})
+        record.update(complete=fetched.get("complete") is True,
+                      nodes=fetched.get("fetched", 0))
+        if record["complete"]:
+            record["path"] = (folder / "whiteboard.json").relative_to(out_dir).as_posix()
+        manifest["missing"].extend({**item, "block_id": block.get("block_id"), "token": token}
+                                   for item in child["missing"])
+    manifest["resources"]["whiteboard"] = {
+        "declared": len(boards), "fetched": sum(record["complete"] for record in records),
+        "complete": all(record["complete"] for record in records), "boards": records}
 
 
 MANIFEST_SCHEMA = "link16-docio-manifest-v2"
@@ -701,7 +736,7 @@ def _docx_inventory(token, revision, bot, out_dir, manifest):
         # attachment handled by _download_files. Counting either as unfetched
         # made a fully-read document look incomplete (2026-09-07: 12 MP4 files
         # and their 12 view wrappers produced 24 phantom "missing" rows).
-        unhandled = kinds - _TEXT_BLOCKS - {"image", "file", "view"}
+        unhandled = kinds - _TEXT_BLOCKS - {"image", "file", "view", "board"}
         if not kinds or unhandled:
             manifest["missing"].append({"kind": ",".join(sorted(unhandled)) or "unknown-block",
                                         "block_id": block.get("block_id"),
@@ -807,6 +842,7 @@ def _read_docx(url, token, bot, out_dir, manifest):
                 "kind": "image", "token": img_token, "name": name, **classify_failure(failure, bot)})
     manifest["resources"]["images"] = {"declared": len(refs), "fetched": got, "assets": asset_records}
     _download_files(blocks, bot, out_dir, assets, manifest)
+    _read_docx_whiteboards(blocks, bot, out_dir, assets, manifest)
 
 
 def _read_sheet(url, token, bot, out_dir, manifest):
