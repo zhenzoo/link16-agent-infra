@@ -68,7 +68,27 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
                 self.env["clear_codex_thread"].assert_called_once_with("unit")
                 self.env["durable_inbox"].cancel_before.assert_called_once_with("mid")
                 self.assertIn("已关闭会话", self.env["reply"].call_args.args[1])
-                self.env["reply"].assert_awaited_once()
+                self.assertIn("正在关闭会话", self.env["reply"].call_args_list[0].args[1])
+                self.assertEqual(self.env["reply"].await_count, 2)
+
+    async def test_account_ack_precedes_profile_check_and_close(self):
+        handler = self.handler()
+        runtime = self.env["agent_runtime"]
+        runtime.account_aliases.return_value = ["cxp", "cxp2"]
+        runtime.current_account.return_value = "cxp"
+        runtime.profile_doctor.return_value = {"ok": True}
+        runtime.apply_account.return_value = "Codex"
+        runtime.account_snapshot.return_value = {}
+        self.env.update(current_cwd=mock.Mock(return_value="repo"),
+                        load_cd_pending=mock.Mock(return_value=None),
+                        clear_cd_pending=mock.Mock(), _merge_session=mock.Mock(),
+                        close_session_runtime=mock.Mock())
+        await handler("chat", "/account cxp2", arrived=time.time(), inbound_id="mid")
+        self.assertIn("已收到账号切换请求", self.env["reply"].call_args_list[0].args[1])
+        runtime.profile_doctor.assert_called_once_with("cxp2", check_execution_env=False)
+        self.env["close_session_runtime"].assert_called_once()
+        self.assertEqual(self.env["_merge_session"].call_args.args[1]["profile"], "cxp2")
+        self.assertIn("已选账号", self.env["reply"].call_args.args[1])
 
     async def test_workspace_is_closed_even_when_recorded_pty_is_gone(self):
         handler = self.handler()

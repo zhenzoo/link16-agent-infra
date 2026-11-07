@@ -2751,6 +2751,10 @@ def _run_bot(bot_name=None):
                 blog(bot["name"], f"🚧 放行群内 {cmd}：{why}")
                 receipt(bot["name"], {"tid": "gate", "kind": "slash_allowed", "cmd": cmd,
                                       "sender": sender, "reason": why, "delivered": True})
+            if cmd == "/close":
+                await reply(chat_id, "🔄 已收到 `/close`，正在关闭会话并释放占用……")
+            elif cmd in ("/account", "/acc", "/账号") and arg:
+                await reply(chat_id, "🔄 已收到账号切换请求，正在检查账号并关闭旧会话；不会自动启动新会话……")
             rec = load_session(bot["name"])
             alive = bool(rec and rec.get("pty") and await asyncio.to_thread(wmux_session.pty_alive, rec["pty"]))
             if cmd == "/screen":

@@ -10,6 +10,8 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from contextlib import redirect_stderr
+from io import StringIO
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'feishu'))
@@ -34,6 +36,76 @@ class InboxTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.sd = Path(self.temp.name)
         self.inbox = bi.Inbox(self.sd, 'unit')
+
+    def test_existing_schema_skips_migration_write_and_uses_wal(self):
+        with patch.object(bi.Inbox, '_migrate', wraps=self.inbox._migrate) as migrate:
+            bi.Inbox(self.sd, 'unit')
+        migrate.assert_not_called()
+        with self.inbox.connect() as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode').fetchone()[0].lower(), 'wal')
+
+    def test_real_process_lock_waits_recovers_and_logs_operation(self):
+        holder = "import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('BEGIN IMMEDIATE'); print('locked',flush=True); time.sleep(.35); db.rollback()"
+        proc = subprocess.Popen([sys.executable, '-c', holder, str(self.inbox.path)],
+                                stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.wait, timeout=5)
+        self.addCleanup(proc.stdout.close)
+        self.assertEqual(proc.stdout.readline().strip(), 'locked')
+        errors = StringIO()
+        with patch.object(bi, 'DB_TIMEOUT_SEC', 1), \
+                patch.object(bi, 'DB_LOCK_LOG_AFTER_SEC', .05), redirect_stderr(errors):
+            self.inbox.receive(payload('om_locked', 'secret-payload'))
+        self.assertEqual(self.inbox.get('om_locked')['state'], 'queued')
+        log = errors.getvalue()
+        self.assertIn('operation=receive', log)
+        self.assertIn('outcome=recovered', log)
+        self.assertIn('pid=', log)
+        self.assertNotIn('secret-payload', log)
+
+    def test_consumer_retries_locked_claim_without_replaying_command(self):
+        self.inbox.receive(payload('close', '/close'))
+        original = self.inbox.claim
+        attempts, handled, reports = [0], [], []
+        state = {'stopping': False}
+
+        def locked_then_claim():
+            if attempts[0] < 2:
+                attempts[0] += 1
+                raise bi.sqlite3.OperationalError('database is locked')
+            return original()
+
+        async def handler(item, _received):
+            handled.append(item['message']['message_id'])
+            state['stopping'] = True
+
+        with patch.object(self.inbox, 'claim', side_effect=locked_then_claim), \
+                patch.object(bi, 'CONSUMER_LOCK_RETRY_SEC', 0):
+            asyncio.run(bi.consume(self.inbox, handler, asyncio.Event(),
+                                   lambda: state['stopping'], reports.append))
+        self.assertEqual(handled, ['close'])
+        self.assertEqual(self.inbox.get('close')['state'], 'done')
+        self.assertEqual(attempts[0], 2)
+        self.assertTrue(any('claim' in line and 'database is locked' in line for line in reports))
+
+    def test_locked_finish_preserves_command_boundary_without_replay(self):
+        self.inbox.receive(payload('close', '/close'))
+        handled, reports = [], []
+        state = {'stopping': False}
+
+        async def handler(item, _received):
+            handled.append(item['message']['message_id'])
+            self.inbox.boundary(item['message']['message_id'])
+            state['stopping'] = True
+
+        with patch.object(self.inbox, 'finish', side_effect=bi.sqlite3.OperationalError('database is locked')):
+            asyncio.run(bi.consume(self.inbox, handler, asyncio.Event(),
+                                   lambda: state['stopping'], reports.append))
+        self.assertEqual(handled, ['close'])
+        self.assertEqual(self.inbox.get('close')['state'], 'command')
+        self.inbox.recover()
+        self.assertEqual(self.inbox.get('close')['state'], 'uncertain')
+        self.assertIsNone(self.inbox.claim())
+        self.assertTrue(any('finish' in line for line in reports))
 
     def channel(self):
         # Exercise the real adapter and installed SDK normalizer without any

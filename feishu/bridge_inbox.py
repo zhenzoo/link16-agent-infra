@@ -8,10 +8,27 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
+import sys
 import time
+
+
+DB_TIMEOUT_SEC = 30.0
+DB_LOCK_LOG_AFTER_SEC = 1.0
+CONSUMER_LOCK_RETRY_SEC = 0.5
+
+
+def is_lock_error(exc):
+    return isinstance(exc, sqlite3.OperationalError) and any(
+        marker in str(exc).lower() for marker in ('database is locked', 'database table is locked', 'database is busy'))
+
+
+def lock_log(bot, operation, elapsed, outcome):
+    print(f"[{time.strftime('%H:%M:%S')}][{bot}] inbox-lock operation={operation} "
+          f"pid={os.getpid()} elapsed={elapsed:.2f}s outcome={outcome}", file=sys.stderr, flush=True)
 
 
 def prompt_digest(prompt):
@@ -35,44 +52,72 @@ class Inbox:
         self.path = Path(state_dir) / f"bridge-inbox-{key}.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')  # Serialize migrations across hook/bridge/cron.
-            db.execute("""CREATE TABLE IF NOT EXISTS messages (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-                payload TEXT, state TEXT NOT NULL, received REAL NOT NULL,
-                updated REAL NOT NULL, digest TEXT, session TEXT, error TEXT,
-                attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0)""")
-            if 'retry_at' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
-                db.execute('ALTER TABLE messages ADD COLUMN retry_at REAL NOT NULL DEFAULT 0')
-            if 'received_digest' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
-                db.execute('ALTER TABLE messages ADD COLUMN received_digest TEXT')
-            if 'receipt' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
-                db.execute('ALTER TABLE messages ADD COLUMN receipt TEXT')
-            if 'retry_safe' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
-                db.execute('ALTER TABLE messages ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0')
-            if 'handoff' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
-                db.execute('ALTER TABLE messages ADD COLUMN handoff TEXT')
-            if 'schedule' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
-                db.execute('ALTER TABLE messages ADD COLUMN schedule TEXT')
-            db.execute('''CREATE TABLE IF NOT EXISTS resources (
-                message_id TEXT, resource_hash TEXT, path TEXT,
-                PRIMARY KEY(message_id, resource_hash))''')
-            db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT)')
+            current = self._schema_current(db)
+            mode = db.execute('PRAGMA journal_mode').fetchone()[0].lower()
+            if not current or mode != 'wal':
+                self._migrate(db)
+
+    @staticmethod
+    def _schema_current(db):
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {'messages', 'resources', 'meta'} <= tables:
+            return False
+        columns = {row[1] for row in db.execute('PRAGMA table_info(messages)')}
+        return {'retry_at', 'received_digest', 'receipt', 'retry_safe', 'handoff', 'schedule'} <= columns
+
+    def _migrate(self, db):
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('BEGIN IMMEDIATE')
+        db.execute("""CREATE TABLE IF NOT EXISTS messages (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+            payload TEXT, state TEXT NOT NULL, received REAL NOT NULL,
+            updated REAL NOT NULL, digest TEXT, session TEXT, error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0)""")
+        if 'retry_at' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN retry_at REAL NOT NULL DEFAULT 0')
+        if 'received_digest' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN received_digest TEXT')
+        if 'receipt' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN receipt TEXT')
+        if 'retry_safe' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0')
+        if 'handoff' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN handoff TEXT')
+        if 'schedule' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN schedule TEXT')
+        db.execute('''CREATE TABLE IF NOT EXISTS resources (
+            message_id TEXT, resource_hash TEXT, path TEXT,
+            PRIMARY KEY(message_id, resource_hash))''')
+        db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT)')
 
     def connect(self):
-        # DELETE journal + FULL commit means a successful receive survives a
-        # process kill. Connections are short lived; hook and bridge may write.
+        # WAL + FULL keeps durable commits while readers no longer exclude writers.
+        # Connections stay short lived; hook, cron and bridge may write.
         from contextlib import contextmanager
+        operation = sys._getframe(1).f_code.co_name
 
         @contextmanager
         def transaction():
-            db = sqlite3.connect(self.path, timeout=5)
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA synchronous=FULL")
+            started = time.monotonic()
+            db = None
             try:
+                db = sqlite3.connect(self.path, timeout=DB_TIMEOUT_SEC)
+                db.row_factory = sqlite3.Row
+                db.execute('PRAGMA busy_timeout=%d' % int(DB_TIMEOUT_SEC * 1000))
+                db.execute('PRAGMA synchronous=FULL')
                 with db:
                     yield db
+            except sqlite3.OperationalError as exc:
+                if is_lock_error(exc):
+                    lock_log(self.bot, operation, time.monotonic() - started, 'failed')
+                raise
+            else:
+                elapsed = time.monotonic() - started
+                if elapsed >= DB_LOCK_LOG_AFTER_SEC:
+                    lock_log(self.bot, operation, elapsed, 'recovered')
             finally:
-                db.close()
+                if db is not None:
+                    db.close()
         return transaction()
 
     def receive(self, payload):
@@ -426,10 +471,23 @@ def confirm_prompt(state_dir, bot, prompt, session=None, receipt=None):
 
 
 async def consume(inbox, handler, wake, stopping, report):
-    inbox.recover()
+    async def db_call(operation, name):
+        while True:
+            try:
+                return await asyncio.to_thread(operation)
+            except sqlite3.OperationalError as exc:
+                if not is_lock_error(exc):
+                    raise
+                report(f"inbox-lock operation={name} pid={os.getpid()} "
+                       f"outcome=waiting: {type(exc).__name__}: {str(exc)[:180]}")
+                if stopping():
+                    return None
+                await asyncio.sleep(CONSUMER_LOCK_RETRY_SEC)
+
+    await db_call(inbox.recover, 'recover')
     while not stopping():
         wake.clear()
-        row = inbox.claim()
+        row = await db_call(inbox.claim, 'claim')
         if row is None:
             try:
                 await asyncio.wait_for(wake.wait(), timeout=0.5)
@@ -439,9 +497,10 @@ async def consume(inbox, handler, wake, stopping, report):
         mid = row['id']
         try:
             await handler(json.loads(row['payload']), row['received'])
-            inbox.finish(mid)
+            await db_call(lambda: inbox.finish(mid), 'finish')
         except Exception as exc:
-            inbox.fail(mid, exc, retryable=not isinstance(exc, NonRetryableHandoffError))
+            await db_call(lambda: inbox.fail(
+                mid, exc, retryable=not isinstance(exc, NonRetryableHandoffError)), 'fail')
             report(f"入站交接保留待办 message_id={mid}: {type(exc).__name__}: {str(exc)[:180]}")
             # Failure backoff only; healthy dispatch wakes immediately.
             try:
