@@ -93,6 +93,16 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 
 中断后用原 `--state` 加 `--resume`：工具先只读核对未确认操作，已落地且通过全文和评论检查才接续；未落地或结果不明也不会自动重发。单补丁使用 `write <URL> --patch <原JSON> --recover`。失败先看批次 `pending` 和 `*.docx-state.json`，不要换目录重试、删除恢复记录或把 HTTP 成功当交付。保护仅针对这条受管写入链；原有失定位评论照实保留，不能称已修复。
 
+### 飞书项目：迭代父需求与子需求维护
+
+`project.feishu.cn` 的项目、迭代、需求和流程节点使用 `python feishu/project_cli.py`，不走云文档的 docio。四个入口：`inspect` 读取实际清单及单项，`preview` 生成零写入变更预演，`apply` 按授权清单逐项执行并留恢复记录，`verify` 回读实际结果。参数见 `--help`；业务配置、操作清单、材料证据和执行记录留在对应项目仓，不复制进 skill 或 runtime home。
+
+TC101S 的操作顺序、入口网址、父子粒度、全部16节点参数、人员证据、验收约束位置及改名/增删方法，先读 `VIBECODING_ROOT/OBSBOT/OBSBOT-baseball/docs/SOP-090-feishu-project-iteration-maintenance.md`；原审阅HTML为该仓 `docs/mockups/tc101s-feishu-project-entry.html`。其他项目先核自身流程，不套用TC101S的人员或节点ID。
+
+先用 `$browser-act` 在已授权项目页面建立本会话独占 session；必要请求头只保留在浏览器内存，不导出Cookie或认证文件。材料中的飞书文档、Sheet、Wiki仍按第2节docio读取；妙记使用同版本lark-meeting。负责人以用户明确指定或已批准分工为准；评审发言量只帮助定位，不能据此把匿名speaker直接认定为负责人。
+
+先全项目查重，再建父项和子项；精确改名保留ID；删除前核关联成果并保存评审ID。TC101S本轮只完成规划、产品内审和产研评审，停在技术方案评审交给Leader。新一轮先读当前SOP、PLAN恢复点、最新范围和现场配置，生成新清单；中断接续原journal，结果未知不重发，也不清除记录。用户已授权的操作不重复索要确认。
+
 ### Bridge Effort
 
 默认 medium 用于讨论、头脑风暴、梳理现状、局部 UI／文案和可脚本验收的重复执行；xhigh 用于多份材料对齐、跨组件实现、反例与边界条件多、容易把草稿误报完成的证据核对，以及关键异常处理和最终验收。按核验难度选，不能只看任务耗时；用户明确指定的档位优先。baseball-2 的规则措辞、baseball-3 的局部页面调整可先用 medium；baseball-3 的事件语义核对和 baseball-4 的草稿与真实调用证据区分宜用 xhigh。历史案例只表明风险类型，不构成档位胜率实测。

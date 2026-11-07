@@ -104,9 +104,9 @@ last_reviewed: 2026-11-04
     - **自愈重生保留当前目录**（2026-06-24 · 与 `/account` 临时号自愈保留对称）：会话死掉自动重生时 `ensure_session` 在**注册表 `cwd`**（`/cd` 过的目录）起，不再无脑回名册默认；注册表无 `cwd`（首次 / `/close` 清过）才回默认。
   - `/screen` → 读屏看现场
   - `/stop` → `ctrl+c` 打断当前 turn
-  - `/close` → `workspace.close` 干净撤掉这个 bot 的会话 + **清注册表（含 `/cd` 过的 `cwd`）+ 账号切回名册默认** → **下次 @ 用名册默认账号 + 默认目录重建**。起会话/关会话/自愈重生的飞书提示都打印「账号 + 目录」并各自标注「（默认）/（已切·默认 X）」，让你一眼看出用哪个号、在哪个目录起的。
+  - `/close` → 先回「已收到，正在关闭」，再 `workspace.close` 干净撤掉这个 bot 的会话 + **清注册表（含 `/cd` 过的 `cwd`）+ 账号切回名册默认** → **下次 @ 用名册默认账号 + 默认目录重建**。起会话/关会话/自愈重生的飞书提示都打印「账号 + 目录」并各自标注「（默认）/（已切·默认 X）」，让你一眼看出用哪个号、在哪个目录起的。即时受理只表示命令开始执行，最终关闭仍以工作区消失和完成回执为准。
   - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
-  - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。先跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
+  - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。带参数切换时先回即时受理，再跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
   - **`/effort medium|high|xhigh`** → Codex 使用所选 Link16 profile 保存的模型，桥驱动当前空闲会话的 `/model`，核对底部实时状态、`/status`、选择器 current 标记和切换回显后才报告成功；无会话则保存为新会话首回合设置。用户明确要求“选用合适 effort，自己调整”时，桥在注入任务前运行只读 Codex 预判断并执行同一切换核验。Claude 转交原生命令；Kimi 无已验证逐回合路径时明确拒绝。群聊受主人/授权闸约束，迟到超过 120 秒的命令不执行。
   - **其余任何 `/xxx`**（`/resume <name>` / `/rename` / `/model` / `/compact` …）→ **原样转发进当前 profile 会话**（verbatim·**绝不缀 `[飞书]` 标记**）。桥回一句「⏎ 已转发」。需会话已存在（先发句话起会话再发 slash）。
@@ -244,6 +244,8 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 ### § 2.4.4 · 入站持久交接与重启恢复（PLAN-1120）
 
 `bridge_inbox_channel.py` 在 SDK 原始同步回调内先完成身份、群 @、私聊 owner/白名单与 SDK policy 检查，再将消息 ID、正文、消息类型和附件引用提交到 `bridge_inbox.py` 的每 bot SQLite 收件箱。提交使用 `synchronous=FULL`；成功后才返回，让 WebSocket 应答成功。保存失败直接向 SDK 抛错，实际帧返回 500，不确认未保存的消息。鉴权头、app secret 和 header token 不写入收件箱；未授权私聊与未 @ 的群旁观消息不留存。
+
+SQLite 锁是局部等待状态，不是桥崩溃条件（PLAN-1220）。收件库使用 WAL 和 30 秒 busy timeout；schema 完整且已是 WAL 时，创建 `Inbox` 只读检查，不再重复执行 `BEGIN IMMEDIATE` 抢写锁。操作等待超过 1 秒或最终失败时记录 bot、操作名、PID、耗时和结果，不写消息正文或凭据。消费者的 recover/claim/finish/fail 通过工作线程执行；锁超时后保留原状态并退避重试，停止请求可结束等待。命令已越过 `command` 边界时，即使完成记账暂时受阻，也不得为恢复而再次执行 `/close` 或 `/account`。
 
 原 SDK 内存队列不再承担消息派发。磁盘消费者依原消息 ID 去重并按收到顺序领取；使用 SDK 的内容归一化与附件解析，但已接纳待办恢复时不再经过按消息年龄丢弃的闸。正常新消息由事件唤醒立即处理；失败准备按退避重试，不挡住后面的 `/stop`。下载完成的附件路径持久化复用，不同消息的同名文件使用不同目录；长文本保存失败保留完整待办，不能截断后假装提交。
 

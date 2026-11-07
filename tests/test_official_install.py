@@ -39,7 +39,7 @@ class OfficialInstallTests(unittest.TestCase):
         profile = SimpleNamespace(runtime="codex", home_path=self.root, name="fixture")
         with patch.object(agent_update.shutil, "which", return_value=str(self.npm)), \
                 patch.object(agent_update, "_centralize_codex_updates") as config, \
-                patch.object(agent_update.subprocess, "run") as run:
+                patch.object(agent_update.subprocess, "Popen") as run:
             with self.assertRaisesRegex(RuntimeError, "官方迁移"):
                 agent_update._update_official(profile, self.root, 60)
         config.assert_not_called()
@@ -62,7 +62,7 @@ class OfficialInstallTests(unittest.TestCase):
         with patch.object(agent_update.agent_runtime, "profile_spec", return_value=profile), \
                 patch.object(agent_update.shutil, "which", return_value=str(self.npm)), \
                 patch.object(agent_update, "_centralize_codex_updates") as config, \
-                patch.object(agent_update.subprocess, "run") as run:
+                patch.object(agent_update.subprocess, "Popen") as run:
             record = agent_update.ensure("fixture", state_dir=self.root)
         self.assertEqual(record["status"], "migration_required")
         self.assertEqual(json.loads(receipt.read_text()), record)

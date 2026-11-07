@@ -23,7 +23,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-06
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -116,7 +116,7 @@ Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要�
 
 后续更新也只走各提供方的原生自动更新、CLI 内置更新命令或同一官方安装脚本；不得再用 npm、uv/pip 或第三方包管理器覆盖这三个入口。更新后重新核对实际命令路径和签名，不能只凭版本号判断来源。
 
-Link16 新交互 session 会经过 `feishu/agent_update.py`，统一调用官方 `claude update`、`codex update`、`kimi update --yes`，不另写下载器，也不让多个 profile 并发更新同一程序。没有其他更新在跑时，更新成功后开 session；已有更新继续运行则当前 session 不等待；失败或 60 秒超时跳过并启动旧版，写脱敏回执。Codex 自带的重复启动检查由 Link16 集中更新后关闭。`agent_update.py status --profile <名>` 查最近结果，紧急时用 `LINK16_AGENT_UPDATE=0` 绕过；已运行的会话不被更新流程中断。
+Link16 新交互 session 会经过 `feishu/agent_update.py`，统一调用官方 `claude update`、`codex update`、`kimi update --yes`，不另写下载器，也不让多个 profile 并发更新同一程序。没有其他更新在跑时，updater 在 5 秒内从 stdout/stderr 产生实际输出即显示正在更新并等待官方命令完成，不再限制更新总时长；5 秒完全无响应、已有更新继续运行或更新失败则跳过并启动当前已装版本，写脱敏回执。Codex 自带的重复启动检查由 Link16 集中更新后关闭。`agent_update.py status --profile <名>` 查最近结果，紧急时用 `LINK16_AGENT_UPDATE=0` 绕过；已运行的会话不被更新流程中断。
 
 | CLI | 官方默认程序入口 | 官方说明 |
 |---|---|---|

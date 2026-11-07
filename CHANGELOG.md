@@ -11,13 +11,20 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-07
 ---
 
 # CHANGELOG · link16-agent-infra
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.41.13 — 2026-11-07 · SQLite 锁等待不再带崩桥，控制命令即时受理
+
+- **故障边界收回收件层**：tb26-baseball-zhen 的 `/close` 与 `/account cxp2` 延迟实证中，每 bot SQLite 收件库在锁等待约 5 秒后抛出 `database is locked`，消费者未隔离该异常，导致单个 bot 桥退出并等待看门狗重启。旧日志没有持锁 PID，不能反推具体占用者；本次用独立数据库和真实第二进程复现，未操作生产库。
+- **减少竞争并允许恢复**：收件库改用 WAL、`synchronous=FULL` 和 30 秒 busy timeout；schema 已完整时不再重复执行迁移写锁。recover/claim/finish/fail 在工作线程等待，锁超时保留原状态并退避，停止请求可结束等待。已越过命令边界的 `/close`、`/account` 不因完成记账受阻而重复执行。慢锁日志记录 bot、操作名、PID、耗时和结果，不记录正文或凭据。
+- **用户先得到受理回执**：`/close` 和带参数的 `/account` 在 wmux/profile 检查前先回“正在处理”，完成或失败再回最终结果；`/account` 仍保持懒启动，不额外创建会话。
+- **验证与升级**：旧版真实持锁实验中 claim/receive/confirm 均约 5.5 秒报错，新版在同样 6.5 秒持锁后均恢复完成；四项新反例先在旧版失败，修复后通过。收件、控制命令、cron、wmux、worker 等相关 193 项回归通过；全仓收集 1591 项，1588 通过、3 跳过、0 失败。生产桥需在维护窗口按明确 bot 范围重载，不能仅拉取代码就宣称运行行为已更新。
 
 ## v0.41.12 — 2026-11-04 · 巡航受阻延期恢复，冷启动有证重试并保留现场
 

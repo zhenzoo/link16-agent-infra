@@ -8,6 +8,7 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
+| `feishu/project_cli.py` | 飞书项目迭代父子需求：现场读取、授权变更预演、精确新建/改名/字段/日期/节点/删除及逐项回读；业务配置留项目仓，认证只在已授权浏览器内存，未知写入不重发 | `inspect / preview / apply / verify --config <配置.json>`；`--help`；TC101S流程见baseball仓SOP-090及feishu skill专节 |
 | `feishu/online_local_html.py` | 只读反查飞书在线链接对应的本地 HTML：按完整 URL 找现有 `meta.json` / `*.meta.json`，区分交互评审页与在线文档正文快照，核对明确映射和文件存在性，不把参考页误认成当前页面 | `python feishu/online_local_html.py "<URL>" [--root <项目总目录>] [--json]` |
 | `feishu/miaoda_delivery.py` | 已有 HTML 发布妙搭的资源允许清单与版本核验；只测量明确资源、回读精确 release，不上传整仓、不改可见范围、不发消息。流程见 repo-owned feishu skill 的 HTML→妙搭 reference | `inventory --root <目录> --entry <HTML> --files <清单.json> --output <回执.json>`；`verify-release --project <应用仓> --release-id <ID> --expected-commit <SHA> --output <回执.json>` |
 | `feishu/kimi_native_worker.py` | 原生 Kimi TUI 与可独立重启的 Wire 1.5 观察程序；由 registry 锁定 profile/home，复用 outbox 和卡片 | 桥通过 `agent_runtime.worker_cmd()` 启动；`--observe-only --bot <bot> --cwd <cwd> --state-dir <state>` 只观察已绑定会话，不另建会话；机制见 ARCH-120 §11 |
@@ -66,7 +67,7 @@
 | `feishu/verify_media_doc.py` | 在真实飞书文档点击播放、跳转并记录下载事件；手机浏览器模拟不冒充真机App实测 | `python feishu/verify_media_doc.py --url <url> --block-id <id> --file-token <token> --media <文件> --out <新目录> --mobile` |
 | `feishu/feishu_rest.py` | 飞书 REST 原语（api/tenant_token/send_msg · 纯标库绕代理） | （feishu_docs/media/voice 内部用） |
 | `feishu/agent-profiles.local.json` · `feishu/agent_profile_cli.py` · `feishu/agent_runtime.py` | 本机 effective profile registry（gitignored）+ 公共 launcher：主 session/独立 wmux worker 都只传 `LINK16_AGENT_PROFILE`，由 registry 派生 runtime/home/driver；`session_search.preferred_profiles` 是历史 Session 首轮搜索集合的唯一真源 | `python feishu/agent_profile_cli.py list`；`platforms`（Link16 支持的智能体平台 × 本机安装与账号）；`doctor --profile <profile>`；`run --profile <profile> --cwd <repo>` |
-| `feishu/agent_update.py` | 三 runtime 新交互进程统一调用官方 updater：Claude/Codex/Kimi 按程序互斥、回读版本；已有更新继续跑则当前 session 不等，失败或 60 秒超时跳过并启动旧版。Windows Codex 只调用官方 standalone；旧 npm 返回 `migration_required`，按 SOP-100 迁移。只读探针不触发；`LINK16_AGENT_UPDATE=0` 紧急绕过 | 新 session 自动执行；查回执 `python feishu/agent_update.py status --profile <profile>`；手动检查 `ensure --profile <profile>` |
+| `feishu/agent_update.py` | 三 runtime 新交互进程统一调用官方 updater：Claude/Codex/Kimi 按程序互斥、回读版本；5 秒内有 stdout/stderr 响应即提示并等待更新完成，不设总时长上限；完全无响应、已有更新在跑或失败则启动当前已装版本。Windows Codex 只调用官方 standalone；旧 npm 返回 `migration_required`，按 SOP-100 迁移。只读探针不触发；`LINK16_AGENT_UPDATE=0` 紧急绕过 | 新 session 自动执行；查回执 `python feishu/agent_update.py status --profile <profile>`；手动检查 `ensure --profile <profile>` |
 | `$find-session` · `$session-xray` | 用户级跨 Runtime 恢复链：前者用原话定位 Claude/Codex Session，后者对白盒时间线、工具、协作与 Link16 投递证据分源复盘。默认先查 registry 指定的 `cc / ccp / ccp2 / cxp / cx`；没有原始正文命中才回退其他已注册且本机存在的 profile | `python "$HOME/.claude-personal/skills/find-session/scripts/find_session.py" "<原话>" --show 1`；`python "$HOME/.claude-personal/skills/session-xray/xray.py" <session-id> --out <report.md>` |
 | `feishu/bridge_env.py` | 跨机路径解析（.env/名册/wmux-rpc） | （库） |
 

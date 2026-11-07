@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -22,7 +24,7 @@ import official_install
 
 
 DISABLE_ENV = "LINK16_AGENT_UPDATE"
-UPDATE_TIMEOUT_SEC = 60
+UPDATE_RESPONSE_TIMEOUT_SEC = 5
 VERSION_TIMEOUT_SEC = 10
 UPDATE_ARGS = {
     "claude": ("update",),
@@ -81,7 +83,57 @@ def _centralize_codex_updates(profile) -> None:
             _write_toml(path, document)
 
 
-def _update_official(profile, state_dir: Path, timeout: float) -> dict:
+def _drain_update_output(stream, responded) -> None:
+    try:
+        while stream.read1(65536):
+            responded.set()
+    finally:
+        stream.close()
+
+
+def _run_update_command(executable, args, *, env, response_timeout, on_response=None) -> dict:
+    process = subprocess.Popen(
+        [executable, *args], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    responded = threading.Event()
+    readers = [
+        threading.Thread(target=_drain_update_output, args=(stream, responded), daemon=True)
+        for stream in (process.stdout, process.stderr)
+    ]
+    started = time.monotonic()
+    for reader in readers:
+        reader.start()
+    deadline = started + response_timeout
+    status = None
+    response_elapsed_sec = None
+    while not responded.is_set() and process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait()
+            status = "no_response"
+            break
+        responded.wait(min(0.05, remaining))
+    if responded.is_set():
+        response_elapsed_sec = round(time.monotonic() - started, 3)
+        if on_response:
+            on_response(response_elapsed_sec)
+    return_code = process.wait() if status is None else None
+    for reader in readers:
+        reader.join(timeout=0.2)
+    return {
+        "status": status,
+        "return_code": return_code,
+        "response_elapsed_sec": response_elapsed_sec,
+    }
+
+
+def _update_official(profile, state_dir: Path, timeout: float, on_response=None) -> dict:
     runtime = profile.runtime
     executable = _executable(runtime)
     if runtime == "codex":
@@ -105,27 +157,28 @@ def _update_official(profile, state_dir: Path, timeout: float) -> dict:
             elif runtime == "codex":
                 network_route.prefer_windows_system_tar(env)
             try:
-                result = subprocess.run(
-                    [executable, *UPDATE_ARGS[runtime]], stdin=subprocess.DEVNULL,
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=timeout, env=env,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                result = _run_update_command(
+                    executable, UPDATE_ARGS[runtime], env=env,
+                    response_timeout=timeout, on_response=on_response,
                 )
-            except subprocess.TimeoutExpired:
-                record.update(status="timed_out", error_type="TimeoutExpired")
             except OSError as exc:
                 record.update(status="failed", error_type=type(exc).__name__)
             else:
-                after = _version(executable)
-                record.update(after=after, return_code=result.returncode)
-                if result.returncode:
-                    record["status"] = "failed"
-                elif after is None:
-                    record["status"] = "unverified"
-                elif before != after:
-                    record["status"] = "updated"
+                if result["response_elapsed_sec"] is not None:
+                    record["response_elapsed_sec"] = result["response_elapsed_sec"]
+                if result["status"] == "no_response":
+                    record.update(status="no_response", response_timeout_sec=timeout)
                 else:
-                    record["status"] = "current"
+                    after = _version(executable)
+                    record.update(after=after, return_code=result["return_code"])
+                    if result["return_code"]:
+                        record["status"] = "failed"
+                    elif after is None:
+                        record["status"] = "unverified"
+                    elif before != after:
+                        record["status"] = "updated"
+                    else:
+                        record["status"] = "current"
             record["elapsed_sec"] = round(time.monotonic() - started, 3)
             bridge_injection.atomic_write_json(receipt_path, record)
             return record
@@ -137,14 +190,15 @@ def _update_official(profile, state_dir: Path, timeout: float) -> dict:
         }
 
 
-def ensure(profile_name: str, *, state_dir=None, timeout=UPDATE_TIMEOUT_SEC) -> dict:
+def ensure(profile_name: str, *, state_dir=None, timeout=UPDATE_RESPONSE_TIMEOUT_SEC,
+           on_response=None) -> dict:
     profile = agent_runtime.profile_spec(profile_name)
     if os.environ.get(DISABLE_ENV) == "0":
         return {"runtime": profile.runtime, "profile": profile.name, "status": "disabled"}
     destination = _state_dir(state_dir)
     destination.mkdir(parents=True, exist_ok=True)
     try:
-        return _update_official(profile, destination, timeout)
+        return _update_official(profile, destination, timeout, on_response=on_response)
     except RuntimeError as exc:
         if str(exc) != official_install.CODEX_FIX:
             raise
@@ -165,8 +219,12 @@ def main(argv=None) -> int:
         path = _state_dir() / f"{agent_runtime.profile_spec(args.profile).name}.json"
         record = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"status": "never"}
     else:
+        def report_response(_):
+            print(f"{args.profile} 正在更新：已收到响应，等待更新完成…",
+                  file=sys.stderr, flush=True)
+
         try:
-            record = ensure(args.profile)
+            record = ensure(args.profile, on_response=report_response)
         except Exception as exc:  # noqa: BLE001 - an updater must not prevent the old CLI starting
             record = {"profile": args.profile, "status": "failed",
                       "error_type": type(exc).__name__}

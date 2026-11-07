@@ -35,6 +35,62 @@ def cell_data(cells=None):
 
 
 class ReadContractTests(unittest.TestCase):
+    def test_document_reads_each_embedded_whiteboard_and_keeps_parent_inventory(self):
+        blocks = [{"block_id": "a", "board": {"token": "B1"}},
+                  {"block_id": "b", "board": {"token": "B2"}}]
+        report = {"url": "https://example.feishu.cn/wiki/T?blockToken=B2",
+                  "resources": {}, "missing": []}
+
+        def engine(args, **kwargs):
+            if args[:2] == ["docs", "+fetch"]:
+                return response({"document": {"document_id": "T", "revision_id": 12,
+                                               "content": "<whiteboard token='B1'/><whiteboard token='B2'/>"}})
+            if args[2].endswith("/blocks"):
+                return response({"items": blocks, "has_more": False})
+            if args[:2] == ["api", "GET"]:
+                return revision_info(12)
+            self.assertEqual(args[:2], ["whiteboard", "+export"])
+            self.assertEqual(kwargs["profile"], "current-bot")
+            token = args[args.index("--whiteboard-token") + 1]
+            target = Path(kwargs["cwd"]) / args[args.index("--output") + 1]
+            target.write_text(json.dumps({"nodes": [{"id": token, "text": {"text": token}}]}))
+            return response({})
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", side_effect=engine):
+            out = Path(folder)
+            d._read_docx(report["url"], "T", "current-bot", out, report)
+            boards = report["resources"]["whiteboard"]
+            self.assertEqual((boards["declared"], boards["fetched"]), (2, 2))
+            self.assertEqual([json.loads((out / r["path"]).read_text())["nodes"][0]["id"]
+                              for r in boards["boards"]], ["B1", "B2"])
+        self.assertEqual(report["inventory"]["source"], "docx.blocks")
+        self.assertEqual(report["missing"], [])
+        self.assertEqual(d.coverage_report(report, quiet=True), 0)
+
+    def test_embedded_whiteboard_missing_token_or_denied_export_stays_incomplete(self):
+        report = {"url": "url", "inventory": {"complete": True}, "resources": {}, "missing": []}
+        denied = subprocess.CompletedProcess([], 1, "", json.dumps({"ok": False, "error": {
+            "type": "authorization", "subtype": "missing_scope", "missing_scopes": ["board:whiteboard:node:read"]}}))
+        blocks = [{"block_id": "missing", "board": {}}, {"block_id": "denied", "board": {"token": "B"}}]
+        with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", return_value=denied):
+            d._read_docx_whiteboards(blocks, "bot", Path(folder), Path(folder) / "assets", report)
+        self.assertEqual(report["resources"]["whiteboard"]["fetched"], 0)
+        self.assertEqual([item["block_id"] for item in report["missing"]], ["missing", "denied"])
+        self.assertEqual(report["missing"][1]["lane"], "scope")
+        self.assertEqual(d.coverage_report(report, quiet=True), 2)
+
+    def test_invalid_whiteboard_payload_cannot_be_reported_as_empty_success(self):
+        for payload, expected in (({}, False), ({"nodes": [None]}, False), ({"nodes": []}, True)):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
+                report = {"inventory": {"complete": False}, "resources": {}, "missing": []}
+                def engine(args, **kwargs):
+                    (Path(folder) / "whiteboard.json").write_text(json.dumps(payload))
+                    return response({})
+                with patch.object(d, "run_lark", side_effect=engine):
+                    d._read_whiteboard("url", "B", "bot", Path(folder), report)
+                self.assertEqual(report["resources"]["whiteboard"]["complete"], expected)
+                self.assertEqual(d.coverage_report(report, quiet=True), 0 if expected else 2)
+
     def test_complete_coordinates_and_fields_are_preserved(self):
         data = cell_data([[{"value": "display", "rich_text": [{"type": "link", "text": "display", "link": "https://example.com/a"}]}]])
         with patch.object(d, "run_lark", return_value=response(data)) as run:
