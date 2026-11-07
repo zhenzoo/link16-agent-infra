@@ -8,6 +8,7 @@
 
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
+| `feishu/project_cli.py` | 飞书项目迭代父子需求：现场读取、授权变更预演、精确新建/改名/字段/日期/节点/删除及逐项回读；业务配置留项目仓，认证只在已授权浏览器内存，未知写入不重发 | `inspect / preview / apply / verify --config <配置.json>`；`--help`；TC101S流程见baseball仓SOP-090及feishu skill专节 |
 | `feishu/online_local_html.py` | 只读反查飞书在线链接对应的本地 HTML：按完整 URL 找现有 `meta.json` / `*.meta.json`，区分交互评审页与在线文档正文快照，核对明确映射和文件存在性，不把参考页误认成当前页面 | `python feishu/online_local_html.py "<URL>" [--root <项目总目录>] [--json]` |
 | `feishu/miaoda_delivery.py` | 已有 HTML 发布妙搭的资源允许清单与版本核验；只测量明确资源、回读精确 release，不上传整仓、不改可见范围、不发消息。流程见 repo-owned feishu skill 的 HTML→妙搭 reference | `inventory --root <目录> --entry <HTML> --files <清单.json> --output <回执.json>`；`verify-release --project <应用仓> --release-id <ID> --expected-commit <SHA> --output <回执.json>` |
 | `feishu/kimi_native_worker.py` | 原生 Kimi TUI 与可独立重启的 Wire 1.5 观察程序；由 registry 锁定 profile/home，复用 outbox 和卡片 | 桥通过 `agent_runtime.worker_cmd()` 启动；`--observe-only --bot <bot> --cwd <cwd> --state-dir <state>` 只观察已绑定会话，不另建会话；机制见 ARCH-120 §11 |
