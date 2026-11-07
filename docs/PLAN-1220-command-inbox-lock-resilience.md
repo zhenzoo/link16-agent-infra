@@ -33,7 +33,7 @@ last_reviewed: 2026-11-08
 
 写入归属：本会话只改 `bridge_inbox*`、相关控制命令/看门狗代码、对应测试、ARCH-110、CHANGELOG 与本 PLAN；保留未跟踪调试 ZIP 及其他会话资产。
 
-当前 Step／恢复点：Step 4.1 外部等待生产维护窗口；v0.41.14 已在 main 与同名标签发布至 7ac9724，TB26 首次 WAL 锁确定性反例、真实并发 5 轮及全仓 1589 通过/3 跳过已通过，TB24、TB25、TUF19 已收到新 SHA 拉取与回归请求。不得批量重启生产桥。
+当前 Step／恢复点：Step 4.1 外部等待 TUF19 的实际拉取与生效回执；v0.41.14=7ac9724 已在 TB26 的 tb26-baseball-zhen、TB24 的 tb24-link16、TB25 的 tb25-link16 单桥生效，原并发反例分别通过。其他 bot 未批量重载；不重复发送 TUF19 任务，收到回执后再核 SHA 和范围。
 
 ## §1 Stage / Step
 
