@@ -35,6 +35,7 @@ class Inbox:
         self.path = Path(state_dir) / f"bridge-inbox-{key}.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')  # Serialize migrations across hook/bridge/cron.
             db.execute("""CREATE TABLE IF NOT EXISTS messages (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
                 payload TEXT, state TEXT NOT NULL, received REAL NOT NULL,
@@ -46,6 +47,12 @@ class Inbox:
                 db.execute('ALTER TABLE messages ADD COLUMN received_digest TEXT')
             if 'receipt' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
                 db.execute('ALTER TABLE messages ADD COLUMN receipt TEXT')
+            if 'retry_safe' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+                db.execute('ALTER TABLE messages ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0')
+            if 'handoff' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+                db.execute('ALTER TABLE messages ADD COLUMN handoff TEXT')
+            if 'schedule' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+                db.execute('ALTER TABLE messages ADD COLUMN schedule TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS resources (
                 message_id TEXT, resource_hash TEXT, path TEXT,
                 PRIMARY KEY(message_id, resource_hash))''')
@@ -127,7 +134,7 @@ class Inbox:
                        (time.time(), row['id']))
             return dict(row)
 
-    def boundary(self, mid, *, prompt=None, session=None):
+    def boundary(self, mid, *, prompt=None, session=None, handoff=None):
         with self.connect() as db:
             cur = db.execute("""UPDATE messages SET state=?,digest=?,session=?,updated=?
                 WHERE id=? AND state='processing'""",
@@ -137,6 +144,48 @@ class Inbox:
                 raise RuntimeError(f"inbound handoff is not in preparation: {mid}")
             if prompt is not None:
                 db.execute("INSERT OR REPLACE INTO meta VALUES ('last_prompt',?)", (prompt,))
+            if handoff is not None:
+                context = dict(handoff, prompt=prompt, submits=0, notice=None)
+                previous = db.execute('SELECT handoff FROM messages WHERE id=?', (mid,)).fetchone()
+                if previous and previous[0]:
+                    saved = json.loads(previous[0])
+                    if all(saved.get(k) == context.get(k) for k in ('prompt', 'workspace_id', 'pty', 'profile')):
+                        context = saved
+                db.execute('UPDATE messages SET handoff=? WHERE id=?',
+                           (json.dumps(context, ensure_ascii=False), mid))
+
+    def inbound_handoffs(self):
+        """Owned ordinary handoffs survive restart, including delayed receipts."""
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT * FROM messages
+                WHERE handoff IS NOT NULL AND state IN
+                ('queued','submitting','awaiting_confirmation','uncertain','done','received_modified')
+                ORDER BY seq""")
+                if json.loads(row['handoff']).get('notice') not in ('done', 'received_modified')]
+
+    def handoff_notice(self, mid, notice):
+        with self.connect() as db:
+            row = db.execute('SELECT handoff FROM messages WHERE id=?', (mid,)).fetchone()
+            if row and row[0]:
+                context = json.loads(row[0]); context['notice'] = notice
+                db.execute('UPDATE messages SET handoff=? WHERE id=?',
+                           (json.dumps(context, ensure_ascii=False), mid))
+
+    def handoff_attempt(self, mid, *, limit, delay):
+        """Reserve a bounded Enter BEFORE writing; a restart cannot reset it."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
+            if not row or not row['handoff'] or row['state'] not in (
+                    'submitting', 'awaiting_confirmation', 'uncertain'):
+                return False
+            context = json.loads(row['handoff'])
+            if context['submits'] >= limit or time.time() < context.get('next_submit', 0):
+                return False
+            context.update(submits=context['submits'] + 1, next_submit=time.time() + delay)
+            db.execute('UPDATE messages SET handoff=? WHERE id=?',
+                       (json.dumps(context, ensure_ascii=False), mid))
+            return True
 
     def last_prompt(self):
         with self.connect() as db:
@@ -149,7 +198,7 @@ class Inbox:
         with self.connect() as db:
             db.execute("""UPDATE messages SET state='cancelled',payload=NULL,updated=?
                 WHERE seq < (SELECT seq FROM messages WHERE id=?)
-                AND state IN ('queued','awaiting_confirmation','uncertain','failed')""", (time.time(), mid))
+                AND state IN ('queued','scheduled','awaiting_confirmation','uncertain','failed')""", (time.time(), mid))
             db.execute("DELETE FROM meta WHERE key='last_prompt'")
 
     def track_scheduled(self, mid, prompt, session, context):
@@ -165,6 +214,10 @@ class Inbox:
                 VALUES (?,?,'awaiting_confirmation',?,?,?,?)""",
                 (mid, json.dumps({'scheduled': context, 'prompt': prompt}, ensure_ascii=False),
                  now, now, prompt_digest(prompt), session))
+            db.execute("""UPDATE messages SET state='awaiting_confirmation',session=?,payload=?,updated=?
+                WHERE id=? AND state='scheduled' AND digest=?""",
+                (session, json.dumps({'scheduled': context, 'prompt': prompt}, ensure_ascii=False),
+                 now, mid, prompt_digest(prompt)))
             row = dict(db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone())
             if row['digest'] != prompt_digest(prompt) or row['session'] != session:
                 raise ValueError('定时投递记录与目标会话或正文不一致')
@@ -184,8 +237,31 @@ class Inbox:
 
     def scheduled_attempt(self, mid):
         with self.connect() as db:
-            cur = db.execute("""UPDATE messages SET attempts=attempts+1,updated=?
+            # Consume non-submission proof BEFORE crossing the write boundary.
+            # A crash after this commit must be treated as unknown, not replayed.
+            cur = db.execute("""UPDATE messages SET attempts=attempts+1,retry_safe=0,updated=?
                 WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""", (time.time(), mid))
+            return cur.rowcount == 1
+
+    def scheduled_not_submitted(self, mid, error, *, limit, delay):
+        """Only the driver's typed zero-write proof permits a later new paste."""
+        if not isinstance(error, RetryableHandoffError):
+            raise TypeError('non-submission requires typed driver proof')
+        with self.connect() as db:
+            db.execute("""UPDATE messages SET
+                state=CASE WHEN attempts>=? THEN 'failed' ELSE 'uncertain' END,
+                retry_safe=1,retry_at=?,error=?,updated=?
+                WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""",
+                (limit, time.time() + delay, str(error)[:300], time.time(), mid))
+
+    def scheduled_cancel(self, mid, reason):
+        """Cancel one superseded cron handoff; never assert a native receipt."""
+        if not mid.startswith('cron:') or not reason:
+            raise ValueError('an exact cron ID and cancellation reason are required')
+        with self.connect() as db:
+            cur = db.execute("""UPDATE messages SET state='cancelled',error=?,updated=?
+                WHERE id=? AND state IN ('scheduled','awaiting_confirmation','uncertain','failed')""",
+                (str(reason)[:300], time.time(), mid))
             return cur.rowcount == 1
 
     def scheduled_error(self, mid, error):
@@ -193,6 +269,56 @@ class Inbox:
             db.execute("""UPDATE messages SET state='uncertain',error=?,updated=?
                 WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""",
                 (str(error)[:300], time.time(), mid))
+
+    def due_register(self, job, stamp, profile, marker):
+        """One occurrence in the same Inbox, committed before any runtime work."""
+        mid = f"cron:{job['name']}:{stamp}"
+        schedule = dict(job=job, stamp=stamp, profile=profile, starts=0, phase='pending', notice=None)
+        now = time.time()
+        with self.connect() as db:
+            db.execute("""INSERT OR IGNORE INTO messages
+                (id,payload,state,received,updated,digest,schedule) VALUES (?,?,'scheduled',?,?,?,?)""",
+                (mid, json.dumps({'prompt': marker}, ensure_ascii=False), now, now,
+                 prompt_digest(marker), json.dumps(schedule, ensure_ascii=False)))
+        return self.get(mid)
+
+    def due_rows(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT * FROM messages
+                WHERE schedule IS NOT NULL AND state NOT IN ('done','cancelled') ORDER BY seq""")]
+
+    def due_start(self, mid, limit):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
+            if not row or row['state'] != 'scheduled':
+                return False
+            context = json.loads(row['schedule'])
+            if context['starts'] >= limit or row['retry_at'] > time.time():
+                return False
+            context.update(starts=context['starts'] + 1, phase='starting')
+            db.execute('UPDATE messages SET schedule=?,updated=? WHERE id=?',
+                       (json.dumps(context, ensure_ascii=False), time.time(), mid))
+            return True
+
+    def due_update(self, mid, *, error=None, delay=0, phase=None, notice=None, failed=False, launch=None):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
+            if not row or not row['schedule'] or row['state'] in ('done', 'cancelled'):
+                return
+            context = json.loads(row['schedule'])
+            if phase is not None:
+                context['phase'] = phase
+            if notice is not None:
+                context['notice'] = notice
+            if launch is not None:
+                context['launch'] = launch
+            # Unknown submitted input must remain eligible for a late native receipt.
+            state = 'failed' if failed and row['state'] == 'scheduled' else row['state']
+            db.execute('UPDATE messages SET schedule=?,error=?,retry_at=?,state=?,updated=? WHERE id=?',
+                       (json.dumps(context, ensure_ascii=False), str(error or row['error'] or '')[:300],
+                        time.time() + delay, state, time.time(), mid))
 
     def confirm(self, prompt, session=None, receipt=None):
         observed = prompt_digest(prompt)
@@ -215,10 +341,10 @@ class Inbox:
             if fields.get('to') != self.bot or fields.get('route') not in {'p2a', 'p2a-ext', 'a2a'}:
                 return 0
             cur = db.execute("""UPDATE messages SET state='received_modified',session=?,
-                received_digest=?,updated=? WHERE id=? AND digest IS NOT NULL
+                received_digest=?,receipt=?,updated=? WHERE id=? AND digest IS NOT NULL
                 AND (session IS NULL OR session=?)
                 AND state IN ('submitting','awaiting_confirmation','uncertain')""",
-                (session, observed, time.time(), fields.get('mid'), session))
+                (session, observed, proof, time.time(), fields.get('mid'), session))
             return cur.rowcount
 
     def finish(self, mid):
@@ -259,6 +385,21 @@ class Inbox:
     def counts(self):
         with self.connect() as db:
             return dict(db.execute("SELECT state,COUNT(*) FROM messages GROUP BY state").fetchall())
+
+    def reset_blockers(self, session=None):
+        """Pending work that could be interrupted by resetting the current thread.
+
+        Queued preparation always blocks. An unresolved handoff bound to a
+        different native thread remains in history, but cannot be interrupted
+        by closing this thread. Unknown/current bindings still fail closed.
+        This is not a delivery receipt or permission to replay old messages.
+        """
+        with self.connect() as db:
+            return dict(db.execute("""SELECT state,COUNT(*) FROM messages
+                WHERE state IN ('queued','processing') OR
+                (state IN ('submitting','awaiting_confirmation','uncertain')
+                 AND (? IS NULL OR session IS NULL OR session='' OR session=?))
+                GROUP BY state""", (session or None, session or None)).fetchall())
 
     def delivery_status(self):
         """Latest ordinary handoff, including its real native receipt (no body)."""

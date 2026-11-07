@@ -266,6 +266,20 @@ def runtime_processes(pty, runtime):
         return []  # Missing observation never authorizes a later unbind.
 
 
+def shell_has_no_children(pty):
+    """Positive OS evidence for retrying an unexecuted launcher, never a PID guess."""
+    import kimi_process
+    try:
+        sessions = json.loads((WMUX_HOME / "sessions.json").read_text(encoding="utf-8"))["sessions"]
+        saved = next(r for r in sessions if r.get("id") == pty)
+        rows = kimi_process.inventory()
+        shell = next(r for r in rows if r["pid"] == saved["pid"]
+                     and int(r["birth"]) // 10 == int(saved["pidCreatedAtFt"]) // 10)
+        return set(kimi_process.descendants(rows, {shell["pid"]: shell})) == {shell["pid"]}
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, kimi_process.Error):
+        return False
+
+
 def daemon_fingerprint():
     """wmux daemon 实例指纹 = ~/.wmux/daemon.pid 的 `内容:mtime`。
 

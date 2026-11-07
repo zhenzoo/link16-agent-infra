@@ -602,6 +602,10 @@ def _record_startup_failure(bot, *, workspace_id, pty, cwd, stage, reason, scree
     try:
         STATE_DIR.mkdir(exist_ok=True)
         bridge_injection.atomic_write_json(_startup_failure_file(bot["name"]), rec)
+        # A later successful /new clears the current warning, not the evidence.
+        with (STATE_DIR / f"bridge-startup-failures-{bot['name']}.jsonl").open(
+                "a", encoding="utf-8") as history:
+            history.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 — 诊断留痕失败不得掀翻原启动错误
         pass
     return rec
@@ -1208,13 +1212,44 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
 
     if agent_runtime.uses_app_server(bot):
         record = _codex_startup_record(bot)
-        detail = record.get("detail") or "启动命令已提交，但 worker 未确认开始执行"
-        if record.get("stage") != "failed":
-            detail += "；未取得终端会话响应和同线程回传确认"
         try:
             screen = read_screen(pty, 100)
         except RuntimeError:
             screen = ""
+        # No current worker receipt + a verified idle shell permits one retry.
+        # An exact owned launcher draft needs Enter only; never paste it twice.
+        retried = False
+        if (not record and bot.get("_startup_id")
+                and _startup_retryable_shell(bot, pty, screen)
+                and wmux_session.shell_has_no_children(pty)):
+            launcher = STATE_DIR / f"agent-launch-{bot['name']}-{bot['_startup_id']}.sh"
+            command = f'bash "{launcher.as_posix()}"'
+            last = screen.rstrip().rsplit("\n", 1)[-1].strip()
+            if last == "$" or last == "$ " + command:
+                # Recheck the worker receipt immediately before touching input.
+                if not _codex_startup_record(bot):
+                    retried = True
+                    blog(bot["name"], "启动仍停在无子进程的 shell，自动恢复一次；原业务消息尚未提交")
+                    try:
+                        if last == "$ " + command:
+                            wmux("enter", pty, "--allow-ws", workspace_id)
+                        else:
+                            wmux_session.send_command(pty, workspace_id, command)
+                        if _wait_agent_ready(bot, pty, workspace_id, since=startup_started):
+                            _clear_startup_failure(bot["name"])
+                            return True
+                    except RuntimeError as exc:
+                        blog(bot["name"], f"启动恢复未完成：{exc}")
+                    record = _codex_startup_record(bot)
+                    try:
+                        screen = read_screen(pty, 100)
+                    except RuntimeError:
+                        pass
+        detail = record.get("detail") or "启动命令已提交，但 worker 未确认开始执行"
+        if retried:
+            detail += "；已按裸 shell 证据自动恢复一次，仍未就绪"
+        if record.get("stage") != "failed":
+            detail += "；未取得终端会话响应和同线程回传确认"
         _record_startup_failure(bot, workspace_id=workspace_id, pty=pty, cwd=cwd,
                                 stage=record.get("stage") or "worker-not-started", reason=detail, screen=screen)
         return False
@@ -1406,10 +1441,28 @@ def _release_exited_session_unlocked(bot):
 
 def _worker_cmd(bot, cwd=None):
     """起 worker 的命令。CLI/runtime 差异集中在 agent_runtime.py，桥只关心 outbox 合约。"""
-    command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd)
+    # The bridge completes the official update before starting its ready clock.
+    command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd, auto_update=False)
     if (agent_runtime.uses_app_server(bot) or agent_runtime.runtime_name(bot) == "kimi") and bot.get("_startup_id"):
         command += " --startup-id " + shlex.quote(bot["_startup_id"])
     return command
+
+
+def _prepare_worker_update(bot):
+    """Run the bounded updater before the separate native startup deadline.
+
+    Previously an updater allowed 60s (plus version probes) lived inside the
+    same 60s ready window, so the bridge could close a healthy pending launch.
+    The updater's program lock, fail-open policy and profile rules are unchanged.
+    """
+    try:
+        import agent_update
+        profile = agent_runtime.profile_name(bot, required=True)
+        result = agent_update.ensure(profile)
+        blog(bot["name"], f"启动前官方更新检查：{result.get('status', 'unknown')}；随后开始原生就绪检查")
+    except Exception as exc:
+        # Match the existing agent_update CLI: update failure never blocks use.
+        blog(bot["name"], f"官方更新检查失败（{type(exc).__name__}），继续使用当前版本启动")
 
 
 def _worker_launcher(bot, cwd):
@@ -1509,10 +1562,12 @@ def _ensure_session_unlocked(bot):
     # Permission bypass flags do not bypass either runtime's directory-trust gate.
     agent_runtime.ensure_launch_cwd_trust(bot, cwd)
     startup_bot = {**bot, "_startup_id": (pending_launch or {}).get("startup_id") or uuid.uuid4().hex}
-    startup_started = time.time()
+    if not pending_launch:
+        _prepare_worker_update(bot)
     # Codex already proved this shape: one script performs cd + worker launch,
     # and the terminal receives one short command from either default shell.
     command = (pending_launch or {}).get("command") or _worker_launcher(startup_bot, cwd)
+    startup_started = time.time()
     try:
         r = wmux_session.spawn(
             f"bot-{bot['name']}", cmd=command, cwd=None, shell_init=None,
@@ -1657,6 +1712,17 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     is_kimi = bool(runtime_bot and agent_runtime.runtime_name(runtime_bot) == "kimi")
     steer_kimi = _kimi_active_turn(runtime_bot)
     win32_input = os.name == "nt" and runtime_bot and agent_runtime.runtime_name(runtime_bot) == "codex"
+    is_codex = bool(runtime_bot and agent_runtime.uses_app_server(runtime_bot))
+    if is_codex:
+        import cron_delivery
+        # A saved/partial draft belongs to its original handoff. Never append a
+        # later message to it, and never clear it to make the queue look healthy.
+        try:
+            empty = cron_delivery._draft(read_screen(pty, None)) in ('', 'Ask Codex to do anything')
+        except RuntimeError as exc:
+            raise bridge_inbox.RetryableHandoffError('输入框无法读取；本次零写入') from exc
+        if not empty:
+            raise bridge_inbox.RetryableHandoffError('输入框不是可核实的空稿；本次零写入')
     wmux("paste", pty, marker, *allow,
          *(["--win32-input"] if win32_input else []))
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
@@ -1666,6 +1732,10 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
         wmux("send", pty, "\x1b[115;5u", *allow)
     else:
         wmux("enter", pty, *allow)
+    if is_codex:
+        # This is only a successful transport call. Inbox + the native hook
+        # decide reception; recovery alone may retry Enter on an idle exact draft.
+        return True
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
     tries = 15 if is_kimi else INJECT_VERIFY_TRIES
     for i in range(tries):
@@ -2139,6 +2209,38 @@ def thumbs_up(channel, message_id, name):
     task = asyncio.create_task(_thumbs_up(channel, message_id, name))
     _BACKGROUND.add(task)
     task.add_done_callback(_BACKGROUND.discard)
+
+
+async def settle_inbound_handoffs(bot, inbox, channel):
+    """Native receipt owns the reaction; unresolved input gets one honest notice."""
+    import cron_delivery
+    for row in inbox.inbound_handoffs():
+        context = json.loads(row['handoff'])
+        if row['state'] in {'awaiting_confirmation', 'uncertain'}:
+            try:
+                await asyncio.to_thread(cron_delivery.confirm_inbound,
+                                        sys.modules[__name__], bot, row)
+            except Exception as exc:
+                inbox.scheduled_error(row['id'], exc)
+            row = inbox.get(row['id'])
+        if cron_delivery.accepted(row):
+            if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
+                inbox.handoff_notice(row['id'], 'done')
+        elif row['state'] == 'received_modified':
+            result = await card_send(channel, context['chat_id'],
+                                    '⚠️ Codex 已接收这条消息，但收到的文字与桥保存的原文不一致。'
+                                    '我不会重复提交；完整原文和接收记录已保留，请核对本条处理结果。', bot['name'])
+            if result != 'failed':
+                inbox.handoff_notice(row['id'], 'received_modified')
+        elif (row['state'] in {'queued', 'awaiting_confirmation', 'uncertain'}
+              and time.time() - row['received'] >= 30 and context.get('notice') != 'pending'):
+            result = await card_send(channel, context['chat_id'],
+                                    '⏳ 消息已保存，但尚未取得 Codex 的原文接收回执，因此还没有点赞。'
+                                    '若原会话空闲且完整原稿仍在，桥会有界补 Enter；审批拦截、残稿或无法读屏时保留现场，'
+                                    '不会清稿、重复粘贴或冒称成功。'
+                                    f"\n记录：{row['id']}\n阻塞：{row.get('error') or '原生回执尚未到达'}", bot['name'])
+            if result != 'failed':
+                inbox.handoff_notice(row['id'], 'pending')
 
 
 async def card_send(channel, target, text, name):
@@ -3241,7 +3343,8 @@ def _run_bot(bot_name=None):
                 blog(bot["name"], "⚠️ 本 bot 还没认主人(无 owner 文件)且只在群里被 @ 过 —— "
                                   "普通回复(route=p2a)无处可投·请主人【私聊它一句】完成认主(SOP-125)")
             # 回信路由 per-turn：回址焊进消息末尾信封 + UserPromptSubmit hook 取【最末】信封→turn-route·不存 session 级 reply_dest（长 turn 交错会串台·见 ARCH-110 §2.5.1）
-            thumbs_up(channel, msg.id, bot["name"])
+            if not agent_runtime.uses_app_server(bot) or text.startswith('/'):
+                thumbs_up(channel, msg.id, bot["name"])
 
             # 🔒 串行化：同一 bot 同时收到多条消息时一条一条处理，防「并发注入交错 + ensure_session race」
             # （Zara 式「运行中的消息排队下一轮」· 2026-06-15 实证：连发两条，第二条的回复被冲掉没发回）。
@@ -3440,7 +3543,11 @@ def _run_bot(bot_name=None):
                            {str(p): mt for p, mt in await asyncio.to_thread(_project_jsonls, bot)})
                     inject_wall = time.time()
                     target_session = _codex_startup_record(bot).get("thread_id")
-                    durable_inbox.boundary(msg.id, prompt=marker, session=target_session)
+                    handoff = (dict(workspace_id=ws, pty=pty,
+                                    profile=agent_runtime.profile_name(bot, required=True),
+                                    chat_id=msg.chat_id)
+                               if agent_runtime.uses_app_server(bot) else None)
+                    durable_inbox.boundary(msg.id, prompt=marker, session=target_session, handoff=handoff)
                     inject_ok = await asyncio.to_thread(
                         _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None,
                         runtime_bot=bot)
@@ -3688,6 +3795,17 @@ def _run_bot(bot_name=None):
                 await asyncio.sleep(10)
                 outage.poll()
         asyncio.create_task(_watch_outage())
+
+        async def _watch_inbound_receipts():
+            while not control.stopping():
+                await asyncio.sleep(2)
+                if not agent_runtime.uses_app_server(bot):
+                    continue
+                try:
+                    await settle_inbound_handoffs(bot, durable_inbox, ch)
+                except Exception as exc:
+                    blog(bname, f'原生接收检查暂未完成：{str(exc)[:180]}')
+        asyncio.create_task(_watch_inbound_receipts())
 
         wake = asyncio.Event()
         ch.bind_inbox(wake)

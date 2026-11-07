@@ -301,10 +301,23 @@ async function main() {
       // Only the wire encoding changes; the prompt and receipt stay original.
       const encode = (t) => WIN32_INPUT && process.platform === "win32"
         ? t.replace(/\r\n|[\r\n]|[\u{10000}-\u{10ffff}]/gu, (c) =>
-            /[\r\n]/.test(c) ? "\x1b[13;28;13;1;16;1_" :
+            /[\r\n]/.test(c) ? "\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_" :
               `\x1b[0;0;${c.charCodeAt(0)};1;0;1_\x1b[0;0;${c.charCodeAt(1)};1;0;1_`)
         : t;
       const sendChunk = (t) => rpc("input.send", { text: encode(t), raw: true, ptyId, workspaceId: ws });
+      if (WIN32_INPUT && process.platform === "win32") {
+        // Codex consumes a complete bracketed paste. Rechecking Wmux's screen
+        // guard between chunks can reject our own half-written prompt and leave
+        // a permanent draft. One protected RPC keeps the envelope together;
+        // policy rejection still writes nothing, and a lost response is unknown.
+        try { await sendChunk(BP_START + text.replace(/\r\n/g, "\n") + BP_END); }
+        catch (error) {
+          if (error.fromServer) error.handoff = "not_written";
+          throw error;
+        }
+        out = { pasted: text.length, chunks: 1 };
+        break;
+      }
       let started = false, written = "", n = 0;
       try {
         await sendChunk(BP_START);

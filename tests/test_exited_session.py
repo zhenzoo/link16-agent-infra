@@ -126,7 +126,7 @@ def test_regular_session_creation_releases_before_reuse(dead, monkeypatch):
 def test_nightly_unknown_old_activity_can_start_after_verified_process_exit(dead, monkeypatch):
     monkeypatch.setattr(bridge, "load_bots", lambda: [dead.bot])
     monkeypatch.setattr(bridge.bridge_inbox, "Inbox", Mock(return_value=SimpleNamespace(
-        counts=lambda: {}, scheduled_latest=lambda name: None)))
+        reset_blockers=lambda session=None: {}, scheduled_latest=lambda name: None)))
     monkeypatch.setattr(bridge.bridge_outbox, "picker_load", lambda *a: None)
     monkeypatch.setattr(bridge.bridge_outbox, "pending_clear", lambda *a: None)
     monkeypatch.setattr(bridge.session_work, "clear", lambda *a: None)

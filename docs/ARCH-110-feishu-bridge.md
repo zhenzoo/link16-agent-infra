@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-10-29
+last_reviewed: 2026-11-04
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -261,7 +261,11 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 普通提示词提交前保存精确内容摘要，信封带该条飞书消息 ID；Codex 同时绑定目标 thread。现有 `UserPromptSubmit` hook 对本次真实输入求摘要，匹配且会话一致后完成交接；换行仅规范 CRLF/CR。它证明会话接收了这条输入，不代表模型已经回答。桥先退出而 hook 后到时，hook 仍能独立提交同一条确认。用户在终端补字导致摘要不同但信封和会话一致时，记 `received_modified`，不能冒充正文完全一致，也不能继续误报未接收。
 
-Codex 缺少 hook 回执时，现有 doctor 通过同一 worker 的 app-server 只读查询目标 thread 最近最多 30 个 turn，仅以 `userMessage` 核对；assistant 引用与其它 thread 均不计接收，未查到也不盲目重投。`/delivery` 与 CLI `status` 显示落盘状态、真实接收会话和正文核对结果。零写入或已确认清空的失败由原收件队列退避重试；持续核对结果保留在账本和日志中，不因为短暂失败或升级后发现历史待核记录就发送“终端未确认”卡片。
+Codex 缺少 hook 回执时，现有 doctor 通过同一 worker 的 app-server 只读查询目标 thread 最近最多 30 个 turn，仅以 `userMessage` 核对；assistant 引用与其它 thread 均不计接收，未查到也不盲目重投。历史接口不支持时保留未知，正常确认使用 `UserPromptSubmit` 或新 worker 的正式 `turn/start` 成功响应。`/delivery` 与 CLI `status` 显示落盘状态、真实接收会话和正文核对结果。
+
+Codex 普通消息的 `handoff` 在写入前保存完整原稿、workspace/PTY/profile、原会话以及恢复次数。桥与 Cron 共用 `cron_delivery` 的回执、绑定和完整草稿检查：只有原生线程明确 idle、绑定不变且输入框仍是完整原稿，才经受保护的 Wmux Enter 补交；最多 3 次、间隔至少 20 秒，尝试前先落盘，重启不能清零。零写入失败仍由原收件队列退避重试；部分草稿、其它草稿和不可读输入框不清除、不重贴，后续消息也不能追加进去。没有 handoff 绑定的历史记录只读核对，不自动接管。
+
+普通 Codex 消息的点赞改为完整原文已接收的信号；提交到输入框不触发点赞。原生回执确认正文被修改时保留原文并提示，不重复输入。当前交接超过 30 秒未确认则告知具体阻塞，每条只提醒一次；迟到回执继续核对并在成功后点赞。Windows Codex 的粘贴包通过一次正式 `input.send` 写入，保留 Wmux 的审批/信任检查，避免分块中途拒绝导致残稿；Shift+Enter 按下后释放，防连续空行被合并。网络响应丢失仍是未知结果，不能换通道重发。Claude/Kimi 的既有投递与反馈分支保持。
 
 受控 `start` / `stop` 给当前 handler 3 秒宽限，超时直接结束进程；强杀、断电恰好跨越不可查询的 TUI/斜杠副作用时，仍有无法自动判定的窗口，这是保留 uncertain 的明确边界（最坏是那一条需要重发，不会重复执行）。正常的桥重启不靠重复发任务解决它。入站未收到平台事件、磁盘损坏和平台撤回资源不属于本地收件确认保证。
 
@@ -593,7 +597,8 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 - `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=30` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
-- 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。app-server 分支不读屏判就绪、不重发启动命令，也不再等待模型预热。
+- 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。三平台的官方更新检查先经 `agent_update.ensure` 完成，随后才开始原生就绪计时；更新失败继续启动当前版本，更新的 60 秒上限和版本探针不会挤占原生启动窗口。app-server 分支只按协议确认就绪，不等待模型预热。
+- Codex 未取得本次 worker 回执时，若工作区仍是无 agent 标签的 shell、系统核对 shell 的进程创建时间且没有子进程、输入行是空 `$` 或本次完整 launcher，则自动恢复一次：空行重发 launcher，完整草稿只补 Enter。慢 worker、未知读屏、其他草稿或原生失败不重贴。恢复后仍须同一 startup_id 的原生 ready；失败当前提示可清除，但 `bridge-startup-failures-<bot>.jsonl` 保留现场历史。
 - **尚未提交 launcher 的超时**：保留工作区、pty、命令和 startup_id 到原会话记录的 `pending_launch`；持久队列在同一工作区续等，不报永久启动失败、不要求主人重发、不另建窗口。launcher 已提交后的响应不确定仍按原生启动回执判断，不能套用此安全重试分支。
 
 **2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。手动 `/handoff` 另以 `bridge-handoff-attempt-<bot>.json` 记录 pending/failed/complete：旧会话已经关掉但新会话没起成时，6 小时内再次发 `/handoff` 会复用原快照重试，不会要求已经不存在的旧会话再活一次；complete 后同一快照不可重放。

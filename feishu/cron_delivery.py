@@ -1,4 +1,4 @@
-"""Cron's Codex handoff: native receipt first, submit an owned draft only.
+"""Cron's Codex handoff: native receipt first, retry only with explicit proof.
 
 Uses the existing Inbox and UserPromptSubmit / successful turn/start receipt.
 Wmux input.sendKey performs the same Enter as the terminal. Screen text is
@@ -13,13 +13,14 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from bridge_inbox import Inbox, prompt_digest
+from bridge_inbox import Inbox, RetryableHandoffError, prompt_digest
 from bridge_injection import injection_lock
 import codex_startup
 
 WAIT_SEC = 20
 MAX_SUBMITS = 3
 POLL_SEC = 1
+RETRY_DELAY_SEC = 20
 
 
 def _binding(fb, bot, ws, pty, session=None):
@@ -34,16 +35,33 @@ def _binding(fb, bot, ws, pty, session=None):
     return thread
 
 
-def draft_matches(screen, prompt):
-    """Conservative guard for Codex's visible composer; blank/changed UI fails closed."""
-    starts = list(re.finditer(r'(?m)^[ \t│║┃]*›(?:\s|$)', screen))
+def _draft(screen):
+    """None means unreadable; an empty string means a visibly empty composer."""
+    starts = list(re.finditer(r'(?m)^[ \t│║┃]*›(?:[ \t]|$)', screen))
     if not starts:
-        return False
+        return None
     tail = screen[starts[-1].end():]
     # Codex separates the composer from its status line by a blank line.
-    draft = re.split(r'\n[ \t]*\n', tail, maxsplit=1)[0]
+    return re.split(r'\n[ \t]*\n', tail, maxsplit=1)[0].strip()
+
+
+def draft_matches(screen, prompt):
+    """Conservative guard for Codex's visible composer; blank/changed UI fails closed."""
+    draft = _draft(screen)
     compact = lambda text: re.sub(r'\s+', '', text)
-    return bool(draft.strip()) and compact(draft) == compact(prompt)
+    return bool(draft) and compact(draft) == compact(prompt)
+
+
+def _paste(fb, bot, inbox, row, pty, ws, marker):
+    if inbox.scheduled_attempt(row['id']):
+        try:
+            fb._inject_unlocked(pty, ws, marker, runtime_bot=bot)
+        except RetryableHandoffError as exc:
+            inbox.scheduled_not_submitted(row['id'], exc, limit=MAX_SUBMITS, delay=RETRY_DELAY_SEC)
+            raise
+        except Exception as exc:
+            inbox.scheduled_error(row['id'], exc)
+            raise
 
 
 def accepted(row):
@@ -53,9 +71,44 @@ def accepted(row):
                 in {'UserPromptSubmit', 'turn/start'})
 
 
+def confirm_inbound(fb, bot, row):
+    """One ordinary-message recovery tick; never paste, clear or answer a dialog.
+
+    Shares cron's native receipt, exact draft and live binding checks. A partial
+    paste or unreadable screen stays pending; Wmux's policy remains authoritative.
+    """
+    inbox = Inbox(fb.STATE_DIR, bot['name'])
+    current = inbox.get(row['id'])
+    if accepted(current):
+        return True
+    if not current or current['state'] not in {'submitting', 'awaiting_confirmation', 'uncertain'}:
+        return False
+    context = json.loads(current.get('handoff') or '{}')
+    marker = context.get('prompt')
+    if not marker or prompt_digest(marker) != current['digest']:
+        raise RuntimeError('待交完整原文缺失或摘要变化；不补交')
+    ws, pty = context['workspace_id'], context['pty']
+    if context['profile'] != fb.agent_runtime.profile_name(bot, required=True):
+        raise RuntimeError('待交账号已变化；不补交')
+    with injection_lock(fb.STATE_DIR, 'tui-inject', ws):
+        if accepted(inbox.get(row['id'])):
+            return True
+        _binding(fb, bot, ws, pty, current['session'])
+        if fb.bridge_activity.read_activity(fb.STATE_DIR, bot).get('state') != 'idle':
+            return False
+        if not draft_matches(fb.read_screen(pty, None), marker):
+            return False
+        # Recheck the receipt after reading the screen; never replay accepted input.
+        if accepted(inbox.get(row['id'])):
+            return True
+        if inbox.handoff_attempt(row['id'], limit=MAX_SUBMITS, delay=RETRY_DELAY_SEC):
+            fb.wmux('enter', pty, '--allow-ws', ws)
+    return accepted(inbox.get(row['id']))
+
+
 def _register(fb, bot, job, ws, pty, marker, stamp=None):
     thread = _binding(fb, bot, ws, pty)
-    stamp = stamp or datetime.now(ZoneInfo(job.get('tz', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M')
+    stamp = stamp or job.get('_scheduled_stamp') or datetime.now(ZoneInfo(job.get('tz', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M')
     mid = f"cron:{job['name']}:{stamp}"
     context = dict(job=job['name'], workspace_id=ws, pty=pty,
                    job_digest=prompt_digest(job['prompt']), stamp=stamp)
@@ -66,7 +119,8 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
     """Same confirmation/recovery loop for initial fire and later daemon ticks.
 
     A missing receipt is UNKNOWN, not proof of non-delivery. Only an idle native
-    thread with the exact owned draft permits another Enter. No text is pasted.
+    thread with the exact owned draft permits another Enter. A new paste also
+    requires durable driver proof of no submission and a visibly empty composer.
     """
     inbox = Inbox(fb.STATE_DIR, bot['name'])
     current = inbox.get(row['id'])
@@ -92,7 +146,13 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
             activity = fb.bridge_activity.read_activity(fb.STATE_DIR, bot)
             if activity.get('state') == 'idle' and current['attempts'] < MAX_SUBMITS:
                 screen = fb.read_screen(pty, None)
-                if draft_matches(screen, marker):
+                if (current.get('retry_safe') and _draft(screen) == ''
+                        and time.time() >= current.get('retry_at', 0)):
+                    if accepted(inbox.get(row['id'])):
+                        return True
+                    _paste(fb, bot, inbox, current, pty, ws, marker)
+                    reason = '已按驱动未提交证明重新投递，等待原生接收回执'
+                elif draft_matches(screen, marker):
                     # A hook can land while querying the native state/screen.
                     if accepted(inbox.get(row['id'])):
                         return True
@@ -100,7 +160,9 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
                         fb.wmux('enter', pty, '--allow-ws', ws)
                     reason = '已补交原草稿，等待原生接收回执'
                 else:
-                    reason = '未确认输入框含完整原草稿；不重贴、不冒称接收'
+                    reason = ('驱动已证未提交，等待可读空输入框及重试间隔；不绕过窗口保护'
+                              if current.get('retry_safe') else
+                              '未确认输入框含完整原草稿；不重贴、不冒称接收')
             elif activity.get('state') != 'idle':
                 reason = '原生会话忙或状态未知，等待接收回执，不重复提交'
             else:
@@ -123,12 +185,7 @@ def submit(fb, bot, job, ws, pty, marker):
         # caller must observe the first attempt/receipt, never paste twice.
         if row['attempts'] == 0:
             inbox = Inbox(fb.STATE_DIR, bot['name'])
-            if inbox.scheduled_attempt(row['id']):
-                try:
-                    fb._inject_unlocked(pty, ws, marker, runtime_bot=bot)
-                except Exception as exc:
-                    inbox.scheduled_error(row['id'], exc)
-                    raise
+            _paste(fb, bot, inbox, row, pty, ws, marker)
     return confirm(fb, bot, job, row)
 
 
