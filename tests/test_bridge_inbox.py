@@ -44,6 +44,28 @@ class InboxTests(unittest.TestCase):
         with self.inbox.connect() as db:
             self.assertEqual(db.execute('PRAGMA journal_mode').fetchone()[0].lower(), 'wal')
 
+    def test_wal_migration_retries_transient_lock(self):
+        class FlakyConnection:
+            def __init__(self, path):
+                self.db = bi.sqlite3.connect(path)
+                self.failed = False
+
+            def execute(self, sql, *args):
+                if sql == 'PRAGMA journal_mode=WAL' and not self.failed:
+                    self.failed = True
+                    raise bi.sqlite3.OperationalError('database is locked')
+                return self.db.execute(sql, *args)
+
+            def close(self):
+                self.db.close()
+
+        db = FlakyConnection(self.inbox.path)
+        self.addCleanup(db.close)
+        with patch.object(bi, 'DB_LOCK_RETRY_SEC', 0):
+            self.inbox._migrate(db)
+        self.assertTrue(db.failed)
+        self.assertEqual(db.execute('PRAGMA journal_mode').fetchone()[0].lower(), 'wal')
+
     def test_real_process_lock_waits_recovers_and_logs_operation(self):
         holder = "import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('BEGIN IMMEDIATE'); print('locked',flush=True); time.sleep(.35); db.rollback()"
         proc = subprocess.Popen([sys.executable, '-c', holder, str(self.inbox.path)],

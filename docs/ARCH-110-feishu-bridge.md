@@ -245,7 +245,7 @@ Link16 对每只 bot 维护 `feishu/_state/bridge-inbound-<bot>.jsonl`：
 
 `bridge_inbox_channel.py` 在 SDK 原始同步回调内先完成身份、群 @、私聊 owner/白名单与 SDK policy 检查，再将消息 ID、正文、消息类型和附件引用提交到 `bridge_inbox.py` 的每 bot SQLite 收件箱。提交使用 `synchronous=FULL`；成功后才返回，让 WebSocket 应答成功。保存失败直接向 SDK 抛错，实际帧返回 500，不确认未保存的消息。鉴权头、app secret 和 header token 不写入收件箱；未授权私聊与未 @ 的群旁观消息不留存。
 
-SQLite 锁是局部等待状态，不是桥崩溃条件（PLAN-1220）。收件库使用 WAL 和 30 秒 busy timeout；schema 完整且已是 WAL 时，创建 `Inbox` 只读检查，不再重复执行 `BEGIN IMMEDIATE` 抢写锁。操作等待超过 1 秒或最终失败时记录 bot、操作名、PID、耗时和结果，不写消息正文或凭据。消费者的 recover/claim/finish/fail 通过工作线程执行；锁超时后保留原状态并退避重试，停止请求可结束等待。命令已越过 `command` 边界时，即使完成记账暂时受阻，也不得为恢复而再次执行 `/close` 或 `/account`。
+SQLite 锁是局部等待状态，不是桥崩溃条件（PLAN-1220）。收件库使用 WAL 和 30 秒 busy timeout；schema 完整且已是 WAL 时，创建 `Inbox` 只读检查，不再重复执行 `BEGIN IMMEDIATE` 抢写锁。首次 `PRAGMA journal_mode=WAL` 在并发切换时可能绕过 busy timeout 立即报锁，因此这一处另按 50ms 间隔、同一 30 秒预算做有界重试，不新增业务锁。操作等待超过 1 秒或最终失败时记录 bot、操作名、PID、耗时和结果，不写消息正文或凭据。消费者的 recover/claim/finish/fail 通过工作线程执行；锁超时后保留原状态并退避重试，停止请求可结束等待。命令已越过 `command` 边界时，即使完成记账暂时受阻，也不得为恢复而再次执行 `/close` 或 `/account`。
 
 原 SDK 内存队列不再承担消息派发。磁盘消费者依原消息 ID 去重并按收到顺序领取；使用 SDK 的内容归一化与附件解析，但已接纳待办恢复时不再经过按消息年龄丢弃的闸。正常新消息由事件唤醒立即处理；失败准备按退避重试，不挡住后面的 `/stop`。下载完成的附件路径持久化复用，不同消息的同名文件使用不同目录；长文本保存失败保留完整待办，不能截断后假装提交。
 
