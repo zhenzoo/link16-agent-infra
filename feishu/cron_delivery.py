@@ -40,9 +40,15 @@ def _draft(screen):
     starts = list(re.finditer(r'(?m)^[ \t│║┃]*›(?:[ \t]|$)', screen))
     if not starts:
         return None
-    tail = screen[starts[-1].end():]
-    # Codex separates the composer from its status line by a blank line.
-    return re.split(r'\n[ \t]*\n', tail, maxsplit=1)[0].strip()
+    tail = screen[starts[-1].end():].rstrip()
+    # read_screen returns the terminal's bottom, including its status footer.
+    # Blank lines *inside* a pasted message are part of the draft. Only the
+    # final separator belongs to the footer; taking the first loses paragraphs
+    # and permanently disables safe Enter recovery for those messages.
+    separators = list(re.finditer(r'\n[ \t]*\n', tail))
+    if not separators:
+        return None  # A partial frame without the footer is not an empty draft.
+    return tail[:separators[-1].start()].strip()
 
 
 def draft_matches(screen, prompt):

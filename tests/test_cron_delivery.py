@@ -98,6 +98,27 @@ def test_lost_enter_retries_only_owned_draft_and_waits_for_receipt(scene):
     assert scene.fb.wmux.call_count == 2
 
 
+def test_scheduled_multiline_draft_uses_same_receipt_guard(scene):
+    scene.job['prompt'] = '第一段\n\n第二段\n第三行'
+    marker = cron._marker(scene.job)
+    row = delivery._register(scene.fb, scene.bot, scene.job, 'ws', 'pty', marker,
+                             stamp='2026-11-03 00:00')
+    scene.fb.read_screen.return_value = f'› {marker}\n\n  GPT-6-Astra xhigh · project\n\n'
+    scene.fb.wmux.side_effect = lambda *a: scene.inbox.confirm(marker, 'thread')
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, row, timeout=0)
+    scene.fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
+
+
+@pytest.mark.parametrize('screen,expected', [
+    ('› 第一段\n  \n  第二段\n\n  GPT-6-Astra xhigh · project', '第一段\n  \n  第二段'),
+    ('› \n\n  GPT-6-Astra xhigh · project\n\n', ''),
+    ('› partial frame without footer', None),
+    ('unreadable', None),
+])
+def test_composer_parser_keeps_internal_blank_lines_and_rejects_incomplete_frames(screen, expected):
+    assert delivery._draft(screen) == expected
+
+
 def test_missing_receipt_has_durable_retry_limit_across_restarts(scene):
     for _ in range(5):
         row = Inbox(scene.fb.STATE_DIR, 'target').get(scene.row['id'])

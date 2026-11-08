@@ -233,6 +233,18 @@ class RemoteResumePermissionTests(unittest.TestCase):
 
 
 class ResumeProviderTests(unittest.TestCase):
+    def test_mismatched_saved_identity_cannot_resume(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(worker.os.environ, {worker.agent_runtime.PROFILE_ENV: 'cxp2'}):
+            state = Path(tmp)
+            for saved in ({'cwd': str(state / 'other')}, {'profile': 'another-profile'}):
+                with self.subTest(saved=saved):
+                    worker._thread_state_path(state, 'test-bot').write_text(
+                        json.dumps({'thread_id': 'existing-thread', **saved}), encoding='utf-8')
+                    rpc = mock.Mock()
+                    with self.assertRaisesRegex(RuntimeError, '不跨'):
+                        worker._start_or_resume_thread(rpc, state_dir=state, bot='test-bot', cwd=state)
+                    rpc.request.assert_not_called()
+
     def test_resumed_thread_uses_explicit_effective_profile_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)

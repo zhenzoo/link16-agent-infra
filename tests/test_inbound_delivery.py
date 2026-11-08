@@ -198,6 +198,26 @@ def test_lost_enter_recovers_owned_draft_then_reacts_only_after_exact_native_rec
     assert delivery.accepted(scene.inbox.get('om_m'))
 
 
+@pytest.mark.parametrize('changed', ['', '\n\n新增另一段', 'truncated'])
+def test_multiline_handoff_preserves_blank_lines_and_requires_whole_prompt(scene, changed):
+    marker = '今天 Slot one 发了吗？\n\n请查发布回执。\n再核今日选题。 ' + scene.marker
+    scene.inbox.receive({'message': {'message_id': 'om_multi', 'chat_id': 'chat'}})
+    scene.inbox.claim()
+    scene.inbox.boundary('om_multi', prompt=marker, session='thread',
+                         handoff=dict(scene.binding, chat_id='chat'))
+    scene.inbox.finish('om_multi')
+    shown = marker.rsplit(' ', 1)[0] if changed == 'truncated' else marker + changed
+    fb.read_screen.return_value = f'› {shown}\n\n  GPT-6-Astra xhigh · project'
+    delivery.confirm_inbound(fb, scene.bot, scene.inbox.get('om_multi'))
+    if changed:
+        fb.wmux.assert_not_called()
+    else:
+        fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
+        scene.inbox.confirm(marker, 'thread')
+        assert delivery.confirm_inbound(fb, scene.bot, scene.inbox.get('om_multi'))
+        assert fb.wmux.call_count == 1
+
+
 @pytest.mark.parametrize('screen', ['', 'unreadable', '› partial\n\nstatus', '› someone else\n\nstatus'])
 def test_partial_changed_and_unreadable_drafts_never_receive_enter_or_success(scene, screen):
     fb.read_screen.return_value = screen

@@ -361,6 +361,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（选 Codex profile 的增量：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
 | 给已有的 bot 改名、查专属后台并同步新旧名称 | [`SOP-125`](docs/SOP-125-bot-rename.md)：`rename_bot.py plan → apply → verify`；执行与本机验证见 [PLAN-1100](docs/PLAN-1100-bot-rename-workflow.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
+| TB25 重启后恢复登录、会话与未完成任务 | [PLAN-1230](docs/PLAN-1230-reboot-task-recovery.md)：蓝屏取证、自动登录与消息补交验收 |
 | 弄懂桥到底怎么运转 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) |
 | 弄懂 wmux 面板怎么被驱动 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) |
 | 让智能体互相喊话（a2a） | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) |

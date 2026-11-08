@@ -321,6 +321,7 @@ def load_bots():
             "agent_cmd": s.get("agent_cmd"),
             "ready_markers": s.get("ready_markers"),
             "ready_timeout_sec": s.get("ready_timeout_sec"),
+            "resume_interrupted": s.get("resume_interrupted") is True,
         })
     return bots
 
@@ -561,7 +562,7 @@ def clear_session(bot_name):
 def clear_codex_thread(bot_name):
     """删掉 codex app-server 的 thread 指针 → 下次 spawn 走 thread/start（真·全新会话）。
 
-    显式结束会话或已核实运行进程全部退出时调用；单纯桥重启不清理活会话。
+    仅显式结束/替换会话时调用；运行进程退出或电脑重启不清理恢复指针。
     ⚠️ 只删指针：Codex 本地存档 ~/.codex-personal/sessions/rollout-*.jsonl 一个字节都不动，
     只是下次不再自动接上去（要翻旧账仍可用 codex 自己的 resume）。
     """
@@ -1385,7 +1386,7 @@ def _resolve_jsonl(bot, marker, pinned, inject_wall, pre=None):
 
 
 # ---------- 会话生命周期 ----------
-def _release_exited_session_unlocked(bot):
+def _release_exited_session_unlocked(bot, *, release=True):
     """Forget a dead runtime, never mistake a failed query for an exited process.
 
     Caller holds ensure-session. Native startup receipts identify the processes;
@@ -1416,8 +1417,25 @@ def _release_exited_session_unlocked(bot):
 
     def exited():
         rows = kimi_process.inventory()  # Raises on unknown/incomplete OS observation.
-        # Include orphan children; PID reuse is conservatively treated as live.
-        return not any(r["pid"] in pids or r["ppid"] in pids
+        # A reboot can reuse a worker PID for an unrelated process. The native
+        # startup receipt was written after its workers existed; a process born
+        # later cannot be that old worker. A child can legitimately start later,
+        # so exclude it only if its parent is proven reused and predates it.
+        # Missing birth evidence stays conservative. Owned workers always block.
+        stamp = start.get('ts')
+        by_pid = {r['pid']: r for r in rows}
+        def born_later(row):
+            birth = str(row.get('birth', ''))
+            return (isinstance(stamp, (float, int)) and stamp > 0 and birth.isdigit()
+                    and int(birth) > int((stamp + 11644473600) * 10_000_000))
+        def old_child(row):
+            if row['ppid'] not in pids:
+                return False
+            parent = by_pid.get(row['ppid'])
+            birth = str(row.get('birth', ''))
+            return not (parent and born_later(parent) and birth.isdigit()
+                        and int(birth) > int(parent['birth']))
+        return not any((r['pid'] in pids and not born_later(r)) or old_child(r)
                        or kimi_process.owned(r, name, STATE_DIR) for r in rows)
 
     if not exited():
@@ -1428,15 +1446,37 @@ def _release_exited_session_unlocked(bot):
         return False  # Never close a workspace whose terminals have changed.
     if load_session(name) != rec or _agent_startup_record(bot) != start or not exited():
         return False
+    if not release:
+        return True
     if ws:
         wmux_session.close(rec["workspace_id"])
         if any(w.get("id") == rec["workspace_id"] for w in wmux_session.workspaces()):
             raise RuntimeError("旧进程已结束，但旧工作区尚未关闭；保留绑定待重试")
-    clear_codex_thread(name)
-    _merge_session(name, {"workspace_id": None, "pty": None, "jsonl": None,
+    _merge_session(name, {"workspace_id": None, "pty": None,
                          "daemon_fp": None, "pending_launch": None, "runtime_processes": None})
-    blog(name, "♻️ 已核实旧运行进程及其子进程退出，释放运行绑定，下次使用全新会话")
+    blog(name, "♻️ 已核实旧运行进程及其子进程退出，释放运行绑定并保留原对话")
     return True
+
+
+def _resumable_claude_jsonl(bot, cwd):
+    """Resume only this bot's pinned history in the exact profile and directory."""
+    if agent_runtime.runtime_name(bot) != "claude":
+        return None
+    rec = load_session(bot["name"]) or {}
+    profile = agent_runtime.profile_name(bot, required=True)
+    if (rec.get("agent") != "claude" or rec.get("profile") != profile
+            or not rec.get("jsonl") or not rec.get("cwd")
+            or Path(rec["cwd"]).resolve() != Path(cwd).resolve()):
+        return None
+    path = Path(rec["jsonl"]).resolve()
+    home = agent_runtime.profile_spec(profile).home_path.resolve()
+    if not path.is_file() or not path.is_relative_to(home / "projects"):
+        return None
+    try:
+        uuid.UUID(path.stem)
+    except ValueError:
+        return None
+    return str(path)
 
 
 def _worker_cmd(bot, cwd=None):
@@ -1445,6 +1485,9 @@ def _worker_cmd(bot, cwd=None):
     command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd, auto_update=False)
     if (agent_runtime.uses_app_server(bot) or agent_runtime.runtime_name(bot) == "kimi") and bot.get("_startup_id"):
         command += " --startup-id " + shlex.quote(bot["_startup_id"])
+    resume = _resumable_claude_jsonl(bot, cwd or current_cwd(bot))
+    if resume:
+        command += " --resume " + shlex.quote(Path(resume).stem)
     return command
 
 
@@ -1593,7 +1636,7 @@ def _ensure_session_unlocked(bot):
             "失败现场已保存，请发 /screen 查看；桥没有向仍在启动的 TUI 重复塞命令。"
         )
     newj = _detect_new_jsonl(bot, before)
-    jsonl = str(newj) if newj else None
+    jsonl = _resumable_claude_jsonl(bot, cwd) or (str(newj) if newj else None)
     _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl,
                                  "profile": agent_runtime.profile_name(bot, required=True),
                                  "agent": agent_runtime.runtime_name(bot),
@@ -3396,16 +3439,16 @@ def _run_bot(bot_name=None):
                         blog(bot["name"], network["detail"])
                     rec = load_session(bot["name"])
                     # 预热提示：用 _reuse_check（与 ensure_session 同判据·含 daemon 重启指纹 + agentName 死壳）
-                    # 预测要不要冷启 → daemon 重启后注进死壳的老 bug 不再静默,改成「会话已失效·起新的」。
+                    # Rebuilding a terminal does not necessarily create a new native conversation.
                     reusable, ws_present, _ = await asyncio.to_thread(_reuse_check, bot, rec)
                     if not reusable and not (rec or {}).get("pending_launch"):
                         # 让用户一眼看出用【哪个账号 + 哪个目录】起会话·各自标「默认 / 已切」（ensure_session 实际就在 current_cwd 起）
                         _dir = await asyncio.to_thread(current_cwd, bot)
                         _acc_lbl, _dir_lbl = runtime_labels(_dir)
                         await reply(msg.chat_id,
-                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}；启动失败会告警一次。"
+                                    (f"♻️ 运行窗口已失效，正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 重新启动 {agent_runtime.display_name(bot)}；有有效会话记录时接回原对话。"
                                      if ws_present else
-                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}；启动失败会告警一次。"))
+                                     f"⏳ 正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 启动 {agent_runtime.display_name(bot)}；有有效会话记录时接回原对话。"))
                     try:
                         ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
                     except Exception as exc:
@@ -3727,6 +3770,25 @@ def _run_bot(bot_name=None):
                     "会话没死，但**回传通道可能断了** —— 你发的消息进得去、我的回复出不来。建议查一下回程。"), bname)
 
         async def _recover_pending(_b):                        # 投递保证：撞 compact 被吃的消息·必达重投/通知（§2.13）
+            if bot.get('resume_interrupted'):
+                import session_recovery
+                try:
+                    async with msg_lock:
+                        resumed = await asyncio.to_thread(session_recovery.recover, sys.modules[__name__], bot)
+                    if resumed == 'accepted':
+                        blog(bname, '中断恢复指令已获原生接收回执，原对话继续处理')
+                    elif resumed == 'needs-attention':
+                        pending = (load_session(bname) or {}).get('resume_handoff') or {}
+                        target = mirror_target(bname)
+                        if pending and not pending.get('notified') and target:
+                            sent = await card_send(ch, target,
+                                '⚠️ 原任务恢复尝试已达上限，尚未确认继续执行。'
+                                '原对话和待办已保留，请查看 /delivery 或启动诊断。', bname)
+                            if sent != 'failed':
+                                await asyncio.to_thread(session_recovery.notice_delivered,
+                                    sys.modules[__name__], bot, pending['id'])
+                except Exception as exc:
+                    blog(bname, f'中断任务恢复待核：{type(exc).__name__}: {str(exc)[:160]}')
             if agent_runtime.uses_app_server(bot):
                 try:
                     recovered = await asyncio.to_thread(
