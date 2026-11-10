@@ -18,6 +18,8 @@ last_reviewed: 2026-11-10
 
 # Kimi 请求停顿复现、诊断与恢复验收
 
+本机文件：file:///C:/410_VibeCoding/Post/link16-agent-infra/docs/PLAN-1240-kimi-request-diagnostics.md
+
 ## §0 目标与恢复点
 
 1. 用户要求彻查 TB26-TC101-SB-2（桥绑定 tb26-baseball-2）：换 Kimi 后飞书长消息停在 UserPromptSubmit，手工输入有时能继续；解释 new 是否必要以及 Codex 为何没有同样表现。

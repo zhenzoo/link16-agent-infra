@@ -17,6 +17,8 @@ last_reviewed: 2026-11-10
 
 # CHANGELOG · link16-agent-infra
 
+本机文件：file:///C:/410_VibeCoding/Post/link16-agent-infra/CHANGELOG.md
+
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
 

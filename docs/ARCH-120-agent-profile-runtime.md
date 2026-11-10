@@ -21,6 +21,8 @@ last_reviewed: 2026-11-10
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
+本机文件：file:///C:/410_VibeCoding/Post/link16-agent-infra/docs/ARCH-120-agent-profile-runtime.md
+
 > **状态**：v1 目标契约 · 2026-07-31 Publisher 拍板
 > **范围**：Link16 启动的 Claude/Codex/Kimi 主 session、手工启动的主 session、以及它们在 wmux 新 pane 中启动的独立 worker。
 > **不包含**：Claude Agent tool / Codex `spawn_agent` 这类同一 harness 内的原生子线程；它们不重新运行 CLI，不走本契约的二次选号。
