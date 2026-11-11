@@ -55,7 +55,7 @@ class MiaodaDeliveryTests(unittest.TestCase):
         expected = 'a' * 40
         for state, actual, accepted in [('finished', expected, True), ('processing', expected, False), ('finished', 'b' * 40, False)]:
             response = {'ok': True, 'data': {'release': {'status': state, 'commit_id': actual, 'online_url': 'https://example.test/app/app_test'}}}
-            with patch.object(delivery, 'cli_prefix', return_value=['lark-cli']), patch.object(delivery.subprocess, 'run',
+            with patch('miaoda_access.govern', return_value={'policy_verified':True}), patch.object(delivery, 'cli_prefix', return_value=['lark-cli']), patch.object(delivery.subprocess, 'run',
                     side_effect=[subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, stdout=json.dumps(response))]):
                 result = delivery.verify_release(self.site, '12345', expected)
                 self.assertEqual(result['status'] == 'verified_release', accepted)

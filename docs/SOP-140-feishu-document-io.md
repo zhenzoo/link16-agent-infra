@@ -3,6 +3,7 @@ doc_type: SOP
 doc_id: SOP-140
 title: 飞书文档读写与智能体权限开通流程
 status: active
+url: ""
 purpose: 让任意一只智能体收到任意一个飞书文档链接后，都能用自己的身份读全、下载、写回，并在失败时给出唯一正确的下一步。
 owns:
   - 权限基线开通与逐 bot 拉齐的操作顺序
@@ -18,7 +19,7 @@ read_when:
   - 收到飞书文档或表格链接要读写
   - 新建智能体后要开权限
   - 报"没权限"但不确定该开 scope 还是该分享文档
-last_reviewed: 2026-10-20
+last_reviewed: 2026-11-11
 related:
   - ARCH-130
   - SPEC-220
@@ -184,11 +185,31 @@ python feishu/docio_cli.py --bot <我> write "<原URL>" --patch <原JSON> --reco
 
 1. 确认它的 App ID / Secret 已写进 `.env`（注册器会写）——这就是它的全部凭据。
 2. 按基线一次性开满免审批 scope（第 2 节），不留待用时再补。
-3. **把它拉进协作群**（`.env` 的 `FEISHU_DOC_COLLAB_CHAT_ID`）——进群即继承所有
+3. **把它拉进本租户协作群**（registry.tenants 的 group_chat_id）——进群即继承所有
    已挂该群的文档权限，不必逐份补挂协作者。
 4. 跑一次 `docio doctor` 确认身份、基线、资源三层全绿，再宣布这只 bot 可用。
 
-## 8 · 把资源分享给全部 bot
+## 8 · 新建资产归属、链接范围与群编辑
+
+所有租户和 runtime 的新建资产统一使用 feishu skill。默认 owner 是已认主人、组织内持链接可读、登记协作群 edit；不新增密级或复制/评论限制。外部链接仅在用户明确要求时启用并记录理由。完整合同见 SPEC-220 §8。
+
+Markdown、HTML/Office、媒体发布链已自动调用 document_access。原生 Sheet、多维表格等通过对应官方接口新建后，立即执行；历史修复也使用同一入口：
+
+```text
+python feishu/docio_cli.py --bot <创建者> govern <URL>
+python feishu/docio_cli.py --bot <创建者> govern <URL> --apply
+python feishu/docio_cli.py --bot <当前bot> govern <URL> --as-user <已授权profile> --apply
+```
+
+第一条只预演。已有任务授权即可执行，不重复确认；user 路径明确使用主人现有登录，并核 profile 应用和已认主人一致。只有明确 external 的对象才加 `--external-reason "用户要求及范围"`。妙搭 HTML/应用运行范围使用 `miaoda_delivery.py govern`，不能把应用可访问与协作开发混为一项。
+
+机械顺序为：解析同租户 owner/群 → 读取当前 owner、分享与协作者 → 预演并留快照 → 设置链接范围 → 挂群 edit → 真正转 owner（原 bot full_access、stay_put）→ 重新读取三项。只更改必要字段；别人分享来的、未证属于 agent/主人的资产拒绝转交。新建空 Docx 在写内容前完成治理，内容写完再次核权限；导入接口返回 token 后立即治理。既有正文更新不自动改变权限。
+
+回执在 feishu/_state/document-governance/operations，每份含资源、身份、修改前后、已发步骤与核验结果。失败不返回成功链接、不重建资产；对同一 token 重新读实际状态，再补尚未完成项。网络超时不能用返回成功或猜测代替回读。目录读取缺 scope 时保留已知链接并单列不可枚举范围，不把可见子集称全租户总量。
+
+个人空间实测不保留 external_access_entity=closed，tenant_readable 则生效且外租户对照无 view；记录这一平台边界，不循环写无效开关，也不声称撤销了历史直接邀请的外部协作者。
+
+### 8.1 仅分享给协作群
 
 逐只挂协作者不可扩展：每新增一只 bot，所有历史文档都要重挂。**挂群**即可：
 
@@ -197,6 +218,6 @@ python feishu/docio_cli.py share <url>            # dry-run：打印现状与将
 python feishu/docio_cli.py share <url> --apply    # 真正挂上（高危写，需显式 --apply）
 ```
 
-群 id 取自 `.env` 的 `FEISHU_DOC_COLLAB_CHAT_ID`，也可 `--group` 覆盖；缺配置即失败，
+群 id 取自 registry 中当前 bot 所属租户的 group_chat_id，也可由明确任务 `--group` 覆盖；缺配置即失败，
 不静默跳过。默认授予 `edit`。**别人拥有的文档**我们无权挂协作者（报 `denied(role)`），
 需要文档所有者操作。

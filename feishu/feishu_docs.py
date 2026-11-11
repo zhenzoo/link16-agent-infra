@@ -5,8 +5,8 @@
 旁挂小工具（**不塞 feishu_bridge 主回路**）。被 `feishu_bridge.py send --doc` 调，也可任意会话直接
 `import feishu_docs` 用。链路全 tenant_access_token·bot 身份（详见 ARCH-101 §2.11）：
 
-  旧链：upload_all → import_tasks → 授权 owner → 设置链接可见范围 → url
-  原生文字链：create_docx → markdown 转块 → 写块/表格 → 设置组织内可见 → url
+  导入链：权限身份预检 → upload_all → import_tasks → owner/链接/群权限回读 → url
+  原生文字链：转换预检 → create_docx → owner/链接/群权限 → 写块/表格 → 内容及权限回读 → url
 
 前置：旧导入链需要 `drive:drive`；原生文字链只需 docx 创建/写入/转换及可见范围权限。
 飞书的 `anyone_readable` 仍要求访问者登录飞书，不等于匿名公网链接（PLAN-980 E25）。
@@ -176,8 +176,9 @@ def _poll_import(token: str, ticket: str, tries: int = 30, interval: float = 2.0
 
 
 def _grant_member(token: str, doc_token: str, open_id: str, perm: str = "edit"):
-    """Step4 授权 owner（坑：body type=user 成员类别 ≠ query type=docx 资源类别·两个都要）。
-    失败不 raise——文档已建好·只是 owner 可能打不开·返回 (False, err) 让上层 warn。"""
+    """Legacy explicit collaborator grant; this does NOT transfer ownership.
+    New publication uses document_access instead of this optional grant.
+    """
     d = api("POST",
             f"{BASE}/drive/v1/permissions/{doc_token}/members?type=docx&need_notification=false",
             token=token,
@@ -187,28 +188,16 @@ def _grant_member(token: str, doc_token: str, open_id: str, perm: str = "edit"):
     return True, None
 
 
-# 「拿到链接且已登录飞书的人可读」这一档的分享配置。
-# `anyone_readable` 不是匿名公网访问：干净浏览器仍会跳飞书登录页（PLAN-980 E25）。
-#   · link_share_entity=anyone_readable  已登录飞书且获得链接的人可阅读
-#   · external_access_entity=open        允许分享到组织外（不开的话 anyone_readable 也传不出去）
-#   · security/comment/copy=anyone_can_view  可查看/可评论/可复制（只读够看·不给编辑）
-_PUBLIC_LINK_BODY = {
-    "external_access_entity": "open",
-    "link_share_entity": "anyone_readable",
-    "security_entity": "anyone_can_view",
-    "comment_entity": "anyone_can_view",
-    "copy_entity": "anyone_can_view",
-}
-
-
-def set_public_link(token: str, doc_token: str, *, doc_type: str = "docx"):
+def set_public_link(token: str, doc_token: str, *, doc_type: str = "docx", external_reason: str = ""):
     """Step5 允许获得链接且已登录飞书的人阅读（drive v2 permissions/public）。
 
     失败不 raise——文档已建好、owner 也授过权·只是外人/别的 bot 可能打不开·返回 (False, err) 让上层 warn。
     注：v2 端点才有 `link_share_entity` 这套 enum（v1 是老式 bool 字段）；scope 用 `drive:drive` 即可。
     若企业管理员锁了外链（`lock_switch=true` / 安全策略），这里会返非 0 —— 属于组织策略、不是代码问题。"""
+    if not external_reason.strip():
+        raise DocImportError("外链需要用户明确要求及 external_reason")
     d = api("PATCH", f"{BASE}/drive/v2/permissions/{doc_token}/public?type={doc_type}",
-            token=token, body=dict(_PUBLIC_LINK_BODY))
+            token=token, body={"external_access_entity": "open", "link_share_entity": "anyone_readable"})
     if d.get("code") != 0:
         return False, f"{d.get('code')} {d.get('msg')}"
     return True, None
@@ -217,11 +206,12 @@ def set_public_link(token: str, doc_token: str, *, doc_type: str = "docx"):
 def publish_file_as_doc(app_id: str, app_secret: str, file_path, *,
                         grant_open_id: str | None = None, perm: str = "edit",
                         folder_token: str = "", name: str | None = None,
-                        public: bool = True, dry_run: bool = False) -> dict:
-    """本地 md/HTML → 飞书云文档 → (授权 owner) → (设公开链接) → 返回
+                        public: bool = False, dry_run: bool = False,
+                        external_reason: str = "") -> dict:
+    """本地 md/HTML → 飞书云文档 → 核 owner/链接/群权限 → 返回
     {url, token, type, granted, grant_error, public, public_error}。
     perm: view/edit/full_access（默认 edit·满足「能改存」）。
-    public: 默认 True = 获得链接且已登录飞书的人可阅读（不等于匿名公网访问）。
+    public: 默认 False = 组织内链接可读；True 必须提供用户明确 external 的依据。
     dry_run: 只回显将走的链路不真发。"""
     path = Path(file_path)
     if not path.is_file():
@@ -234,20 +224,17 @@ def publish_file_as_doc(app_id: str, app_secret: str, file_path, *,
         return {"dry_run": True, "ext": ext, "title": title, "grant_open_id": grant_open_id,
                 "perm": perm, "public": public,
                 "chain": ["upload_all", "import_tasks", "poll(job_status==0&&token)",
-                          (f"grant_member(perm={perm})" if grant_open_id else "skip-grant"),
-                          ("set_public_link(anyone_readable)" if public else "skip-public")]}
+                          "owner/link/group policy + readback"]}
     token = _tenant_token(app_id, app_secret)
+    import document_access
+    policy = document_access.resolve_policy(app_id, token, visibility="external" if public else "tenant",
+                                            external_reason=external_reason)
     file_token = _upload_media(token, path, ext)
     ticket = _create_import_task(token, file_token, ext, title, folder_token)
     doc_token, url, dtype = _poll_import(token, ticket)
-    granted, gerr = True, None
-    if grant_open_id:
-        granted, gerr = _grant_member(token, doc_token, grant_open_id, perm)
-    pub, perr = None, None
-    if public:
-        pub, perr = set_public_link(token, doc_token)
-    return {"url": url, "token": doc_token, "type": dtype, "granted": granted, "grant_error": gerr,
-            "public": pub, "public_error": perr}
+    access = document_access.apply_new(token, doc_token, dtype, policy)
+    return {"url": url, "token": doc_token, "type": dtype, "granted": True, "grant_error": None,
+            "public": public, "public_error": None, "policy_verified": True, "access_policy": access}
 
 
 # ============================================================================
@@ -737,6 +724,7 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
                         markdown: str = None, title: str = None,
                         grant_open_id: str = None, perm: str = "edit",
                         visibility: str = "tenant",
+                        external_reason: str = "",
                         table_layout: str = "auto",
                         dry_run: bool = False) -> dict:
     """Markdown → 飞书在线文档，只用 docx 权限（不碰云空间上传/导入）。
@@ -753,7 +741,7 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     - 遇到不支持的资源时，建文档前报错并提示专用路径。
     - 禁止纯文本降级：表格或普通块写入未完成直接报错；写入后分页回读，核对正文、链接与结构才返回成功。
 
-    visibility: "tenant" 组织内凭链接可读（默认）/ "anyone" 任何已登录飞书的人 / "none" 不动
+    visibility: "tenant" 组织内凭链接可读（默认）/ "external" 用户明确要求的外链。
     """
     src = Path(file_path) if file_path else None
     if markdown is None:
@@ -765,15 +753,18 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
     if dry_run:
         return {"dry_run": True, "title": doc_title, "chars": len(markdown),
                 "table_layout": layout,
-                "chain": ["blocks/convert", "compile/preflight", "create_docx", "descendant(普通块分批)",
-                          "children(表格逐格填·节流·9×9 扩表)", "readback/verify", f"visibility={visibility}",
-                          "grant_member" if grant_open_id else "skip-grant"]}
+                "chain": ["owner/tenant/group preflight", "blocks/convert", "compile/preflight", "create_docx",
+                          f"owner/link/group policy={visibility}", "descendant(普通块分批)",
+                          "children(表格逐格填·节流·9×9 扩表)", "content/permission readback"]}
 
     token = _tenant_token(app_id, app_secret)
+    import document_access
+    policy = document_access.resolve_policy(app_id, token, visibility=visibility, external_reason=external_reason)
     blocks, first_level = _convert_markdown(token, markdown)
     blocks, first_level, tables_vertical = compile_blocks(blocks, first_level, layout)
     by_id = {b["block_id"]: b for b in blocks}
     doc_id = _create_docx(token, doc_title)
+    access = document_access.apply_new(token, doc_id, "docx", policy)
 
     written = _write_roots(token, doc_id, by_id, first_level)
     tables_real, batches = written["tables_real"], written["batches"]
@@ -784,12 +775,7 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
 
     actual, roots = _read_doc_blocks(token, doc_id)
     verification = verify_structure(blocks, first_level, actual, roots)
-    granted, grant_error = (None, None)
-    if grant_open_id:
-        granted, grant_error = _grant_member(token, doc_id, grant_open_id, perm)
-    vis_ok, vis_err = (None, None)
-    if visibility and visibility != "none":
-        vis_ok, vis_err = _set_visibility(token, doc_id, visibility)
+    access = document_access.verify_delivery(token, doc_id, "docx", policy, access)
     return {"url": _doc_url(token, doc_id), "token": doc_id, "type": "docx",
             "blocks": len(blocks), "batches": batches,
             "tables_real": tables_real, "tables_degraded": tables_degraded,
@@ -797,8 +783,8 @@ def publish_text_as_doc(app_id: str, app_secret: str, file_path=None, *,
             "table_cells_attempted": table_cells_attempted,
             "table_cells_filled": table_cells_filled,
             "table_cells_failed": table_cells_failed,
-            "granted": granted, "grant_error": grant_error,
-            "visibility": vis_ok, "visibility_error": vis_err}
+            "granted": True, "grant_error": None,
+            "visibility": True, "visibility_error": None, "policy_verified": True, "access_policy": access}
 
 
 def _docx_id(token, doc):
@@ -978,7 +964,9 @@ _VISIBILITY_PRESETS = {
 }
 
 
-def _set_visibility(token: str, doc_token: str, visibility: str, *, doc_type: str = "docx"):
+def _set_visibility(token: str, doc_token: str, visibility: str, *, doc_type: str = "docx", external_reason: str = ""):
+    if visibility in ("anyone", "external"):
+        return set_public_link(token, doc_token, doc_type=doc_type, external_reason=external_reason)
     body = _VISIBILITY_PRESETS.get(visibility)
     if not body:
         return None, f"未知 visibility={visibility}"
@@ -990,14 +978,14 @@ def _set_visibility(token: str, doc_token: str, visibility: str, *, doc_type: st
 def publish_media_as_doc(app_id: str, app_secret: str, files, *,
                          title: str | None = None, captions=None,
                          grant_open_id: str | None = None, perm: str = "view",
-                         public: bool = True, dry_run: bool = False,
+                         public: bool = False, dry_run: bool = False, external_reason: str = "",
                          document_id: str | None = None, parent_block: str | None = None,
                          index: int | None = None, resume_empty_block: str | None = None) -> dict:
-    """本地【图片/视频/任意文件】多个 → 嵌进一篇飞书 docx → (授权 owner) → (设公开链接) → 返回
+    """本地媒体 → 统一权限治理的 docx → 原生媒体绑定核验 → 返回
     {url, token, items, granted, public, public_error}。
     files: 本地路径 list。captions: 与 files 等长的可选说明（嵌在每个媒体前·None 跳过）。
     图片走 image 块（内联显示）· 其他走 file 块（视频/音频/pdf 内联播放/预览）。perm 默认 view（只读够看）。
-    public 默认 True = 【拿到链接的任何人都能打开看】（见 set_public_link）。"""
+    public 默认 False = 组织内链接可读；外链须附用户明确要求的 external_reason。"""
     # Existing documents keep their title, contents and ACL; this only inserts children.
     if document_id is not None and not re.fullmatch(r'[A-Za-z0-9]+', document_id):
         raise DocImportError('document_id must be a docx token, not a URL or wiki token')
@@ -1031,7 +1019,11 @@ def publish_media_as_doc(app_id: str, app_secret: str, files, *,
                 'operation': 'insert' if document_id else 'create', 'document_id': document_id,
                 'parent_block': parent_block or document_id, 'index': index}
     token = _tenant_token(app_id, app_secret)
+    import document_access
+    policy = (document_access.resolve_policy(app_id, token, visibility="external" if public else "tenant",
+                                            external_reason=external_reason) if not document_id else None)
     doc_id = document_id or _create_docx(token, doc_title)
+    access = document_access.apply_new(token, doc_id, "docx", policy) if policy else None
     parent = parent_block or doc_id
     if document_id:
         existing = api('GET', f'{_DOCX}/{doc_id}/blocks/{parent}', token=token)
@@ -1079,14 +1071,11 @@ def publish_media_as_doc(app_id: str, app_secret: str, files, *,
                       'view_type': None if is_image else (2 if native_av else 1)})
         if index is not None: index += 1
     url = _doc_url(token, doc_id)
-    granted, gerr = True, None
-    if grant_open_id and not document_id:
-        granted, gerr = _grant_member(token, doc_id, grant_open_id, perm)
-    pub, perr = None, None
-    if public and not document_id:
-        pub, perr = set_public_link(token, doc_id)
-    return {"url": url, "token": doc_id, "items": items, "granted": granted, "grant_error": gerr,
-            "public": pub, "public_error": perr,
+    if policy:
+        access = document_access.verify_delivery(token, doc_id, "docx", policy, access)
+    return {"url": url, "token": doc_id, "items": items, "granted": True, "grant_error": None,
+            "public": public if policy else None, "public_error": None,
+            "policy_verified": bool(access), "access_policy": access,
             'operation': 'insert' if document_id else 'create', 'permissions_preserved': bool(document_id)}
 
 

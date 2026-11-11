@@ -1,3 +1,7 @@
+---
+url: ""
+---
+
 # TOOLS.md · link16-agent-infra 工具索引（SSOT）
 
 > 本仓所有可复用工具的唯一索引 · 分 **🔵 feishu** / **🟢 wmux** 两段 · 「有没有工具干 X」查这里。
@@ -10,7 +14,7 @@
 |---|---|---|
 | `feishu/project_cli.py` | 飞书项目迭代父子需求：现场读取、授权变更预演、精确新建/改名/字段/日期/节点/删除及逐项回读；业务配置留项目仓，认证只在已授权浏览器内存，未知写入不重发 | `inspect / preview / apply / verify --config <配置.json>`；`--help`；TC101S流程见baseball仓SOP-090及feishu skill专节 |
 | `feishu/online_local_html.py` | 只读反查飞书在线链接对应的本地 HTML：按完整 URL 找现有 `meta.json` / `*.meta.json`，区分交互评审页与在线文档正文快照，核对明确映射和文件存在性，不把参考页误认成当前页面 | `python feishu/online_local_html.py "<URL>" [--root <项目总目录>] [--json]` |
-| `feishu/miaoda_delivery.py` | 已有 HTML 发布妙搭的资源允许清单与版本核验；只测量明确资源、回读精确 release，不上传整仓、不改可见范围、不发消息。流程见 repo-owned feishu skill 的 HTML→妙搭 reference | `inventory --root <目录> --entry <HTML> --files <清单.json> --output <回执.json>`；`verify-release --project <应用仓> --release-id <ID> --expected-commit <SHA> --output <回执.json>` |
+| `feishu/miaoda_delivery.py`、`feishu/miaoda_access.py` | 妙搭资源清单、主人归属/组织内链接/租户群编辑治理及发布核验；HTML 与 frontend/full_stack 使用对应权限 API。verify-release 同时核精确版本与权限，不发送消息 | `govern --app-id <app_id> --cli-profile <已授权profile> [--apply]`；`inventory --root <目录> --entry <HTML> --files <清单.json> --output <回执.json>`；`verify-release --project <应用仓> --release-id <ID> --expected-commit <SHA> --cli-profile <已授权profile> --output <回执.json>` |
 | `feishu/kimi_native_worker.py` | 原生 Kimi TUI 与可独立重启的 Wire 1.5 观察程序；由 registry 锁定 profile/home，复用 outbox 和卡片 | 桥通过 `agent_runtime.worker_cmd()` 启动；`--observe-only --bot <bot> --cwd <cwd> --state-dir <state>` 只观察已绑定会话，不另建会话；机制见 ARCH-120 §11 |
 | `feishu/bridge_process.py` | 桥、cron、watchdog 共用的 Windows 进程观测与服务互斥；查询失败为未知，受控停止等待退出，同一服务持有系统文件锁到退出 | 库；通过三种服务的 `start` / `stop` / `status` 使用 |
 | `feishu/kimi_process.py` | 显式 close/new 的单 bot Kimi 回收：关窗前核进程归属并持有身份，回收残留后实际核 worker/observer 锁；未知身份或跨 bot 子树拒绝操作 | 内部库，由桥生命周期互斥内调用；Windows 真进程验收，Linux pidfd 尚待真机验收；不作全机清理 CLI |
@@ -58,6 +62,7 @@
 | `feishu/bridge_history.py` ⭐ | **查某只 bot 的完整本地收发时间线**：入站读 durable ledger；自动/主动出站合并 outbox + `bridge-outbound` ledger + receipts。只按非空 message_id 去重，同文不同 message_id 不误吞；分片按 part/total 可追查 | `python feishu/bridge_history.py --bot X --recent 40 --full [--feishu]` |
 | `feishu/feishu_docs.py` | `send --doc` 底层：Markdown/TXT先编译布局，非PRD表格转原生字段列表；写后完整回读正文、链接、样式及结构，失败禁止纯文本降级/import绕闸。HTML/Office走import，另按对应流程验收。网络前先过全局策略闸，失败不发附件 | 全局 on：`python feishu/feishu_bridge.py send --bot X --doc <file>`；当前轮明确要求在线稿：追加 `--explicit-online`；同步到已有文档：`--update <URL>`（按顶层块比对，只改变化部分，回读核验；`--overwrite` 整篇重写；`--table-layout` 指定表格形态） |
 | `feishu/doc_structure.py`、`feishu/doc_xml_structure.py` | 在线格式机械闸：原生Markdown编译与回读；docio XML更新绑定revision并全文回读，局部替换须有expected_document；另核comment-refs选中文字。不代替评论原身份检查、手机观感与视频播放验收 | 由 `send --doc` / docio受管写入调用；测试 `test_feishu_doc_structure.py` / `test_docio_xml_structure.py` |
+| `feishu/document_access.py` | 所有新建文档共用 owner/链接/群权限检查，保留原创建者及目录，写后回读，不改密级；Markdown/HTML/媒体自动接入，Sheet/多维表格创建后必须治理 | `python feishu/docio_cli.py --bot <创建者> govern <URL> [--apply]`；明确主人身份加 `--as-user <profile>`；仅用户明确 external 才加 `--external-reason <依据>` |
 | `feishu/docio_comments.py`、`feishu/docio_edit.py` | docio内部评论保护与批改执行器：完整评论/回复分页，拒绝覆盖评论选区与带评论块，保留原ID/作者/回复/状态/关联；进程锁、身份/版本绑定、逐处持久回执，超时只读核对且不盲重发。原Markdown同步发现评论则导向此链 | **无独立CLI，不直接调库**；只用上方 `docio edit-text/write`。反例与续跑测试 `tests/test_docio_comments.py`，规范 SOP-140 §5 |
 | `feishu/send_feishu_msg.py` ⭐ | 主动发**纯文字 + @人/@bot**；其 `send_agent_message` 也是桥自动回 peer 的共享实现，同租户应用 API、跨租户 webhook 自动选择。请求 final 默认回请求方；关联结果不反射、不 DM owner。active turn 阻止同 peer 手动+自动双发，真正额外通知加 `--proactive`。显式关联回信用 `--reply-to <入站mid>`；新请求不加它 | `python feishu/send_feishu_msg.py --bot X --to-agent Y --text "..." [--reply-to ID] [--proactive]` |
 | `feishu/session_work.py` ⭐ | **每只 bot 的「工作行」与逐 turn 回执闸**：入站先建 `pending`，机械触发 repo-owned `feishu-workline` 让 LM 选择 `keep / replace / progress`；普通工作卡只在 `ready` 后出站。pending 超过 120 秒会自动改为红色故障标题并放行，Stop 缺回执也按两次修复失败处理，避免正文永久堵塞。语义字段只有 `project / task / progress`，身份、route、turn key、revision、状态、配色和摘要均由桥填写；旧 `set` 保持兼容，`/new` `/clear` `/cd` 自动清。机制见 ARCH-110 §2.6.1 | `python feishu/session_work.py decide --turn-key <key> --action replace --project TC101P --task "给 TC101P 的 PRD 补可行性章节，交付改好的 PRD.md" --progress "找素材 ✅ → 写帖子 🔄 → 得出结论 ⏳"` · `set` · `show` · `clear` |

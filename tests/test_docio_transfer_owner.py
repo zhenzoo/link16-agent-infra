@@ -72,7 +72,7 @@ class TransferOwnerTests(unittest.TestCase):
         self.assertEqual(json.loads(argv[argv.index("--data") + 1]),
                          {"member_type": "openid", "member_id": "ou_human"})
         self.assertEqual(argv[argv.index("--old-owner-perm") + 1], "full_access")
-        self.assertEqual(json.loads(argv[argv.index("--params") + 1]), {"need_notification": False})
+        self.assertEqual(json.loads(argv[argv.index("--params") + 1]), {"need_notification": False, "stay_put": True})
         self.assertIn("--yes", argv)
         self.assertIn("✅", out)
 

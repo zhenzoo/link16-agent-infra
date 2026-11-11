@@ -1,3 +1,20 @@
+---
+doc_type: SOP
+doc_id: SOP-020
+title: 用飞书API参照现有表格新建原生Sheet
+status: active
+url: ""
+purpose: 参照已核工作簿创建原生 Sheet，并验收结构、交互、归属与权限。
+owns:
+  - 参考表复刻与新表验收流程
+does_not_own:
+  - 飞书原生 API schema
+  - 参考表正文修改
+read_when:
+  - 用户要求参照现有表格新建同类型原生 Sheet
+last_reviewed: 2026-11-11
+---
+
 # 用飞书API参照现有表格新建原生Sheet
 
 当用户给出一张参考飞书电子表格并要求“建一个一样类型的表格”时使用本流程。这里的“一样类型”默认是原生Sheet资源、字段结构、布局和交互合同相同；除非用户明确要求复制正文，否则参考表始终只读，新表不得带入参考表的业务数据、评论或历史。
@@ -40,7 +57,9 @@ lark-cli sheets +workbook-create --as user --title "<新表标题>" --sheets @da
 
 `data.json`使用`{"sheets":[{"name":"...","columns":[...],"data":[...]}]}`；`styles.json`使用`{"styles":[{"name":"...","cell_styles":[...],"row_sizes":[...],"col_sizes":[...],"cell_merges":[...],"freeze":{"rows":1,"cols":2}}]}`。字段以`+workbook-create --print-schema --flag-name sheets|styles`的当前输出为准，不在本SOP复制完整vendor schema。
 
-创建成功后拿返回的真实URL、token和sheet_id继续补交互：
+创建成功后先用返回的真实 URL 执行 `python feishu/docio_cli.py --bot <创建者> govern <新表URL> --apply`；明确用主人身份创建的表则加 `--as-user <已授权profile>`。默认 owner 归主人、组织内持链接可读、租户协作群 edit，三项独立回读通过后继续补交互。只有用户明确 external 才传 --external-reason，不设置密级。创建已经返回 token 而治理失败时修复同一张表，不另建。
+
+随后用真实URL、token和sheet_id继续补交互：
 
 ```powershell
 lark-cli sheets +dropdown-set --as user --url "<新表URL>" --sheet-id "<SID>" --range "<范围>" --options '["选项1","选项2"]'
@@ -75,4 +94,4 @@ lark-cli sheets +revision-get --as user --url "<新表URL>"
 - `caught`：给出一个会被当前核验抓住的真实反例，例如漏掉一项下拉值、合并范围少一行或冻结列数错误。
 - `judge`：上述为机械判；手机端阅读舒适度、颜色是否合适等仍由人审。
 
-任何一层回读不一致都写“部分创建、未验收”，不把URL当成功证明。交付时列出真实URL；需要把所有权交给人或挂协作群时，仍遵守feishu主skill的身份、权限和明确授权规则。
+任何一层回读不一致都写“部分创建、未验收”，不把URL当成功证明。交付前再次执行 govern（不加 --apply，只读预演），确认 owner/链接/群权限没有漂移；交付真实 URL 与权限回执，不把这些默认项留作可选提醒。

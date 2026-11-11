@@ -61,7 +61,7 @@ def cli_prefix():
     raise RuntimeError('maintained lark-cli is required; use the installed lark-apps setup instructions')
 
 
-def verify_release(project, release_id, expected_commit, profile=None):
+def verify_release(project, release_id, expected_commit, profile=None, external_reason=''):
     project = project.resolve(strict=True)
     meta = json.loads((project / '.spark/meta.json').read_text(encoding='utf-8-sig'))
     app_id = meta['app_id']
@@ -84,11 +84,17 @@ def verify_release(project, release_id, expected_commit, profile=None):
     finished = release.get('status') == 'finished'
     url = release.get('online_url')
     verified = bool(matched and finished and isinstance(url, str) and url.startswith('https://'))
+    access_result = None
+    if verified:
+        import miaoda_access
+        access_result = miaoda_access.govern(app_id, profile, external_reason=external_reason)
+        verified = access_result.get('policy_verified') is True
     return {'artifact_type': 'miaoda_release_verification', 'updated_at': datetime.now(timezone.utc).isoformat(),
             'status': 'verified_release' if verified else 'not_verified', 'app_id': app_id,
             'release_id': release_id, 'expected_commit': expected_commit, 'actual_commit': release.get('commit_id'),
             'release_status': release.get('status'), 'online_url': url, 'verification': envelope,
-            'covers': 'Remote release finished state and exact local Git object; access scope is unchanged.',
+            'access_policy': access_result,
+            'covers': 'Remote release, exact local Git object and freshly verified owner/link/group; no permission mutation.',
             'judge': 'Miaoda release API. This is not a logged-in, anonymous, media or WebGL browser acceptance.'}
 
 
@@ -101,9 +107,20 @@ def main():
     release = commands.add_parser('verify-release')
     release.add_argument('--project', type=Path, required=True); release.add_argument('--release-id', required=True)
     release.add_argument('--expected-commit', required=True); release.add_argument('--cli-profile')
+    release.add_argument('--external-reason', default='')
     release.add_argument('--output', type=Path, required=True)
+    govern = commands.add_parser('govern', help='预检或修复妙搭 owner/链接范围/租户群编辑权限')
+    govern.add_argument('--app-id', required=True); govern.add_argument('--cli-profile')
+    govern.add_argument('--apply', action='store_true'); govern.add_argument('--external-reason', default='')
+    govern.add_argument('--output', type=Path, help='新的回执路径；默认自动保存')
     args = parser.parse_args()
-    result = inventory(args.root, args.entry, args.files) if args.action == 'inventory' else verify_release(args.project, args.release_id, args.expected_commit, args.cli_profile)
+    if args.action == 'govern':
+        import miaoda_access
+        result = miaoda_access.govern(args.app_id, args.cli_profile, apply=args.apply,
+            external_reason=args.external_reason, receipt=args.output)
+        print(json.dumps(result, ensure_ascii=False))
+        raise SystemExit(0 if result['policy_verified'] or not args.apply else 1)
+    result = inventory(args.root, args.entry, args.files) if args.action == 'inventory' else verify_release(args.project, args.release_id, args.expected_commit, args.cli_profile, args.external_reason)
     if args.output.suffix.lower() != '.json':
         raise ValueError('receipt output must be a JSON path')
     if args.action == 'inventory' and args.output.resolve() in {args.files.resolve(), *[(args.root / row['path']).resolve() for row in result['files']]}:

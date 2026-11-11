@@ -4179,7 +4179,7 @@ def _read_send_text(*, text=None, file_as_text=None, legacy_file=None):
 
 
 def _publish_online_doc(bot, path, *, grant_open_id=None, name=None,
-                        update=None, overwrite=False, table_layout="auto"):
+                        update=None, overwrite=False, table_layout="auto", external_reason=""):
     """Publish verified text natively; use import only for HTML/Office.
 
     ``update`` names an existing docx/wiki URL: local Markdown is diffed into it in
@@ -4187,7 +4187,7 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None,
 
     The native path is the no-``drive:drive`` production path discovered in
     PLAN-980.  A returned URL is accepted only when the document was made
-    tenant-readable or the intended human was granted access.
+    owner/link/group policy and content structure have all been read back.
     """
     import feishu_docs
 
@@ -4206,11 +4206,11 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None,
         try:
             result = feishu_docs.publish_text_as_doc(
                 bot["app_id"], bot["app_secret"], path,
-                grant_open_id=grant_open_id, title=name, visibility="tenant",
+                grant_open_id=grant_open_id, title=name,
+                visibility="external" if external_reason else "tenant", external_reason=external_reason,
                 table_layout=table_layout,
             )
-            accessible = bool(result.get("visibility") is True
-                              or (grant_open_id and result.get("granted") is True))
+            accessible = result.get("policy_verified") is True
             if (result.get("url") and accessible
                     and result.get("structure_verified") is True
                     and not result.get("tables_degraded")):
@@ -4223,7 +4223,7 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None,
                 )
             else:
                 errors.append(
-                    "native=文档已创建但未证实收件人可读或结构完整"
+                    "native=文档已创建但 owner/link/group 或结构未全部核实"
                     f"(visibility={result.get('visibility')}, granted={result.get('granted')})"
                 )
         except Exception as exc:  # noqa: BLE001
@@ -4234,9 +4234,9 @@ def _publish_online_doc(bot, path, *, grant_open_id=None, name=None,
     try:
         result = feishu_docs.publish_file_as_doc(
             bot["app_id"], bot["app_secret"], path,
-            grant_open_id=grant_open_id, name=name,
+            grant_open_id=grant_open_id, name=name, public=bool(external_reason), external_reason=external_reason,
         )
-        if result.get("url"):
+        if result.get("url") and result.get("policy_verified") is True:
             return result, "online_doc_import"
         errors.append("import=发布结果缺 doc URL")
     except Exception as exc:  # noqa: BLE001
@@ -4303,7 +4303,7 @@ def _send_size_label(text, doc_stats):
 
 
 def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_name=None,
-             online_override=False, update=None, overwrite=False, table_layout="auto"):
+             online_override=False, update=None, overwrite=False, table_layout="auto", external_reason=""):
     """独立短进程主动推送一条到飞书 DM（REST·不依赖常驻桥进程）。
     目标优先级：--to > 会话 chat_id > owner open_id（私聊）。文字复用 guaranteed_send 四级兜底。
     --image <path>：把本地图发到 DM（封面/截图/图表/架构图直达手机·SDK upload_media→OutboundImage）。
@@ -4311,6 +4311,8 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
     如实失败并保留 receipt，绝不自动发送本地原文件附件。file-as-text 也不参与自动降级。
     给「Claude 在终端会话里主动发飞书」用——不是群喇叭 notify.py，是 bot 自己的 DM 通道。"""
     assert_sender_identity(bot_name)
+    if external_reason and (not doc or update):
+        raise ValueError("--external-reason 仅用于新建文档；已有权限请经 docio govern 显式修改")
     if (update or overwrite) and not doc:
         print("❌ --update/--overwrite 需要配合 --doc <本地 Markdown>", file=sys.stderr); sys.exit(2)
     # --update names an existing online URL, so it is an explicit online action by itself;
@@ -4371,6 +4373,7 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
                 res, doc_delivery_mode = await asyncio.to_thread(
                     _publish_online_doc, bot, doc, grant_open_id=grant_oid, name=doc_name,
                     update=update, overwrite=overwrite, table_layout=table_layout,
+                    external_reason=external_reason,
                 )
                 doc_url, doc_ok = res.get("url"), True
                 if doc_delivery_mode == "online_doc_updated":
@@ -4508,6 +4511,7 @@ def main():
     ap.add_argument("--image", default=None, help="send：把本地图片发到 DM（可与 --text 同用·封面/截图/图表直达手机）")
     ap.add_argument("--doc", default=None, help="send：本地 md/HTML 转飞书云文档发链接（在线查看·可复制可改存·ARCH-101 §2.11）")
     ap.add_argument("--name", default=None, help="send：--doc 的飞书文档标题（不给=取文件名）")
+    ap.add_argument("--external-reason", default="", help="仅用户明确 external 时填写其要求；默认组织内链接可读")
     ap.add_argument("--explicit-online", action="store_true",
                     help="send --doc：用户本轮明确要求在线副本时，单次覆盖关闭的全局开关；不修改全局值")
     ap.add_argument("--update", default=None,
@@ -4547,7 +4551,7 @@ def main():
         _bots = load_bots()
         bot_name = args.bot or (_bots[0]["name"] if _bots else "default")
         cmd_send(bot_name, body, args.to, args.json, args.image, args.doc, args.name,
-                 args.explicit_online, args.update, args.overwrite, args.table_layout)
+                 args.explicit_online, args.update, args.overwrite, args.table_layout, args.external_reason)
     elif args.cmd == "doctor":
         cmd_doctor(args.bot)
 

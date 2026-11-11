@@ -43,7 +43,19 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 
 不要改用网页抓取（WebFetch、Jina、浏览器登录态）、直接调 `lark-cli docs +fetch` 或按官方说明书自选身份、或自写开放平台脚本。已经走了这些路或它们报错时，回到上面第 1 步；docio 本身报错先 `docio doctor`，不要另造读取工具。
 
-官方 `lark-*` 说明书一律用 `lark-cli skills read <名字>`（子文件如 `lark-cli skills read lark-doc/references/lark-doc-xml.md`）读取，与已装引擎同版本；遇到 `../lark-drive/SKILL.md` 这类打不开的相对链接也这样读。docio 不覆盖的文档/云盘操作（文内关键词定位、历史版本、移动、评论、权限、密级、上传）按对应说明书直接用 lark-cli，显式 `--as bot`，资源没分享给 bot 且主人能看时才 `--as user`。
+官方 `lark-*` 说明书一律用 `lark-cli skills read <名字>`（子文件如 `lark-cli skills read lark-doc/references/lark-doc-xml.md`）读取，与已装引擎同版本；遇到 `../lark-drive/SKILL.md` 这类打不开的相对链接也这样读。docio 不覆盖的文档/云盘操作按对应说明书使用 lark-cli，显式 `--as bot`，资源没分享给 bot 且主人能看时才明确 `--as user`。新建后的 owner、链接范围与群编辑必须过下面的统一检查，不用裸 API 绕过；不默认设置密级。
+
+### 2.1 所有新建资产的归属与权限
+
+适用于全部租户、Claude/Codex/Kimi 创建的文档、Sheet、多维表格、网页及妙搭，不取决于用户是否再次提醒：
+
+- **owner 必须是已认主人**。认主记录的 open_id 只在对应应用下有效，不能拿收件人、当前群发起人或另一 bot 的 open_id 代替。真正转所有权，原创建 bot 保留 full_access 与原目录；加一个 edit 协作者不算转交。
+- **默认组织内获得链接可阅读**。仅用户明确 external 时传 `--external-reason "用户明确要求及范围"`；默认不新增或更改密级、下载/复制/评论限制。个人空间以 tenant_readable 核链接，平台不保留的外部邀请开关不能冒称已关闭。
+- **租户协作群可编辑**。群从 registry.tenants 的 group_chat_id 解析并核同租户内部群；公司租户对应“obsagent 大乱斗”，个人租户对应自己的登记群。新 bot 按注册流程认主、开所需 API 权限并进群后继承历史资产，不逐 bot 授权。
+- Markdown、HTML/Office、媒体新建已经由 document_access 自动执行和回读。原生 Sheet/多维表格等用官方创建接口后，立即 `python feishu/docio_cli.py --bot <创建者> govern <真实URL> --apply`，通过才继续交付；用户创建或 bot 无管理权时显式加 `--as-user <已授权profile>`。妙搭用 `python feishu/miaoda_delivery.py govern --app-id <app_id> --cli-profile <已授权profile> --apply`，按 HTML/应用类型检查不同接口，见对应 SOP。
+- owner、链接范围、群编辑三项回读全部通过才标成功；失败保留 token/app_id 和权限回执，修复原资产，禁止另建一份或只凭 URL 报交付。新建空文档先完成权限再写正文；导入得到资源后立即治理。已有正文更新/媒体插入保持 ACL，权限调整显式走 govern。
+
+这些默认值和用户本轮已授权的历史修复无需重复确认。缺认主、群配置、API scope 或用户授权时报告具体缺项，继续不依赖它的工作。完整合同见 SPEC-220 §8、执行与恢复见 SOP-140 §8。
 
 ## 3. 常用工具
 
@@ -64,7 +76,7 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 本地 Markdown 改了，同步到已有无评论在线文档（链接不变） | `python feishu/feishu_bridge.py send --bot <文档所属 bot> --doc <文件.md> --update <docx/wiki 链接>`：按块比对，只删改变化块；检测到原生评论引用就停止，改用上一行 `edit-text` 或 `docio write`，`--overwrite`不能绕过。线上有本地没有的图片等块时拒绝，确认以本地为准才加 `--overwrite`；并发正文修改中止。表格形态 `--table-layout auto|native|vertical`（auto 沿用线上形态）。不要自写比对脚本或直调 feishu_docs 内部函数 |
 | 参照现有表格新建同类型飞书Sheet | 读 [原生Sheet参考表复刻流程](references/SOP-020-native-sheet-from-reference.md)，再按 `lark-cli skills read lark-shared` 与 `lark-cli skills read lark-sheets` 调用飞书API；先只读参考表，声明式新建，最后回读工作簿、单元格、样式、合并、冻结、下拉和条件格式 |
 | 将已有 HTML、视频交互或三维查看器发布为妙搭应用链接 | 读 [HTML→妙搭流程](references/SOP-010-html-to-miaoda.md)，复用 `lark-apps`，保留已有应用入口；资源清单和发布核验用 `python feishu/miaoda_delivery.py --help` |
-| 把 bot 建的在线文档交给主人（主人说“这份给我/交接给我/要发给别人看”，或 PRD 交付稿） | `python feishu/docio_cli.py transfer-owner <url>`（默认 dry-run，确认后加 `--apply`）；用**创建它的那只 bot** 身份跑，主人 = 该 bot 的 owner 文件，bot 保留可管理；不挂群、不改其他协作者与分享设置 |
+| 新建资产或历史资产统一归属与权限 | `python feishu/docio_cli.py --bot <创建者> govern <url>` 预演，已授权后加 `--apply`：主人 owner、组织内链接可读、租户群 edit，三项回读；仅改 owner 的明确任务仍可用 `transfer-owner` |
 | 明确发送原文件附件 | `python feishu/send_feishu_file.py --bot <我> --to <oc_群/ou_人> --file <路径>` |
 | 明确把文件正文塞进聊天 | `python feishu/feishu_bridge.py send --bot <我> --file-as-text <路径>`（最后选择；长文可能拆条） |
 | 查某 bot 完整收发历史 | `python feishu/bridge_history.py --bot <bot> --recent 40 --full`（自动与主动出站均含 Feishu message_id） |
