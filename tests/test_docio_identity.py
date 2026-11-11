@@ -5,6 +5,7 @@ import contextlib
 import io
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,13 +87,19 @@ class WindowsShimSafetyTests(unittest.TestCase):
     """A Feishu URL carries `&`; cmd.exe would split on it and run the tail."""
 
     def test_node_entry_is_preferred_over_the_cmd_shim(self):
-        argv = docio_cli.lark_cli()
-        self.assertTrue(argv)
-        if len(argv) == 2:
-            self.assertTrue(argv[1].endswith("run.js"))
-        else:
-            self.assertFalse(argv[0].lower().endswith(".cmd"),
-                             "只剩 .cmd 兜底时必须靠 _guard_shim_args 挡住元字符")
+        # Test resolution without requiring an optional vendor installation
+        # (or the maintainer's Node/npm layout) on every contributor's machine.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            entry = base / "node_modules" / "@larksuite" / "cli" / "scripts" / "run.js"
+            entry.parent.mkdir(parents=True)
+            entry.write_text("// fixture", encoding="utf-8")
+            node = base / "node.exe"
+            node.touch()
+            shim = base / "lark-cli.cmd"
+            shim.touch()
+            with patch.object(docio_cli.shutil, "which", return_value=str(shim)):
+                self.assertEqual(docio_cli.lark_cli(), [str(node), str(entry)])
 
     def test_guard_blocks_metacharacters_only_on_the_cmd_shim(self):
         url = "https://x.feishu.cn/docx/T?from=auth_notice&hash=abc"

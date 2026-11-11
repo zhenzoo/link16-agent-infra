@@ -146,6 +146,17 @@ def test_whole_stop_observes_then_stops_bridges_before_guardians(monkeypatch):
     assert events == ['query', ['101'], ['102'], ['103']]
 
 
+def test_only_missing_preserves_all_running_services(tmp_path, monkeypatch):
+    monkeypatch.setattr(fb, 'load_bots', lambda: [{'name': 'unit-bot'}])
+    monkeypatch.setattr(p, 'query_processes', lambda *a: [
+        row(101), row(102, 'bridge_cron.py'), row(103, 'bridge_watchdog.py')])
+    monkeypatch.setattr(fb, 'LOG_DIR', tmp_path)
+    monkeypatch.setattr(fb, '_kill', lambda ids: pytest.fail('must not kill running services'))
+    monkeypatch.setattr(fb.subprocess, 'Popen', lambda *a, **kw: pytest.fail('must not duplicate bridge'))
+    monkeypatch.setattr(fb.subprocess, 'run', lambda *a, **kw: pytest.fail('must not restart guardians'))
+    fb.cmd_start('unit-bot', only_missing=True)
+
+
 def test_whole_start_still_starts_guardians_when_a_bridge_or_cron_fails(tmp_path, monkeypatch):
     """09-25 开机早于联网：一只桥起不来就抛错，看门狗没起，没人复活死桥。失败要最后再报。"""
     class Exited:

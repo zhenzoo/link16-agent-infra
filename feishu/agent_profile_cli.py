@@ -48,7 +48,7 @@ _SELFTEST_PROBE_ARGS = ["--version"]
 _SELFTEST_TIMEOUT = 180
 
 
-def _selftest_one(name: str) -> dict:
+def _selftest_one(name: str, *, cwd: str | None = None) -> dict:
     row = {"profile": name, "runtime": None, "registry": False, "doctor": False,
            "command": False, "launch": False, "version": "", "error": ""}
     try:
@@ -67,7 +67,7 @@ def _selftest_one(name: str) -> dict:
 
     try:
         command = agent_runtime.standalone_worker_cmd(
-            name, cwd=os.getcwd(), provider_args=_SELFTEST_PROBE_ARGS
+            name, cwd=cwd or os.getcwd(), provider_args=_SELFTEST_PROBE_ARGS
         )
         row["command"] = True
     except (KeyError, OSError, ValueError) as exc:

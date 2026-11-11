@@ -15,14 +15,40 @@ import preflight  # noqa: E402
 
 
 class GitBashChecks(unittest.TestCase):
-    def test_runtime_signature_must_be_mingw(self):
+    def test_runtime_signature_accepts_mingw_and_ucrt(self):
         bash = Path(r"C:\Program Files\Git\bin\bash.exe")
-        with mock.patch.object(preflight, "_git_bash_path", return_value=bash), \
-             mock.patch.object(preflight, "_run", return_value="BASH_VERSION=5.3\nMSYSTEM=MINGW64"):
-            self.assertEqual(preflight.check_git_bash().status, preflight.OK)
+        for msystem in ("MINGW64", "UCRT64"):
+            with self.subTest(msystem=msystem), \
+                 mock.patch.object(preflight, "_git_bash_path", return_value=bash), \
+                 mock.patch.object(preflight, "_run", return_value=f"BASH_VERSION=5.3\nMSYSTEM={msystem}"):
+                self.assertEqual(preflight.check_git_bash().status, preflight.OK)
         with mock.patch.object(preflight, "_git_bash_path", return_value=bash), \
              mock.patch.object(preflight, "_run", return_value="BASH_VERSION=5.3\nMSYSTEM="):
             self.assertEqual(preflight.check_git_bash().status, preflight.FAIL)
+
+
+class FastStartupChecks(unittest.TestCase):
+    def test_enabled_is_advisory_and_disabled_passes(self):
+        for enabled, expected in ((True, preflight.WARN), (False, preflight.OK)):
+            with self.subTest(enabled=enabled), mock.patch.object(preflight.os, "name", "nt"), \
+                 mock.patch.object(preflight, "_fast_startup_enabled", return_value=enabled):
+                result = preflight.check_fast_startup()
+                self.assertEqual(result.status, expected)
+                if enabled:
+                    self.assertIn("不自动修改", result.fix)
+
+    def test_unreadable_is_not_reported_as_disabled(self):
+        with mock.patch.object(preflight.os, "name", "nt"), \
+             mock.patch.object(preflight, "_fast_startup_enabled", side_effect=PermissionError("denied")):
+            result = preflight.check_fast_startup()
+            self.assertEqual(result.status, preflight.WARN)
+            self.assertIn("未能读取", result.detail)
+
+    def test_other_os_does_not_read_windows_registry(self):
+        with mock.patch.object(preflight.os, "name", "posix"), \
+             mock.patch.object(preflight, "_fast_startup_enabled") as read:
+            self.assertEqual(preflight.check_fast_startup().status, preflight.OK)
+            read.assert_not_called()
 
 
 class TerminalDefaultsChecks(unittest.TestCase):

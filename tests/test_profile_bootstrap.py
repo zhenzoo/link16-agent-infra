@@ -17,10 +17,79 @@ import profile_bootstrap as pb  # noqa: E402
 
 
 class ProfileBootstrapTests(unittest.TestCase):
+    def test_selected_account_uses_native_login_then_launch_probe_for_all_runtimes(self):
+        for runtime, arguments in (("claude", ["auth", "login"]), ("codex", ["login"]), ("kimi", ["login"])):
+            with self.subTest(runtime=runtime), \
+                 mock.patch.object(pb.agent_runtime, "profile_spec"), \
+                 mock.patch.object(pb.agent_runtime, "profile_login_state", return_value={"status": "missing"}), \
+                 mock.patch.object(pb.subprocess, "call", return_value=0) as call:
+                selected = {"name": runtime + "-work", "runtime": runtime, "registry": "chosen-local.json"}
+                self.assertEqual(pb.login_account(selected), 0)
+                self.assertEqual(call.call_args_list[0].args[0][-len(arguments):], arguments)
+                self.assertEqual(call.call_args_list[1].args[0][-3:], ["selftest", "--profile", selected["name"]])
+                self.assertEqual(call.call_args_list[0].kwargs["env"][pb.agent_runtime.PROFILE_REGISTRY_ENV], "chosen-local.json")
+                self.assertNotIn("timeout", call.call_args_list[0].kwargs)
+
+    def test_failed_login_stops_before_launch_probe(self):
+        with mock.patch.object(pb.agent_runtime, "profile_spec"), \
+             mock.patch.object(pb.agent_runtime, "profile_login_state", return_value={"status": "missing"}), \
+             mock.patch.object(pb.subprocess, "call", return_value=1) as call:
+            self.assertEqual(pb.login_account({"name": "chosen", "runtime": "codex", "registry": "local.json"}), 1)
+            call.assert_called_once()
+
+    def test_blank_user_choices_have_three_runtimes_without_private_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = pb.account_choices(root / "profiles.json", root)
+            self.assertEqual({r["runtime"] for r in rows}, {"claude", "codex", "kimi"})
+            self.assertEqual(len(rows), 6)
+            self.assertTrue(all(not r["existing"] for r in rows))
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_choices_keep_all_accounts_and_offer_next_unused_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "profiles.json"
+            pb.initialize_registry(registry, [
+                {"name": "a", "runtime": "codex", "home": "~/.codex-personal"},
+                {"name": "b", "runtime": "codex", "home": "~/.codex-personal2"},
+                {"name": "c", "runtime": "codex", "home": "~/.codex-personal3"},
+            ], apply=True)
+            rows = pb.account_choices(registry, root)
+            self.assertEqual([r["name"] for r in rows if r["existing"]], ["a", "b", "c"])
+            self.assertEqual(rows[1]["label"], "Codex-personal 2")
+            self.assertIn("codex-personal4", [r["name"] for r in rows])
+
+    def test_selection_creates_only_chosen_account_and_reuses_it(self):
+        for runtime in ("claude", "codex", "kimi"):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "profiles.json"
+                name = runtime + "-personal"
+                selected, rows = pb.select_account(name, home=root, registry_path=registry, apply=False)
+                self.assertFalse(registry.exists())
+                first, _ = pb.select_account(name, home=root, registry_path=registry, apply=True)
+                before = registry.read_bytes()
+                second, _ = pb.select_account(name, home=root, registry_path=registry, apply=True)
+                self.assertTrue(second["existing"])
+                self.assertEqual(before, registry.read_bytes())
+                self.assertEqual(list(json.loads(before)["profiles"]), [name])
+                self.assertFalse(list(root.rglob("auth.json")))
+                self.assertFalse(list(root.rglob("CLAUDE.md")))
+
+    def test_occupied_unregistered_home_is_never_adopted_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".codex-personal").mkdir()
+            registry = root / "profiles.json"
+            with self.assertRaisesRegex(ValueError, "选项已变化"):
+                pb.select_account("codex-personal", home=root, registry_path=registry, apply=True)
+            self.assertFalse(registry.exists())
+
     def test_apply_creates_three_homes_launcher_and_shell_functions(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            pb.bootstrap(home, apply=True, registry_path=ROOT / "feishu" / "agent-profiles.json")
+            pb.bootstrap(home, apply=True, registry_path=ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json")
             self.assertTrue((home / ".claude-personal").is_dir())
             self.assertTrue((home / ".claude-personal2" / "launch.sh").is_file())
             self.assertTrue((home / ".codex-personal").is_dir())
@@ -315,7 +384,7 @@ class ProfileBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "agent-profiles.json"
             target = root / "agent-profiles.local.json"
-            shutil.copy2(ROOT / "feishu" / "agent-profiles.json", source)
+            shutil.copy2(ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json", source)
             first = pb.migrate_registry(source, target, roster=root / "missing-roster.json", apply=True)
             second = pb.migrate_registry(source, target, roster=root / "missing-roster.json", apply=True)
             self.assertEqual(first["status"], "ok")
@@ -331,8 +400,8 @@ class ProfileBootstrapTests(unittest.TestCase):
 
     def test_real_git_bash_loads_all_three_as_functions(self):
         candidates = [
-            Path(r"C:\Program Files\Git\bin\bash.exe"),
             Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
         ]
         bash = next((path for path in candidates if path.is_file()), None)
         if not bash:
@@ -344,6 +413,10 @@ class ProfileBootstrapTests(unittest.TestCase):
             done = subprocess.run(
                 [str(bash), "--noprofile", "--norc", "-c",
                  f"source '{rc}'; type -t ccp; type -t ccp2; type -t cxp"],
+                stdin=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env={**os.environ, "LINK16_AGENT_INFRA_ROOT": str(ROOT),
+                     pb.agent_runtime.PROFILE_REGISTRY_ENV: str(ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json")},
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )
             self.assertEqual(done.returncode, 0, done.stderr)
@@ -351,18 +424,15 @@ class ProfileBootstrapTests(unittest.TestCase):
 
     def test_git_bash_resolver_prefers_python313_over_python39(self):
         candidates = [
-            Path(r"C:\Program Files\Git\bin\bash.exe"),
             Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
         ]
         bash = next((path for path in candidates if path.is_file()), None)
         if not bash:
             self.skipTest("Git for Windows bash not installed")
         if sys.version_info < (3, 11):
-            # 本用例把 sys.executable 拷成 Python39/Python313 两个假解释器，靠它们【自报版本】
-            # 来演示「在合格的解释器里挑最新的」。跑测试的解释器若本身 < 3.11，两个拷贝都不合格，
-            # 解析器只会退到 PATH 上的 python —— 那不是被测行为，是环境不具备演示条件。
-            # （tb24 是 3.10.10。2026-08-30 主人拍板把 PATH 兜底的硬闸放宽后，
-            #   returncode 会变 0，但 stdout 仍不可能是 Python313 —— 断言不该为此改弱。）
+            # Both test installations delegate to this interpreter; it must
+            # qualify before we can test ordering among eligible installations.
             self.skipTest("需要 Python 3.11+ 才能演示「优先挑更新的解释器」")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -372,23 +442,27 @@ class ProfileBootstrapTests(unittest.TestCase):
             new_python = local / "Programs" / "Python" / "Python313" / "python.exe"
             old_python.parent.mkdir(parents=True)
             new_python.parent.mkdir(parents=True)
-            # Python's official install manager uses a launcher plus a
-            # ``.__target__`` sidecar.  Copy both when present; copying only
-            # the launcher creates a fake interpreter that cannot start and
-            # makes the resolver appear to prefer PATH by mistake.
-            launcher = Path(shutil.which("python") or sys.executable)
-            shutil.copy2(launcher, old_python)
-            shutil.copy2(launcher, new_python)
-            launcher_target = launcher.with_name(launcher.name + ".__target__")
-            if launcher_target.is_file():
-                shutil.copy2(launcher_target, old_python.with_name(old_python.name + ".__target__"))
-                shutil.copy2(launcher_target, new_python.with_name(new_python.name + ".__target__"))
-            pb.bootstrap(home, apply=True)
-            rc = (home / ".bashrc").as_posix()
+            # Use supported venv redirectors: a naked copy of python.exe
+            # cannot find its DLLs; a shell script named .exe is not a PE file.
+            import venv
+            probe_env = root / "probe-venv"
+            venv.EnvBuilder(with_pip=False).create(probe_env)
+            for executable in (old_python, new_python):
+                shutil.copy2(probe_env / "Scripts" / "python.exe", executable)
+                shutil.copy2(probe_env / "pyvenv.cfg", executable.parent / "pyvenv.cfg")
+            # This case checks interpreter selection only; wrapper discovery
+            # (and its second interpreter scan) is covered by the preceding test.
+            home.mkdir()
+            rc_path = home / ".bashrc"
+            rc_path.write_text(pb._bash_block().split("\n__link16_cli=", 1)[0], encoding="utf-8", newline="\n")
             done = subprocess.run(
                 [str(bash), "--noprofile", "--norc", "-c",
-                 f"export LOCALAPPDATA='{local.as_posix()}'; source '{rc}'; __link16_python"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+                 f"export LOCALAPPDATA='{local.as_posix()}'; source '{rc_path.as_posix()}'; __link16_python"],
+                stdin=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env={**os.environ, "LINK16_AGENT_INFRA_ROOT": str(ROOT),
+                     pb.agent_runtime.PROFILE_REGISTRY_ENV: str(ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json")},
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertIn("Python313/python.exe", done.stdout.replace("\\", "/"))

@@ -2325,6 +2325,31 @@ async def card_send(channel, target, text, name):
     return await guaranteed_send(channel, target, text, name)
 
 
+async def command_card(channel, target, text, name, *, message_id=None):
+    """One command message: create once, then patch the same ID, never append a result card."""
+    payload = _card_payload(text, bot_name=name)
+    try:
+        if message_id:
+            # Retrying an edit of the same message cannot create duplicate cards.
+            for attempt in range(3):
+                try:
+                    result = await asyncio.wait_for(channel.update_card(message_id, payload), CARD_SEND_TIMEOUT)
+                    if bool(getattr(result, "success", False)):
+                        return message_id
+                except Exception:
+                    if attempt == 2:
+                        raise
+                await asyncio.sleep(0.5)
+            raise RuntimeError("update_card returned false")
+        receive_type = "chat_id" if str(target).startswith("oc_") else "open_id"
+        return await asyncio.wait_for(
+            channel._ensure_card_snapshot(target, receive_type, snapshot=payload,
+                                          reply_to=None, reply_in_thread=None), CARD_SEND_TIMEOUT)
+    except Exception as exc:
+        blog(name, f"命令卡片{'更新' if message_id else '创建'}未确认：{type(exc).__name__}；不另发第二张")
+        return None
+
+
 # ---------- 后台镜像器：把【终端原生轮次】也搬到飞书 DM（双向完整同步 · ARCH-101 §2.8）----------
 def mirror_target(bot_name):
     """镜像 / 主动推送的 DM 目标（优先私聊 open_id）：owner open_id > 会话 open_id > 会话 chat_id。
@@ -2808,8 +2833,10 @@ def _run_bot(bot_name=None):
                 blog(bot["name"], f"🚧 放行群内 {cmd}：{why}")
                 receipt(bot["name"], {"tid": "gate", "kind": "slash_allowed", "cmd": cmd,
                                       "sender": sender, "reason": why, "delivered": True})
+            close_card = None
             if cmd == "/close":
-                await reply(chat_id, "🔄 已收到 `/close`，正在关闭会话并释放占用……")
+                close_card = await command_card(channel, chat_id,
+                                                "🔄 已收到 `/close`，正在关闭会话并释放占用……", bot["name"])
             elif cmd in ("/account", "/acc", "/账号") and arg:
                 await reply(chat_id, "🔄 已收到账号切换请求，正在检查账号并关闭旧会话；不会自动启动新会话……")
             rec = load_session(bot["name"])
@@ -2937,7 +2964,10 @@ def _run_bot(bot_name=None):
                 try:
                     closed = await asyncio.to_thread(replace_session, bot, account_default)
                 except Exception as e:
-                    await reply(chat_id, f"⛔ 关闭未完成：{str(e)[:200]}。未清除旧会话绑定。"); return
+                    if close_card:
+                        await command_card(channel, chat_id, f"⛔ 关闭未完成：{str(e)[:200]}。未清除旧会话绑定。",
+                                           bot["name"], message_id=close_card)
+                    return
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])
                 default_acc = default_account()
@@ -2945,7 +2975,11 @@ def _run_bot(bot_name=None):
                 head = "🗑 已关闭会话" if closed["had_session"] else "🛌 会话已关闭，无残留占用"
                 if closed.get("locks_released"):
                     head += "，Kimi 占用已释放"
-                await reply(chat_id, f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）"); return
+                if close_card:
+                    await command_card(channel, chat_id,
+                                       f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）",
+                                       bot["name"], message_id=close_card)
+                return
             if cmd in ("/handoff", "/交接", "/接手"):
                 # `/close` 的进阶版（主人 2026-08-21 定）：**关掉当前会话 → 开一个全新 context →
                 # 让新会话先读懂历史、汇报、然后停下等你**。
@@ -3970,12 +4004,12 @@ def _run_bot(bot_name=None):
 
 
 # ---------- 子命令 ----------
-def cmd_start(bot_filter=None):
+def cmd_start(bot_filter=None, *, only_missing=False):
     with bridge_process.control_lock('bridge-fleet'):
-        return _start_locked(bot_filter)
+        return _start_locked(bot_filter, only_missing=only_missing)
 
 
-def _start_locked(bot_filter=None):
+def _start_locked(bot_filter=None, *, only_missing=False):
     """为每个 bot 各起一个脱离终端的后台进程 run --bot <name>（各自日志 · 各自单实例锁）。
     用 subprocess.Popen + DETACHED_PROCESS 直接起 —— 比 powershell Start-Process 可靠
     （后者实测会 hang 住不返回、卡住后续 bot · 2026-06-15）。
@@ -3989,8 +4023,12 @@ def _start_locked(bot_filter=None):
     # Observe the whole fleet before any mutation. A watchdog left running while
     # bots are replaced can revive a just-stopped bot in the middle of start.
     rows = bridge_process.require_known(bridge_process.query_processes(_PIDS_QUERY_TIMEOUTS))
+    if only_missing:
+        bots = [b for b in bots if not bridge_process.select_pids(rows, Path(__file__), b['name'])]
     pids = bridge_process.select_pids(rows, Path(__file__), bot_filter)
-    guardians = [] if bot_filter else [
+    if only_missing:
+        pids = []
+    guardians = [] if bot_filter or only_missing else [
         (name, bridge_process.select_pids(rows, Path(__file__).parent / name))
         for name in ("bridge_watchdog.py", "bridge_cron.py")]
     if pids or any(ids for _, ids in guardians):
@@ -4038,9 +4076,11 @@ def _start_locked(bot_filter=None):
     finally:
         # Recover the watchdog even when Ctrl+C or a spawn error interrupts the
         # stop/start sequence. Readiness waits happen only after both guardians.
-        if not bot_filter:
+        if not bot_filter or only_missing:
             _here = Path(__file__).resolve().parent
             for _name, _hint in (("bridge_watchdog.py", "看门狗"), ("bridge_cron.py", "cron 守护进程")):
+                if only_missing and bridge_process.select_pids(rows, _here / _name):
+                    continue
                 try:
                     subprocess.run([sys.executable, str(_here / _name), "start"],
                                    cwd=str(PROJECT), timeout=150, check=True,
@@ -4504,6 +4544,8 @@ def main():
                     choices=["run", "start", "stop", "status", "workspaces", "send", "doctor"],
                     help="(默认)start / run[--bot X] / stop / status / workspaces / send=主动推DM / doctor=一眼健康")
     ap.add_argument("--bot", default=None, help="指定单个 bot：start/stop/run/send 都认它（裸命令 --bot X=只起它·stop --bot X=只停它·不给=全部）")
+    ap.add_argument("--only-missing", action="store_true",
+                    help="start：只补起缺失进程及守护，不替换任何现有桥；首次注册自动续跑使用")
     ap.add_argument("--text", default=None, help="send：要推送的文本")
     ap.add_argument("--file-as-text", default=None,
                     help="send：明确把文件正文作为聊天文字发送（不是附件；长文可能拆成多条）")
@@ -4530,7 +4572,7 @@ def main():
         run(args.bot)
     elif args.cmd == "start":
         try:
-            cmd_start(args.bot)
+            cmd_start(args.bot, only_missing=args.only_missing)
         except KeyboardInterrupt:
             print("\n⏸ 重启等待被 Ctrl+C 中断；已启动的 bot 仍在后台，"
                   "全局守护恢复已尝试。用 `status` 查看实际连接状态。", file=sys.stderr)

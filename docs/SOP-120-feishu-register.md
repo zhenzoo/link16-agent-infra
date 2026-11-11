@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-10-17
+last_reviewed: 2026-11-11
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -41,8 +41,8 @@ python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile 
 # 4. 把 bot 拉进群 —— 先查它该进哪个（企业租户 ≠ 交流水吧 · 见 §4.2）；再互报 open_id（跨机靠 bot/v3/info）
 python feishu/tenant_probe.py --bot <新bot>
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
-# 6. 重启桥生效（只加了新 bot 就【单起它】·别全局 stop/start 把在跑的会话全杀了）
-python feishu/feishu_bridge.py start --bot <新bot>
+# 6. Monitor 在权限就绪后自动核账号启动并补起缺失桥；排障时可复用同一幂等命令
+python feishu/feishu_bridge.py start --bot <新bot> --only-missing
 # 7. ⚠️ 必做：主人【私聊】新 bot 一句话，完成「认主」（见下方红字 · 漏了它以后的回复【无处可投】）
 # 8. 仅多台受信机器确实要共享该 bot 凭据时：用用户自己的安全同步方案更新其它机器
 ```
@@ -74,12 +74,25 @@ python feishu/feishu_bridge.py start --bot <新bot>
 - 默认 bot：`FEISHU_BRIDGE_APP_ID` / `FEISHU_BRIDGE_APP_SECRET`
 - 第 N 个：`--bot <key>` → `FEISHU_BRIDGE_<KEY>_APP_ID` / `_SECRET`
 
-### 注册前：目标飞书组织 / tenant（新机器问一次，不是每只 bot 都问）
+### 授权页核对目标飞书组织 / tenant
 
 - 飞书应用属于**创建时 Device Grant 页面选择的组织/企业 tenant**；权限、管理员审批和能访问的组织资源都在该 tenant 内。它不是“这台电脑的通用飞书账号”。
-- **新机器且本机还没有 roster**：注册第一只 bot 前，让用户明确一次“创建到哪个飞书组织/企业”，并在网页上核对当前账号和组织。
+- **新机器且本机还没有 roster**：直接提供 Device Grant 链接，让用户在官方页核对当前账号和目标组织；注册器不需要组织准确名称参数，不拆出重复追问名称的停点。
 - **本机已有 roster，用户没另说**：沿用当前注册上下文，不重复询问。**用户明确指定组织时永远覆盖沿用。**
 - CLI 本地拿不到可靠的组织显示名，不能假装替用户验证；Claude/Codex 的本机 profile 与飞书组织也没有绑定关系。
+- 只有页面选择、已有上下文与用户指令存在冲突或目标仍不明确时，才追问具体选择；未选择群协作时不以群名阻塞私聊 bot 注册。
+
+### 首 bot 没有回调通道：读取本地链接并自动续跑
+
+`--background` 返回 job ID，并短等首条链接生成；后台输出被隔离也不会丢链接。安装会话持续读取：
+
+```bash
+python feishu/registration_monitor.py links --job <job-id> --watch
+```
+
+命令按状态给出授权页、权限审阅页或当前下一动作；退出查看不会终止后台注册。第一条授权 URL 只在 gitignored `feishu/_state/registration-links` 中短期交接，过期、登记成功或任务终止即清除；不把 device code、secret、token 放进交接文件或长期 job 日志。第二条链接按 App ID 与实际权限重建，不持久保存。
+
+权限两次核验通过后，Monitor 使用所选 profile 和 bot cwd 检查实际 shell/launcher，补起缺失的桥、cron 和唯一 watchdog，不重启健康已有进程；确认飞书连接后才显示私聊认主动作。失败保留具体缺项，不让用户反复发送测试消息。`--no-start-bridge` 只供诊断。`--version` 与连接成功不等于模型回复通过，最后仍需真实私聊往返。有现成回调 bot 时继续沿用事件回传，无回调时安装会话必须读取本地状态，不能声称会自动唤醒不存在的通道。
 
 ### 页面已显示创建成功、CLI 却没拿到 secret：续接原应用
 
@@ -95,7 +108,7 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 注册器在生成链接前检查 SDK 参数兼容性；当前依赖 `lark_oapi>=1.7.3`。新建才传 `create_only=True`；续接必须传 `create_only=False`，因为官方 SDK 的“只允许新建”优先于 `app_id`。已有本机 App ID 自动进入续接，显式 App ID 与本机记录冲突时停止，避免覆盖另一应用的凭据。
 
-后台每次请求有连接/读取超时；临时网络错误只有限重试同一个授权任务的 poll，不自动重放创建步骤或替人重新授权。任务保留 SDK 版本、请求阶段、最近进展、重试次数、HTTP 状态与错误类别；不保存 secret、token、device code、授权链接或原始响应。失败也必须回调。重复启动同一 bot 的注册器复用活任务，Windows 探活只查询进程，禁止用 `os.kill(pid, 0)`。
+后台每次请求有连接/读取超时；临时网络错误只有限重试同一个授权任务的 poll，不自动重放创建步骤或替人重新授权。长期任务记录只保留 SDK 版本、请求阶段、最近进展、重试次数、HTTP 状态与错误类别；不保存 secret、token、device code、授权链接或原始响应。授权 URL 仅经上方有期限的本地交接通道提供。失败也进入本地状态及已有回调。重复启动同一 bot 的注册器复用活任务，Windows 探活只查询进程，禁止用 `os.kill(pid, 0)`。
 
 验收分清三件事：SDK 实际返回凭据且本机登记成功，才记 `registered`；权限与主人私聊可用只是连接能力；飞书紫色“智能体”标签没有已验证的公共 API 判据，需由用户界面确认，不能用会发消息或权限齐全代替。未选 `group-a2a` 不发送“已入群”回调。`ready` 表示本次所选能力**与 SPEC-220 免审基线**均验收通过（两次独立读取一致）；level 4 需管理员审批的伞形权限永远不在基线内，`ready` 不代表开了它们。
 
@@ -132,7 +145,7 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
   `LINK16_AGENT_PROFILE`，否则取本机 runtime 默认。OAuth 前必须 doctor。
 - **换号**：飞书 `/account <profile>`；成功后只持久化 `profile`，失败时保持当前
   session 不动。
-- **新 profile**：用本仓 `profile_bootstrap.py --register-profile ...`，先 dry-run 再 `--apply`；
+- **新 profile**：用本仓 `profile_bootstrap.py --choices --json` 展示账号，选定后 `--select <name> --apply --login` 自动配置登录；高级自定义仍可 `--register-profile ...`；
   **新 bot**：用本仓 `register_feishu_app.py`。私人用户入口治理不是注册前置。
 
 ---
