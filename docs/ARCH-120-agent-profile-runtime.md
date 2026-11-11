@@ -9,14 +9,14 @@ owns:
   - LINK16_AGENT_PROFILE 的继承规则与 fail-closed 时机
   - 独立 wmux worker 与原生 subagent 的边界划分
 does_not_own:
-  - profile 的实际取值（见 feishu/agent-profiles.json）
-  - 注册新 profile 的步骤（见用户级 $agent-profile-governance）
+  - profile 的实际取值（见本机 effective registry）
+  - 注册新 profile 的步骤（见 SOP-100 与 profile_bootstrap.py）
   - 桥的收发机制（见 ARCH-110）
 read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-11
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -55,21 +55,20 @@ Kimi 原生 TUI 与独立 Wire observer 合同见 §11；逐机部署证据与�
 
 ## 3. Profile registry
 
-`feishu/agent-profiles.local.json` 是本机无密钥的运行目录，历史机器未迁移时才回退 committed
-`feishu/agent-profiles.json`。以下 cck 是旧 Claude 后端配置示例，不代表各机必须保留。顶层包含 runtime 默认、
+`feishu/agent-profiles.local.json` 是本机无密钥的运行目录。公开 `feishu/agent-profiles.json` 为空模板，不分发维护者账号；旧版本使用 committed 映射的机器升级前先迁入 local。以下仅为结构示例，不代表各机必须保留。顶层包含 runtime 默认、
 受管入口文档声明和 `profiles`；每个 profile 至少包含：
 
 ```json
 {
-  "cxp": {
+  "codex-personal": {
     "runtime": "codex",
     "home": "~/.codex-personal",
     "recommended": true,
     "launcher": "direct"
   },
-  "cck": {
+  "claude-backend": {
     "runtime": "claude",
-    "home": "~/.claude-kimi",
+    "home": "~/.claude-backend",
     "launcher": "launch-sh"
   }
 }
@@ -81,7 +80,7 @@ Kimi 原生 TUI 与独立 Wire observer 合同见 §11；逐机部署证据与�
 2. `runtime` 允许 `claude` / `codex` / `kimi`；原生 Kimi 的终端与飞书适配见 §11。
 3. `home` 必须是 home-relative，不写盘符和用户名。
 4. `launch-sh` 只表示运行时 source `<home>/launch.sh`；registry 不复制脚本内容或密钥。
-5. 当前生产推荐 Codex profile 是 `cxp`。`cx` 保留为可显式选择的备用档案，不再是新 Codex bot 默认值。
+5. 没有全局推荐个人账号。首次安装列三平台的工作/个人选项、全部已有编号账号与下一个空位；选择后自动登记 ID/home，立即接官方登录。默认账号仅保存在本机 registry，显示标签不参与身份推导。
 6. registry 可以登记本机尚未安装的 profile；实际启动前必须检查目录、launcher 和 CLI 是否可用。
 7. `entry_documents.managed_profiles` 是用户级入口文档的受管 profile 列表；同步工具只能从
    此处发现目标，不另存一套账号名单。

@@ -31,6 +31,7 @@ EVENT_ORDER = (
     "registered",
     "permissions_review",
     "permissions_ready",
+    "bridge_ready",
     "owner_ready",
     "group_ready",
     "ready",
@@ -132,6 +133,7 @@ def _arm_job(
     ttl_seconds=DEFAULT_TTL_SECONDS,
     launch=True,
     context=None,
+    start_bridge=False,
 ):
     capabilities = bridge_scope_audit.normalize_capabilities(capabilities)
     notify_bot = (notify_bot or os.environ.get("FEISHU_BRIDGE_SESSION") or "").strip() or None
@@ -144,6 +146,7 @@ def _arm_job(
             and existing.get("group") == group
             and existing.get("id_env") == id_env
             and existing.get("secret_env") == secret_env
+            and bool(existing.get("start_bridge")) == bool(start_bridge)
             and (not app_id or not existing.get("app_id") or existing.get("app_id") == app_id)
             and (not context or not existing.get("registration_context") or existing.get("registration_context") == context)
         )
@@ -168,6 +171,7 @@ def _arm_job(
         "group": group,
         "app_id": app_id,
         "registration_context": context,
+        "start_bridge": bool(start_bridge),
         "id_env": id_env,
         "secret_env": secret_env,
         "status": "armed",
@@ -218,8 +222,8 @@ def launch_registration_worker(command):
     kwargs = {
         "cwd": str(PROJECT),
         "stdin": subprocess.DEVNULL,
-        # QR URLs are time-limited authorization material: deliver them through
-        # Link16, do not persist them in a state/log file.
+        # General output may contain SDK details; drop it. The explicit OAuth
+        # callback owns the expiring local handoff and optional bot delivery.
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
@@ -306,7 +310,68 @@ def record_stage(job_id, stage, app_id=None, error=None):
         if error:
             state["last_error"] = type(error).__name__ if isinstance(error, BaseException) else str(error)[:500]
 
-    return _mutate(job_id, apply)
+    result = _mutate(job_id, apply)
+    if stage == "registered" or stage in TERMINAL_STATUSES:
+        _clear_oauth_handoff(job_id)
+    return result
+
+
+def _oauth_handoff_path(job_id):
+    # Resolve through a known job; never accept an arbitrary path from CLI input.
+    if Path(job_id).name != job_id or "/" in job_id or "\\" in job_id:
+        raise ValueError("非法 registration job")
+    state = get_job(job_id)
+    if not state or state.get("job_id") != job_id or Path(job_id).name != job_id:
+        raise ValueError("未知 registration job")
+    return STATE_DIR / "registration-links" / f"{job_id}.json"
+
+
+def _clear_oauth_handoff(job_id):
+    _oauth_handoff_path(job_id).unlink(missing_ok=True)
+
+
+def _save_oauth_handoff(job_id, url, expire_in):
+    """Short-lived local delivery, separate from durable diagnostics and logs."""
+    from urllib.parse import urlsplit
+    parsed = urlsplit(str(url or ""))
+    if parsed.scheme != "https" or not parsed.hostname or not any(
+            parsed.hostname == domain or parsed.hostname.endswith('.' + domain)
+            for domain in ("feishu.cn", "larksuite.com", "larkoffice.com")):
+        raise ValueError("授权链接不是飞书 HTTPS 地址")
+    path = _oauth_handoff_path(job_id)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    bridge_injection.atomic_write_json(path, {
+        "url": url, "expires_at": _now() + max(0, int(600 if expire_in is None else expire_in)),
+    })
+    path.chmod(0o600)
+
+
+def local_handoff(job_id):
+    """Read the current human action without ever exposing app secrets/device codes."""
+    state = get_job(job_id)
+    if not state:
+        raise ValueError("找不到 registration job")
+    result = {"job_id": job_id, "bot": state["bot"], "status": state["status"], "links": []}
+    if state["status"] in TERMINAL_STATUSES:
+        _clear_oauth_handoff(job_id)
+        result["action"] = state.get("last_error") or state["status"]
+    elif not state.get("milestones", {}).get("registered"):
+        handoff = _read(_oauth_handoff_path(job_id)) or {}
+        if handoff.get("expires_at", 0) > _now():
+            result.update(links=[handoff["url"]], expires_at=handoff["expires_at"],
+                          action="在授权页核对账号和目标组织，然后授权")
+        else:
+            _clear_oauth_handoff(job_id)
+            result["action"] = "等待注册器生成有效授权链接；沿用当前 job，不重复建应用"
+    elif not state.get("milestones", {}).get("permissions_ready"):
+        urls, _caps, _scopes, audit = permission_review_link(state)
+        result.update(links=urls, audit=audit, action="审阅权限并按飞书页面创建版本/发布")
+    elif state.get("start_bridge") and not state.get("milestones", {}).get("bridge_ready"):
+        result.update(action="正在检查启动环境和飞书连接，暂不要求用户发测试消息",
+                      check=(state.get("checks") or {}).get("bridge"))
+    else:
+        result["action"] = "请主人私聊新 bot 一句完成认主" if not state["milestones"].get("owner_ready") else "等待所选范围的其他验收"
+    return result
 
 
 def permission_review_link(state):
@@ -357,14 +422,15 @@ def request_permission_review(job_id):
 
 
 def notify_oauth_link(job_id, url, expire_in=None):
-    """Deliver a time-limited Device Grant URL without persisting the URL."""
+    """Make the link readable locally even before the first callback bot exists."""
     state = get_job(job_id)
     if not state:
         return {"ok": False, "error": "registration job 不存在"}
+    _save_oauth_handoff(job_id, url, expire_in)
     notify_bot = state.get("notify_bot")
     event_id = f"{job_id}:oauth_waiting"
     if not notify_bot:
-        result = {"ok": False, "error": "未绑定 notify_bot"}
+        result = {"ok": True, "via": "local_handoff"}
     else:
         marker = (
             f"Link16 注册回调：{state['bot']} 的授权链接已生成"
@@ -380,7 +446,7 @@ def notify_oauth_link(job_id, url, expire_in=None):
             event["delivered_at"] = _now()
         else:
             event["last_error"] = result.get("error")
-        # Deliberately no url/device_code/token in durable state.
+        # Deliberately no url/device_code/token in durable job state.
     _mutate(job_id, receipt)
     return result
 
@@ -504,6 +570,7 @@ def _event_text(state, milestone):
     labels = {
         "registered": "OAuth/应用登记已完成",
         "permissions_ready": f"所选 capability 与 SPEC-220 免审基线权限已到位（{scope_note}）",
+        "bridge_ready": "启动入口与飞书连接已核验，请主人私聊新 bot 一句完成认主",
         "owner_ready": "主人私聊认领已检测到",
         "group_ready": "目标群成员关系已检测到",
         "ready": (f"官方登记与所选能力验收完成，权限在本次回调前再次复核（{scope_note}）；"
@@ -565,7 +632,11 @@ def check_once(job_id, emit=True):
     state = get_job(job_id)
     if not state:
         raise FileNotFoundError(job_id)
+    handoff = _read(_oauth_handoff_path(job_id)) or {}
+    if handoff and handoff.get("expires_at", 0) <= _now():
+        _clear_oauth_handoff(job_id)
     if state.get("status") in TERMINAL_STATUSES:
+        _clear_oauth_handoff(job_id)
         return _emit_pending(job_id) if emit else state
 
     if (state.get("registrar_pid") and not state.get("milestones", {}).get("registered")
@@ -578,6 +649,7 @@ def check_once(job_id, emit=True):
             item["status"] = item["stage"] = "expired"
             item["events"].setdefault("expired", {"event_id": f"{job_id}:expired"})
         state = _mutate(job_id, expire)
+        _clear_oauth_handoff(job_id)
         return _emit_pending(job_id) if emit else state
 
     permission = _permission_check(state)
@@ -594,6 +666,10 @@ def check_once(job_id, emit=True):
             permission["verified_twice"] = True
             permission["verify_count"] = int(prior.get("verify_count") or 0) + 1
             permission["verified_at"] = _iso()
+    activation = None
+    if (state.get("start_bridge") and state.get("milestones", {}).get("registered")
+            and permission.get("status") == "ready"):
+        activation = _activate_bridge(state)
     owner = _owner_check(state["bot"])
     need_group = "group-a2a" in state.get("capabilities", [])
     group = _group_check(state["bot"], state.get("group")) if need_group else {"status": "ready"}
@@ -607,26 +683,32 @@ def check_once(job_id, emit=True):
         if item.get("status") in TERMINAL_STATUSES:
             return
         item["checks"] = {"permissions": permission, "owner": owner, "group": group}
+        if activation is not None:
+            item["checks"]["bridge"] = activation
         if tenant is not None:
             item["checks"]["tenant"] = tenant
         milestones = item["milestones"]
         milestones["permissions_ready"] = permission.get("status") == "ready"
         milestones["owner_ready"] = owner.get("status") == "ready"
         milestones["group_ready"] = group.get("status") == "ready"
-        for name in ("registered", "permissions_ready", "owner_ready", "group_ready"):
+        if item.get("start_bridge"):
+            milestones["bridge_ready"] = bool(activation and activation.get("status") == "ready")
+        for name in ("registered", "permissions_ready", "bridge_ready", "owner_ready", "group_ready"):
             if milestones.get("registered") and milestones.get(name) and (name != "group_ready" or need_group):
                 item["events"].setdefault(name, {"event_id": f"{job_id}:{name}"})
         milestones["ready"] = all(
             milestones.get(name)
             for name in ("registered", "permissions_ready", "owner_ready", "group_ready")
         )
+        if item.get("start_bridge"):
+            milestones["ready"] = milestones["ready"] and milestones.get("bridge_ready", False)
         if milestones["ready"]:
             item["status"] = item["stage"] = "ready"
             item["events"].setdefault("ready", {"event_id": f"{job_id}:ready"})
         elif milestones.get("registered"):
             item["status"] = item["stage"] = "manual_pending"
         item["last_error"] = next(
-            (check.get("error") for check in (permission, owner, group) if check.get("status") == "unknown"),
+            (check.get("error") for check in (permission, owner, group, activation or {}) if check.get("status") == "unknown"),
             None,
         )
 
@@ -634,10 +716,65 @@ def check_once(job_id, emit=True):
     return _emit_pending(job_id) if emit else state
 
 
+def _activate_bridge(state):
+    """Use the same launcher/environment as the bridge, then only start missing services."""
+    import agent_profile_cli
+    import bridge_control
+    import bridge_process
+    from bridge_env import bots_config_path
+
+    context = state.get("registration_context") or {}
+    profile = context.get("profile")
+    if not profile:
+        return {"status": "unknown", "error": "注册任务缺 profile，无法检查启动入口"}
+    try:
+        roster = _read(bots_config_path(PROJECT)) or {}
+        bot = next((row for row in roster.get("bots", []) if row.get("name") == state["bot"]), {})
+        if (bot.get("profile") != profile or bot.get("app_id_env") != state.get("id_env")
+                or bot.get("app_secret_env") != state.get("secret_env")):
+            return {"status": "unknown", "error": "本机 bot 的账号或凭据映射已变化，未自动启动；请核对原注册任务"}
+        def connected():
+            pid = bridge_process.ready_pid("bridge:" + state["bot"])
+            control = bridge_control.read_state(bridge_control.control_path(STATE_DIR, pid)) if pid else {}
+            ready = (pid and _pid_alive(pid) and control.get("pid") == pid
+                     and control.get("bot") == state["bot"] and control.get("contract") == bridge_control.CONTRACT
+                     and control.get("state") in ("ready", "handling"))
+            return pid, bool(ready)
+        prior = (state.get("checks") or {}).get("bridge") or {}
+        pid, ready = connected()
+        if ready and prior.get("status") == "ready" and prior.get("pid") == pid and prior.get("profile") == profile:
+            return prior
+        spec = agent_profile_cli.agent_runtime.profile_spec(profile)
+        if agent_profile_cli.agent_runtime.profile_login_state(spec).get("status") != "ok":
+            return {"status": "unknown", "error": f"所选账号 {profile} 尚未确认登录，请先完成官方登录"}
+        launch = agent_profile_cli._selftest_one(profile, cwd=context.get("cwd") or str(PROJECT))
+        if not launch.get("launch"):
+            return {"status": "unknown", "error": launch.get("error") or "CLI 启动检查未通过"}
+        current = get_job(state["job_id"]) or {}
+        if current.get("status") in TERMINAL_STATUSES or not current.get("start_bridge"):
+            return {"status": "unknown", "error": "注册任务已停止，未启动桥"}
+        done = subprocess.run(
+            [sys.executable, str(PROJECT / "feishu" / "feishu_bridge.py"), "start",
+             "--bot", state["bot"], "--only-missing"],
+            cwd=str(PROJECT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=240,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if done.returncode:
+            return {"status": "unknown", "error": f"桥启动命令退出 {done.returncode}；查看该 bot 的桥日志"}
+        pid, ready = connected()
+        return {"status": "ready" if ready else "waiting", "pid": pid,
+                "profile": profile, "launch_version": launch.get("version"),
+                "detail": "CLI --version 与飞书连接通过；模型回复仍需私聊验收" if ready else "进程正在等待飞书连接"}
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError) as exc:
+        return {"status": "unknown", "error": f"启动检查失败：{type(exc).__name__}"}
+
+
 def run(job_id, interval=10):
     while True:
         state = check_once(job_id, emit=True)
-        if state.get("status") in TERMINAL_STATUSES and not pending_event_names(state):
+        if (state.get("status") in TERMINAL_STATUSES
+                and (not state.get("notify_bot") or not pending_event_names(state))):
             return 0 if state.get("status") == "ready" else 1
         time.sleep(max(1, interval))
 
@@ -665,9 +802,24 @@ def main():
     status = sub.add_parser("status", help="读取监督状态")
     status.add_argument("--job", "--job-id", dest="job")
     status.add_argument("--bot")
+    links = sub.add_parser("links", help="读取当前授权/权限链接或下一人工动作（首次安装无 bot 也可用）")
+    links.add_argument("--job", required=True)
+    links.add_argument("--watch", action="store_true", help="状态变化时持续输出；退出不会终止后台注册")
     stop = sub.add_parser("cancel", help="取消监督任务")
     stop.add_argument("--job", "--job-id", dest="job", required=True)
     args = parser.parse_args()
+
+    if args.command == "links":
+        previous = None
+        while True:
+            handoff = local_handoff(args.job)
+            text = json.dumps(handoff, ensure_ascii=False, indent=2)
+            if text != previous:
+                print(text, flush=True)
+                previous = text
+            if not args.watch or handoff["status"] in TERMINAL_STATUSES:
+                return
+            time.sleep(2)
 
     if args.command == "arm":
         state = arm_job(

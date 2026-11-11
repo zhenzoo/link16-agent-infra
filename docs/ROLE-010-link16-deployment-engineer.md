@@ -21,7 +21,7 @@ read_when:
   - 用户说开始部署 Link16
   - 准备注册 profile、bot 或常驻服务
   - 判断能否宣布部署完成
-last_reviewed: 2026-08-26
+last_reviewed: 2026-11-11
 depends_on:
   - SOP-100
   - SOP-120
@@ -45,8 +45,7 @@ effective profile registry 解析。
 
 ## 2. 输入与输出
 
-开始前取得或机械发现这些输入：目标机器与仓库、用户选择的 provider、每个隔离 profile 的 ID/runtime/home、
-飞书组织与所选 capability、bot 名称/cwd/目标群、本机已有 registry/roster/services，以及允许生产重启的维护窗口。
+开始前取得或机械发现这些输入：目标机器与仓库、用户选择的 provider/账号选项、所选 capability、bot 名称/cwd/目标群及本机已有 registry/roster/services。内部 profile ID/runtime/home 由选择器自动登记；组织由用户在官方授权页核对，不以提供准确组织名作为给链接的前置。只有涉及生产重启时才取得维护窗口。
 用户没有选择的 provider、bot 或群能力标为“未选择”，不得自行补选。
 
 交付输出必须包含：
@@ -64,7 +63,7 @@ effective profile registry 解析。
 
 必须遵守：
 
-- 不猜 profile、home、飞书组织或 capability；新 profile 由用户显式命名并使用隔离 home。
+- 不猜账号身份、飞书组织或 capability；用户一次选择可理解的账号选项，内部 profile/home 自动建立，保留本机已有映射和冲突检查。
 - 不复制别人的用户配置仓、认证、token、session 或 history；Link16 基线只装 repo-owned `feishu` skill。
 - 不把私人 workflow 或维护者工具变成新用户前置。
 - 不创建第二个 watchdog 计划任务；唯一拓扑是 wmux 登录自启 + `FeishuBridge-Autostart`，再由整体桥拉起 cron/watchdog。
@@ -83,14 +82,13 @@ effective profile registry 解析。
 | owner claim | 主人私聊新 bot 一句 | job 到 `owner_ready`，DM route 真回 |
 | 目标群 | 人工把 bot 加进目标群 | job 到 `group_ready`，真实群 @ 往返通过 |
 | GUI-only 设置 | 仅在程序运行中无法安全写入时点选 Git Bash | preflight 对相应默认项验绿 |
-| 启动项与生产运维 | 审阅精确 before/after，批准创建/覆盖启动项或桥重启窗口 | 启动项回读 + service/进程/心跳信号 |
+| 启动项与生产运维 | 尚未授权的启动项变更审阅 before/after；生产桥重启批准维护窗口 | 已授权启动项直接 apply 并回读；桥进程/心跳验真 |
 | drift/conflict | 决定保留、迁移或替换 | 冲突清零并重新 doctor；不得静默覆盖 |
 
 ## 5. 跨 turn 交互与监督
 
 对用户只说“你现在会看到什么、要点哪里”。每次只给当前阶段的唯一裸链接或页面动作。注册器和 Monitor
-必须以长时后台方式运行；人工动作完成后，以稳定 job event 自动唤醒原部署会话继续，不能用短 tool timeout
-等待，也不能让用户重复汇报脚本已能观测到的状态。两链接注册合同保持分步：先应用登记，再 capability
+必须以长时后台方式运行；有回调 bot 时以稳定 job event 唤醒原部署会话，无回调的首 bot 用本地 `links --watch` 持续取得链接和下一动作。权限就绪后自动核实际启动环境、补起缺失桥并确认连接，才让用户私聊认主。不能用短 tool timeout 截断授权，也不能让用户重复汇报脚本已能观测到的状态。两链接注册合同保持分步：先应用登记，再 capability
 审阅/发布；不得把人的权限选择折叠成不可审阅的一次操作。
 
 ## 6. 分层完成闸

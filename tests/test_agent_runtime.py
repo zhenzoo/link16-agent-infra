@@ -132,7 +132,7 @@ class AgentProfileTests(unittest.TestCase):
             root = Path(tmp)
             committed = root / "agent-profiles.json"
             local = root / "agent-profiles.local.json"
-            committed.write_text((ROOT / "feishu" / "agent-profiles.json").read_text(encoding="utf-8"),
+            committed.write_text((ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json").read_text(encoding="utf-8"),
                                  encoding="utf-8")
             local.write_text(json.dumps({
                 "version": 1,
@@ -156,7 +156,7 @@ class AgentProfileTests(unittest.TestCase):
             root = Path(tmp)
             committed = root / "agent-profiles.json"
             local = root / "agent-profiles.local.json"
-            committed.write_text((ROOT / "feishu" / "agent-profiles.json").read_text(encoding="utf-8"),
+            committed.write_text((ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json").read_text(encoding="utf-8"),
                                  encoding="utf-8")
             with patch.object(agent_runtime, "PROFILE_REGISTRY_PATH", committed), \
                  patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH", local):
@@ -349,7 +349,14 @@ class AgentProfileTests(unittest.TestCase):
         recorder = shlex.quote(sys.executable) + " -c " + shlex.quote(
             "import json,sys; print(json.dumps(sys.argv[1:]))")
         command = command.replace("claude --dangerously-skip-permissions", recorder, 1)
-        done = subprocess.run([agent_runtime.resolve_shell(), "-lc", command], cwd=ROOT,
+        # Argument conversion is a shell/native boundary, not a test of the
+        # contributor's personal login scripts or terminal integrations.
+        probe_env = {key: os.environ[key] for key in (
+            "SYSTEMROOT", "WINDIR", "COMSPEC", "SYSTEMDRIVE", "TEMP", "TMP",
+            "USERPROFILE", "HOME", "PATH", "MSYSTEM") if key in os.environ}
+        done = subprocess.run([agent_runtime.resolve_shell(), "--noprofile", "--norc", "-c", command], cwd=ROOT,
+                              env=probe_env, stdin=subprocess.DEVNULL,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                               capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout), supplied)
@@ -360,13 +367,24 @@ class AgentProfileTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             agent_runtime.profile_spec("does-not-exist")
 
+    def test_native_login_has_only_selected_home_and_native_auth_arguments(self):
+        for name, args, expected in (("ccp", ["auth", "login"], "claude auth login"),
+                                     ("cxp", ["login"], "codex login"),
+                                     ("kp", ["login"], "kimi login")):
+            with self.subTest(profile=name), patch.object(agent_runtime, "_require_profile_available"):
+                command = agent_runtime.standalone_worker_cmd(name, cwd=ROOT, provider_args=args, auto_update=True)
+                self.assertTrue(command.endswith(expected), command)
+                self.assertNotIn("agent_update.py", command)
+                self.assertNotIn("--dangerously", command)
+                self.assertNotIn("--setting-sources", command)
+
     def test_public_ready_probe_supports_claude_and_codex(self):
         cli = ROOT / "feishu" / "agent_profile_cli.py"
         # 屏幕样本带 `❯` / `›`：子进程按本机 locale 解 stdin（tuf19 是 GBK）会直接崩，
         # 探针看起来「判未就绪」其实是根本没读到屏。钉死编码，这条测试才跨机器成立。
         utf8_env = {**os.environ, "PYTHONIOENCODING": "utf-8",
                     agent_runtime.PROFILE_REGISTRY_ENV:
-                    str(ROOT / "feishu" / "agent-profiles.json")}
+                    str(ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json")}
         samples = {
             "cck": "Claude Code\n❯",
             "cxp": "OpenAI Codex\npermissions: YOLO mode\n›",

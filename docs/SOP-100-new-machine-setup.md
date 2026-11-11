@@ -10,7 +10,7 @@ owns:
   - 本机代理入口、DNS 分流、出口与浏览器/CLI 一致性验收及回退
   - wmux 与 RPC 客户端的就位检查
   - private GitHub collaborator 登录、main-only clone 与同步验收
-  - 新机机型/年份前缀与用户显式命名的隔离 Claude/Codex/Kimi profile
+  - 新机机型/年份前缀与一次选号自动建立的隔离 Claude/Codex/Kimi profile
   - 本机 .env 凭据与 bot 名册的建立
   - 起桥与验收
   - 开机自启（桥的计划任务 + wmux 的 Run 键）
@@ -23,7 +23,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-11
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -175,7 +175,7 @@ python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 -
 
 1. **Python 依赖**（pip · 跟着 requirements.txt 走）
 2. **wmux + 仓库自带的 RPC 客户端**（⚠️ 最容易卡的一步 · 见 §3）
-3. **本机 profile registry + repo-owned `feishu` / `feishu-workline` skills**（用户显式命名、hash/drift 可验）
+3. **本机 profile registry + repo-owned `feishu` / `feishu-workline` skills**（选一次账号自动建立，hash/drift 可验）
 4. **本机 `.env` 凭证 + 机器本地 bot 名册**（每台机各管各的）
 
 > 🔑 **「为什么之前在新机器拿不到 wmux handler？」** —— 因为缺 `wmux-rpc.js`。桥靠 `node <wmux-rpc.js> rpc workspace.list/new/…` 跟 wmux daemon 对话；这个脚本**原是仓库外的自建脚本（没提交进 git）**，只活在主力机 home，所以 `git pull` 带不来它。新机器 `git clone` 完，Python 装好、wmux 也开着，但只要找不到 `wmux-rpc.js`，桥就连不上 wmux = 拿不到 handler。
@@ -388,21 +388,16 @@ TB24/TB25 或同事拉取后，直接让 agent “按 SOP-100 §1.2 配置并验
 ```powershell
 python feishu/machine_identity.py
 
-# 新机：示例同时选三种 CLI；只装部分 provider 时只提供对应的参数组
-python feishu/profile_bootstrap.py --init-registry `
-  --claude-profile claude-work --claude-home ~/.claude-work `
-  --codex-profile codex-work --codex-home ~/.codex-work `
-  --kimi-profile kimi-work --kimi-home ~/.kimi-work
-python feishu/profile_bootstrap.py --init-registry `
-  --claude-profile claude-work --claude-home ~/.claude-work `
-  --codex-profile codex-work --codex-home ~/.codex-work `
-  --kimi-profile kimi-work --kimi-home ~/.kimi-work --apply
+# Wmux 就绪后展示一次完整选项；选定后自动配置并进入官方登录
+python feishu/profile_bootstrap.py --choices --json
+python feishu/profile_bootstrap.py --select <选项name> --apply --login
+# 用户直接在终端操作可用 --interactive：一次选择后接登录，不再确认 ID/home
 
-# 已有旧机：不改名、不搬认证，先逐字迁入 local registry
+# 尚无 local registry 的旧机：升级到空公共 registry 前，先在旧版本逐字迁入
 python feishu/profile_bootstrap.py --migrate-registry
 python feishu/profile_bootstrap.py --migrate-registry --apply
 
-# 两条分支在这里汇合：先预览，再安装，再体检
+# 已有 registry 的修复/升级：预览、安装、体检；新选择流程已自动安装
 python feishu/profile_bootstrap.py
 python feishu/profile_bootstrap.py --apply
 python feishu/profile_bootstrap.py --doctor
@@ -413,13 +408,13 @@ Kimi 通过原生终端与 Wire 观察程序接桥，`service_doctor.py` 检查 
 不向 Kimi home 安装 Codex `hooks.json`。只选 Kimi 时，Agent CLI 检查也应通过。
 
 - 前缀约定 = 产品线缩写 + 年份，例 `tb25` / `tb24` / `tuf19`。自动年份来自 BIOS，不等于购买年；用户告知时用 `--year 2025` 覆盖。
-- 本机名示例：`<prefix>-link16`、`<prefix>-baseball`。写入共享 agent registry 前，要说明 private collaborator 可见主机元数据。
-- profile ID 与 home 由用户选择；新建流程拒绝精确的 `~/.claude`、`~/.codex`、`~/.kimi-code`，推荐 `~/.claude-work`、`~/.codex-work2`、`~/.kimi-work` 这类隔离目录。
-- `agent-profiles.local.json` 是 gitignored 的单一本机有效 registry，不与 committed 文件合并；旧机迁移期 committed `agent-profiles.json` 只作显式 fallback。
+- 本机名示例：`<prefix>-link16`、`<prefix>-baseball`。本机账号、bot 名册和机器取证保留在 gitignored 文件，不把个人配置随公开仓库发布。
+- 选项包含 Claude-work / Claude-personal / Codex-personal / Codex-work / Kimi 及全部已有编号账号；每类同时给下一个空位。选择器自动派生内部 ID 与隔离 home，已存在但未登记的目录不覆盖。高级自定义仍可用 `--init-registry` / `--register-profile`，不作为普通用户必答项。
+- `agent-profiles.local.json` 是 gitignored 的单一本机有效 registry，不与 committed 文件合并；公共 `agent-profiles.json` 为空模板，没有维护者默认账号。旧机未迁移时仍可读旧格式，但必须先保存本机映射再升级；不能从测试 fixture 恢复私人身份。
 - Claude 的 `feishu` / `feishu-workline` 安装到各所选 profile home；Codex/Kimi 共用用户级 `$HOME/.agents/skills/<skill>`。
 - 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
-- 重开 Git Bash，用用户自己命名的 profile 函数进入对应账号并在官方页面登录；不复制别人的认证文件。
-- Kimi 示例：`kimi-work login`，随后 `kimi-work --version` 和 `python feishu/agent_profile_cli.py selftest --profile kimi-work`；selftest 只证明程序可执行，不覆盖 wmux、TUI、模型或飞书链路，仍需真实会话回复验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。
+- `--select ... --apply --login` 通过登记的 launcher 调用 Claude `auth login`、Codex/Kimi `login`，由原生流程打开浏览器；已有健康登录直接复用。登录进程保留到用户完成，不用短 timeout 截断，也不让用户另开终端重复操作。
+- 登录后自动 selftest，走与桥一致的 shell、环境和 launcher；`--version` 通过只证明实际入口可执行，不覆盖模型与飞书回复，随后仍须真实私聊验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。
 
 ### 1.4 · 装 OpenSSH Server（仅 `envsync` 的硬前置 · 要管理员）
 
@@ -691,6 +686,12 @@ tail -5 feishu/_logs/bridge-<某个bot>.log
 ```
 
 ### 9.4 · 排错
+
+安装时运行 `preflight.py` 的“Windows 快速启动”只读检查。启用时提醒用户：关机可能使用混合关机，
+不等于完整重启；这本身不能证明桥为什么没启动。先核是否已登录桌面、任务是否触发和桥连接日志，
+确需调整时由用户在“电源选项 → 选择电源按钮的功能 → 更改当前不可用的设置”审阅。
+Link16 不自动关闭快速启动、休眠或更改电源计划；不能把读取失败当成关闭。任务配置回读通过也不等于
+已经做过真实关机/开机验收，交付时分开报告。
 
 | 症状 | 病因 / 修 |
 |---|---|

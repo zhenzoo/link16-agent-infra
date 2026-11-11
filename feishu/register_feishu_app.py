@@ -5,12 +5,10 @@
 跑起来打印授权链接：Publisher 在飞书里打开（或手机扫码）确认 → 脚本拿回 client_id/client_secret
 → 自动写进 VibeCoding 的 .env（路径跨机解析·见 bridge_env.resolve_env_path·不写死盘符）。
 
-  默认（建第一个 / 单 bot）：
-    python orchestrator/register_feishu_app.py
-    → 应用名「tb24-xhs-autopilot」· 写 FEISHU_BRIDGE_APP_ID / FEISHU_BRIDGE_APP_SECRET
-  建第 N 个 bot（多 bot · ARCH-101 §4）：
-    python orchestrator/register_feishu_app.py --name "xhs总控-ws2" --bot ws2
-    → 写 FEISHU_BRIDGE_WS2_APP_ID / FEISHU_BRIDGE_WS2_APP_SECRET（bridge-bots.json 的 app_id_env 指它）
+  首次安装（仅私聊）：
+    python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <已选账号> --capability core --background
+    python feishu/registration_monitor.py links --job <返回的job> --watch
+    → 官方页核对组织；本机 .env 保存凭据，local roster 保存所选账号。
 
 官方 preset 提供消息、事件与 WebSocket 基础能力；注册默认分成两条人工链接：
 第一条只创建应用，第二条按 `--capability` 精确列出 tenant 权限供人审阅/发布。
@@ -233,7 +231,8 @@ def _deliver_oauth_link(job_id, info):
 
     2026-09-08 机器 3050 首次装机：第一只 bot 没有任何已存在的投递通道，旧逻辑三次投递失败后
     抛 oauth_link_delivery_failed，把整个 Device Grant 轮询一起杀掉——而链接其实已经由 on_qr
-    打在终端上了。链接的真源永远是终端输出；bot 投递只是"顺手转发"，失败只记 job 状态。
+    打在终端上了。后台模式另经 registration-monitor 的短期本地 handoff 读取；
+    bot 回调只是附加通道，失败不终止官方轮询。
     返回 True=已投递，False=未投递（终端链接仍有效、轮询继续）。
     """
     state = registration_monitor.get_job(job_id) or {}
@@ -372,7 +371,7 @@ def _apply_scan_pick(args, ap):
 
 def main():
     ap = argparse.ArgumentParser(description="一键创建飞书智能体应用并写凭据进 .env")
-    ap.add_argument("--name", default="tb24-xhs-autopilot", help="应用显示名（默认 tb24-xhs-autopilot）")
+    ap.add_argument("--name", help="应用显示名；省略时采用 --bot 或盘点建议")
     ap.add_argument("--bot", default=None,
                     help="bot 标识（如 ws2）→ 写 FEISHU_BRIDGE_<BOT>_APP_ID/SECRET；不给 = 默认键")
     ap.add_argument("--runtime", choices=sorted(agent_runtime._PROFILE_RUNTIMES), default=None,
@@ -394,7 +393,9 @@ def main():
     ap.add_argument("--no-monitor", action="store_true",
                     help="只用于测试/故障隔离：不启动独立注册监督器")
     ap.add_argument("--background", action="store_true",
-                    help="把 Device Grant 轮询放进独立后台进程；授权链接经 Link16 回调，不依赖本轮 tool timeout")
+                    help="独立后台注册；链接可本地读取，也可经已有 bot 回调")
+    ap.add_argument("--no-start-bridge", action="store_true",
+                    help="仅诊断：权限就绪后不自动补起新 bot；默认自动检查启动入口并补起缺失服务")
     ap.add_argument("--job-id", help=argparse.SUPPRESS)
     ap.add_argument("--dry-run", action="store_true",
                     help="只显示 profile/cwd/capability/增量 scopes，不创建应用、不写文件")
@@ -406,6 +407,9 @@ def main():
     args = ap.parse_args()
     if args.from_scan:
         _apply_scan_pick(args, ap)
+    args.name = args.name or args.bot
+    if not args.name:
+        ap.error("请给 --name/--bot，或用 --from-scan 选择真实项目；不采用维护者的 bot 名称")
 
     requested = (args.profile or "").strip().lower()
     if requested:
@@ -497,10 +501,11 @@ def main():
             launch=True,
             context={"name": args.name, "profile": selected_profile.name,
                      "cwd": selected_cwd, "tenant_kind": tenant_kind},
+            start_bridge=not args.no_start_bridge,
         )
         print(
             f"\n🛰️ 独立注册监督已启动：job={monitor['job_id']} · "
-            f"回调目标={monitor.get('notify_bot') or '未绑定（仅持久记录）'}",
+            f"回调目标={monitor.get('notify_bot') or '本地 links 通道（首 bot 无需已有桥）'}",
             flush=True,
         )
 
@@ -514,9 +519,18 @@ def main():
         )
         print(
             f"✅ Device Grant {'已独立后台运行' if started else '复用已有注册任务'}：job={monitor['job_id']} · pid={pid}\n"
-            "   授权链接会由 registration-monitor 自动注回发起 session；本命令现在即可退出。",
+            f"   持续查看链接/下一步：python feishu/registration_monitor.py links --job {monitor['job_id']} --watch\n"
+            "   后台注册和权限监督独立继续；关闭查看命令不会中止授权。",
             flush=True,
         )
+        # Wait only for the first visible action, never for the human authorization.
+        deadline = time.monotonic() + 10
+        while True:
+            handoff = registration_monitor.local_handoff(monitor["job_id"])
+            if handoff["links"] or handoff["status"] in registration_monitor.TERMINAL_STATUSES or time.monotonic() >= deadline:
+                print(json.dumps(handoff, ensure_ascii=False, indent=2), flush=True)
+                break
+            time.sleep(0.2)
         return
 
     if monitor and not registration_monitor.claim_registration_worker(monitor["job_id"]):

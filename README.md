@@ -14,7 +14,7 @@ does_not_own:
   - 架构与精确合同（见 docs/ARCH-*、docs/SPEC-*）
 read_when:
   - 第一次了解或部署 Link16
-last_reviewed: 2026-09-09
+last_reviewed: 2026-11-11
 ---
 
 # Link 16 · 用飞书（Lark）遥控你电脑上的 Claude Code、Codex 与 Kimi Code
@@ -168,14 +168,10 @@ python feishu/windows_bootstrap.py --apply --yes
 # 1) 装 Python 依赖
 pip install -r feishu/requirements.txt
 
-# 2) 建本机隔离 profile registry（示例选三种 CLI；只提供实际选择的参数组）
-python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --kimi-profile kimi-work --kimi-home ~/.kimi-work
-python feishu/profile_bootstrap.py --init-registry --claude-profile claude-work --claude-home ~/.claude-work --codex-profile codex-work --codex-home ~/.codex-work --kimi-profile kimi-work --kimi-home ~/.kimi-work --apply
-python feishu/profile_bootstrap.py                   # 预览 profile/入口/feishu + feishu-workline skills 安装
-python feishu/profile_bootstrap.py --apply
-python feishu/profile_bootstrap.py --doctor
-
-# 3) 从桌面快捷方式【打开】wmux（见上一节）
+# 2) 从桌面快捷方式打开 Wmux，再一次选择 Claude/Codex/Kimi 的工作/个人账号
+python feishu/profile_bootstrap.py --choices --json
+# 3) 自动建立内部 profile 并打开官方登录；全部已有多账号与新增编号都在选项中
+python feishu/profile_bootstrap.py --select <选项name> --apply --login
 
 # 4) 本机体检：Python/node/wmux/编码/凭据 逐项打勾，缺什么给你可粘贴的修复命令
 python feishu/preflight.py
@@ -183,12 +179,13 @@ python feishu/preflight.py
 # 5) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
 #    名字用「机器代号-项目简称」（机器代号由 python feishu/machine_identity.py 给，如 tb26；项目简称=它要干活的仓库名）
 #    --cwd 指向真实项目目录，别给它一个空文件夹
-python feishu/register_feishu_app.py --name tb26-link16 --bot tb26-link16 --profile <所选profile> --cwd <项目目录> --background
+python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <所选profile> --cwd <项目目录> --capability core --background
+python feishu/registration_monitor.py links --job <返回的job> --watch
 
-# 6) 起桥
-python feishu/feishu_bridge.py start
+# 6) 权限发布后 Monitor 自动核账号启动、补起桥并确认连接
 python feishu/feishu_bridge.py status     # 每只 bot 应显示「进程=在跑 · 凭据✅」
-python feishu/service_installer.py plan   # 开机自启 before/after；明确同意后才 apply
+python feishu/service_installer.py plan   # 核自启 before/after；已有授权则直接 apply
+python feishu/service_installer.py apply --yes --expect <digest>
 python feishu/service_doctor.py           # 文件/配置/运行/真实收发四层验收
 
 # 7) 在飞书里【私聊】这只新 bot 发一句「在吗」
@@ -201,7 +198,7 @@ gstack 不在默认安装范围。clone Link16 会带上 repo-owned `feishu` 与
 三种 CLI 的新安装均走官方原生安装器及其默认程序目录，可用 `--skip` 取消不需要的项；
 例如只选 Kimi 时使用 `--skip claude,codex`。已有安装先复用，不自动卸载或迁移。
 程序路径与隔离账号目录的区别见 [SOP-100 安装清单](docs/SOP-100-new-machine-setup.md#部署前只确认一次8-项安装清单)。
-`profile_bootstrap.py` 按本机 local registry 安装用户自己命名的 Claude/Codex/Kimi profile、Shell 入口和 skill。
+`profile_bootstrap.py` 根据一次账号选择自动建立本机 local registry、隔离 home、Shell 入口和桥 skill。公共 registry 为空，私人规则与记忆不默认安装。尚依赖旧 committed registry 的机器须在升级前运行 `--migrate-registry --apply` 保存本机映射。
 anysearch、push、pull、align 等个人 workflows 只是可选增强，不是运行依赖。
 
 通了之后：@ 它说句话，它会在你指定的仓库目录里用所选 Claude/Codex/Kimi profile 开会话干活，干完把结果发回飞书。
@@ -362,6 +359,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 给已有的 bot 改名、查专属后台并同步新旧名称 | [`SOP-125`](docs/SOP-125-bot-rename.md)：`rename_bot.py plan → apply → verify`；执行与本机验证见 [PLAN-1100](docs/PLAN-1100-bot-rename-workflow.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
 | TB25 重启后恢复登录、会话与未完成任务 | [PLAN-1230](docs/PLAN-1230-reboot-task-recovery.md)：蓝屏取证、自动登录与消息补交验收 |
+| 首次安装、登录自启与 close 单卡片 | [PLAN-1250](docs/PLAN-1250-first-install-and-startup-repair.md)：首 bot 链接与自动续跑、一次选号、关闭原卡更新 |
 | 弄懂桥到底怎么运转 | [`docs/ARCH-110-feishu-bridge.md`](docs/ARCH-110-feishu-bridge.md) |
 | 弄懂 wmux 面板怎么被驱动 | [`docs/ARCH-010-wmux-orchestration.md`](docs/ARCH-010-wmux-orchestration.md) |
 | 让智能体互相喊话（a2a） | [`docs/ARCH-140-a2a-comm-protocol.md`](docs/ARCH-140-a2a-comm-protocol.md) |

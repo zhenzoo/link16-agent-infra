@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-11
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -104,7 +104,7 @@ last_reviewed: 2026-11-04
     - **自愈重生保留当前目录**（2026-06-24 · 与 `/account` 临时号自愈保留对称）：会话死掉自动重生时 `ensure_session` 在**注册表 `cwd`**（`/cd` 过的目录）起，不再无脑回名册默认；注册表无 `cwd`（首次 / `/close` 清过）才回默认。
   - `/screen` → 读屏看现场
   - `/stop` → `ctrl+c` 打断当前 turn
-  - `/close` → 先回「已收到，正在关闭」，再 `workspace.close` 干净撤掉这个 bot 的会话 + **清注册表（含 `/cd` 过的 `cwd`）+ 账号切回名册默认** → **下次 @ 用名册默认账号 + 默认目录重建**。起会话/关会话/自愈重生的飞书提示都打印「账号 + 目录」并各自标注「（默认）/（已切·默认 X）」，让你一眼看出用哪个号、在哪个目录起的。即时受理只表示命令开始执行，最终关闭仍以工作区消失和完成回执为准。
+  - `/close` → 创建一张「已收到，正在关闭」卡片，再 `workspace.close` 撤掉该 bot 会话、清注册表（含临时 cwd），**更新同一 message_id** 为完成或失败；不另发第二张完成卡。完成仍以工作区消失为准，下次 @ 用名册默认账号与目录重建。更新失败只有限重试原卡并留诊断，首次发送结果未知也不新建补发，防止重复卡片。
   - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
   - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。带参数切换时先回即时受理，再跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
@@ -856,11 +856,11 @@ paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，
 Device Grant 的 SDK 会在注册命令内部同步轮询授权结果；它能证明 OAuth 已完成，却不能在调用它的 Claude/Codex turn 已结束后主动再开一轮。Link16 因此把“平台回调”和“agent 唤醒”分成两层：
 
 1. `register_feishu_app.py --background` 在等待 OAuth 前创建无密钥注册状态，并分别启动独立的 Device Grant worker 与 `registration_monitor.py`；发起 tool/turn 退出不会杀掉轮询。
-2. 第一条 SDK 链固定 `create_only=True` 且不传权限 `addons`，只让人确认账号、组织与应用创建。
+2. 第一条 SDK 链新建时 `create_only=True`，续接已有应用时 `False`，均不传权限 `addons`；用户直接在该页核对账号与组织，不先追问准确组织名。没有回调 bot 时由 `links --job <id> --watch` 提供本地授权交接，后台输出被丢弃不影响取得链接。
 3. 注册器只在 SDK 返回完整 `client_id/client_secret`、凭据落盘、registry 与本机 roster 都成功后，把 OAuth 里程碑写为 `registered`；`polling` 不是成功。
 4. `registered` 后生成稳定的 `permissions_review` 事件；Monitor 用 job 中的 `app_id + capabilities` 临时重建第二条权限审阅链接，正文列出 capability 与 scopes。链接不落盘，代码不自动发布，也不能绕过管理员审批。
-5. Monitor 独立于发起 turn 存活，继续机械检查能力档 scopes、owner 文件与目标群成员关系。
-6. 里程碑变化后，Monitor 根据状态中钉死的 `notify_bot` 查本机 roster，经 `ensure_session()` + `_inject()` 把一条注册事件注回原 bot；该链对 Claude 与 Codex 相同，不读取任何 runtime transcript 私有格式。
+5. Monitor 独立于发起 turn 存活，继续机械检查权限、owner 与所选群；默认在权限两次核验后用所选账号和 bot cwd 真启动 `--version` 探针，再以 `start --bot <name> --only-missing` 补缺失桥和守护进程。现有健康进程保持，连接控制状态就绪才记 `bridge_ready` 并提示私聊认主；模型回复仍需真实往返验证。
+6. 有 `notify_bot` 时里程碑经原 `ensure_session()` + `_inject()` 注回发起 bot，三 runtime 共用这条链。首 bot 没有该通道时安装会话持续读本地 `links`，不声称无回调也能自动唤醒；Monitor 本身的检查与补起不依赖会话在线。
 
 状态文件位于 `feishu/_state/bridge-registration-<job-id>.json`，状态机为：
 
@@ -886,7 +886,7 @@ armed → oauth_waiting → registered → permissions_review → manual_pending
 
 - “查 session → `ensure_session` → `_inject`”整体持有按目标 bot 的跨进程锁；桥真人消息、cron、watchdog 与 Monitor 使用同一把锁，防双 spawn 和 paste 交错。
 - 注册器与 Monitor 更新同一 job 时必须锁内重读、合并，以唯一临时文件 + `os.replace` 原子替换。
-- 状态与日志只允许 app ID、env 键名、bot/profile/capability、群 ID、阶段、时间和脱敏错误；严禁 app secret、tenant/user token、Device Grant 临时码与授权 URL。
+- 长期 job 状态与日志只允许 app ID、env 键名、bot/profile/capability、群 ID、阶段、时间和脱敏错误；严禁 app secret、tenant/user token、Device Grant 临时码与授权 URL。唯一短期交接文件 `feishu/_state/registration-links/<job>.json` 仅保存官方 HTTPS 授权 URL 与过期时间，登记成功、过期或终止即删除；不进入 Git、日志或普通诊断。第二阶段权限链接现读权限后重建，不落盘。
 - scopes API 或群 API 报错属于 `unknown/retry`，不得伪装成“未授权/未入群”；owner 文件必须存在且含有效 open_id 才算完成。
 - 应用 owner、应用审核管理员、企业超级管理员是三个概念。API 只能返回哪一层就标哪一层，查不到姓名时写“不可判定”，禁止用 app owner 冒充企业管理员。
 
