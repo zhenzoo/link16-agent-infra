@@ -109,6 +109,8 @@ def recover(fb, bot):
         return None
     name = bot['name']
     with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', name, timeout=1):
+        if fb._invalidate_restart_resume_unlocked(bot):
+            return 'restart-fresh'
         rec = fb.load_session(name) or {}
         if rec.get('profile') != fb.agent_runtime.profile_name(bot, required=True):
             return None

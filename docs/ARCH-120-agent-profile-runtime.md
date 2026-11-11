@@ -17,7 +17,7 @@ read_when:
   - 新增账号 / 新增 worker 接入
   - 出现「起错号」「串账号」类症状
   - 改动 agent_runtime.py 或 agent_profile_cli.py
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
 
@@ -293,9 +293,15 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 `kimi update --yes`，Link16 不另写下载器。Codex 自己的 `check_for_update_on_startup` 关闭，
 因为更新已由 Link16 集中执行，避免重复检查拖慢 TUI。
 更新按可执行文件跨进程互斥，记录 before/after 版本和脱敏回执；锁忙表示已有更新继续运行，
-当前 session 不等待。updater 的 stdout/stderr 在 5 秒内产生实际输出即视为已响应：显示正在更新，
-不再限制更新总时长，待官方命令退出后回读版本；5 秒完全无响应则结束本次尝试并启动当前已装版本。
-更新失败同样不阻止启动。更新不是选号输入，只有 Codex 的重复检查设置写入所选 profile。
+当前 session 不等待。Codex 先在最多3秒内读官方 `releases.openai.com/codex/channels/latest`；
+已是当前发布版本跳过安装，检查失败明确报告失败并启动已装版，不冒称最新版。发现更新仍调用官方
+updater，设置所选 `CODEX_HOME` 与非交互安装；三runtime持续观察数值进度、有限安装阶段与本次暂存
+目录字节增长。Windows Codex解包目录只统计专属进程Job内PID对应的 `.staging.*.<PID>`，不扫历史存档。
+连续5秒无进展就结束此次更新子树并放行已装版；开场文字、重复spinner不能取消这道限制。
+真实进展持续时不限制总时长。正常退出后回读版本，区分最新版、更新完成和失败；桥用同一张卡片
+合并进度，发送失败不阻塞更新。Windows在挂起启动后先分配专属Job，再恢复运行，退出/取消时结束
+其后代；POSIX使用独立进程组，不按进程名扫杀。控制取消会退出启动流程，而非按一般失败继续开窗。
+更新不是选号输入，只有 Codex 的重复检查设置写入所选 profile。
 `LINK16_AGENT_UPDATE=0` 是故障时的紧急绕过；已经运行的 CLI 不被更新流程重启或中断。
 
 ## 6. Fail closed

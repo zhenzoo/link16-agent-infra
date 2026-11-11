@@ -75,6 +75,7 @@ def scene(tmp_path, monkeypatch):
         STATE_DIR=tmp_path, load_session=lambda name: dict(rec), current_cwd=lambda bot: tmp_path,
         _merge_session=lambda name, changes: rec.update(changes),
         _reuse_check=Mock(return_value=(False, True, 'dead')),
+        _invalidate_restart_resume_unlocked=Mock(return_value=False),
         _release_exited_session_unlocked=Mock(return_value=True),
         bridge_injection=SimpleNamespace(injection_lock=lambda *a, **kw: nullcontext()),
         bridge_activity=SimpleNamespace(read_activity=Mock(return_value={'state': 'idle'})),
@@ -94,6 +95,13 @@ def scene(tmp_path, monkeypatch):
         inbox.confirm(prompt, 'thread', {'source': 'turn/start', 'turn_id': 'resumed'})
     fb._inject_unlocked = Mock(side_effect=inject)
     return SimpleNamespace(fb=fb, bot=bot, rec=rec, snapshot=snapshot, inbox=inbox, route=route)
+
+
+def test_daemon_restart_never_injects_continue_into_the_old_task(scene):
+    scene.fb._invalidate_restart_resume_unlocked.return_value = True
+    assert recovery.recover(scene.fb, scene.bot) == 'restart-fresh'
+    scene.fb._ensure_session_unlocked.assert_not_called()
+    scene.fb._inject_unlocked.assert_not_called()
 
 
 def test_restarts_resume_same_conversation_and_accept_once(scene):

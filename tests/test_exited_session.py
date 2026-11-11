@@ -54,6 +54,45 @@ def test_confirmed_exit_releases_runtime_but_preserves_conversation(dead, runtim
     assert not bridge._release_exited_session_unlocked(dead.bot)
 
 
+@pytest.mark.parametrize('runtime', ['codex', 'kimi', 'claude'])
+def test_daemon_restart_invalidates_only_automatic_resume(dead, monkeypatch, runtime):
+    dead.bot['agent'] = runtime
+    bridge.save_session(dead.bot['name'], {**dead.rec, 'agent': runtime, 'daemon_fp': 'old'})
+    monkeypatch.setattr(bridge.wmux_session, 'daemon_fingerprint', lambda: 'new')
+    kimi = bridge.STATE_DIR / f"bridge-kimi-thread-{dead.bot['name']}.json"
+    kimi.write_text('{"session_id":"old"}')
+    history = bridge.STATE_DIR / 'history.jsonl'
+    history.write_text('original conversation')
+    assert bridge._invalidate_restart_resume_unlocked(dead.bot)
+    assert not dead.thread.exists()
+    assert json.loads(kimi.read_text()) == {'closed': True}
+    rec = bridge.load_session(dead.bot['name'])
+    assert rec['jsonl'] is None
+    assert rec['pty'] == dead.rec['pty']  # No speculative process killing.
+    assert rec['chat_id'] == 'owner-chat'
+    assert history.read_text() == 'original conversation'
+    dead.close.assert_not_called()
+    assert bridge._invalidate_restart_resume_unlocked(dead.bot)  # idempotent
+
+
+@pytest.mark.parametrize('old,current', [('same', 'same'), (None, 'new'), ('old', None)])
+def test_same_or_unknown_daemon_preserves_resume(dead, monkeypatch, old, current):
+    bridge.save_session(dead.bot['name'], {**dead.rec, 'daemon_fp': old})
+    monkeypatch.setattr(bridge.wmux_session, 'daemon_fingerprint', lambda: current)
+    assert not bridge._invalidate_restart_resume_unlocked(dead.bot)
+    assert dead.thread.exists()
+    assert bridge.load_session(dead.bot['name'])['jsonl'] == 'old.jsonl'
+
+
+def test_releasing_a_dead_process_keeps_epoch_for_a_later_reboot_check(dead, monkeypatch):
+    bridge.save_session(dead.bot['name'], {**dead.rec, 'daemon_fp': 'old'})
+    assert bridge._release_exited_session_unlocked(dead.bot)
+    assert bridge.load_session(dead.bot['name'])['daemon_fp'] == 'old'
+    monkeypatch.setattr(bridge.wmux_session, 'daemon_fingerprint', lambda: 'new')
+    assert bridge._invalidate_restart_resume_unlocked(dead.bot)
+    assert not dead.thread.exists()
+
+
 @pytest.mark.parametrize("pid,ppid", [(101, 1), (102, 1), (103, 1), (999, 101), (999, 102)])
 def test_live_pid_reused_pid_or_orphan_child_prevents_release(dead, pid, ppid):
     dead.inventory.return_value = [{"pid": pid, "ppid": ppid, "birth": "1"}]

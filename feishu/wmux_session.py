@@ -303,8 +303,10 @@ def daemon_fingerprint():
         return None
 
 
-def _wait_first_pty(ws_id, tries=20):
+def _wait_first_pty(ws_id, tries=20, cancelled=None):
     for _ in range(tries):
+        if cancelled and cancelled():
+            return None
         w = _ws(ws_id)
         ptys = (w or {}).get("ptyIds") or []
         if ptys:
@@ -347,10 +349,12 @@ def _shell_ready(screen, echoed_hint=None):
     return (echoed_hint in screen) if echoed_hint else True
 
 
-def _wait_shell_ready(pty, echoed_hint=None, timeout=SHELL_READY_TIMEOUT):
+def _wait_shell_ready(pty, echoed_hint=None, timeout=SHELL_READY_TIMEOUT, cancelled=None):
     """轮询读屏直到 shell 提示符回来（或超时）。返回 bool（False=超时·调用方回退原盲等）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if cancelled and cancelled():
+            return False
         if _shell_ready(_read_screen(pty), echoed_hint):
             return True
         time.sleep(SHELL_POLL_SEC)
@@ -505,7 +509,7 @@ class WmuxLaunchPending(RuntimeError):
         self.record = record
 
 
-def spawn(name, cmd="ccp", cwd=None, shell_init="bash", *, resume=None):
+def spawn(name, cmd="ccp", cwd=None, shell_init="bash", *, resume=None, cancelled=None):
     """Create or reconcile one workspace, then start the registry-derived command.
 
     A lost response is not a failed create. Never replay ``workspace.new``:
@@ -518,21 +522,26 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash", *, resume=None):
         ws = _create_workspace(name)
     ws_id = ws["id"]
     pending = {"workspace_id": ws_id, "name": name, "command": cmd}
+    def check_cancelled():
+        if cancelled and cancelled():
+            raise WmuxLaunchPending(pending, '启动已让位给待处理的控制命令')
+    check_cancelled()
     try:
         autonomy = enable_autonomy(ws_id)
     except Exception as exc:
         raise WmuxLaunchPending(pending, f"工作区已保留，正在等待 Autonomy 设置就绪：{exc}") from exc
-    pty = _wait_first_pty(ws_id)
+    pty = _wait_first_pty(ws_id, **({'cancelled': cancelled} if cancelled else {}))
     pending["pty"] = pty
     if not pty:
         raise WmuxLaunchPending(pending, f"workspace {ws_id} 正在等待终端 pty")
 
     def send_line(text, gate=True, echoed_hint=None):
+        check_cancelled()
         _wmux("send", pty, text, "--allow-ws", ws_id)
         _wmux("enter", pty, "--allow-ws", ws_id)
         if not gate:
             return  # The caller observes the actual worker/session receipt.
-        if gate and _wait_shell_ready(pty, echoed_hint):
+        if gate and _wait_shell_ready(pty, echoed_hint, **({'cancelled': cancelled} if cancelled else {})):
             time.sleep(SEND_SETTLE_SEC)
         else:
             time.sleep(0.4)            # 探不到提示符 / 末行不 gate → 回退原盲等(绝不卡死/少发)
@@ -542,8 +551,9 @@ def spawn(name, cmd="ccp", cwd=None, shell_init="bash", *, resume=None):
     if cwd:
         tail = cwd.rstrip("/").rsplit("/", 1)[-1]     # cd 后新提示符含目录尾段 = 落地铁证
         send_line(f'cd "{cwd}"', echoed_hint=tail)    # ② 单独一行 cd(不合并)·探到新目录提示符再继续
-    if not _wait_shell_ready(pty):
+    if not _wait_shell_ready(pty, **({'cancelled': cancelled} if cancelled else {})):
         raise WmuxLaunchPending(pending, f"workspace {ws_id} shell 未就绪，保留原工作区继续等待")
+    check_cancelled()
     send_command(pty, ws_id, _short_launcher(cmd))  # ③ 长命令落脚本，终端只收短 launcher
     return {"workspace_id": ws_id, "pty": pty, "name": name, "autonomy": autonomy}
 
