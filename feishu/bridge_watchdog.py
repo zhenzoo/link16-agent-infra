@@ -1523,23 +1523,27 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         notify(bot_name, "failed", f"⛔ {bot_name} 换号失败（写名册这步）：{e}。**没动你的会话**，请手动 `/account {tgt}`。")
         return False
 
-    # ⑤ 关旧会话
+    # ⑤ 先停旧桥消费者，避免清指针后它按内存中的旧账号又创建会话。
+    #    显式换号复用 /account、/cd 的生命周期，不能只关窗口留恢复指针。
     try:
-        if rec.get("workspace_id"):
-            import wmux_session
-            wmux_session.close(rec["workspace_id"])
-            log(f"已关旧会话 workspace={rec['workspace_id']}")
+        stopped = _bridge_cmd(["stop", "--bot", bot_name])
+        if stopped.returncode:
+            raise RuntimeError(f"旧桥停止失败 exit={stopped.returncode}")
+        fb.close_session_runtime(bot)
+        log(f"已关闭旧会话并清除恢复指针 workspace={rec.get('workspace_id')}")
     except Exception as e:                             # noqa: BLE001
-        log(f"关旧会话异常（继续）：{e}")
+        notify(bot_name, "failed", f"⛔ {bot_name} 名册已选 {tgt}，但旧桥/会话关闭未确认：{e}。"
+               "旧会话身份与历史保留，未启动或注入新会话。")
+        return False
 
     # ⑥ 重启【这一个】bot 的桥进程 —— 让它重读名册拿到新 profile。
     #    为什么非要重启：`/account` 的处理里有一步是改桥进程【内存里】的 bot 字典；
     #    外部进程改得了名册文件，改不了别人进程的内存。不重启的话，
     #    桥下次冷启仍会用旧 profile —— 当时看着是好的，等会话一死就静默切回老号。
     try:
-        _bridge_cmd(["stop", "--bot", bot_name])
-        time.sleep(2)
-        _bridge_cmd(["start", "--bot", bot_name])
+        started = _bridge_cmd(["start", "--bot", bot_name])
+        if started.returncode:
+            raise RuntimeError(f"新桥启动失败 exit={started.returncode}")
         time.sleep(5)
         log(f"已重启 {bot_name} 的桥进程")
     except Exception as e:                             # noqa: BLE001

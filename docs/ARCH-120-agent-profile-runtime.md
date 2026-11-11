@@ -342,6 +342,7 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
   `defaults.profiles.claude` / `defaults.profiles.codex`。
 - bot 自己的 `profile` 优先于对应的机器 runtime 默认。
 - `/account cxp` 原子更新该 bot 的 `profile`，关闭旧 session；重载、`/close` 和桥重启后仍是 `cxp`。
+- 显式 `/account`、`/cd`、交接和自动限额换号共用 `close_session_runtime`：旧会话确认关闭后，在生命周期锁内清 Codex/Kimi 恢复指针及旧运行绑定，保留历史与路由；新账号/目录使用新对话。关闭失败不清状态、不继续启动。普通桥重载及意外进程退出继续保留原对话，不能为绕过错号恢复而取消 profile/cwd 检查。
 - Bridge session 记录必须同时钉住启动时的 `profile`。复用前记录值必须与 bot 当前
   profile 完全相同；旧记录缺字段或值不同都先关闭 workspace 再重生，禁止 roster 已切
   `cxp` 却继续向旧 `cx` shell 注入消息。

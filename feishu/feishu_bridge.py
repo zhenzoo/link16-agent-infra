@@ -1671,9 +1671,21 @@ def _close_session_unlocked(bot):
 
 
 def close_session_runtime(bot):
-    """Explicit account/directory/handoff changes retain their own metadata."""
+    """End native continuity for an explicit account/directory/handoff change.
+
+    A normal bridge restart does not call this function: it must retain the
+    thread pointer. Explicit changes instead keep history and routing, but must
+    not let the next worker resume the previous profile or directory.
+    """
     with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
-        return _close_session_unlocked(bot)
+        result = _close_session_unlocked(bot)
+        # Only clear after close succeeded. Failed close retains enough identity
+        # to recover the original runtime, including Kimi's supervised worker.
+        clear_codex_thread(bot["name"])
+        _merge_session(bot["name"], {"workspace_id": None, "pty": None, "jsonl": None,
+                                     "daemon_fp": None, "pending_launch": None,
+                                     "runtime_processes": None})
+        return result
 
 
 def replace_session(bot, defaults, *, create=False):
