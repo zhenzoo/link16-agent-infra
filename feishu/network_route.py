@@ -174,7 +174,7 @@ class AgentProxyUnavailable(RuntimeError):
         super().__init__(message)
 
 
-def _proxy_processes():
+def _proxy_processes(timeout=10):
     import bridge_process
     script = """
 $ErrorActionPreference = 'Stop'
@@ -193,7 +193,7 @@ try {
   @{ok=$true; session=$session; processes=$rows} | ConvertTo-Json -Depth 4 -Compress
 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 """
-    value = bridge_process._envelope(bridge_process._powershell(script, 10))
+    value = bridge_process._envelope(bridge_process._powershell(script, timeout))
     if value.get("session") == 0 or not isinstance(value.get("processes"), list):
         raise AgentProxyUnavailable("无法确认交互桌面上的代理进程；未启动或重启任何程序。")
     return value["processes"]
@@ -318,9 +318,15 @@ def ensure_agent_proxy(*, apply=False, expected=None, probe_url="https://www.gst
             raise AgentProxyUnavailable("代理恢复记录无法读取，未执行自动操作。")
         if _listening(expected):
             # Remember the actual running client for a later absent-process recovery.
-            if apply and (not state.get("client") or state.get("launch_attempts")
+            if apply and (state.get("launch_attempts")
                           or time.time() - state.get("observed_at", 0) >= 300):
-                client = _remember_client(_proxy_processes(), parsed.port)
+                # Inventory is optional while the configured socket is healthy.
+                # A slow Windows CIM query must not retain an otherwise deliverable
+                # inbox message. Unknown ownership disables future auto-launch.
+                try:
+                    client = _remember_client(_proxy_processes(timeout=2), parsed.port)
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+                    client = None
                 if client:
                     state["client"] = client
                 else:

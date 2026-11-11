@@ -413,6 +413,7 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 - `standalone_worker_cmd()` 为 Kimi 设置 registry home 和 profile，受管交互启动默认 `--auto`（Never Ask），plan 退出自动批准且不弹交互提问；
   `login` / `acp` / `doctor` / `-p` 等入口不追加冲突的交互权限参数。
 - 子 shell 清除继承的临时 `KIMI_MODEL_*`，避免旧模型覆盖改变实际 provider；不迁移任何其他 home 的凭据。
+- Windows 启动若出现 `ESC]11;rgb:…ESC\\`，这是终端背景色回复，不能直接判成业务消息注入失败。Kimi 2.5.2 在 TUI 接管输入前的自动主题探测只等 250 ms；在 registry 对应 home 的 `tui.toml` 选择明确的 `dark` 或 `light` 可避开这次探测，保留原生 TUI 内的回复过滤。这项缓解下次启动生效，不代表所有卡住问题已根治。应分别核原生 prompt/steer、llm.request 和结束事件；不能删用户草稿或把所有转义文本当噪声过滤。隔离 Wmux 的短、多行、分段 OSC 回复已核原生正文不受污染，证据见 PLAN-1270。
 - `kp login` 登录隔离账户；`kp --version` 与 Link16 `selftest --profile kp` 检查真实启动。
   `doctor` 通过只说明可启动，登录和模型消息仍要分别验证。
 - 私人入口治理的 Kimi 模板注入同一 Claude 母版沟通段；生成目标为 registry home 下的 `AGENTS.md`。
