@@ -45,6 +45,41 @@ def progress_state_path(state_dir, bot):
     return Path(state_dir) / f"bridge-progress-state-{bot}.json"
 
 
+def _is_kimi_diagnostic(step):
+    return str(step.get("event_id") or "").startswith("kimi-diagnostic:")
+
+
+def _kimi_diagnostic_label(step):
+    """Compact only bridge-owned notices; retain full evidence in the journal."""
+    phase = str(step.get("event_id") or "").rsplit(":", 1)[-1]
+    label = str(step.get("label") or "").strip()
+    if phase == "response":
+        return "🟢 模型请求已恢复，任务继续。"
+    if phase in {"wait-60", "wait-300"}:
+        wait = "5 分钟" if phase == "wait-300" else "60 秒"
+        return f"⏳ 模型请求已有 {wait} 未新增响应记录；日志可能延迟落盘，尚不能判定任务卡住。"
+    if phase == "retry":
+        category = label.split("：", 1)[0]
+        attempt = re.search(r"第 (\d+) 次(?:／最多 (\d+) 次)?", label)
+        retry = f"（{attempt[1]}/{attempt[2]}）" if attempt and attempt[2] else ""
+        return f"{category}；CLI 正在自动重试{retry}，任务尚未结束。"
+    return label
+
+
+def _merge_kimi_diagnostic_steps(previous, incoming):
+    """Sparse infrastructure updates must not erase already-approved prose."""
+    merged = [dict(step) for step in previous]
+    positions = {step.get("event_id"): i for i, step in enumerate(merged) if step.get("event_id")}
+    for step in incoming:
+        event_id = step.get("event_id")
+        if event_id in positions:
+            merged[positions[event_id]].update(step)
+        else:
+            positions[event_id] = len(merged)
+            merged.append(dict(step))
+    return merged
+
+
 def delivery_state_path(state_dir, bot):
     return Path(state_dir) / f"bridge-delivery-state-{bot}.json"
 
@@ -898,12 +933,29 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             return 0
 
     def _v2_text(steps, snapshot=None):
+        # Kimi retry/wait/recovery records are current status, not a timeline
+        # to accumulate in the owner's card. IDs/ACKs stay intact for replay.
+        snapshot = snapshot or steps
+        latest_diagnostic = next((step for step in reversed(snapshot) if _is_kimi_diagnostic(step)), None)
+        latest_diagnostic_id = latest_diagnostic.get("event_id") if latest_diagnostic else None
         labels = [
-            str(step.get("label") or "").strip()
+            _kimi_diagnostic_label(step) if _is_kimi_diagnostic(step)
+            else str(step.get("label") or "").strip()
             for step in steps if step.get("kind") != "tool"
+            and (not _is_kimi_diagnostic(step) or step.get("event_id") == latest_diagnostic_id)
         ]
         labels = [label for label in labels if label]
-        snapshot = snapshot or steps
+        if labels and latest_diagnostic and not any(
+            step.get("kind") in {"commentary", "plan"} and not _is_kimi_diagnostic(step)
+            and str(step.get("label") or "").strip() for step in steps
+        ):
+            # Also repair a pre-upgrade card whose old sparse snapshot already
+            # removed its ACKed prose. Reuse only the latest authorized context.
+            context = next((str(step.get("label") or "").strip() for step in reversed(snapshot)
+                            if step.get("kind") == "commentary" and not _is_kimi_diagnostic(step)
+                            and str(step.get("label") or "").strip()), None)
+            if context:
+                labels.insert(0, context)
         plan = next((step for step in reversed(snapshot) if step.get("kind") == "plan"), None)
         replay = not labels
         if not labels:
@@ -917,6 +969,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 (
                     step for step in reversed(snapshot)
                     if step.get("kind") == "commentary"
+                    and not _is_kimi_diagnostic(step)
                     and str(step.get("label") or "").strip()
                 ),
                 None,
@@ -925,6 +978,10 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 label = str(commentary.get("label") or "").strip()
                 if label not in context:
                     context.append(label)
+            if not context:
+                diagnostic = next((step for step in reversed(snapshot) if _is_kimi_diagnostic(step)), None)
+                if diagnostic:
+                    context.append(_kimi_diagnostic_label(diagnostic))
             labels = context
         tool_total = sum(
             _safe_count(step.get("tool_count"))
@@ -1019,8 +1076,16 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         if not steps:
             return None, []
         snapshot = state.get("v2_steps") or []
+        latest_diagnostic = next((step.get("event_id") for step in reversed(snapshot)
+                                  if _is_kimi_diagnostic(step)), None)
+        visible_steps = [step for step in steps if not _is_kimi_diagnostic(step)
+                         or step.get("event_id") == latest_diagnostic]
+        if not visible_steps:
+            _v2_ack(steps)  # Superseded status is retained locally, never replayed as a new warning.
+            _checkpoint_progress()
+            return state.get("v2_mid"), state.get("v2_card_ids") or []
         groups, current = [], []
-        for step in steps:
+        for step in visible_steps:
             trial = current + [step]
             # A tool step adds no body text; left alone in its own group it
             # would replay the context that the previous group just sent.
@@ -1401,6 +1466,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
         elif kind == "progress":
             if r.get("contract") == "milestone-v1":
                 turn = r.get("root_turn") or r.get("turn")
+                partial_diagnostic = bool(r.get("runtime") == "kimi" and r.get("kimi_diagnostic"))
+                same_context = (turn == state.get("v2_turn")
+                                and _route_key(r.get("route")) == _route_key(state.get("v2_route")))
                 # An answer seals a card, not the active turn's future events:
                 # Codex can ask for input and continue under the same turn ID.
                 # Its saved event/revision ACKs suppress replay while admitting
@@ -1413,9 +1481,12 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                     state["v2_card_ids"] = []
                     state["v2_acked"] = {}
                     state["v2_delivered_new"] = []
-                state["v2_steps"] = r.get("steps") or []
+                incoming = r.get("steps") or []
+                state["v2_steps"] = (_merge_kimi_diagnostic_steps(state.get("v2_steps") or [], incoming)
+                                     if partial_diagnostic and same_context else incoming)
                 state["v2_route"] = r.get("route")
-                state["v2_workline"] = record_workline
+                if not (partial_diagnostic and same_context and record_workline is None):
+                    state["v2_workline"] = record_workline
                 continue
             steps = r.get("steps")
             if steps is None:                              # 老式单 label 兜底 → 累加

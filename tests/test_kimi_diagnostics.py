@@ -270,7 +270,7 @@ def test_real_writer_process_notice_recovery_and_final_reach_renderer(tmp_path):
                 workline_gate=lambda r: session_work.delivery_work("test", r, observer.state_dir))
     asyncio.run(deliver())
     rendered = "\n".join([c[0] for c in cards] + edits)
-    assert "60 秒" in rendered and "已产生新的模型响应记录" in rendered
+    assert "60 秒" in rendered and "模型请求已恢复" in rendered
     answers = [c for c in cards if c[2] == "answer"]
     assert len(answers) == 1 and "原生结果保留" in answers[0][0]
     assert all(c[1]["dest"] == "oc_group" for c in cards)
