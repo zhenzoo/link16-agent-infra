@@ -1508,6 +1508,20 @@ def main(argv=None):
     parser.add_argument("--bot", help="显式指定身份；缺省从 FEISHU_BRIDGE_SESSION 解析")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p_create = sub.add_parser("create", help="原生表格创建：固定bot身份，自动转owner/设群权限并回读")
+    p_create.add_argument("kind", choices=("sheet", "bitable"))
+    p_create.add_argument("--title", required=True)
+    p_create.add_argument("--spec", help="JSON文件：官方sheets/styles/values或Base初始字段等参数")
+    p_create.add_argument("--state", required=True, help="本次创建独占目录；失败后保留并续原资源")
+    p_create.add_argument("--external-reason", default="", help="仅用户明确external时填写其要求")
+    create_action = p_create.add_mutually_exclusive_group()
+    create_action.add_argument("--apply", action="store_true", help="执行一次创建与权限治理；缺省仅预检")
+    create_action.add_argument("--resume", action="store_true", help="只恢复原资源权限，不重发创建")
+    def create(args):
+        import docio_create
+        return docio_create.run(args, sys.modules[__name__])
+    p_create.set_defaults(func=create)
+
     p_prof = sub.add_parser("profiles", help="把每只 bot 的应用注册成同名 lark-cli profile")
     p_prof.add_argument("--apply", dest="dry_run", action="store_false", default=True,
                         help="真正注册；缺省只预览")

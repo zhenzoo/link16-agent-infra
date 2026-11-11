@@ -193,7 +193,19 @@ python feishu/docio_cli.py --bot <我> write "<原URL>" --patch <原JSON> --reco
 
 所有租户和 runtime 的新建资产统一使用 feishu skill。默认 owner 是已认主人、组织内持链接可读、登记协作群 edit；不新增密级或复制/评论限制。外部链接仅在用户明确要求时启用并记录理由。完整合同见 SPEC-220 §8。
 
-Markdown、HTML/Office、媒体发布链已自动调用 document_access。原生 Sheet、多维表格等通过对应官方接口新建后，立即执行；历史修复也使用同一入口：
+Markdown、HTML/Office、媒体发布链已自动调用document_access。原生Sheet和多维表格必须使用统一创建入口，不再裸调用官方创建命令后手工补治理：
+
+```text
+python feishu/docio_cli.py create sheet --title "标题" --spec create.json --state <本次目录>
+python feishu/docio_cli.py create sheet --title "标题" --spec create.json --state <同一目录> --apply
+python feishu/docio_cli.py create sheet --title "标题" --spec create.json --state <同一目录> --resume
+```
+
+第一条仅预检，第二条一次创建并自动核owner/链接/群edit，第三条只恢复原资源权限。bot默认从FEISHU_BRIDGE_SESSION解析，普通终端在create前显式加--bot；子进程清除CLI默认profile和其他应用token，使用名册中的当前应用凭据。创建前认主/同租户群预检失败时不调用创建API。Sheet spec允许sheets/styles/values/folder_token，JSON值沿用官方schema；bitable将kind换成bitable，spec允许table_name/fields/folder_token/time_zone。--spec可省略以创建空资源。只在用户明确external时加--external-reason。
+
+state/create.json绑定身份、输入摘要与创建token，写入意图后只调用一次创建。已有记录须--resume，换身份或输入拒绝续跑；未知创建结果先查原资源，不能自动重试。创建有token但数据/样式部分失败仍自动治理并报未完成，后续修同一表。成功必须完成三项独立回读，不把裸URL当交付。该闸保证统一入口内的行为，不声称能够拦截任意第三方脚本绕过入口。
+
+已有资产的历史修复或创建后的独立复核使用govern：
 
 ```text
 python feishu/docio_cli.py --bot <创建者> govern <URL>

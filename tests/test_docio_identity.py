@@ -267,12 +267,20 @@ class CollabChatTests(unittest.TestCase):
         with patch.object(docio_cli.audit, "_env_val", return_value=None):
             with self.assertRaises(SystemExit) as caught:
                 docio_cli.collab_chat_id()
-        self.assertIn(docio_cli.COLLAB_CHAT_ENV, str(caught.exception))
+        self.assertIn("registry.tenants", str(caught.exception))
 
     def test_explicit_group_wins(self):
         with patch.object(docio_cli.audit, "_env_val", return_value="oc_from_env"):
             self.assertEqual(docio_cli.collab_chat_id("oc_explicit"), "oc_explicit")
-            self.assertEqual(docio_cli.collab_chat_id(), "oc_from_env")
+            with self.assertRaises(SystemExit):
+                docio_cli.collab_chat_id()  # No global group can override tenant identity.
+
+    def test_current_app_selects_its_registered_tenant_group(self):
+        with patch("send_feishu_msg._creds_for", return_value=("app-current", "secret")), \
+             patch.object(docio_cli.rest, "tenant_token", return_value="token"), \
+             patch("document_access.resolve_policy", return_value={"group_id": "same-tenant"}) as resolve:
+            self.assertEqual(docio_cli.collab_chat_id(bot="current"), "same-tenant")
+        resolve.assert_called_once_with("app-current", "token")
 
 
 class TokenRetryTests(unittest.TestCase):

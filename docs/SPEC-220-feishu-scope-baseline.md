@@ -157,7 +157,7 @@ level 4 scope **永久不进基线**。它们提供的每一项能力都已有 l
 
 owner 来自该 app 的认主记录，群来自 registry.tenants；不按 bot 名后缀或机器推断租户，不使用全局单一群环境变量，不跨 app 复制人的 open_id。创建者原目录不变，转交后保留 full_access；群只需 edit。三项独立回读全部满足才交付，HTTP 成功、URL、edit 协作者均不能替代 owner 证明。
 
-Markdown/HTML/媒体由 document_access 实施；Sheet/多维表格创建后必须 docio govern；妙搭 HTML 用 Drive apps 权限，frontend/full_stack 分别核应用 scope 与成员，并核数字 owner 与已授权主人身份。妙搭开发接口仍可能要求 user token，群 edit 不会替应用补 API scope 或替真人完成 OAuth。
+Markdown/HTML/媒体由document_access实施；Sheet/多维表格必须经docio create固定当前bot身份，在同一次调用内自动治理并回读，禁止裸创建后靠手工补govern。缺owner或同租户群时创建前失败；创建后任一权限未通过就保留原token并报未完成，恢复不重建。已有资产用docio govern。妙搭HTML用Drive apps权限，frontend/full_stack分别核应用scope与成员，并核数字owner与已授权主人身份；初始化/发布必须固定已核主人profile，verify-release继续在交付前核三项。妙搭开发接口仍可能要求user token，群edit不会替应用补API scope或替真人完成OAuth。
 
 权限清单之外的第二层是**资源是否分享给这个身份**。逐只应用挂协作者可行但不可扩展：
 每新增一只 bot，所有历史文档都要重挂一遍。
