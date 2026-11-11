@@ -3,6 +3,7 @@ doc_type: ARCH
 doc_id: ARCH-120
 title: Agent profile 运行档案与 worker 身份继承
 status: active
+url: "https://n8r2cr07gk.feishu.cn/docx/Yp76dJDrDoDUM7xyqZycvRvgnGc"
 purpose: 定义一个会话/worker 用哪个账号运行、身份从哪里来、以及为什么禁止从环境反推身份。
 owns:
   - profile → runtime/home/launcher 的解析契约
@@ -19,6 +20,8 @@ read_when:
 last_reviewed: 2026-11-11
 ---
 # ARCH-120 · Agent Profile 运行档案与 worker 继承
+
+本机文件：file:///C:/410_VibeCoding/Post/link16-agent-infra/docs/ARCH-120-agent-profile-runtime.md
 
 > **状态**：v1 目标契约 · 2026-07-31 Publisher 拍板
 > **范围**：Link16 启动的 Claude/Codex/Kimi 主 session、手工启动的主 session、以及它们在 wmux 新 pane 中启动的独立 worker。
@@ -438,11 +441,13 @@ Codex/Kimi runtime 适配、最小目标特例和不可复制的派生/私密状
 
 ### 11.2 Wire 1.5 → 共享 milestone 合同
 
-只接受已验证的 Wire `protocol_version=1.5` 和精确 `agents/main/wire.jsonl`。`turn.prompt` 字节偏移形成稳定 turn_key，入口信封当场锁定回址。工作行闸只在 hook 已创建匹配 pending 时启用；observer 不为无合同的 Wire 回合自建 pending，wmux 手输、后台通知和看门狗恢复因此不被回执闸阻塞；pending 超过 120 秒则自动失败放行，失败/取消/阻塞也生成可见结果而非永久等待。`turn.prompt` / `turn.steer` 的精确文本同时作为注入已被原生消费的结构回执，屏幕校验落后时不误报交接失败。`content.part` 只接收公开 text；工具调用只派生固定类别/安全仓库相对路径；`tools.update_store` 的 todo 状态生成真实 plan 修订。思考、系统提示、工具参数、工具结果与错误详情不得进入 outbox。
+只接受已验证的 Wire `protocol_version=1.5` 和精确 `agents/main/wire.jsonl`。`turn.prompt` 字节偏移形成稳定 turn_key，入口信封当场锁定回址；若 hook 已创建匹配工作行合同，首次读取和重启重建都复用该 hook 的 turn_key。工作行闸只在 hook 已创建匹配 pending 时启用；observer 不为无合同的 Wire 回合自建 pending，wmux 手输、后台通知和看门狗恢复因此不被回执闸阻塞；pending 超过 120 秒则自动失败放行，失败/取消/阻塞也生成可见结果而非永久等待。空的原生接收记录与纯基础设施诊断不等待模型写工作行，避免模型请求停顿同时挡住故障提示；诊断快照仅含固定提示与工具计数，不放行模型正文、计划或路径，正常模型回复仍走原闸。`turn.prompt` / `turn.steer` 的精确文本同时作为注入已被原生消费的结构回执，屏幕校验落后时不误报交接失败。`content.part` 只接收公开 text；工具调用只派生固定类别/安全仓库相对路径；`tools.update_store` 的 todo 状态生成真实 plan 修订。思考、系统提示、工具参数、工具结果与原始错误消息不得进入 outbox。
+
+Kimi 请求诊断只消费 main 的 `llm.request`、`turn.step.retrying`、响应记录与 `turn.ended.error`。请求后 60 秒／5 分钟没有新增响应记录时各提示一次；Wire 可能在流结束后落盘，因此不把记录静默等同“零首字节”或模型失败。原生重试显示白名单错误类别、数字 HTTP 状态码及真实 nextAttempt/maxAttempts；超时与连接失败保留网络／客户端／服务端未能唯一归责的边界，401/403、429、5xx、过载分别说明可证原因。出现响应才报告请求恢复；只有原生终止事件决定本轮结束，最终失败不承诺继续自动重试。等待提示不杀进程、不新建会话、不重发业务请求；5 分钟提示可用 `/stop` 中断后在原会话继续。工具运行、子 agent、已结束／seed 历史及被新 turn 替代的回合不触发请求等待提示。本地日志 JSON、权限、缺文件、协议或截断故障与上游请求错误分开呈现；首条日志就失败时，仅允许精确 session 的活动 hook 提供回址。实现与实验见 [PLAN-1240](PLAN-1240-kimi-request-diagnostics.md)。
 
 `turn.ended.reason` 决定终结：completed 且存在无工具步骤的公开文字才生成正常答案；failed/cancelled/blocked 分别明确呈现。工具步骤中的文字作为进度，不拼进最终答案。ETA 与实际时间由 agent 提供，适配器保留，不编造。终结记录持久写入 outbox 后才按 turn_key compare-and-clear，旧轮不得清掉新轮。
 
-按完整 UTF-8 行推进字节游标；部分尾行等待、截断或未知协议失败。重启从头重建 reducer 状态，但只发布 cursor 以后的事件。每条公开事件用 session/字节偏移/序号形成 source_event_id，先追加并 fsync，再原子推进 cursor；追加后、游标前崩溃时按已发布 ID 去重。最终网络送达仍由 SPEC-210 的 fragment ACK 保证。
+按完整 UTF-8 行推进字节游标；部分尾行等待、截断或未知协议失败。重启从头重建 reducer 状态，但只发布 cursor 以后的事件。每条公开事件用 session/字节偏移/序号形成 source_event_id，先追加并 fsync，再原子推进 cursor；追加后、游标前崩溃时按已发布 ID 去重。计时诊断用 session/请求偏移/阈值形成固定 ID，重启时从已持久 outbox 恢复计时提示和恢复状态；先读完当前日志尾部再判断等待，防止对历史慢请求重新报警。诊断与正常进度共用原 milestone ACK，最终网络送达仍由 SPEC-210 的 fragment ACK 保证。
 
 选路实证：0.38.0 的 ACP session 接续原生 TUI 时会出现工具 runtime 不存在；ACP 的部分 failed 也映射成 end_turn，因此没有采用 ACP 创建或执行路径。版本升级需重跑原生会话/真实工具/计划/失败/取消/恢复验收；本机隔离通过不等于生产 bot 或其他电脑已部署。
 
