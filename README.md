@@ -350,6 +350,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 |---|---|
 | 在一台新电脑上从零装好 | [`docs/SOP-100-new-machine-setup.md`](docs/SOP-100-new-machine-setup.md) |
 | 查看四机两仓同步与全部桥重载回执 | [PLAN-1270：四机同步](docs/PLAN-1270-four-machine-repository-sync.md) |
+| 查看 TB26 两仓发布、13 桥重载与业务状态保留证据 | [PLAN-1290：TB26 发布与运行验收](docs/PLAN-1290-tb26-fleet-publication.md) |
 | 核对公开版默认配置与发布前缺口 | [PLAN-1080：隔离账号、沟通规则与新手验收](docs/PLAN-1080-public-installation-baseline.md)（实施方案，尚未全部实现） |
 | 查看飞书文档工具修复与提交交接进度 | [PLAN-1090：凭据单一来源与读写核验](docs/PLAN-1090-feishu-docio-reliability.md) |
 | 查看 Codex 桥接启动空白与就绪信号整改 | [PLAN-1110：快速启动与真实就绪信号](docs/PLAN-1110-codex-startup-readiness.md) |
