@@ -18,7 +18,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -36,8 +36,8 @@ last_reviewed: 2026-11-11
 # 1. 一键建应用（官方扫码 · 自动写 .env）
 python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <profile> --group "<目标共享群>" --background
 # 2. 脚本按 profile doctor 后自动 upsert 本机运行名册；只核对非身份字段（见 §1）
-# 3. 选择能力档（见 §2）：个人租户默认 core/group-a2a；公司租户默认再加 docs-consume；
-#    docs-text/docs-media/docs-import/group-listen 按用途追加，可能需要管理员审批
+# 3. 企业应用按SPEC-220分别开齐tenant/user免审范围；个人租户保留能力档。
+#    需管理员审批的跳过，不发申请链接；后台开通与用户OAuth分别验收。
 # 4. 把 bot 拉进群 —— 先查它该进哪个（企业租户 ≠ 交流水吧 · 见 §4.2）；再互报 open_id（跨机靠 bot/v3/info）
 python feishu/tenant_probe.py --bot <新bot>
 # 5. 两台机各自配 .env + 选跑哪些 bot（bridge-bots.local.json 防撞同一应用 · 见 §5）
@@ -51,7 +51,7 @@ python feishu/feishu_bridge.py start --bot <新bot> --only-missing
 > 该应用主动发送，用户需用自己的安全凭据同步方案更新那台机器。Link16 不内置、不要求私人 `envsync` skill，
 > 更不会把 `.env` 或 secret 提交进 Git。只在本机运行该 bot 时跳过第 8 步。
 
-> ⏳ **OAuth、权限审批与主人私聊认主都是人工停点。** 注册器必须用 `--background` 长时运行，
+> ⏳ **需要本人完成的OAuth与主人私聊认主是人工停点。** 企业免审权限已获批量开通授权时直接执行；管理员审批跳过、不发申请链接。注册器必须用 `--background` 长时运行，
 > 并由 `registration_monitor.py` 观察机械信号；不能同步干等，也不能用短 timeout 杀掉授权进程。
 > 认主完成信号是 `feishu/_state/bridge-owner-<bot>.json` 出现。
 
@@ -110,7 +110,7 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 后台每次请求有连接/读取超时；临时网络错误只有限重试同一个授权任务的 poll，不自动重放创建步骤或替人重新授权。长期任务记录只保留 SDK 版本、请求阶段、最近进展、重试次数、HTTP 状态与错误类别；不保存 secret、token、device code、授权链接或原始响应。授权 URL 仅经上方有期限的本地交接通道提供。失败也进入本地状态及已有回调。重复启动同一 bot 的注册器复用活任务，Windows 探活只查询进程，禁止用 `os.kill(pid, 0)`。
 
-验收分清三件事：SDK 实际返回凭据且本机登记成功，才记 `registered`；权限与主人私聊可用只是连接能力；飞书紫色“智能体”标签没有已验证的公共 API 判据，需由用户界面确认，不能用会发消息或权限齐全代替。未选 `group-a2a` 不发送“已入群”回调。`ready` 表示本次所选能力**与 SPEC-220 免审基线**均验收通过（两次独立读取一致）；level 4 需管理员审批的伞形权限永远不在基线内，`ready` 不代表开了它们。
+验收分清三件事：SDK实际返回凭据且本机登记成功才记registered；Monitor的ready只表示所选桥能力与SPEC-220应用后台权限通过，两次独立读取一致，不表示主人OAuth完成、数据范围发布或已可姓名查询。注册收尾另运行 `bridge_scope_audit.py --bot <新bot> --baseline --user-identity`，用户授权缺失保留未完成，按§2办理并只读验人。飞书紫色“智能体”标签无已验证公共API判据，不能用会发消息替代；未选group-a2a不发送入群回调。
 
 2026-09-07 的 media-meta 案例：手工凭据接入后能收发，但用户看到机器人标签；同一 App ID 经官方续接完成后用户确认变为智能体。首次回传中断的旧记录不足，不能归因为 SDK 改名或某个确定的网络故障。手工导入凭据不应冒充官方登记完成。
 
@@ -152,19 +152,23 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 ## § 2 · 权限三层（★ 本文最关键的一节）
 
-注册不再把“所有历史 bot 开过的权限”当成每只新 bot 的完成条件。`register_feishu_app.py --capability ...` 按实际用途选择；个人租户未指定时使用 `core + group-a2a`，公司租户使用 `core + group-a2a + docs-consume`。
+注册按当前目标租户的规则验收，不用历史bot权限并集。企业应用开齐当前免审目录；能力档决定业务验收内容，不限制企业权限目标。个人租户仍按用途选择能力档，默认core + group-a2a；企业默认再验docs-consume。
 
 | 能力档 | 能做什么 | 额外权限 | 审批边界 |
 |---|---|---|---|
 | `core` | DM 收发、发文字/图/文件 | 无；官方 preset 已带 | Device Grant 创建流内完成 |
 | `group-a2a` | 入共享群后与 peer bot 互相 @ | 无额外 umbrella scope；依赖 preset 的 granular `im:chat:read/update`、`im:chat.members:bot_access`、群 @ scope | 权限通常已随 preset；**人工拉群**仍不可省 |
-| `docs-text` | 创建公开可读文字 docx；Markdown/HTML 经 convert-block 写入 | docx 创建/编辑 + block convert；preset 通常已带 | `tb26-baseball` 无 `drive:drive` 真测成功 |
+| `docs-text` | 创建默认组织内链接可读文字docx；Markdown/HTML经convert-block写入 | docx 创建/编辑 + block convert；preset 通常已带 | `tb26-baseball` 无 `drive:drive` 真测成功 |
 | `docs-consume` | 递归读取在线文档里的 Sheet、图片与白板 | `sheets:spreadsheet:read` + `docs:document.media:download` + `board:whiteboard:node:read` | **公司租户默认**；个人租户仅承担完整文档解析时选 |
 | `docs-media` | 图片/视频/文件嵌入 docx | 优先 `docs:document.media:upload` | 组织内应用通常免审；**一旦这只应用开了「外部可用范围」就会翻成需审核**（[§ 4.4](#-44--权限突然全变需审核先看应用可用范围有没有开外部2026-08-27-主人实测)）。直接 IM 发附件不需要它 |
-| `docs-import` | 把本地源文件上传后走 import task，并显式授权协作者 | Drive/导入/permission 类权限 | 会触发管理员审核的重能力；不用就不开 |
-| `group-listen` | 不被 @ 也主动读取全群 | `im:message.group_msg` | 可选高范围能力；不用就不开 |
+| `docs-import` | 把本地源文件上传后走import task，并授权协作者 | 优先免审的docs:document:import与细分permission权限 | 不因导入默认申请需审批的drive:drive |
+| `group-listen` | 不被@也主动读取全群 | `im:message.group_msg` | 企业免审范围内默认开通；实际监听仍由能力配置决定 |
 
-注册默认固定为**两步、两条链接**：链接 1 只做 Device Grant（新建 `create_only=True`，续接 `False`；均不携带权限 `addons`）；登记成功后，Monitor **先跑一次 scope 审计**（`bridge_scope_audit.granted_scopes`），再按 `registration_scopes()` 生成链接 2：内容 = 选定 capability 的增量 scope **∪ SPEC-220 免审基线**（与舰队其他 bot 对齐）**− 已授权**，只列真正待开的项，超长自动拆成多条；回调文案会写明「已授权 N 项 / 共需 M 项 / 本次待开 K 项」。让人审阅后再按飞书页面要求创建版本/发布。`permissions_ready` 同时要求 capability 与基线全部开满，且 Monitor 在翻绿前**独立再读一次**飞书接口、两次一致才回调；此后每一轮（含最终 `ready` 那一轮）都重新读取，回调不会骑在旧的成功读数上。（2026-09-09 定：此前 Monitor 只发 8 项能力档链接、注册脚本 dry-run 却承诺 41 项，tb26-baseball-5 以 39 项被判 ready，兄弟号 66+；现在三处共用 `registration_scopes()` 一个真源。）个人租户默认 `core + group-a2a`；公司租户由 `--tenant-kind enterprise` 或 `--group` 对 registry 的租户映射自动加 `docs-consume`。需要创建文字在线文档时再加 `--capability docs-text`，不要为了它顺手申请整个 Drive。两条链接都不能绕过租户管理员审批，代码也不会替人发布。正常注册加 `--background`：Device Grant 子进程独立存活，两个链接和后续里程碑经 Monitor 注回发起 session，不靠 Claude/Codex 的单轮生命周期。
+注册应用仍分两步：第一步只做官方Device Grant（新建create_only=True，续接False，不携带权限addons）；第二步按 `registration_scope_plan()` 的统一目标补后台权限。企业目标是**当前对应企业目录的全部免审tenant/user权限**，个人租户保留原能力基线。dry-run、登记输出和Monitor共用此函数；按(scope_name,scope_type)减去已生效授权、按身份拆分链接，不依赖总数相等。企业任务只查目标企业，不查个人租户；user token表示企业用户身份，与个人租户不是一回事。
+
+权限面板用“免审权限”筛选分别全选两身份；已有用户授权范围可能仍小于新增后台权限。对应身份需审或目录未知项不申请、不发管理员链接。API回读已生效后无需为scope再创建版本；数据范围另需发布时，以页面审批提示为准，需要企业审核就跳过并如实记录。已有批准可直接开通，不额外增加用户确认环节。Monitor在permissions_ready翻绿前两次独立读取、后续每轮继续重读；这仅验证后台权限，不代表用户OAuth或业务资源角色。
+
+注册收尾必须核 `--user-identity`。按姓名查人使用user-only的contact:user:search，需要当前bot对应CLI profile中有效且verified的主人授权；基本信息可用bot已知ID读取，真实mention用该app人员ID。缺同意时走原生 `lark-cli auth login --profile <新bot> --scope <当前应用已开通的免审用户scope>`，保留后台监听和真实成功回读，不借另一个bot的凭据，不仅等待“已授权”文字。本人动作未完成时明确“应用权限已齐、主人OAuth待完成”，不能称已具备人员查询。注册器和授权监听按各自有效期后台运行，不用短timeout截断。
 
 **2026-09-04 `tb26-baseball-4` 端到端验真**：scope API 返回 43 项，三项新增 scope 均为已生效；随后以 bot 身份从真实产品文档读取内嵌 Sheet `A1:F8`、一张 2,030,702 字节 PNG，并导出一块 350 节点白板。图片预览链已满足 AI 解析；“原件直下”分支仍单独返回 HTTP 403，不能把“预览可读”写成“所有下载分支均可用”。
 
@@ -173,7 +177,7 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 ### § 2.0.1 · 谁能审核，能不能自己发布
 
 - 企业自建应用生产版本原则上由企业管理员审核；管理员可以给某个应用或开发者配置免审。开发者只有同时是管理员、或命中免审规则时，才会表现为“自己确认发布即可”。
-- 云文档应用权限明确需要企业管理员审批；`drive:drive` 开不了不是 Link16 故障，代码不能绕过租户政策。
+- 云文档窄权限可免审，伞形scope是否需审以对应身份当前目录为准；`drive:drive`开不了不是Link16故障。需审批的权限或数据范围发布直接跳过，说明当前无法自助操作，不发申请链接。
 - Device Grant preset 可能已经带齐基础能力；链接 2 仍然出现，供人核对最终 capability/scopes。若真实权限已齐，Monitor 直接验绿，不伪造重复申请；需要发布或审核时以飞书页面为准。
 - “应用 owner/协作者”“最近可审核该应用的应用管理员”“企业超级管理员”不是同一身份。`bridge_scope_audit.py --reviewers --bot X` 会尽量机械查询并明确标记权限不足；不得把 app owner 自动认成企业管理员。
 
@@ -283,7 +287,7 @@ python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某
 - **`im:chat`** = 参与群所需：**发群消息 + 被 @ 收事件 + 读群信息**（成员/群名）。**a2a 默认开这个就够**。
 - **`im:message.group_msg`** = 额外的「**读整段群历史消息**」权限。explore 没开它 → 读群消息历史报 `230027 need scope: im:message.group_msg`。**仅当某 bot 要主动读全群对话**（不只收 @ 自己的）才加开。
 
-⚠️ **②③ 都一样**：开发者后台勾选后 **必须「创建版本 + 发布」** 才真生效（光勾不发版 = 没开）。
+权限以官方API的grant_status回读为准：当前企业免审scope可直接生效，不一律要求创建版本。新增数据范围的发布独立判断；需企业审核时跳过，不能将“scope已开通”当数据范围已发布。
 
 ---
 

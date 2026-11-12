@@ -129,7 +129,9 @@ TC101S 的操作顺序、入口网址、父子粒度、全部16节点参数、�
 
 改名由 Link16 承担，不在业务仓建脚本。用户已明确指定新名即授权相应本地同步；先 plan，线上名称已经一致则直接 apply 和 verify，需人操作则给后台链接并启动 `watch --background`。普通改名固定内部代号和凭据键，只更新两本名册的显示名与历史别名；不重建应用、不搬会话、不重启桥。转写有歧义只澄清该名称；只有 API 回读和两本名册核验通过才报告完成。运行时专用旧工具需要内部代号时用 `rename_bot.py resolve --bot <显示名>`，不猜变量名。
 
-注册公司租户 bot 时，默认传 `--tenant-kind enterprise`（或给出能由 registry 唯一识别的公司群），让注册器自动附加 `docs-consume`：`sheets:spreadsheet:read`、`docs:document.media:download`、`board:whiteboard:node:read`。注册个人租户 bot 时传 `--tenant-kind personal`，默认不扩这三项；只有该 bot 确实承担在线文档完整解析时才显式加 `--capability docs-consume`。不要按 bot 名、机器名或 Codex/Claude profile 猜飞书租户。
+注册公司租户 bot 时，传 `--tenant-kind enterprise`（或能由registry唯一识别的公司群）：注册器按SPEC-220默认开齐当前企业目录中tenant/user两身份全部免审权限，并保留docs-consume验收。已批准批量开通的可直接执行；需管理员/企业审批的跳过，只说明不能自助开通，不发申请链接。企业任务只查对应企业，不能转查个人租户；user身份是代表企业用户，不是个人租户。个人租户仍保留原能力范围，不使用企业目录扩权；租户只认registry或官方选择，不按名称、机器或runtime猜。
+
+后台权限与主人OAuth分别验：`python feishu/bridge_scope_audit.py --bot <当前bot> --baseline --user-identity`。人员姓名搜索需要有效且已验证的当前应用用户身份与contact:user:search；基本信息读取用相应身份的窄权限。真实mention使用当前应用查询到的人员ID，不存在单独mention权限。缺用户同意时按原生lark-cli设备授权，只请求当前应用已开通的免审用户scope；不跨bot借token/open_id。只创建授权链接不算已授权，应用scope已生效也不代表待审核的数据范围已发布。
 
 ## 4. 自动回址与主动发送
 

@@ -362,6 +362,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 排查更新等待拖住消息和关闭、关机后恢复旧对话 | [RESEARCH-120：拥堵原因与证据](docs/RESEARCH-120-bridge-congestion-audit.md)；[PLAN-1260：审查与整改进度](docs/PLAN-1260-bridge-congestion-audit.md) |
 | Kimi 正常过程被连接提示覆盖、告警反复累积 | [PLAN-1311：业务进度保留与诊断降噪](docs/PLAN-1311-kimi-progress-card-preservation.md)，投递合同见 SPEC-210 §2.1 |
 | 智能体文档归主人、默认组织内链接与群编辑 | [PLAN-1300：历史资产修复与统一创建检查](docs/PLAN-1300-document-owner-and-access.md)，执行合同见 SOP-140 §8 |
+| 企业智能体免审权限全开、人员搜索与用户授权分别验收 | [PLAN-1320：企业权限与人员查询](docs/PLAN-1320-enterprise-permission-baseline.md)，基线见 SPEC-220 |
 | 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（选 Codex profile 的增量：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
 | 给已有的 bot 改名、查专属后台并同步新旧名称 | [`SOP-125`](docs/SOP-125-bot-rename.md)：`rename_bot.py plan → apply → verify`；执行与本机验证见 [PLAN-1100](docs/PLAN-1100-bot-rename-workflow.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |

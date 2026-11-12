@@ -365,13 +365,23 @@ def local_handoff(job_id):
             result["action"] = "等待注册器生成有效授权链接；沿用当前 job，不重复建应用"
     elif not state.get("milestones", {}).get("permissions_ready"):
         urls, _caps, _scopes, audit = permission_review_link(state)
-        result.update(links=urls, audit=audit, action="审阅权限并按飞书页面创建版本/发布")
+        result.update(links=urls, audit=audit, action="核对应租户免审权限；管理员审批跳过；用户OAuth另验")
     elif state.get("start_bridge") and not state.get("milestones", {}).get("bridge_ready"):
         result.update(action="正在检查启动环境和飞书连接，暂不要求用户发测试消息",
                       check=(state.get("checks") or {}).get("bridge"))
     else:
         result["action"] = "请主人私聊新 bot 一句完成认主" if not state["milestones"].get("owner_ready") else "等待所选范围的其他验收"
     return result
+
+
+def _registration_tenant_kind(state):
+    explicit = (state.get("registration_context") or {}).get("tenant_kind")
+    if explicit:
+        return explicit
+    try:
+        return bridge_scope_audit.registered_tenant_kind(state.get("bot"))
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def permission_review_link(state):
@@ -387,6 +397,14 @@ def permission_review_link(state):
     if not app_id:
         raise ValueError("registration job 尚无 app_id，不能生成权限审阅链接")
     capabilities = bridge_scope_audit.normalize_capabilities(state.get("capabilities"))
+    if _registration_tenant_kind(state) == "enterprise":
+        granted, error = bridge_scope_audit.granted_scope_pairs(state.get("id_env"), state.get("secret_env"))
+        plan = bridge_scope_audit.registration_scope_plan(capabilities, granted if not error else (), "enterprise")
+        scopes = tuple(dict.fromkeys(s for values in plan.values() for s in values))
+        return bridge_scope_audit.scope_plan_urls(app_id, plan), capabilities, scopes, {
+            "granted": len(granted), "error": error, "by_identity": plan,
+            "planned": sum(len(v) for v in bridge_scope_audit.registration_scope_plan(capabilities, (), "enterprise").values()),
+        }
     granted, error = bridge_scope_audit.granted_scopes(state.get("id_env"), state.get("secret_env"))
     if error:
         granted = set()  # pre-check unavailable → plan the whole set; never silently drop a scope
@@ -510,6 +528,18 @@ def _permission_check(state):
     fully opened as every other Link16 bot, not merely that its declared
     capabilities happen to work (2026-09-09: a bot went "ready" on 39 scopes while
     its siblings held 66+)."""
+    if _registration_tenant_kind(state) == "enterprise":
+        result = bridge_scope_audit.audit_entry(
+            state.get("id_env"), state.get("secret_env"), state.get("capabilities"),
+            baseline=True, tenant_kind="enterprise")
+        if result.get("status") == "unknown":
+            return result
+        gap = result["baseline"]
+        result["baseline_ok"] = gap["ok"]
+        result["remaining_scopes"] = gap["self_serve"]
+        result["fix_links"] = gap.pop("links")
+        result["user_authorization"] = "separate_check_required; application grants are not OAuth consent"
+        return result
     result = bridge_scope_audit.audit_entry(
         state.get("id_env"),
         state.get("secret_env"),
@@ -544,18 +574,23 @@ def _event_text(state, milestone):
             bridge_scope_audit.CAPABILITY_SPECS[name]["label"]
             for name in capabilities
         ]
+        pending = sum(len(v) for v in audit["by_identity"].values()) if "by_identity" in audit else len(scopes)
         if audit.get("error"):
             audit_line = (f"注册前审计：未能读取当前授权（{audit['error']}），"
                           f"按整套 {audit['planned']} 项申请")
         else:
             audit_line = (f"注册前审计：已授权 {audit['granted']} 项；能力档 + SPEC-220 免审基线共 "
-                          f"{audit['planned']} 项（与舰队其他 bot 对齐），本次待开 {len(scopes)} 项")
+                          f"{audit['planned']} 项，本次待开 {pending} 项（按权限与身份组合计数）")
         links = "\n".join(
             (f"[{i}/{len(urls)}] {u}" if len(urls) > 1 else u) for i, u in enumerate(urls, 1)
         ) or "（无增量 scope：能力档与基线已全部开通）"
+        instruction = ("请核对当前企业后台的tenant/user免审范围；已获授权可直接开通。"
+                       "需管理员审批的权限或数据范围发布跳过，不发申请链接。应用权限与主人OAuth分别验收：\n"
+                       if _registration_tenant_kind(state) == "enterprise" else
+                       "请把下面裸链接回复给主人；按本租户权限范围核对，需管理员审批的跳过：\n")
         return (
             f"Link16 注册回调：{state['bot']} 的第二步权限审阅链接已生成。"
-            "请把下面裸链接回复给主人；让人核对权限并按飞书页面要求创建版本/发布，代码不会代点：\n"
+            f"{instruction}"
             f"能力：{', '.join(capabilities)}（{'；'.join(labels)}）\n"
             f"{audit_line}\n"
             f"权限：{', '.join(scopes) or '无增量 scope'}\n"
@@ -578,6 +613,10 @@ def _event_text(state, milestone):
         "failed": "注册未完成，请查看任务诊断并恢复原应用；无需主人提供密钥",
         "expired": "注册监督已过期，仍有人工步骤未完成",
     }
+    if milestone == "ready" and _registration_tenant_kind(state) == "enterprise":
+        labels["ready"] += ("；本次ready只验证应用后台与桥连接，主人OAuth仍须用"
+                            " bridge_scope_audit.py --bot " + state["bot"] +
+                            " --baseline --user-identity 单独核验并实查人员；缺授权时保留该项未完成")
     return (
         f"Link16 注册回调：{state['bot']} · {labels[milestone]}。"
         f"请读取 registration job {state['job_id']} 的状态并继续处理；这不是用户重复催办。"

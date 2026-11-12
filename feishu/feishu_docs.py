@@ -59,12 +59,15 @@ APP_IDENTITY_MANUAL_SCOPES = CLOUD_DOC_SCOPES + (
 AUTH_URL_MAX_CHARS = 760
 
 
-def _auth_url_raw(app_id: str, scopes) -> str:
+def _auth_url_raw(app_id: str, scopes, token_type: str = "tenant") -> str:
+    if token_type not in ("tenant", "user"):
+        raise ValueError("token_type must be tenant or user")
     return (f"https://open.feishu.cn/app/{app_id}/auth?q="
-            + ",".join(scopes) + "&op_from=openapi&token_type=tenant")
+            + ",".join(scopes) + "&op_from=openapi&token_type=" + token_type)
 
 
-def auth_urls(app_id: str, scopes=CLOUD_DOC_SCOPES, max_chars: int = AUTH_URL_MAX_CHARS):
+def auth_urls(app_id: str, scopes=CLOUD_DOC_SCOPES, max_chars: int = AUTH_URL_MAX_CHARS,
+              token_type: str = "tenant"):
     """把 scope 列表切成【每条都点得开】的一组开通链（长度硬闸·见 AUTH_URL_MAX_CHARS）。
 
     返回 list[str]；scopes 为空返回 []。调用方一律用它，不要自己拼 q= 串。"""
@@ -74,13 +77,13 @@ def auth_urls(app_id: str, scopes=CLOUD_DOC_SCOPES, max_chars: int = AUTH_URL_MA
     urls, chunk = [], []
     for scope in selected:
         probe = chunk + [scope]
-        if chunk and len(_auth_url_raw(app_id, probe)) > max_chars:
-            urls.append(_auth_url_raw(app_id, chunk))
+        if chunk and len(_auth_url_raw(app_id, probe, token_type)) > max_chars:
+            urls.append(_auth_url_raw(app_id, chunk, token_type))
             chunk = [scope]
         else:
             chunk = probe
     if chunk:
-        urls.append(_auth_url_raw(app_id, chunk))
+        urls.append(_auth_url_raw(app_id, chunk, token_type))
     return urls
 
 

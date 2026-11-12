@@ -3,7 +3,7 @@ doc_type: SPEC
 doc_id: SPEC-220
 title: 飞书 scope 等级表与智能体权限基线
 status: active
-url: ""
+url: "https://n8r2cr07gk.feishu.cn/docx/L3LIdZyWgo9hB5xWscOctnO1nVb"
 purpose: 定义 scope 等级快照的数据契约、判定"是否需要管理员审批"的唯一机器依据，以及每只智能体必须开满的免审批权限基线。
 owns:
   - feishu/feishu-scope-levels.json 的字段与语义
@@ -18,7 +18,7 @@ read_when:
   - 判断某个 scope 能不能自助开通
   - 新增或修改智能体权限基线
   - 把这套机制搬到另一个租户或另一台机器
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 related:
   - ARCH-130
   - SOP-140
@@ -26,6 +26,8 @@ related:
 ---
 
 # SPEC-220 · 飞书 scope 等级表与智能体权限基线
+
+本机原稿：file:///C:/410_VibeCoding/Post/link16-agent-infra/docs/SPEC-220-feishu-scope-baseline.md
 
 ## 1 · 为什么需要这张表
 
@@ -52,6 +54,7 @@ related:
 | `scopes[]` | array | 每条 scope |
 | `scopes[].scope` | string | scope 全名，唯一键 |
 | `scopes[].level` | int | 权限等级 |
+| `scopes[].identity_levels` | object | `tenant` / `user` 各自等级；缺该键表示该身份不支持或未知，绝不借另一身份推断 |
 | `scopes[].self_serve` | bool | `level <= 3` |
 | `scopes[].biz` | string | 所属业务域 |
 | `scopes[].desc` | string | 官方描述（截断至 100 字符） |
@@ -63,7 +66,7 @@ related:
 ## 3 · level 与审批的对应关系
 
 ```text
-level 3  →  self_serve = true   →  开发者自助勾选即生效，无需管理员审批
+对应身份 level 3  →  self_serve = true   →  API权限可自助开通，无需管理员审批
 level 4  →  self_serve = false  →  需要租户管理员审批
 ```
 
@@ -75,7 +78,9 @@ level 4  →  self_serve = false  →  需要租户管理员审批
   在目录中正是 level 4。
 - 主人当场自助开通并立即生效的 7 条表格类 scope，在目录中全部是 level 3。
 
-判定规则因此是机械的：**`level >= 4` 即视为不可自助开通**，不再逐条询问真人。
+2026-11-12 当前企业目录重新校准：1333个权限名称，应用身份356项免审、用户身份322项免审。同名权限可以有不同等级：`contact:user.basic_profile:readonly`、`mail:user_mailbox:readonly` 均为user 3、tenant 4；`im:message.send_as_user` 为user 4。旧记录将两个身份折成一个等级，不能用它判用户身份权限。`level`是旧读取器的保守兼容值：所有已知身份均免审才为3，否则为4；其中3个权限的原始等级10尚未解释，不将它当成已证管理员审批。**实际开通只认 `identity_levels` 中已知免审等级**。
+
+对应身份level4或当前页面显示需审即跳过，说明“需管理员审批，当前无法自助开通”，不提供申请链接、不推动审批。未知身份/等级保持未知，不猜免审，也不冒称已证审批类型。API权限和数据范围发布不同：免审scope可能已生效，但新数据范围仍待版本审核；不得提交管理员审批或将两者合称可用。
 
 ## 4 · 快照的适用范围与失效条件
 
@@ -85,10 +90,11 @@ level 4  →  self_serve = false  →  需要租户管理员审批
 - 任何人把这套机制用到另一个租户，必须**重新抓一份快照**或明确接受当前快照的偏差；
   沿用别家租户的快照会得到错误的"能不能开"结论。
 - 快照发生以下情况即失效：换租户、飞书调整权限目录、`counts.total` 与实际不符。
+- 企业bot只检查其registry绑定的企业与当前企业后台，不为企业权限任务查询个人租户。`user`表示代表企业中的用户，不表示“个人租户”。企业目录不能覆盖个人租户或另一个企业的审批政策。
 
 ## 5 · 智能体权限基线
 
-基线只由**免审批（level 3）** scope 组成，任何一条都不依赖管理员审批。
+**企业基线＝当前目标企业目录中，每个身份可自助开通的全部权限**，不是固定100项、旧文档子集或兄弟bot权限并集。用户于2026-11-12已明确批准现有TB26与新企业智能体全开免审项。以(scope, identity)验收，保留原已授予权限，不撤销额外权限；管理员审批项不申请。其他租户保留原能力基线。下表是基础文档/消息能力说明，不再限定企业全部目标。
 
 | 能力 | 基线 scope（level 3） | 被替代的高权限伞形 scope（level 4·不依赖） |
 |---|---|---|
@@ -107,19 +113,16 @@ level 4  →  self_serve = false  →  需要租户管理员审批
 | 知识库 | `wiki:node:read`、`wiki:node:retrieve`、`wiki:space:read` | `wiki:wiki` |
 | 文档版本 | `drive:drive:version`、`drive:drive:version:readonly` | `drive:drive` |
 
-**登记结论**：`drive:drive`、`drive:drive:readonly`、`drive:file`、`docs:doc` 及其余
-level 4 scope **永久不进基线**。它们提供的每一项能力都已有 level 3 替代。
+**登记结论**：对应身份需审批的scope不进自助基线；文档常见需求优先使用表内窄权限替代。不能声称所有管理员权限都有等价免审替代。
 
 ## 6 · 一致性要求
 
-- 8 只智能体的应用必须开满同一份基线，不设"能力更强的专用号"。
+- 本机名册内目标企业应用必须覆盖各自当前可用的免审基线，不按固定bot数或总权限数量相等验收。
 - 新注册的智能体在注册流程内一次性开满基线，不允许"用到才发现缺"。
 - `bridge_scope_audit.py` 以本文件为准，报告每只 bot 相对基线缺哪几条，
   并只为 level 3 的缺口生成开通链接；遇到 level 4 缺口直接说明"需管理员审批、
   基线不依赖它"，不生成误导性的开通链接。
-- 注册流程的"该开哪些 scope"只有一个真源：`bridge_scope_audit.registration_scopes(capabilities, granted)`
-  = capability 增量 ∪ 本基线 − 已授权。注册脚本的 dry-run、登记打印和 `registration_monitor`
-  的第二条链接三处共用它，不允许各算一份（2026-09-09：监督器曾只发 8 项、dry-run 承诺 41 项）。
+- 注册目标真源为 `bridge_scope_audit.registration_scope_plan(capabilities, granted_pairs, tenant_kind)`：企业返回tenant/user两份免审增量，其他租户保留旧基线；dry-run、登记打印、Monitor共用。实际授权保留scope_type；只有tenant同名权限不能抵消user缺口。开通URL按身份生成，不能把user-only搜索塞进tenant链接。
 - `registration_monitor` 在生成第二条链接前先审计当前授权；`permissions_ready` 同时要求
   capability 与基线开满，并在里程碑翻绿前独立再读一次接口、两次一致才回调；其后每一轮
   （含 `ready`）继续重读，最终回调不骑在旧读数上。
@@ -132,11 +135,15 @@ level 4 scope **永久不进基线**。它们提供的每一项能力都已有 l
 | 属性 | 应用身份（tenant） | 用户身份（user） |
 |---|---|---|
 | 授权入口 | 开发者后台权限页 | OAuth 设备码流程 |
-| 有效期 | 永久 | 约 2 小时，刷新窗口 7 天，到期需真人重新授权 |
+| 有效期 | 应用配置持续有效，访问token另有期限 | 以CLI回读的expiresAt/refreshExpiresAt为准，可刷新时先刷新 |
 | 文档中的署名 | 该机器人 | 那个人本人 |
-| 适用 | 默认路径 | 兜底：资源未分享给任何应用时 |
+| 适用 | bot默认操作路径 | 用户专属API（如姓名搜索），或已明确选择用主人身份访问资源 |
 
-2026-09-07 完成的一次授权把用户身份从 14 条 scope 扩到 **56 条**，覆盖：
+注册完成后运行 `bridge_scope_audit.py --bot <bot> --baseline --user-identity`。后台scope开通不等于主人已同意OAuth；同应用用户身份有效且verified、openId匹配该bot持久owner，并具有 `contact:user:search`，才记人员搜索授权就绪，最后仍需一次真实只读姓名查询。真实mention使用本应用返回的用户ID，没有独立的mention授权。基本信息可先走已知ID的bot读取；按姓名搜索是user-only路径。OAuth缺失时用原生lark-cli授权，profile必须匹配当前AppID，不能借兄弟bot的token或open_id。
+
+设备授权链接让主人同意这个企业应用代表自己操作；它与开发者后台的应用权限是两道独立的门，**不是改查个人租户**。只生成当前应用已开通且免审的用户权限请求；管理员权限不进入授权链接。只需本人完成的同意时保留后台等待与成功回读，不能把链接创建当授权成功。
+
+以下为2026-09-07的历史授权样本（14→56），不代表当前所有bot已完成用户授权：
 
 - 文档正文读写与创建：`docx:document:readonly`、`docs:document.content:read`、
   创建与编辑新版文档、复制文档、导出与导入

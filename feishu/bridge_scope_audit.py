@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """Audit Feishu bot scopes as explicit Link16 capability profiles.
 
-The preset registration path is deliberately useful without requesting broad
-Drive access. Additional scopes are selected by capability instead of by one
-global "open everything" list.
+Enterprise registration covers the current self-serve catalog per identity.
+Other tenants retain their capability baseline; approval-gated scopes are skipped.
 """
 from __future__ import annotations
 
@@ -163,6 +162,68 @@ SCOPE_LEVELS_PATH = Path(__file__).resolve().parent / "feishu-scope-levels.json"
 _LEVELS_CACHE = {}
 
 
+def scope_catalog():
+    """Catalog only, never credentials or per-app grants."""
+    return json.loads(SCOPE_LEVELS_PATH.read_text(encoding="utf-8"))
+
+
+def registered_tenant_kind(bot):
+    """Read the selected bot's registry binding; never inspect a different tenant."""
+    import tenant_probe
+    data = json.loads(tenant_probe.registry_path().read_text(encoding="utf-8"))
+    entry = tenant_probe.find_entry(data.get("agents", []), bot) or {}
+    return (tenant_probe.tenant_entry(entry.get("tenant_key")) or {}).get("kind")
+
+
+def registration_scope_plan(capabilities=None, granted=(), tenant_kind=None):
+    """Application-side grants, keyed by token identity; not a user's OAuth consent."""
+    held = set(granted)
+    if tenant_kind == "enterprise":
+        data = scope_catalog()
+        if data.get("snapshot", {}).get("tenant_kind") != "enterprise":
+            raise ValueError("企业注册缺少企业权限目录；不得用个人租户目录替代")
+        if not data.get("scopes") or any("identity_levels" not in r for r in data["scopes"]):
+            raise ValueError("企业权限目录缺少身份等级；先按 SOP-140 刷新")
+        return {t: tuple(sorted(r["scope"] for r in data["scopes"]
+                               if 0 < int(r["identity_levels"].get(t) or 0) <= 3
+                               and (r["scope"], t) not in held))
+                for t in ("tenant", "user")}
+    return {"tenant": registration_scopes(capabilities, {s for s, t in held if t == "tenant"}),
+            "user": ()}
+
+
+def scope_plan_urls(app_id, plan):
+    import feishu_docs
+    return [url for t, scopes in plan.items()
+            for url in feishu_docs.auth_urls(app_id, scopes, token_type=t)]
+
+
+def user_identity_status(bot):
+    """No login side effect. Verify the exact app profile and personnel scopes."""
+    import docio_cli
+    try:
+        result = docio_cli.run_lark(["auth", "status", "--json", "--verify"], profile=bot)
+        data = docio_cli._json_out(result)
+        # CLI versions return either a direct result or an envelope.
+        data = data.get("data", data)
+        user = (data.get("identities") or {}).get("user") or data.get("user") or {}
+        scopes = user.get("scopes") or user.get("scope") or []
+        if isinstance(scopes, str):
+            scopes = scopes.split()
+        status = user.get("status") or data.get("user_status") or "missing"
+        owner = docio_cli.owner_open_id(bot)
+        owner_matches = bool(owner and user.get("openId") == owner)
+        return {"status": status, "verified": user.get("verified") is True,
+                "owner_matches": owner_matches,
+                "personnel_ready": status == "ready" and user.get("verified") is True
+                                   and owner_matches and "contact:user:search" in scopes,
+                "personnel_search_scope": "contact:user:search" in scopes,
+                "expires_at": user.get("expiresAt"),
+                "note": "应用权限与主人OAuth独立；需身份匹配本应用主人且有有效search授权，再实查姓名验收"}
+    except Exception as exc:
+        return {"status": "unknown", "error": type(exc).__name__}
+
+
 def scope_levels():
     """SPEC-220 snapshot: scope -> level. Empty dict when unavailable.
 
@@ -224,7 +285,7 @@ def requested_scopes(capabilities=None, for_fix=False):
     ))
 
 
-def registration_scopes(capabilities=None, granted=None):
+def registration_scopes(capabilities=None, granted=None, tenant_kind=None, scope_type="tenant"):
     """SPEC-220 §6: everything a registration must open, in one stable order.
 
     Capability fix scopes plus the whole self-serve baseline, minus what the app
@@ -233,6 +294,9 @@ def registration_scopes(capabilities=None, granted=None):
     (2026-09-09: the monitor delivered 8 scopes while the dry-run promised 41).
     Approval-gated scopes are never planned; the baseline is built without them.
     """
+    if tenant_kind == "enterprise":
+        return registration_scope_plan(capabilities, {(s, scope_type) for s in (granted or ())},
+                                       tenant_kind)[scope_type]
     planned = tuple(dict.fromkeys(
         list(requested_scopes(capabilities, for_fix=True))
         + [s for s in BASELINE_SCOPES if self_serve(s)]
@@ -314,7 +378,7 @@ def _token(id_env, sec_env):
     return result.get("tenant_access_token"), None
 
 
-def granted_scopes(id_env, sec_env):
+def granted_scope_pairs(id_env, sec_env):
     """Return (granted scopes, error). An API error is unknown, never absence."""
     token, error = _token(id_env, sec_env)
     if error:
@@ -324,10 +388,15 @@ def granted_scopes(id_env, sec_env):
         return set(), f"scopes {result.get('code')}:{result.get('msg')}"
     scopes = result.get("data", {}).get("scopes") or []
     return {
-        item.get("scope_name")
+        (item.get("scope_name"), item.get("scope_type"))
         for item in scopes
         if item.get("scope_name") and item.get("grant_status") == 1
     }, None
+
+
+def granted_scopes(id_env, sec_env):
+    pairs, error = granted_scope_pairs(id_env, sec_env)
+    return {s for s, _t in pairs}, error
 
 
 def reviewer_status(id_env, sec_env):
@@ -402,8 +471,29 @@ def roster_bots():
         return []
 
 
-def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False, baseline=False):
+def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False, baseline=False,
+                tenant_kind=None):
     names = normalize_capabilities(capabilities)
+    if tenant_kind == "enterprise":
+        pairs, error = granted_scope_pairs(id_env, sec_env)
+        if error:
+            return {"status": "unknown", "error": error, "capabilities": list(names)}
+        tenant_scopes = {s for s, t in pairs if t == "tenant"}
+        caps = capability_status(tenant_scopes, names)
+        plan = registration_scope_plan(names, pairs, tenant_kind)
+        ok = not any(plan.values())
+        app_id = _env_val(id_env)
+        result = {"status": "ready" if all(caps.values()) and (ok or not baseline) else "missing",
+                  "capabilities": caps, "missing": [n for n, v in caps.items() if not v],
+                  "total_scopes": len(pairs), "identity_counts": {t: sum(k == t for _, k in pairs) for t in plan},
+                  "scope_plan": plan, "scopes": sorted(tenant_scopes) if raw else None,
+                  "scope_pairs": sorted(pairs) if raw else None,
+                  "fix_link": None}
+        if baseline:
+            result["baseline"] = {"ok": ok, "self_serve": [s for v in plan.values() for s in v],
+                                  "by_identity": plan, "needs_approval": [], "unknown_level": [],
+                                  "links": scope_plan_urls(app_id, plan) if app_id else []}
+        return result
     scopes, error = granted_scopes(id_env, sec_env)
     if error:
         return {"status": "unknown", "error": error, "capabilities": list(names)}
@@ -433,22 +523,26 @@ def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False, 
     return result
 
 
-def _print_levels(names, as_json):
+def _print_levels(names, as_json, scope_type="tenant"):
     """Answer "does this scope need admin approval" from the SPEC-220 snapshot."""
-    levels = scope_levels()
+    data = scope_catalog()
+    levels = {r["scope"]: int((r.get("identity_levels") or {}).get(scope_type) or 0)
+              for r in data.get("scopes", [])}
     if not levels:
         print(f"scope 等级快照不可用：{SCOPE_LEVELS_PATH}（按 SOP-140 §3 重新抓取）")
         return
     if not names:
         total = len(levels)
-        three = sum(1 for v in levels.values() if v <= 3)
-        print(f"快照 {SCOPE_LEVELS_PATH.name}：{total} 条 · "
-              f"可自助开通(level<=3) {three} 条 · 需管理员审批(level>=4) {total - three} 条")
+        free = sum(1 for v in levels.values() if 0 < v <= 3)
+        approval = sum(1 for v in levels.values() if v == 4)
+        print(f"快照 {SCOPE_LEVELS_PATH.name} · {scope_type}：{total} 条 · "
+              f"可自助开通(level<=3) {free} 条 · 需管理员审批(level=4) {approval} 条 · "
+              f"身份不支持或等级未知 {total - free - approval} 条")
         return
-    rows = [{"scope": n, "level": levels.get(n),
-             "self_serve": self_serve(n),
-             "verdict": ("可自助开通" if self_serve(n)
-                         else "需管理员审批" if levels.get(n) else "快照里没有这条")}
+    rows = [{"scope": n, "scope_type": scope_type, "level": levels.get(n),
+             "self_serve": 0 < levels.get(n, 0) <= 3,
+             "verdict": ("可自助开通" if 0 < levels.get(n, 0) <= 3
+                         else "需管理员审批" if levels.get(n) == 4 else "身份不支持或等级未知，不能自助开通")}
             for n in names]
     if as_json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -468,8 +562,11 @@ def main():
     parser.add_argument("--all-env", action="store_true", help="审 .env 里的所有飞书应用")
     parser.add_argument("--baseline", action="store_true",
                         help="按 SPEC-220 基线报告每只 bot 的缺口，并只为免审批缺口生成开通链")
+    parser.add_argument("--user-identity", action="store_true", help="另验同一应用的主人OAuth；不发起登录")
     parser.add_argument("--levels", nargs="*", metavar="SCOPE",
                         help="查 scope 等级（3=可自助开通 / 4=需管理员审批）；不给参数=打印统计")
+    parser.add_argument("--scope-type", choices=("tenant", "user"), default="tenant",
+                        help="--levels 查哪种身份，不能将 user 当作个人租户")
     args = parser.parse_args()
 
     entries = discover_env_bots() if args.all_env else roster_bots()
@@ -481,11 +578,15 @@ def main():
             raise SystemExit(f"未找到待审计智能体：{args.bot}；没有执行权限检查")
     capabilities = args.capability or list(DEFAULT_CAPABILITIES)
     if args.levels is not None:
-        return _print_levels(args.levels, args.json)
+        return _print_levels(args.levels, args.json, args.scope_type)
     result = {
-        bot: audit_entry(id_env, sec_env, capabilities, args.raw, args.reviewers, args.baseline)
+        bot: audit_entry(id_env, sec_env, capabilities, args.raw, args.reviewers, args.baseline,
+                         tenant_kind=registered_tenant_kind(bot) if args.baseline else None)
         for bot, id_env, sec_env in entries
     }
+    if args.user_identity:
+        for bot, item in result.items():
+            item["user_identity"] = user_identity_status(bot)
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -505,6 +606,8 @@ def main():
             for name in capabilities
         )
         print(f"{bot:<22}{cells} | {item['total_scopes']}")
+        if args.user_identity:
+            print("  主人用户授权: " + json.dumps(item["user_identity"], ensure_ascii=False))
         if item.get("missing"):
             print(f"  缺能力: {', '.join(item['missing'])}")
             if item.get("fix_link"):

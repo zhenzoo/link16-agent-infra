@@ -469,7 +469,8 @@ def main():
     # missing scope months later — mid-task, as a bare "no permission" — was the
     # recurring failure this closes. Approval-gated scopes are never requested;
     # the baseline is built entirely from self-serve ones.
-    permission_scopes = bridge_scope_audit.registration_scopes(capabilities)
+    permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, tenant_kind=tenant_kind)
+    permission_scopes = tuple(dict.fromkeys(s for v in permission_plan.values() for s in v))
     try:
         sdk_version = registration_transport.preflight()
         args.app_id = _recovery_app_id(args.app_id, id_key, args.bot or args.name)
@@ -486,6 +487,7 @@ def main():
         print(f"sdk_version={sdk_version}")
         print(f"first_link={'existing-app' if args.app_id else 'create-only'};addons=(none)")
         print(f"second_link_scopes={','.join(permission_scopes) or '(none)'}")
+        print("second_link_scopes_by_identity=" + json.dumps(permission_plan, ensure_ascii=False))
         return
     monitor = registration_monitor.get_job(args.job_id) if args.job_id else None
     monitor_bot = args.bot or args.name
@@ -578,8 +580,10 @@ def main():
 
 def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
                           app_id, secret, monitor):
-    capabilities = _registration_capabilities(args.capability, args.tenant_kind or _tenant_kind_from_group(args.group))
-    permission_scopes = bridge_scope_audit.registration_scopes(capabilities)
+    tenant_kind = args.tenant_kind or _tenant_kind_from_group(args.group)
+    capabilities = _registration_capabilities(args.capability, tenant_kind)
+    permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, tenant_kind=tenant_kind)
+    permission_scopes = tuple(dict.fromkeys(s for v in permission_plan.values() for s in v))
     write_env(app_id, secret, id_key, sec_key)
     action = "续接成功" if args.app_id else "创建成功"
     print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
@@ -617,7 +621,7 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
 
     # 超长的 q= 串会被飞书整页判「参数不合法」（2026-08-27 tb26-baseball-2 实证：54 条 = 1446 字符挂，
     # 18 条 = 523 字符通）→ 一律走拆链，每条都点得开。SSOT = feishu_docs.AUTH_URL_MAX_CHARS。
-    permission_links = bridge_scope_audit.fix_auth_urls(app_id, permission_scopes)
+    permission_links = bridge_scope_audit.scope_plan_urls(app_id, permission_plan)
     permission_link = (
         "\n".join(f"   [{i}/{len(permission_links)}] {u}" for i, u in enumerate(permission_links, 1))
         if len(permission_links) > 1
@@ -625,14 +629,15 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
     )
 
     labels = [bridge_scope_audit.CAPABILITY_SPECS[name]["label"] for name in capabilities]
-    print("\n🔐 第二步：请人工审阅本次能力与权限，并按飞书页面要求创建版本/发布：\n"
+    print("\n🔐 第二步：核对当前租户与免审权限；已授权的开通可执行，需要管理员审批的直接跳过：\n"
           f"   capability: {', '.join(capabilities)}\n"
           f"   能力: {'；'.join(labels)}\n"
-          f"   tenant scopes（能力档 + SPEC-220 免审基线 · 与舰队其他 bot 对齐）: "
+          f"   应用后台 scopes（tenant/user 分开开通；不等于主人OAuth已完成）: "
           f"{', '.join(permission_scopes) or '无（只用官方 preset）'}\n"
           f"{permission_link}\n"
           "   第一条链接只创建应用；本链接不自动发布。监督器回调给发起 session 的链接会先审计当前授权、"
-          "只列增量；如飞书把其中某项标为需审核，以开发者后台的实时标识为准；监督器会两次独立复核真实授权状态。",
+          "只列增量；如飞书把其中某项标为需审核，以当前企业后台为准，跳过且不发送管理员申请链接。"
+          "监督器两次独立复核应用授权；再用 bridge_scope_audit.py --bot <本bot> --baseline --user-identity 单独验主人OAuth和人员查询。",
           flush=True)
 
     # 🔒 登记协议：建完必回写。§4 见 docs/SOP-120。agent-registry stub 上面已【自动】补·其余照单核对。
@@ -645,7 +650,7 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
           f"   ② 打开上面的第二条链接，人工核对本次 capability：{', '.join(capabilities)}\n"
           f"{group_step}"
           "   ④ ✅ agent-registry.json 已【自动】补 stub（谁是谁·跨机目录）→ 你只需核对/补 repo + machine（脚本不知道它管哪个仓）\n"
-          "   ⑤ 跑  python feishu/bridge_scope_audit.py --all-env  → 刷新 SOP-120 §2.2 能力矩阵\n"
+          "   ⑤ 跑  python feishu/bridge_scope_audit.py --bot <本bot> --baseline --user-identity  → 核当前企业应用，不能转查个人租户\n"
           "   ⑥ 不自动重启整座桥；由监督器验权/认主/入群并回调发起 session\n"
           "   —— 两个名册各司其职：bridge-bots(运行时·跑哪些) + agent-registry(目录·谁是谁·本步已自动)。",
           flush=True)
