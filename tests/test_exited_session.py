@@ -219,10 +219,8 @@ def test_regular_session_creation_releases_before_reuse(dead, monkeypatch):
         bridge.ensure_session(dead.bot)
 
 
-def test_nightly_unknown_old_activity_can_start_after_verified_process_exit(dead, monkeypatch):
+def test_cron_keeps_native_thread_when_normal_startup_reuses_history(dead, monkeypatch):
     monkeypatch.setattr(bridge, "load_bots", lambda: [dead.bot])
-    monkeypatch.setattr(bridge.bridge_inbox, "Inbox", Mock(return_value=SimpleNamespace(
-        reset_blockers=lambda session=None: {}, scheduled_latest=lambda name: None)))
     monkeypatch.setattr(bridge.bridge_outbox, "picker_load", lambda *a: None)
     monkeypatch.setattr(bridge.bridge_outbox, "pending_clear", lambda *a: None)
     monkeypatch.setattr(bridge.session_work, "clear", lambda *a: None)
@@ -230,9 +228,9 @@ def test_nightly_unknown_old_activity_can_start_after_verified_process_exit(dead
     monkeypatch.setattr(bridge, "_close_session_unlocked", Mock())
     create = Mock(return_value=("new", "new-pty", True, None))
     inject = Mock(return_value=True)
-    monkeypatch.setattr(bridge, "_ensure_session_unlocked", create)
+    monkeypatch.setattr(bridge, "ensure_session", create)
     monkeypatch.setattr(bridge, "_inject", inject)
-    # This case exercises releasing a dead session, not native delivery receipts.
+    # Cron delegates startup to the bridge without clearing the saved thread.
     monkeypatch.setattr(cron, "_deliver", lambda fb, bot, job, pty, ws, marker:
                         fb._inject(pty, ws, marker, runtime_bot=bot))
     monkeypatch.setattr(cron, "_watchdog_waiting_for_short_limit", lambda *a: False)
@@ -240,7 +238,8 @@ def test_nightly_unknown_old_activity_can_start_after_verified_process_exit(dead
     assert cron.fire({"name": "nightly", "bot": dead.bot["name"], "prompt": "go", "session_policy": "idle-fresh"})
     create.assert_called_once()
     inject.assert_called_once()
-    assert not dead.thread.exists()
+    assert dead.thread.exists()
+    bridge._close_session_unlocked.assert_not_called()
 
 
 def test_native_identity_requires_matching_shell_birth_and_tree(tmp_path, monkeypatch):

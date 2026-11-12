@@ -1,4 +1,4 @@
-"""Regression for a historical handoff blocking midnight and a lost launcher Enter."""
+"""Regression for a lost launcher Enter and exact pending-startup identity."""
 import json
 import sys
 from pathlib import Path
@@ -7,34 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "feishu"))
-import bridge_inbox
 import feishu_bridge as fb
 import wmux_session
-
-
-@pytest.mark.parametrize("state", ["submitting", "awaiting_confirmation", "uncertain"])
-def test_old_thread_does_not_block_current_idle_thread_but_record_is_preserved(tmp_path, state):
-    inbox = bridge_inbox.Inbox(tmp_path, "bot")
-    inbox.receive({"message": {"message_id": "old"}})
-    with inbox.connect() as db:
-        db.execute("UPDATE messages SET state=?,session='old-thread'", (state,))
-    assert inbox.reset_blockers("new-thread") == {}
-    assert inbox.reset_blockers("old-thread") == {state: 1}
-    assert inbox.reset_blockers() == {state: 1}
-    assert inbox.get("old")["state"] == state
-    assert inbox.get("old")["payload"] is not None
-
-
-@pytest.mark.parametrize("state,session", [
-    ("queued", "old"), ("processing", "old"), ("uncertain", None),
-    ("uncertain", ""), ("awaiting_confirmation", "current"),
-])
-def test_preparation_and_unknown_or_current_handoff_still_block(tmp_path, state, session):
-    inbox = bridge_inbox.Inbox(tmp_path, "bot")
-    inbox.receive({"message": {"message_id": "pending"}})
-    with inbox.connect() as db:
-        db.execute("UPDATE messages SET state=?,session=?", (state, session))
-    assert inbox.reset_blockers("current") == {state: 1}
 
 
 @pytest.fixture

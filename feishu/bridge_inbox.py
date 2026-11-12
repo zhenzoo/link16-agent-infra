@@ -456,21 +456,6 @@ class Inbox:
         with self.connect() as db:
             return dict(db.execute("SELECT state,COUNT(*) FROM messages GROUP BY state").fetchall())
 
-    def reset_blockers(self, session=None):
-        """Pending work that could be interrupted by resetting the current thread.
-
-        Queued preparation always blocks. An unresolved handoff bound to a
-        different native thread remains in history, but cannot be interrupted
-        by closing this thread. Unknown/current bindings still fail closed.
-        This is not a delivery receipt or permission to replay old messages.
-        """
-        with self.connect() as db:
-            return dict(db.execute("""SELECT state,COUNT(*) FROM messages
-                WHERE state IN ('queued','processing') OR
-                (state IN ('submitting','awaiting_confirmation','uncertain')
-                 AND (? IS NULL OR session IS NULL OR session='' OR session=?))
-                GROUP BY state""", (session or None, session or None)).fetchall())
-
     def delivery_status(self):
         """Latest ordinary handoff, including its real native receipt (no body)."""
         with self.connect() as db:

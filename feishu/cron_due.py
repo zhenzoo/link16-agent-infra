@@ -14,11 +14,11 @@ MAX_AGE_SEC = 24 * 60 * 60
 def spec(job):
     return {k: job.get(k, default) for k, default in (
         ('name', None), ('bot', None), ('prompt', None), ('cron', None),
-        ('tz', 'Asia/Shanghai'), ('session_policy', 'reuse'))}
+        ('tz', 'Asia/Shanghai'))}
 
 
 def start(fb, bot, job):
-    """Called under the lifecycle lock, after idle guards, before side effects."""
+    """Called under the lifecycle lock before ensuring the existing session."""
     if job.get('_due_id'):
         inbox = Inbox(fb.STATE_DIR, bot['name'])
         row = inbox.get(job['_due_id'])
