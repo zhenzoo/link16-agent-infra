@@ -40,7 +40,9 @@ def main():
         try:
             page.goto(a.url,wait_until='domcontentloaded',timeout=60000)
             block=page.locator('[data-record-id="'+a.block_id+'"]')
-            page.locator('[data-block-type="file"],[data-block-type="image"]').first.wait_for(state='attached',timeout=60000)
+            # A long leading caption can keep every media block unmounted.
+            # Wait for the document shell, then scroll to mount the exact target.
+            page.locator('[data-block-type="page"]').first.wait_for(state='attached',timeout=60000)
             # Long documents can mount only the nearby blocks. Scroll through
             # the actual document before declaring a later media block absent.
             for _ in range(40):
