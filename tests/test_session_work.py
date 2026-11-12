@@ -175,6 +175,27 @@ class WorklineGateTests(unittest.TestCase):
                 self.bot, "new", "replace", project="P", task="新任务", state_dir=self.state,
             )
 
+    def test_keep_acknowledges_concurrent_set_without_overwriting_it(self):
+        for runtime in ("claude", "codex", "kimi"):
+            with self.subTest(runtime=runtime):
+                key = "callback-" + runtime
+                session_work.begin_turn(self.bot, key, runtime=runtime, state_dir=self.state)
+                latest = session_work.set_work(
+                    self.bot, "Link16", "注册智能体", "等待授权", state_dir=self.state,
+                )
+                with self.assertRaisesRegex(ValueError, "revision"):
+                    session_work.decide_work(
+                        self.bot, key, "progress", progress="旧进度", state_dir=self.state,
+                    )
+                row = session_work.decide_work(self.bot, key, "keep", state_dir=self.state)
+                self.assertEqual(row["status"], "ready")
+                self.assertEqual(row["committed_revision"], latest["revision"])
+                self.assertEqual(row["work"]["progress"], "等待授权")
+                self.assertEqual(session_work.load(self.bot, self.state), latest)
+                self.begin("newer-" + runtime)
+                with self.assertRaisesRegex(ValueError, "已过期"):
+                    session_work.decide_work(self.bot, key, "keep", state_dir=self.state)
+
     def test_newest_commit_releases_older_pending_turns_in_same_burst(self):
         # 2026-09-26 tb24-link16: owner follow-up + two task notices arrived within 3 s.
         import time

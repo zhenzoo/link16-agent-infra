@@ -240,7 +240,10 @@ def decide_work(bot: str, turn_key: str, action: str, *, project="", task="", pr
                 return row
             raise ValueError("本轮工作行已经提交，拒绝二次改写")
         current = load(bot, state_dir)
-        if _revision(current) != int(row.get("previous_revision") or 0):
+        # A legacy `set` may finish after a new callback opened its gate.
+        # Keeping the current work only acknowledges it; it cannot overwrite
+        # the newer revision. Mutating decisions still require the old revision.
+        if action != "keep" and _revision(current) != int(row.get("previous_revision") or 0):
             raise ValueError("工作行 revision 已变化：拒绝旧 turn 覆盖新状态")
         if action == "keep":
             if current.get("source") != "agent" or not current.get("project") or not current.get("task"):
