@@ -50,6 +50,121 @@ class _MonitorCase(unittest.TestCase):
 
 
 class RegistrationMonitorTests(_MonitorCase):
+    def test_first_bot_monitor_finishes_without_a_nonexistent_callback_channel(self):
+        state = {"status": "ready", "notify_bot": None, "events": {"ready": {"event_id": "job:ready"}}}
+        with mock.patch.object(monitor, "check_once", return_value=state), \
+             mock.patch.object(monitor.time, "sleep", side_effect=AssertionError("must not keep polling after ready")):
+            self.assertEqual(monitor.run("job"), 0)
+
+    def activation_job(self):
+        state = monitor.arm_job("first", ["core"], launch=False, start_bridge=True,
+                                context={"profile": "chosen", "cwd": str(self.state_dir)})
+        folder = self.state_dir / "feishu"
+        folder.mkdir(exist_ok=True)
+        (folder / "bridge-bots.local.json").write_text(json.dumps({"bots": [{
+            "name": "first", "profile": "chosen", "app_id_env": state["id_env"],
+            "app_secret_env": state["secret_env"]}]}), encoding="utf-8")
+        return state
+
+    def test_launch_failure_blocks_bridge_and_keeps_concrete_error(self):
+        state = self.activation_job()
+        with mock.patch.object(monitor, "PROJECT", self.state_dir), \
+             mock.patch("bridge_process.ready_pid", return_value=None), \
+             mock.patch("agent_runtime.profile_spec"), \
+             mock.patch("agent_runtime.profile_login_state", return_value={"status": "ok"}), \
+             mock.patch("agent_profile_cli._selftest_one", return_value={"launch": False, "error": "codex: command not found"}), \
+             mock.patch.object(monitor.subprocess, "run") as run:
+            result = monitor._activate_bridge(state)
+        run.assert_not_called()
+        self.assertEqual(result["status"], "unknown")
+        self.assertIn("command not found", result["error"])
+
+    def test_start_checks_bot_cwd_and_connection_before_ready(self):
+        import bridge_control
+        state = self.activation_job()
+        with mock.patch.object(monitor, "PROJECT", self.state_dir), \
+             mock.patch("bridge_process.ready_pid", side_effect=[None, 123]), \
+             mock.patch.object(monitor, "_pid_alive", return_value=True), \
+             mock.patch("bridge_control.read_state", return_value={"pid": 123, "bot": "first", "contract": bridge_control.CONTRACT, "state": "ready"}), \
+             mock.patch("agent_runtime.profile_spec"), \
+             mock.patch("agent_runtime.profile_login_state", return_value={"status": "ok"}), \
+             mock.patch("agent_profile_cli._selftest_one", return_value={"launch": True, "version": "native version"}) as probe, \
+             mock.patch.object(monitor.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as run:
+            result = monitor._activate_bridge(state)
+        self.assertEqual(result["status"], "ready")
+        probe.assert_called_once_with("chosen", cwd=str(self.state_dir))
+        self.assertEqual(run.call_args.args[0][-4:], ["start", "--bot", "first", "--only-missing"])
+
+    def test_changed_roster_identity_never_starts_old_registration(self):
+        state = self.activation_job()
+        state["registration_context"]["profile"] = "different"
+        with mock.patch.object(monitor, "PROJECT", self.state_dir), \
+             mock.patch.object(monitor.subprocess, "run") as run:
+            result = monitor._activate_bridge(state)
+        self.assertEqual(result["status"], "unknown")
+        self.assertIn("映射已变化", result["error"])
+        run.assert_not_called()
+
+    def test_cancel_during_launch_probe_never_starts_bridge(self):
+        state = self.activation_job()
+        def probe(*args, **kwargs):
+            monitor.cancel(state["job_id"])
+            return {"launch": True}
+        with mock.patch.object(monitor, "PROJECT", self.state_dir), \
+             mock.patch("bridge_process.ready_pid", return_value=None), \
+             mock.patch("agent_runtime.profile_spec"), \
+             mock.patch("agent_runtime.profile_login_state", return_value={"status": "ok"}), \
+             mock.patch("agent_profile_cli._selftest_one", side_effect=probe), \
+             mock.patch.object(monitor.subprocess, "run") as run:
+            result = monitor._activate_bridge(state)
+        self.assertIn("已停止", result["error"])
+        run.assert_not_called()
+
+    def test_first_bot_link_is_available_without_callback_and_removed_after_registration(self):
+        with mock.patch.dict(os.environ, {"FEISHU_BRIDGE_SESSION": ""}):
+            state = monitor.arm_job("first", ["core"], launch=False)
+        url = "https://accounts.feishu.cn/authorize?safe-example=1"
+        result = monitor.notify_oauth_link(state["job_id"], url, 60)
+        self.assertTrue(result["ok"])
+        self.assertEqual(monitor.local_handoff(state["job_id"])["links"], [url])
+        self.assertNotIn(url, monitor._state_path(state["job_id"]).read_text())
+        self.registered(state)
+        self.assertFalse(monitor._oauth_handoff_path(state["job_id"]).exists())
+
+    def test_expired_link_and_cancelled_job_never_reoffer_authorization(self):
+        state = self.arm(["core"])
+        with mock.patch.object(monitor.bridge_injection, "inject_bot_prompt", return_value={"ok": True}):
+            monitor.notify_oauth_link(state["job_id"], "https://accounts.feishu.cn/authorize", 1)
+        with mock.patch.object(monitor, "_now", return_value=state["created_at"] + 10):
+            self.assertEqual(monitor.local_handoff(state["job_id"])["links"], [])
+        monitor.cancel(state["job_id"])
+        self.assertEqual(monitor.local_handoff(state["job_id"])["links"], [])
+
+    def test_permissions_gate_start_and_bridge_connection_gates_claim_prompt(self):
+        with mock.patch.dict(os.environ, {"FEISHU_BRIDGE_SESSION": ""}):
+            state = monitor.arm_job("first", ["core"], launch=False, start_bridge=True,
+                                    context={"profile": "chosen"})
+        self.registered(state)
+        with mock.patch.object(monitor, "_permission_check", return_value={"status": "missing"}), \
+             mock.patch.object(monitor, "_owner_check", return_value={"status": "missing"}), \
+             mock.patch.object(monitor, "_activate_bridge", return_value={"status": "waiting"}) as start:
+            monitor.check_once(state["job_id"], emit=False)
+            start.assert_not_called()
+        with mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}) as permission, \
+             mock.patch.object(monitor, "_owner_check", return_value={"status": "missing"}), \
+             mock.patch.object(monitor, "_activate_bridge", return_value={"status": "waiting"}) as start:
+            result = monitor.check_once(state["job_id"], emit=False)
+            self.assertEqual(permission.call_count, 2)
+            start.assert_called_once()
+            self.assertFalse(result["milestones"]["ready"])
+            self.assertIn("暂不要求", monitor.local_handoff(state["job_id"])["action"])
+        with mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}), \
+             mock.patch.object(monitor, "_owner_check", return_value={"status": "missing"}), \
+             mock.patch.object(monitor, "_activate_bridge", return_value={"status": "ready", "pid": 123}):
+            result = monitor.check_once(state["job_id"], emit=False)
+            self.assertTrue(result["milestones"]["bridge_ready"])
+            self.assertIn("私聊", monitor.local_handoff(state["job_id"])["action"])
+
     def test_process_probe_keeps_real_child_alive(self):
         child = subprocess.Popen([sys.executable, "-u", "-c",
                                   "import time; print('ready', flush=True); time.sleep(30)"],

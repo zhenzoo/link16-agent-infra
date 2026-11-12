@@ -190,6 +190,9 @@ class WireObserver:
         self.position = 0
         self.committed = initial_offset
         self.published = set()
+        self.timer_history = {}
+        self.saved_routes = {}
+        self.turn_offset = None
         self.state_dir.mkdir(parents=True, exist_ok=True)
         if self.checkpoint.exists():
             state = json.loads(self.checkpoint.read_text(encoding="utf-8"))
@@ -204,8 +207,15 @@ class WireObserver:
                         continue
                     if item.get("session") == session and item.get("source_event_id"):
                         self.published.add(item["source_event_id"])
+                        if item.get("kind") == "progress" and not item.get("steps"):
+                            self.saved_routes[item["source_event_id"]] = {
+                                "route": item.get("route"), "kimi_prompt_gate": item.get("kimi_prompt_gate"),
+                            }
+                        diagnostic = item.get("kimi_diagnostic") or {}
+                        if diagnostic.get("timer"):
+                            self.timer_history.setdefault(diagnostic["offset"], []).append(diagnostic)
 
-    def poll(self):
+    def poll(self, *, now=None):
         if self.wire.stat().st_size < max(self.position, self.committed):
             raise ValueError("Kimi journal truncated; refusing to replay as new")
         count = 0
@@ -221,31 +231,51 @@ class WireObserver:
                 # trailing line waits for the next poll without moving the cursor.
                 record = json.loads(line)
                 records = self.reducer.consume(record, start)
-                if end > self.committed:
-                    if record.get("type") == "turn.prompt" and self.reducer.route:
-                        route = self.reducer.route
-                        # UserPromptSubmit runs inside Kimi before the Wire
-                        # observer sees this journal row. Reuse that exact key
-                        # so the injected decide command and typed events bind
-                        # to one mechanical gate.
+                if (record.get("type") == "turn.prompt" and record.get("agentId") == "main"
+                        and self.reducer.route):
+                    self.turn_offset = start
+                    route = self.reducer.route
+                    # Reconstruct the hook identity on replay too. Otherwise
+                    # observer restart silently replaces it with a byte-offset key.
+                    saved = self.saved_routes.get(f"kimi:{self.session}:{start}:0", {})
+                    if saved.get("route"):
+                        route.update(saved["route"])
+                        if saved.get("kimi_prompt_gate"):
+                            route["workline_gate"] = saved["kimi_prompt_gate"]
+                    else:
                         pending = session_work.turn_for_prompt(
                             self.bot, self.reducer.prompt_digest, self.state_dir,
                         )
                         if pending:
                             route["turn_key"] = pending["turn_key"]
-                            self.reducer.turn = pending["turn_key"]
-                            self.reducer.accumulator.turn = pending["turn_key"]
                             route["workline_gate"] = session_work.GATE_CONTRACT
+                    self.reducer.turn = route["turn_key"]
+                    self.reducer.accumulator.turn = route["turn_key"]
+                    if end > self.committed:
                         turn_delivery_guard.activate(
                             self.state_dir, self.bot, route, session=self.session,
                             now=route["started_at"], turn_key=route["turn_key"],
-                            metadata={"workline_gate": session_work.GATE_CONTRACT} if pending else None,
+                            metadata={"workline_gate": route["workline_gate"]} if route.get("workline_gate") else None,
                         )
+                # Timed notices have no source Wire row. Reinsert the durable
+                # notices immediately after their request to reconstruct ACK IDs
+                # and recovery state across a restart, without sending history.
+                for diagnostic in self.timer_history.get(start, []):
+                    self.reducer.diagnostic(start, diagnostic["phase"], diagnostic["label"], timer=True)
+                    self.reducer.diagnostics.alerted = True
+                if end > self.committed:
                     for index, public in enumerate(records):
                         if record.get("type") == "turn.prompt" and self.reducer.route:
                             public["route"] = dict(self.reducer.route)
                             public["root_turn"] = self.reducer.turn
                             public["turn"] = self.reducer.turn
+                            # Empty receipt has no model-authored content. Do
+                            # not let it block later infrastructure diagnostics
+                            # behind an LM decision that needs the stalled request.
+                            if not public.get("steps"):
+                                gate = public["route"].pop("workline_gate", None)
+                                if gate:
+                                    public["kimi_prompt_gate"] = gate
                         identity = f"kimi:{self.session}:{start}:{index}"
                         failed_turn = (public.get("kind") == "answer" and record.get("type") == "turn.ended"
                                        and record.get("reason") in {"failed", "cancelled", "blocked"})
@@ -271,26 +301,69 @@ class WireObserver:
                     )
                     self.committed = end
                 self.position = end
+        # Complete the journal scan first: old waits followed by a response or
+        # terminal event must never generate a fresh timeout warning on restart.
+        active = turn_delivery_guard.read_route(self.state_dir, self.bot)
+        if (self.turn_offset is not None and self.turn_offset >= self.initial_offset
+                and self.committed > self.initial_offset and active.get("active")
+                and active.get("turn_key") == self.reducer.turn):
+            failed_id = f"kimi:{self.session}:{self.reducer.turn}:observer-failed:False"
+            restored_id = f"kimi:{self.session}:{self.reducer.turn}:observer-restored"
+            if failed_id in self.published and restored_id not in self.published:
+                public = self.reducer.diagnostic(self.committed, "observer-restored",
+                    "🟢 本地 Kimi 日志观察器已恢复读取和回传；任务是否完成仍以原生结果为准。")
+                public.update(source_event_id=restored_id, ts=time.time() if now is None else now)
+                _append(self.outbox, public)
+                self.published.add(restored_id)
+                count += 1
+            public = self.reducer.waiting(time.time() if now is None else now)
+            if public:
+                diagnostic = public["kimi_diagnostic"]
+                identity = f"kimi:{self.session}:wait:{diagnostic['offset']}:{diagnostic['phase']}"
+                if identity not in self.published:
+                    public.update(source_event_id=identity, ts=time.time() if now is None else now)
+                    _append(self.outbox, public)
+                    self.published.add(identity)
+                    count += 1
         return count
 
-    def report_failure(self, *, terminal=False):
+    def report_failure(self, *, terminal=False, error=None):
         """Report lost observation without declaring that a live TUI has ended."""
         if self.reducer.closed or not self.reducer.route or self.committed <= self.initial_offset:
-            return
+            # Version/JSON failure can precede turn.prompt. Only an active hook
+            # stamped with this exact native session may supply the missing route.
+            route = turn_delivery_guard.read_route(self.state_dir, self.bot)
+            if not error or not route.get("active") or route.get("session") != self.session:
+                return
+            self.reducer.route = route
+            self.reducer.turn = route["turn_key"]
+            self.reducer.accumulator.turn = route["turn_key"]
         identity = f"kimi:{self.session}:{self.reducer.turn}:observer-failed:{terminal}"
         if identity not in self.published:
+            if isinstance(error, json.JSONDecodeError):
+                detail = "本机 Kimi Wire 日志有一条完整记录不是合法 JSON"
+            elif isinstance(error, FileNotFoundError):
+                detail = "本机绑定的 Kimi Wire 日志文件已不存在"
+            elif isinstance(error, PermissionError):
+                detail = "本机观察器没有权限读取日志或写入回传记录"
+            elif isinstance(error, ValueError) and "version" in str(error):
+                detail = "本机 Kimi Wire 协议版本与桥适配版本不兼容"
+            elif isinstance(error, ValueError) and "truncated" in str(error):
+                detail = "本机 Kimi Wire 日志被截短，已停止重放以防重复回复"
+            elif isinstance(error, OSError):
+                detail = "本机观察器读写日志／回传文件失败"
+            else:
+                detail = "本机 Kimi 日志观察器中断，具体原因尚未由安全字段确认"
             record = {
                 "kind": "answer", "runtime": "kimi", "session": self.session,
                 "anchor": self.reducer.turn, "route": dict(self.reducer.route),
-                "text": "❌ Kimi 进度观察程序中断，本轮结果尚未确认；请检查本机会话后恢复。",
+                "text": f"❌ {detail}。本轮结果尚未确认；这是本地回传链路问题，不能据此判定模型失败。",
             }
             if not terminal:
-                self.reducer._apply({
-                    "event_id": identity, "event_type": "commentary", "turn": self.reducer.turn,
-                    "label": "💬 🔴 Kimi 回传观察中断，正在重连；原生会话仍可继续工作。",
-                    "payload": {},
-                })
-                record = self.reducer._progress()
+                record = self.reducer.diagnostic(
+                    self.committed, "observer-failed",
+                    f"🔴 {detail}。本地回传监督器将重启观察器；原生会话仍可继续工作，结果尚未确认。",
+                )
             record.update(source_event_id=identity, ts=time.time())
             _append(self.outbox, record)
             self.published.add(identity)
@@ -342,8 +415,8 @@ def observe(args):
             while True:
                 observer.poll()
                 time.sleep(0.2)
-        except Exception:
-            observer.report_failure()
+        except Exception as exc:
+            observer.report_failure(error=exc)
             raise
 
 

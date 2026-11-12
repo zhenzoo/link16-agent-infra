@@ -321,6 +321,7 @@ def load_bots():
             "agent_cmd": s.get("agent_cmd"),
             "ready_markers": s.get("ready_markers"),
             "ready_timeout_sec": s.get("ready_timeout_sec"),
+            "resume_interrupted": s.get("resume_interrupted") is True,
         })
     return bots
 
@@ -561,14 +562,14 @@ def clear_session(bot_name):
 def clear_codex_thread(bot_name):
     """删掉 codex app-server 的 thread 指针 → 下次 spawn 走 thread/start（真·全新会话）。
 
-    显式结束会话或已核实运行进程全部退出时调用；单纯桥重启不清理活会话。
+    显式结束/替换会话或已证 Wmux daemon 重启时调用；同 daemon 内进程退出保留恢复指针。
     ⚠️ 只删指针：Codex 本地存档 ~/.codex-personal/sessions/rollout-*.jsonl 一个字节都不动，
     只是下次不再自动接上去（要翻旧账仍可用 codex 自己的 resume）。
     """
     f = STATE_DIR / f"bridge-codex-app-thread-{bot_name}.json"
     if f.exists():
         f.unlink()
-    # Tombstone only Kimi's pointer on explicit close/new/handoff. Provider
+    # Tombstone only Kimi's automatic pointer. Provider
     # history and delivery cursors remain available for recovery and auditing.
     kimi = STATE_DIR / f"bridge-kimi-thread-{bot_name}.json"
     if kimi.exists():
@@ -1099,6 +1100,7 @@ def _wait_agent_ready(bot, pty, workspace_id=None, timeout=None, since=None, req
     trust_sent = False
     kimi_update_dismissed = False
     while time.time() < deadline:
+        _check_startup_cancelled(bot)
         if agent_runtime.uses_app_server(bot):
             # The TUI's own correlated RPC response and the independent observer
             # prove readiness. Screen wording and historical markers prove none.
@@ -1238,6 +1240,8 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
                         if _wait_agent_ready(bot, pty, workspace_id, since=startup_started):
                             _clear_startup_failure(bot["name"])
                             return True
+                    except bridge_inbox.StartupCancelled:
+                        raise
                     except RuntimeError as exc:
                         blog(bot["name"], f"启动恢复未完成：{exc}")
                     record = _codex_startup_record(bot)
@@ -1385,7 +1389,7 @@ def _resolve_jsonl(bot, marker, pinned, inject_wall, pre=None):
 
 
 # ---------- 会话生命周期 ----------
-def _release_exited_session_unlocked(bot):
+def _release_exited_session_unlocked(bot, *, release=True):
     """Forget a dead runtime, never mistake a failed query for an exited process.
 
     Caller holds ensure-session. Native startup receipts identify the processes;
@@ -1416,8 +1420,25 @@ def _release_exited_session_unlocked(bot):
 
     def exited():
         rows = kimi_process.inventory()  # Raises on unknown/incomplete OS observation.
-        # Include orphan children; PID reuse is conservatively treated as live.
-        return not any(r["pid"] in pids or r["ppid"] in pids
+        # A reboot can reuse a worker PID for an unrelated process. The native
+        # startup receipt was written after its workers existed; a process born
+        # later cannot be that old worker. A child can legitimately start later,
+        # so exclude it only if its parent is proven reused and predates it.
+        # Missing birth evidence stays conservative. Owned workers always block.
+        stamp = start.get('ts')
+        by_pid = {r['pid']: r for r in rows}
+        def born_later(row):
+            birth = str(row.get('birth', ''))
+            return (isinstance(stamp, (float, int)) and stamp > 0 and birth.isdigit()
+                    and int(birth) > int((stamp + 11644473600) * 10_000_000))
+        def old_child(row):
+            if row['ppid'] not in pids:
+                return False
+            parent = by_pid.get(row['ppid'])
+            birth = str(row.get('birth', ''))
+            return not (parent and born_later(parent) and birth.isdigit()
+                        and int(birth) > int(parent['birth']))
+        return not any((r['pid'] in pids and not born_later(r)) or old_child(r)
                        or kimi_process.owned(r, name, STATE_DIR) for r in rows)
 
     if not exited():
@@ -1428,15 +1449,62 @@ def _release_exited_session_unlocked(bot):
         return False  # Never close a workspace whose terminals have changed.
     if load_session(name) != rec or _agent_startup_record(bot) != start or not exited():
         return False
+    if not release:
+        return True
     if ws:
         wmux_session.close(rec["workspace_id"])
         if any(w.get("id") == rec["workspace_id"] for w in wmux_session.workspaces()):
             raise RuntimeError("旧进程已结束，但旧工作区尚未关闭；保留绑定待重试")
-    clear_codex_thread(name)
-    _merge_session(name, {"workspace_id": None, "pty": None, "jsonl": None,
-                         "daemon_fp": None, "pending_launch": None, "runtime_processes": None})
-    blog(name, "♻️ 已核实旧运行进程及其子进程退出，释放运行绑定，下次使用全新会话")
+    _merge_session(name, {"workspace_id": None, "pty": None,
+                         "pending_launch": None, "runtime_processes": None})
+    blog(name, "♻️ 已核实旧运行进程及其子进程退出，释放运行绑定并保留原对话")
     return True
+
+
+def _invalidate_restart_resume_unlocked(bot):
+    """A new daemon invalidates automatic resume, never the historical files.
+
+    Keep the old epoch across dead-process release so a later startup can still
+    distinguish an agent crash from a PC/daemon restart. Unknown is not changed.
+    Caller holds the existing ensure-session lock.
+    """
+    name = bot['name']
+    rec = load_session(name) or {}
+    old, current = rec.get('daemon_fp'), wmux_session.daemon_fingerprint()
+    if not old or not current or old == current:
+        return False
+    if rec.get('resume_invalidated_for') != current:
+        clear_codex_thread(name)
+        pending = rec.get('resume_handoff')
+        if pending and str(pending.get('id', '')).startswith('resume:'):
+            import session_recovery
+            session_recovery._cancel(bridge_inbox.Inbox(STATE_DIR, name), pending['id'],
+                                     'Wmux 已重启，取消旧任务自动续跑')
+        _merge_session(name, {'jsonl': None, 'resume_handoff': None,
+                             'pending_launch': None, 'resume_invalidated_for': current})
+        blog(name, 'Wmux 已重启：旧会话不自动恢复；历史保留，下一条消息新建会话')
+    return True
+
+
+def _resumable_claude_jsonl(bot, cwd):
+    """Resume only this bot's pinned history in the exact profile and directory."""
+    if agent_runtime.runtime_name(bot) != "claude":
+        return None
+    rec = load_session(bot["name"]) or {}
+    profile = agent_runtime.profile_name(bot, required=True)
+    if (rec.get("agent") != "claude" or rec.get("profile") != profile
+            or not rec.get("jsonl") or not rec.get("cwd")
+            or Path(rec["cwd"]).resolve() != Path(cwd).resolve()):
+        return None
+    path = Path(rec["jsonl"]).resolve()
+    home = agent_runtime.profile_spec(profile).home_path.resolve()
+    if not path.is_file() or not path.is_relative_to(home / "projects"):
+        return None
+    try:
+        uuid.UUID(path.stem)
+    except ValueError:
+        return None
+    return str(path)
 
 
 def _worker_cmd(bot, cwd=None):
@@ -1445,6 +1513,9 @@ def _worker_cmd(bot, cwd=None):
     command = agent_runtime.worker_cmd(bot, PROJECT, STATE_DIR, cwd=cwd, auto_update=False)
     if (agent_runtime.uses_app_server(bot) or agent_runtime.runtime_name(bot) == "kimi") and bot.get("_startup_id"):
         command += " --startup-id " + shlex.quote(bot["_startup_id"])
+    resume = _resumable_claude_jsonl(bot, cwd or current_cwd(bot))
+    if resume:
+        command += " --resume " + shlex.quote(Path(resume).stem)
     return command
 
 
@@ -1458,11 +1529,87 @@ def _prepare_worker_update(bot):
     try:
         import agent_update
         profile = agent_runtime.profile_name(bot, required=True)
-        result = agent_update.ensure(profile)
+        result = agent_update.ensure(profile, on_progress=bot.get("_update_progress"),
+                                     cancelled=bot.get("_startup_cancelled"))
+        if bot.get("_update_progress"):
+            bot["_update_progress"](result)
+        if result.get("status") == "cancelled":
+            raise bridge_inbox.StartupCancelled("启动已让位给待处理的控制命令")
         blog(bot["name"], f"启动前官方更新检查：{result.get('status', 'unknown')}；随后开始原生就绪检查")
+    except bridge_inbox.StartupCancelled:
+        raise
     except Exception as exc:
         # Match the existing agent_update CLI: update failure never blocks use.
         blog(bot["name"], f"官方更新检查失败（{type(exc).__name__}），继续使用当前版本启动")
+        if bot.get("_update_progress"):
+            bot["_update_progress"]({"status": "failed"})
+
+
+def _startup_control_allowed(bot, row):
+    """Read-only authorization for preemption; normal slash handling rechecks it."""
+    try:
+        payload = json.loads(row['payload'])
+        message = payload['message']
+        if message.get('message_type') != 'text':
+            return False
+        text = json.loads(message['content']).get('text', '')
+        for mention in message.get('mentions') or []:
+            key = mention.get('key')
+            if key:
+                text = text.replace(key, '')
+        text = _unmangle_slash(text.strip())
+        cmd = text.split()[0].lower() if text else ''
+        if cmd not in {'/close', '/new', '/stop'}:
+            return False
+        if _stale_slash_lag(cmd, bridge_inbound.event_ts(message.get('create_time'), 0), row['received']) is not None:
+            return False
+        sender = payload.get('sender', {}).get('sender_id', {}).get('open_id')
+        if message.get('chat_type') in {'p2p', 'private'}:
+            return bool(sender and (sender in ALLOWED_OPEN_IDS or sender == load_owner(bot['name'])))
+        return bool(sender and _gate_verdict(bot, sender, cmd, text)[0])
+    except (KeyError, ValueError, TypeError):
+        return False
+
+
+def _check_startup_cancelled(bot):
+    check = bot.get('_startup_cancelled')
+    if check and check():
+        raise bridge_inbox.StartupCancelled('启动已让位给待处理的控制命令')
+
+
+def _update_progress_callback(channel, chat_id, bot_name):
+    """Coalesce progress into one card; network reporting never holds startup."""
+    import agent_update
+    loop = asyncio.get_running_loop()
+    pending, task, card, create_failed = None, None, None, False
+
+    async def drain():
+        nonlocal pending, card, create_failed
+        while pending is not None:
+            event, pending = pending, None
+            try:
+                result = await command_card(channel, chat_id, agent_update.status_text(event),
+                                            bot_name, message_id=card)
+                if card is None and not result:
+                    create_failed = True  # Unknown create outcome: never create a second card.
+                    pending = None
+                    return
+                card = result or card
+            except Exception:
+                if card is None:
+                    create_failed = True
+                    pending = None
+                    return
+
+    def enqueue(event):
+        nonlocal pending, task
+        if create_failed:
+            return
+        pending = event
+        if task is None or task.done():
+            task = asyncio.create_task(drain())
+
+    return lambda event: loop.call_soon_threadsafe(enqueue, dict(event))
 
 
 def _worker_launcher(bot, cwd):
@@ -1516,6 +1663,8 @@ def _reuse_check(bot, rec):
 def _ensure_session_unlocked(bot):
     """返回 (workspace_id, pty, created, jsonl)。jsonl=该会话钉死的 transcript 路径(str)或 None。
     复用活会话时带出已钉的 jsonl；新 spawn 时探测新建 jsonl 钉死它（彻底绕开 marker+mtime 猜文件的串台坑）。"""
+    _check_startup_cancelled(bot)
+    _invalidate_restart_resume_unlocked(bot)
     _release_exited_session_unlocked(bot)
     rec = load_session(bot["name"])
     pending_launch = (rec or {}).get("pending_launch")
@@ -1541,8 +1690,8 @@ def _ensure_session_unlocked(bot):
         blog(bot["name"], f"♻️ {rec['pty']} {why} → 关掉重起")
         try:
             wmux_session.close(rec["workspace_id"])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:
+            raise bridge_inbox.RetryableHandoffError('旧工作区尚未确认关闭，暂不创建第二个会话') from exc
     # 2026-09-08 机器 3050：profile 从没登录，面板开了、Claude 停在登录页，桥干等 90 秒才报未就绪。
     # spawn 前先看凭据证据：明确「没登录过」就立刻报人话，不开面板、不等 90 秒。unknown（Kimi/第三方端点）不拦。
     try:
@@ -1564,6 +1713,9 @@ def _ensure_session_unlocked(bot):
     startup_bot = {**bot, "_startup_id": (pending_launch or {}).get("startup_id") or uuid.uuid4().hex}
     if not pending_launch:
         _prepare_worker_update(bot)
+    _check_startup_cancelled(bot)
+    if _invalidate_restart_resume_unlocked(bot):
+        pending_launch = None  # The daemon may have restarted during a real download.
     # Codex already proved this shape: one script performs cd + worker launch,
     # and the terminal receives one short command from either default shell.
     command = (pending_launch or {}).get("command") or _worker_launcher(startup_bot, cwd)
@@ -1572,6 +1724,7 @@ def _ensure_session_unlocked(bot):
         r = wmux_session.spawn(
             f"bot-{bot['name']}", cmd=command, cwd=None, shell_init=None,
             **({"resume": pending_launch} if pending_launch else {}),
+            **({'cancelled': bot['_startup_cancelled']} if bot.get('_startup_cancelled') else {}),
         )
     except wmux_session.WmuxLaunchPending as exc:
         _merge_session(bot["name"], {
@@ -1579,10 +1732,23 @@ def _ensure_session_unlocked(bot):
             "profile": agent_runtime.profile_name(bot, required=True),
             "agent": agent_runtime.runtime_name(bot), "cwd": cwd,
             "pending_launch": {**exc.record, "startup_id": startup_bot["_startup_id"]},
+            "daemon_fp": wmux_session.daemon_fingerprint(),
         })
+        _check_startup_cancelled(bot)
         raise bridge_inbox.RetryableHandoffError(str(exc)) from exc
     ws, pty = r["workspace_id"], r["pty"]
-    if not _finish_worker_startup(startup_bot, ws, pty, cwd, started=startup_started):
+    try:
+        _check_startup_cancelled(bot)
+        ready = _finish_worker_startup(startup_bot, ws, pty, cwd, started=startup_started)
+    except bridge_inbox.StartupCancelled:
+        # Leave the exact new workspace bound for /close or /new to close via
+        # the normal owned-process cleanup. No business prompt was submitted.
+        _merge_session(bot['name'], {'workspace_id': ws, 'pty': pty,
+            'profile': agent_runtime.profile_name(bot, required=True),
+            'agent': agent_runtime.runtime_name(bot), 'cwd': cwd,
+            'daemon_fp': wmux_session.daemon_fingerprint(), 'pending_launch': None})
+        raise
+    if not ready:
         try:
             wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
         except Exception:  # noqa: BLE001
@@ -1593,7 +1759,7 @@ def _ensure_session_unlocked(bot):
             "失败现场已保存，请发 /screen 查看；桥没有向仍在启动的 TUI 重复塞命令。"
         )
     newj = _detect_new_jsonl(bot, before)
-    jsonl = str(newj) if newj else None
+    jsonl = _resumable_claude_jsonl(bot, cwd) or (str(newj) if newj else None)
     _merge_session(bot["name"], {"workspace_id": ws, "pty": pty, "jsonl": jsonl,
                                  "profile": agent_runtime.profile_name(bot, required=True),
                                  "agent": agent_runtime.runtime_name(bot),
@@ -2233,14 +2399,28 @@ async def settle_inbound_handoffs(bot, inbox, channel):
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'received_modified')
         elif (row['state'] in {'queued', 'awaiting_confirmation', 'uncertain'}
-              and time.time() - row['received'] >= 30 and context.get('notice') != 'pending'):
+              and time.time() - row['received'] >= 30 and context.get('notice') != 'compacting'):
+            compacting = False
+            try:
+                compacting = await asyncio.to_thread(cron_delivery.inbound_compacting,
+                                                    sys.modules[__name__], bot, row)
+            except Exception as exc:
+                inbox.scheduled_error(row['id'], exc)
+            # A receipt can arrive while reading the pane; it always wins.
+            row = inbox.get(row['id'])
+            if cron_delivery.accepted(row):
+                if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
+                    inbox.handoff_notice(row['id'], 'done')
+                continue
+            if row['state'] not in {'queued', 'awaiting_confirmation', 'uncertain'}:
+                continue
+            if not compacting and context.get('notice') == 'pending':
+                continue
             result = await card_send(channel, context['chat_id'],
-                                    '⏳ 消息已保存，但尚未取得 Codex 的原文接收回执，因此还没有点赞。'
-                                    '若原会话空闲且完整原稿仍在，桥会有界补 Enter；审批拦截、残稿或无法读屏时保留现场，'
-                                    '不会清稿、重复粘贴或冒称成功。'
-                                    f"\n记录：{row['id']}\n阻塞：{row.get('error') or '原生回执尚未到达'}", bot['name'])
+                                    'compacting context' if compacting else
+                                    '⏳ 等待 Codex 处理这条消息。', bot['name'])
             if result != 'failed':
-                inbox.handoff_notice(row['id'], 'pending')
+                inbox.handoff_notice(row['id'], 'compacting' if compacting else 'pending')
 
 
 async def card_send(channel, target, text, name):
@@ -2266,6 +2446,31 @@ async def card_send(channel, target, text, name):
         except Exception as e:  # noqa: BLE001 — 卡片失败/超时不致命，下面退普通消息必达
             blog(name, f"卡片发送失败({str(e)[:120] or type(e).__name__})→ 退普通消息")
     return await guaranteed_send(channel, target, text, name)
+
+
+async def command_card(channel, target, text, name, *, message_id=None):
+    """One command message: create once, then patch the same ID, never append a result card."""
+    payload = _card_payload(text, bot_name=name)
+    try:
+        if message_id:
+            # Retrying an edit of the same message cannot create duplicate cards.
+            for attempt in range(3):
+                try:
+                    result = await asyncio.wait_for(channel.update_card(message_id, payload), CARD_SEND_TIMEOUT)
+                    if bool(getattr(result, "success", False)):
+                        return message_id
+                except Exception:
+                    if attempt == 2:
+                        raise
+                await asyncio.sleep(0.5)
+            raise RuntimeError("update_card returned false")
+        receive_type = "chat_id" if str(target).startswith("oc_") else "open_id"
+        return await asyncio.wait_for(
+            channel._ensure_card_snapshot(target, receive_type, snapshot=payload,
+                                          reply_to=None, reply_in_thread=None), CARD_SEND_TIMEOUT)
+    except Exception as exc:
+        blog(name, f"命令卡片{'更新' if message_id else '创建'}未确认：{type(exc).__name__}；不另发第二张")
+        return None
 
 
 # ---------- 后台镜像器：把【终端原生轮次】也搬到飞书 DM（双向完整同步 · ARCH-101 §2.8）----------
@@ -2685,6 +2890,8 @@ def _run_bot(bot_name=None):
 
     msg_lock = asyncio.Lock()   # 本 bot 进程内消息串行（防并发注入交错 / ensure_session race · 见 on_message）
     durable_inbox = bridge_inbox.Inbox(STATE_DIR, bot['name'])
+    durable_inbox.priority = lambda row: _startup_control_allowed(bot, row)
+    bot = {**bot, '_startup_cancelled': lambda: durable_inbox.pending_control(durable_inbox.priority)}
     imported = durable_inbox.import_legacy(lambda: bridge_inbound.read_records(STATE_DIR, bot['name'], strict=True))
     if imported:
         blog(bot['name'], f'迁移 {imported} 个历史接收 ID，仅用于旧事件去重，不假定旧任务完成或重新执行。')
@@ -2751,8 +2958,10 @@ def _run_bot(bot_name=None):
                 blog(bot["name"], f"🚧 放行群内 {cmd}：{why}")
                 receipt(bot["name"], {"tid": "gate", "kind": "slash_allowed", "cmd": cmd,
                                       "sender": sender, "reason": why, "delivered": True})
+            close_card = None
             if cmd == "/close":
-                await reply(chat_id, "🔄 已收到 `/close`，正在关闭会话并释放占用……")
+                close_card = await command_card(channel, chat_id,
+                                                "🔄 已收到 `/close`，正在关闭会话并释放占用……", bot["name"])
             elif cmd in ("/account", "/acc", "/账号") and arg:
                 await reply(chat_id, "🔄 已收到账号切换请求，正在检查账号并关闭旧会话；不会自动启动新会话……")
             rec = load_session(bot["name"])
@@ -2880,7 +3089,10 @@ def _run_bot(bot_name=None):
                 try:
                     closed = await asyncio.to_thread(replace_session, bot, account_default)
                 except Exception as e:
-                    await reply(chat_id, f"⛔ 关闭未完成：{str(e)[:200]}。未清除旧会话绑定。"); return
+                    if close_card:
+                        await command_card(channel, chat_id, f"⛔ 关闭未完成：{str(e)[:200]}。未清除旧会话绑定。",
+                                           bot["name"], message_id=close_card)
+                    return
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])
                 default_acc = default_account()
@@ -2888,7 +3100,11 @@ def _run_bot(bot_name=None):
                 head = "🗑 已关闭会话" if closed["had_session"] else "🛌 会话已关闭，无残留占用"
                 if closed.get("locks_released"):
                     head += "，Kimi 占用已释放"
-                await reply(chat_id, f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）"); return
+                if close_card:
+                    await command_card(channel, chat_id,
+                                       f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）",
+                                       bot["name"], message_id=close_card)
+                return
             if cmd in ("/handoff", "/交接", "/接手"):
                 # `/close` 的进阶版（主人 2026-08-21 定）：**关掉当前会话 → 开一个全新 context →
                 # 让新会话先读懂历史、汇报、然后停下等你**。
@@ -3354,6 +3570,7 @@ def _run_bot(bot_name=None):
             # （Zara 式「运行中的消息排队下一轮」· 2026-06-15 实证：连发两条，第二条的回复被冲掉没发回）。
             arrived_at = getattr(msg, 'link16_received', time.time())
             async with msg_lock:
+                bot['_update_progress'] = _update_progress_callback(channel, msg.chat_id, bot['name'])
                 text = _unmangle_slash(text)      # 修 Git-Bash 把 /close 改写成 C:/Program Files/Git/close
                 if text.startswith("/"):
                     durable_inbox.boundary(msg.id)
@@ -3382,16 +3599,16 @@ def _run_bot(bot_name=None):
                         blog(bot["name"], network["detail"])
                     rec = load_session(bot["name"])
                     # 预热提示：用 _reuse_check（与 ensure_session 同判据·含 daemon 重启指纹 + agentName 死壳）
-                    # 预测要不要冷启 → daemon 重启后注进死壳的老 bug 不再静默,改成「会话已失效·起新的」。
+                    # Rebuilding a terminal does not necessarily create a new native conversation.
                     reusable, ws_present, _ = await asyncio.to_thread(_reuse_check, bot, rec)
                     if not reusable and not (rec or {}).get("pending_launch"):
                         # 让用户一眼看出用【哪个账号 + 哪个目录】起会话·各自标「默认 / 已切」（ensure_session 实际就在 current_cwd 起）
                         _dir = await asyncio.to_thread(current_cwd, bot)
                         _acc_lbl, _dir_lbl = runtime_labels(_dir)
                         await reply(msg.chat_id,
-                                    (f"🆕 上个会话已失效（wmux 重启过 / 会话被关）·正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 为你起一个新的 {agent_runtime.display_name(bot)}；启动失败会告警一次。"
+                                    (f"♻️ 运行窗口已失效，正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 重新启动 {agent_runtime.display_name(bot)}；仅同一次 Wmux 运行中的有效记录会接回原对话。"
                                      if ws_present else
-                                     f"🆕 你还没有会话，正在 wmux 里用账号 {_acc_lbl} · 目录 {_dir_lbl} 起一个 {agent_runtime.display_name(bot)}；启动失败会告警一次。"))
+                                     f"⏳ 正在用账号 {_acc_lbl} · 目录 {_dir_lbl} 启动 {agent_runtime.display_name(bot)}；仅同一次 Wmux 运行中的有效记录会接回原对话。"))
                     try:
                         ws, pty, created, pinned = await asyncio.to_thread(ensure_session, bot)
                     except Exception as exc:
@@ -3551,6 +3768,7 @@ def _run_bot(bot_name=None):
                                     profile=agent_runtime.profile_name(bot, required=True),
                                     chat_id=msg.chat_id)
                                if agent_runtime.uses_app_server(bot) else None)
+                    _check_startup_cancelled(bot)
                     durable_inbox.boundary(msg.id, prompt=marker, session=target_session, handoff=handoff)
                     inject_ok = await asyncio.to_thread(
                         _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None,
@@ -3713,6 +3931,25 @@ def _run_bot(bot_name=None):
                     "会话没死，但**回传通道可能断了** —— 你发的消息进得去、我的回复出不来。建议查一下回程。"), bname)
 
         async def _recover_pending(_b):                        # 投递保证：撞 compact 被吃的消息·必达重投/通知（§2.13）
+            if bot.get('resume_interrupted'):
+                import session_recovery
+                try:
+                    async with msg_lock:
+                        resumed = await asyncio.to_thread(session_recovery.recover, sys.modules[__name__], bot)
+                    if resumed == 'accepted':
+                        blog(bname, '中断恢复指令已获原生接收回执，原对话继续处理')
+                    elif resumed == 'needs-attention':
+                        pending = (load_session(bname) or {}).get('resume_handoff') or {}
+                        target = mirror_target(bname)
+                        if pending and not pending.get('notified') and target:
+                            sent = await card_send(ch, target,
+                                '⚠️ 原任务恢复尝试已达上限，尚未确认继续执行。'
+                                '原对话和待办已保留，请查看 /delivery 或启动诊断。', bname)
+                            if sent != 'failed':
+                                await asyncio.to_thread(session_recovery.notice_delivered,
+                                    sys.modules[__name__], bot, pending['id'])
+                except Exception as exc:
+                    blog(bname, f'中断任务恢复待核：{type(exc).__name__}: {str(exc)[:160]}')
             if agent_runtime.uses_app_server(bot):
                 try:
                     recovered = await asyncio.to_thread(
@@ -3894,12 +4131,12 @@ def _run_bot(bot_name=None):
 
 
 # ---------- 子命令 ----------
-def cmd_start(bot_filter=None):
+def cmd_start(bot_filter=None, *, only_missing=False):
     with bridge_process.control_lock('bridge-fleet'):
-        return _start_locked(bot_filter)
+        return _start_locked(bot_filter, only_missing=only_missing)
 
 
-def _start_locked(bot_filter=None):
+def _start_locked(bot_filter=None, *, only_missing=False):
     """为每个 bot 各起一个脱离终端的后台进程 run --bot <name>（各自日志 · 各自单实例锁）。
     用 subprocess.Popen + DETACHED_PROCESS 直接起 —— 比 powershell Start-Process 可靠
     （后者实测会 hang 住不返回、卡住后续 bot · 2026-06-15）。
@@ -3913,8 +4150,12 @@ def _start_locked(bot_filter=None):
     # Observe the whole fleet before any mutation. A watchdog left running while
     # bots are replaced can revive a just-stopped bot in the middle of start.
     rows = bridge_process.require_known(bridge_process.query_processes(_PIDS_QUERY_TIMEOUTS))
+    if only_missing:
+        bots = [b for b in bots if not bridge_process.select_pids(rows, Path(__file__), b['name'])]
     pids = bridge_process.select_pids(rows, Path(__file__), bot_filter)
-    guardians = [] if bot_filter else [
+    if only_missing:
+        pids = []
+    guardians = [] if bot_filter or only_missing else [
         (name, bridge_process.select_pids(rows, Path(__file__).parent / name))
         for name in ("bridge_watchdog.py", "bridge_cron.py")]
     if pids or any(ids for _, ids in guardians):
@@ -3962,9 +4203,11 @@ def _start_locked(bot_filter=None):
     finally:
         # Recover the watchdog even when Ctrl+C or a spawn error interrupts the
         # stop/start sequence. Readiness waits happen only after both guardians.
-        if not bot_filter:
+        if not bot_filter or only_missing:
             _here = Path(__file__).resolve().parent
             for _name, _hint in (("bridge_watchdog.py", "看门狗"), ("bridge_cron.py", "cron 守护进程")):
+                if only_missing and bridge_process.select_pids(rows, _here / _name):
+                    continue
                 try:
                     subprocess.run([sys.executable, str(_here / _name), "start"],
                                    cwd=str(PROJECT), timeout=150, check=True,
@@ -4425,6 +4668,8 @@ def main():
                     choices=["run", "start", "stop", "status", "workspaces", "send", "doctor"],
                     help="(默认)start / run[--bot X] / stop / status / workspaces / send=主动推DM / doctor=一眼健康")
     ap.add_argument("--bot", default=None, help="指定单个 bot：start/stop/run/send 都认它（裸命令 --bot X=只起它·stop --bot X=只停它·不给=全部）")
+    ap.add_argument("--only-missing", action="store_true",
+                    help="start：只补起缺失进程及守护，不替换任何现有桥；首次注册自动续跑使用")
     ap.add_argument("--text", default=None, help="send：要推送的文本")
     ap.add_argument("--file-as-text", default=None,
                     help="send：明确把文件正文作为聊天文字发送（不是附件；长文可能拆成多条）")
@@ -4450,7 +4695,7 @@ def main():
         run(args.bot)
     elif args.cmd == "start":
         try:
-            cmd_start(args.bot)
+            cmd_start(args.bot, only_missing=args.only_missing)
         except KeyboardInterrupt:
             print("\n⏸ 重启等待被 Ctrl+C 中断；已启动的 bot 仍在后台，"
                   "全局守护恢复已尝试。用 `status` 查看实际连接状态。", file=sys.stderr)

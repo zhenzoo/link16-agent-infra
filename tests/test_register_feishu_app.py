@@ -208,7 +208,7 @@ class RegistrationLifecycleTests(unittest.TestCase):
             post = stack.enter_context(mock.patch.object(sdk.requests, "post", side_effect=[
                 response({"supported_auth_methods": ["client_secret"]}),
                 response({"device_code": "device-private", "interval": 0, "expires_in": 600,
-                          "verification_uri_complete": "https://example.invalid/authorize"}),
+                          "verification_uri_complete": "https://accounts.feishu.cn/authorize"}),
                 response({"client_id": "cli_test", "client_secret": "secret-private"}),
             ]))
             # This callback test owns an explicit mocked recipient; it must not
@@ -233,8 +233,10 @@ class RegistrationLifecycleTests(unittest.TestCase):
             self.assertEqual(post.call_count, 3)
             stack.enter_context(mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}))
             stack.enter_context(mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}))
+            activation = stack.enter_context(mock.patch.object(monitor, "_activate_bridge", return_value={"status": "ready"}))
             result = monitor.check_once(state["job_id"], emit=False)
             self.assertEqual(result["status"], "ready")
+            activation.assert_called_once()
             self.assertEqual(result["checks"]["tenant"]["status"], "unknown")
             self.assertEqual(tenant_sync.call_count, 2)
             self.assertNotIn("group_ready", result["events"])

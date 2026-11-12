@@ -488,11 +488,16 @@ def _start_or_resume_thread(rpc: RpcConnection, *, state_dir: Path, bot: str, cw
     state_path = _thread_state_path(state_dir, bot)
     previous = None
     try:
-        previous = json.loads(state_path.read_text(encoding="utf-8")).get("thread_id")
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        previous = saved.get("thread_id")
     except (OSError, ValueError, AttributeError):
         pass
     if not previous:
         return None
+    if saved.get('cwd') and Path(saved['cwd']).resolve() != cwd.resolve():
+        raise RuntimeError('保存会话的工作目录不匹配；请显式切换会话，不跨目录恢复')
+    if saved.get('profile') and saved['profile'] != os.environ.get(agent_runtime.PROFILE_ENV):
+        raise RuntimeError('保存会话的账号不匹配；不跨 profile 恢复')
     common = {
         "cwd": str(cwd),
         "approvalPolicy": "never",
@@ -652,6 +657,7 @@ def observe(args) -> int:
             raise RuntimeError("直连 app-server 的观察者需要已有 thread；新线程应观察 TUI 事件流")
         codex_startup.atomic_write_json(_thread_state_path(state_dir, args.bot), {
             "thread_id": args.thread, "cwd": str(cwd), "startup_id": args.startup_id,
+            "profile": os.environ.get(agent_runtime.PROFILE_ENV),
         })
         observer = MilestoneObserver(
             rpc, bot=args.bot, root_thread=args.thread, state_dir=state_dir, workspace_root=cwd,

@@ -45,11 +45,16 @@ class RetryableHandoffError(RuntimeError):
     """Driver proved no submission: zero writes, or owned draft fully cleared."""
 
 
+class StartupCancelled(RetryableHandoffError):
+    """A queued authorized control command must run before startup continues."""
+
+
 class Inbox:
     def __init__(self, state_dir, bot):
         # Hash the namespace: neither remote IDs nor bot names become paths.
         key = hashlib.sha256(str(bot).encode()).hexdigest()[:24]
         self.bot = str(bot)
+        self.priority = None
         self.path = Path(state_dir) / f"bridge-inbox-{key}.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
@@ -184,9 +189,20 @@ class Inbox:
                              (time.time(),)).fetchone()
             if not row:
                 return None
+            if self.priority:
+                for candidate in db.execute("SELECT * FROM messages WHERE state='queued' AND retry_at<=? ORDER BY seq",
+                                            (time.time(),)):
+                    if self.priority(dict(candidate)):
+                        row = candidate
+                        break
             db.execute("UPDATE messages SET state='processing',attempts=attempts+1,updated=? WHERE id=?",
                        (time.time(), row['id']))
             return dict(row)
+
+    def pending_control(self, predicate):
+        with self.connect() as db:
+            return any(predicate(dict(row)) for row in db.execute(
+                "SELECT * FROM messages WHERE state='queued' AND retry_at<=? ORDER BY seq", (time.time(),)))
 
     def boundary(self, mid, *, prompt=None, session=None, handoff=None):
         with self.connect() as db:
@@ -511,6 +527,8 @@ async def consume(inbox, handler, wake, stopping, report):
             await db_call(lambda: inbox.fail(
                 mid, exc, retryable=not isinstance(exc, NonRetryableHandoffError)), 'fail')
             report(f"入站交接保留待办 message_id={mid}: {type(exc).__name__}: {str(exc)[:180]}")
+            if isinstance(exc, StartupCancelled):
+                continue  # Release preparation first, then claim the control command.
             # Failure backoff only; healthy dispatch wakes immediately.
             try:
                 await asyncio.wait_for(wake.wait(), timeout=2)

@@ -23,7 +23,7 @@ read_when:
   - 改动 feishu_bridge.py 或回传链任一环
   - 飞书侧收不到 / 回复格式不对 / 卡片不更新
   - 要理解某条消息为什么回给了这个人
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-12
 ---
 # ARCH-110 · 飞书智能体桥（tb24-xhs-autopilot 等 · owned-session 多智能体）
 
@@ -104,7 +104,7 @@ last_reviewed: 2026-11-04
     - **自愈重生保留当前目录**（2026-06-24 · 与 `/account` 临时号自愈保留对称）：会话死掉自动重生时 `ensure_session` 在**注册表 `cwd`**（`/cd` 过的目录）起，不再无脑回名册默认；注册表无 `cwd`（首次 / `/close` 清过）才回默认。
   - `/screen` → 读屏看现场
   - `/stop` → `ctrl+c` 打断当前 turn
-  - `/close` → 先回「已收到，正在关闭」，再 `workspace.close` 干净撤掉这个 bot 的会话 + **清注册表（含 `/cd` 过的 `cwd`）+ 账号切回名册默认** → **下次 @ 用名册默认账号 + 默认目录重建**。起会话/关会话/自愈重生的飞书提示都打印「账号 + 目录」并各自标注「（默认）/（已切·默认 X）」，让你一眼看出用哪个号、在哪个目录起的。即时受理只表示命令开始执行，最终关闭仍以工作区消失和完成回执为准。
+  - `/close` → 创建一张「已收到，正在关闭」卡片，再 `workspace.close` 撤掉该 bot 会话、清注册表（含临时 cwd），**更新同一 message_id** 为完成或失败；不另发第二张完成卡。完成仍以工作区消失为准，下次 @ 用名册默认账号与目录重建。更新失败只有限重试原卡并留诊断，首次发送结果未知也不新建补发，防止重复卡片。
   - `/new`（2026-07-07）→ **起一个全新【空】会话·不注入任何文本**。把「起会话」和「注入内容」拆开：以前必须发一条【有内容】的消息才会起会话（且那条内容被注进去）；`/new` 让你先起个空的、再自己发消息喂它。与「正常发消息起会话」**同一 spawn 路径**（`ensure_session` eager 冷启），唯一区别是不缀文本、不注入 → 起好停在就绪 `❯`。**起在名册默认账号 + 默认目录**（与 `/close` 一致：先 `reset_account` 回默认号 + `clear_session` 清掉 `/cd` 过的 `cwd` → `current_cwd` 回默认目录·撤掉临时 `/account`/`/cd`·主人拍板 2026-07-07）；有活会话则先 `workspace.close` 关旧的再全新 spawn（名副其实「新的」）。实现 = `/close` 的「reset_account + clear_session」+ eager `ensure_session`（不注入）。
   - `/account <profile> [目录]` → **切登录账号 = 直改该 bot 的持久 `profile`**（2026-07-31 起写 `bridge-bots.local.json`；`/close`/整桥重启仍落在新 profile）。带参数切换时先回即时受理，再跑 Link16 doctor，成功才关旧会话；失败不改变当前会话。可选值来自 `agent-profiles.json`，当前含 `cc/ccp/ccp2/cck/ccw/ccw2/ccw3/cx/cxp`（`/acc`、`/账号` 同义）。
   - `/help` → 列全部命令 + `/cd` 书签清单
@@ -256,10 +256,14 @@ SQLite 锁是局部等待状态，不是桥崩溃条件（PLAN-1220）。收件�
 | queued / processing | 尚未提交，或驱动已证明零写入／未提交残稿已完整清除；自动恢复准备与投递 |
 | submitting | 已准备开始粘贴/回车；异常退出后转 uncertain，不能直接再次粘贴 |
 | awaiting_confirmation | 桥已完成注入操作，等待真实输入确认；不自动重贴 |
-| done | 实际输入 hook 已确认或桥内命令处理完成；不重做，清空队列中的原始 payload |
+| done | 实际输入 hook 已确认或桥内命令处理完成；不重贴原输入，清空队列中的原始 payload；不等同业务回合已经完成 |
 | received_modified | 目标会话的原生用户消息包含同一 bot/mid，但正文摘要有变化；记录实际摘要、保留原文，不重投 |
 | command / uncertain | 强制结束恰好跨越命令或终端副作用时，保留结果不明记录；不盲目执行第二次 |
 | cancelled | `/stop`、已确认 `/close`、`/clear`、`/new` 等撤销此前待办；不恢复旧任务 |
+
+重启接续（PLAN-1230，PLAN-1260修订）区分运行进程、原生对话和业务回合。**同一次Wmux daemon运行内**，已退出进程只释放窗口绑定，保留匹配profile/cwd的原生对话；单独重启桥同样保留。**关机或Wmux daemon重启后**，旧/当前daemon指纹都存在且不同才取消自动恢复：删除Codex自动thread指针、关闭Kimi自动指针、解除Claude transcript绑定，阻止旧任务自动注入“继续”；历史档案和出站ACK不删。释放旧进程时保留daemon指纹，避免丢失随后判断重启的依据；指纹未知不猜测变化。显式 `/close`、`/new`、账号/目录切换及既有idle-fresh仍清恢复指针。保留历史不会自动重放所有消息。自动继续目前只接入显式启用 `resume_interrupted` 的Codex主人私聊，Claude/Kimi只覆盖同daemon会话保留，不宣称自动继续。原生事件明确仍在执行、无结束/取消/待答证据，旧实例已死亡且daemon未变化时，doctor才登记一次中断恢复；后来用户消息优先。恢复输入先核已有产物和外部操作回执，不逐字重贴旧任务。接收以原生回执为准；证据不足、草稿不完整或结果未知时保留待核，不盲目重复提交。恢复启动失败最多三次；已注入但三分钟仍未确认接收时保留现场并告警一次，不无限补交。输入交接去重不等于跨系统业务绝对只执行一次。
+
+Codex 输入框解析以消息后面、状态栏前面的最后一个空行分隔为边界，保留正文中的空行和多段文本；完整原稿、原生 idle、原绑定和缺少接收回执四项仍需同时成立，压缩期间不补 Enter。
 
 普通提示词提交前保存精确内容摘要，信封带该条飞书消息 ID；Codex 同时绑定目标 thread。现有 `UserPromptSubmit` hook 对本次真实输入求摘要，匹配且会话一致后完成交接；换行仅规范 CRLF/CR。它证明会话接收了这条输入，不代表模型已经回答。桥先退出而 hook 后到时，hook 仍能独立提交同一条确认。用户在终端补字导致摘要不同但信封和会话一致时，记 `received_modified`，不能冒充正文完全一致，也不能继续误报未接收。
 
@@ -599,7 +603,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 - `spawn` 的 `send_line` 改「发一行 → `_wait_shell_ready` 轮询读屏到提示符回来 → 再发下一行」。提示符判定 `_PROMPT_TAIL_RE`（行尾 `$`/`>`/`❯`）+ 超时/间隔常量（`SHELL_READY_TIMEOUT=30` / `SHELL_POLL_SEC=0.3` / `SEND_SETTLE_SEC`）集中一处。
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
-- 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。三平台的官方更新检查先经 `agent_update.ensure` 完成，随后才开始原生就绪计时；更新失败继续启动当前版本，更新的 60 秒上限和版本探针不会挤占原生启动窗口。app-server 分支只按协议确认就绪，不等待模型预热。
+- 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。三平台的官方更新检查先经 `agent_update.ensure` 完成，随后才开始原生就绪计时；更新按连续5秒无进展退出，失败继续启动当前版本，不挤占原生启动窗口。app-server 分支只按协议确认就绪，不等待模型预热。已授权且未过期的文本 `/close /new /stop` 在持久收件箱优先于普通消息、控制之间保持接收顺序；更新、shell和原生就绪等待协作取消，释放原启动锁后由原控制路径处理。终端正文仍串行提交，不并发注入。网络调用、OS查询和正在完成的原子提交不被强行中断，因此不承诺端到端零等待。
 - Codex 未取得本次 worker 回执时，若工作区仍是无 agent 标签的 shell、系统核对 shell 的进程创建时间且没有子进程、输入行是空 `$` 或本次完整 launcher，则自动恢复一次：空行重发 launcher，完整草稿只补 Enter。慢 worker、未知读屏、其他草稿或原生失败不重贴。恢复后仍须同一 startup_id 的原生 ready；失败当前提示可清除，但 `bridge-startup-failures-<bot>.jsonl` 保留现场历史。
 - **尚未提交 launcher 的超时**：保留工作区、pty、命令和 startup_id 到原会话记录的 `pending_launch`；持久队列在同一工作区续等，不报永久启动失败、不要求主人重发、不另建窗口。launcher 已提交后的响应不确定仍按原生启动回执判断，不能套用此安全重试分支。
 
@@ -748,7 +752,7 @@ paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，
 2. **daemon 指纹未变（主闸）**：spawn 时把 `~/.wmux/daemon.pid` 的 `pid:mtime` 盖进会话记录 `daemon_fp`；复用前比当前值。daemon **每次启动**（真重启 / 关机重开 / 快速启动开机 / 关掉 wmux 重开）都重写 `daemon.pid`（实测 mtime 钉在启动那刻、3h 不动 = 启动写一次·非心跳）→ 指纹一变 = 旧 daemon 底下的 claude 全死 → 作废重生。**指纹缺失（读不到 / 老记录无 `daemon_fp`）→ 跳过该闸·零回归**，绝不因读不到就误杀活会话。
 3. **agentName 非空（软闸·辅）**：`workspace.list` 每 workspace `metadata.agentName` = wmux 自报在跑的 agent（`Claude Code`/`Codex CLI` = 活；`''` = 裸/死壳）。**只在 agentName 空 + 读屏也判裸 shell 时才判死壳**（双印证）——agentName 标签偶抖（实测会把 Claude 误标 Codex CLI、活会话偶尔闪空），故绝不靠它单独误杀。
 
-**只重启桥不会误杀活会话**：单纯重启 python 桥**不重启 wmux daemon** → `daemon.pid` 不变 → 指纹匹配 → 正在跑的会话照常复用（保住 ARCH-101 §2.8「桥重启不丢正在跑的轮」）。**只有真·daemon 重启**才作废，正合「wmux 没了→会话也没了→帮我重连」的心智模型。
+**只重启桥不会误杀活会话**：单纯重启 python 桥**不重启 wmux daemon** → `daemon.pid` 不变 → 指纹匹配 → 正在跑的会话照常复用。daemon明确变化时，按PLAN-1260同时终止旧对话的自动恢复资格；下一条消息建全新对话，历史仍可手动恢复。未知身份不误杀，旧工作区未确认关闭时不得创建第二个工作区。
 
 **过渡补强**：本修复前建的老记录无 `daemon_fp` → 首次「确认存活复用」时惰性补盖当前指纹（`ensure_session` 里·只在判定可复用=确认活时盖·绝不把死壳误盖成当前 daemon）→ 不必等它被重新 @ 才有指纹保护。
 
@@ -852,11 +856,11 @@ paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，
 Device Grant 的 SDK 会在注册命令内部同步轮询授权结果；它能证明 OAuth 已完成，却不能在调用它的 Claude/Codex turn 已结束后主动再开一轮。Link16 因此把“平台回调”和“agent 唤醒”分成两层：
 
 1. `register_feishu_app.py --background` 在等待 OAuth 前创建无密钥注册状态，并分别启动独立的 Device Grant worker 与 `registration_monitor.py`；发起 tool/turn 退出不会杀掉轮询。
-2. 第一条 SDK 链固定 `create_only=True` 且不传权限 `addons`，只让人确认账号、组织与应用创建。
+2. 第一条 SDK 链新建时 `create_only=True`，续接已有应用时 `False`，均不传权限 `addons`；用户直接在该页核对账号与组织，不先追问准确组织名。没有回调 bot 时由 `links --job <id> --watch` 提供本地授权交接，后台输出被丢弃不影响取得链接。
 3. 注册器只在 SDK 返回完整 `client_id/client_secret`、凭据落盘、registry 与本机 roster 都成功后，把 OAuth 里程碑写为 `registered`；`polling` 不是成功。
 4. `registered` 后生成稳定的 `permissions_review` 事件；Monitor 用 job 中的 `app_id + capabilities` 临时重建第二条权限审阅链接，正文列出 capability 与 scopes。链接不落盘，代码不自动发布，也不能绕过管理员审批。
-5. Monitor 独立于发起 turn 存活，继续机械检查能力档 scopes、owner 文件与目标群成员关系。
-6. 里程碑变化后，Monitor 根据状态中钉死的 `notify_bot` 查本机 roster，经 `ensure_session()` + `_inject()` 把一条注册事件注回原 bot；该链对 Claude 与 Codex 相同，不读取任何 runtime transcript 私有格式。
+5. Monitor 独立于发起 turn 存活，继续机械检查权限、owner 与所选群；默认在权限两次核验后用所选账号和 bot cwd 真启动 `--version` 探针，再以 `start --bot <name> --only-missing` 补缺失桥和守护进程。现有健康进程保持，连接控制状态就绪才记 `bridge_ready` 并提示私聊认主；模型回复仍需真实往返验证。
+6. 有 `notify_bot` 时里程碑经原 `ensure_session()` + `_inject()` 注回发起 bot，三 runtime 共用这条链。首 bot 没有该通道时安装会话持续读本地 `links`，不声称无回调也能自动唤醒；Monitor 本身的检查与补起不依赖会话在线。
 
 状态文件位于 `feishu/_state/bridge-registration-<job-id>.json`，状态机为：
 
@@ -882,7 +886,7 @@ armed → oauth_waiting → registered → permissions_review → manual_pending
 
 - “查 session → `ensure_session` → `_inject`”整体持有按目标 bot 的跨进程锁；桥真人消息、cron、watchdog 与 Monitor 使用同一把锁，防双 spawn 和 paste 交错。
 - 注册器与 Monitor 更新同一 job 时必须锁内重读、合并，以唯一临时文件 + `os.replace` 原子替换。
-- 状态与日志只允许 app ID、env 键名、bot/profile/capability、群 ID、阶段、时间和脱敏错误；严禁 app secret、tenant/user token、Device Grant 临时码与授权 URL。
+- 长期 job 状态与日志只允许 app ID、env 键名、bot/profile/capability、群 ID、阶段、时间和脱敏错误；严禁 app secret、tenant/user token、Device Grant 临时码与授权 URL。唯一短期交接文件 `feishu/_state/registration-links/<job>.json` 仅保存官方 HTTPS 授权 URL 与过期时间，登记成功、过期或终止即删除；不进入 Git、日志或普通诊断。第二阶段权限链接现读权限后重建，不落盘。
 - scopes API 或群 API 报错属于 `unknown/retry`，不得伪装成“未授权/未入群”；owner 文件必须存在且含有效 open_id 才算完成。
 - 应用 owner、应用审核管理员、企业超级管理员是三个概念。API 只能返回哪一层就标哪一层，查不到姓名时写“不可判定”，禁止用 app owner 冒充企业管理员。
 

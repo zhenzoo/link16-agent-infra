@@ -36,7 +36,7 @@ def dead(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("runtime", ["codex", "kimi", "claude"])
-def test_confirmed_exit_releases_only_runtime_and_resume_pointers(dead, runtime):
+def test_confirmed_exit_releases_runtime_but_preserves_conversation(dead, runtime):
     dead.bot["agent"] = runtime
     dead.start["native_pid"] = 104
     if runtime == "claude":
@@ -44,13 +44,53 @@ def test_confirmed_exit_releases_only_runtime_and_resume_pointers(dead, runtime)
                             "runtime_processes": [{"pid": 101, "birth": "10"}]})
     assert bridge._release_exited_session_unlocked(dead.bot)
     saved = bridge.load_session(dead.bot["name"])
-    assert saved["pty"] is saved["workspace_id"] is saved["jsonl"] is None
+    assert saved["pty"] is saved["workspace_id"] is None
+    assert saved["jsonl"] == 'old.jsonl'
     assert {k: saved[k] for k in ("chat_id", "open_id", "cwd", "profile")} == {
         k: dead.rec[k] for k in ("chat_id", "open_id", "cwd", "profile")}
-    assert not dead.thread.exists()
+    assert dead.thread.exists()
     dead.close.assert_called_once_with("old")
     assert dead.inventory.call_count == 2
     assert not bridge._release_exited_session_unlocked(dead.bot)
+
+
+@pytest.mark.parametrize('runtime', ['codex', 'kimi', 'claude'])
+def test_daemon_restart_invalidates_only_automatic_resume(dead, monkeypatch, runtime):
+    dead.bot['agent'] = runtime
+    bridge.save_session(dead.bot['name'], {**dead.rec, 'agent': runtime, 'daemon_fp': 'old'})
+    monkeypatch.setattr(bridge.wmux_session, 'daemon_fingerprint', lambda: 'new')
+    kimi = bridge.STATE_DIR / f"bridge-kimi-thread-{dead.bot['name']}.json"
+    kimi.write_text('{"session_id":"old"}')
+    history = bridge.STATE_DIR / 'history.jsonl'
+    history.write_text('original conversation')
+    assert bridge._invalidate_restart_resume_unlocked(dead.bot)
+    assert not dead.thread.exists()
+    assert json.loads(kimi.read_text()) == {'closed': True}
+    rec = bridge.load_session(dead.bot['name'])
+    assert rec['jsonl'] is None
+    assert rec['pty'] == dead.rec['pty']  # No speculative process killing.
+    assert rec['chat_id'] == 'owner-chat'
+    assert history.read_text() == 'original conversation'
+    dead.close.assert_not_called()
+    assert bridge._invalidate_restart_resume_unlocked(dead.bot)  # idempotent
+
+
+@pytest.mark.parametrize('old,current', [('same', 'same'), (None, 'new'), ('old', None)])
+def test_same_or_unknown_daemon_preserves_resume(dead, monkeypatch, old, current):
+    bridge.save_session(dead.bot['name'], {**dead.rec, 'daemon_fp': old})
+    monkeypatch.setattr(bridge.wmux_session, 'daemon_fingerprint', lambda: current)
+    assert not bridge._invalidate_restart_resume_unlocked(dead.bot)
+    assert dead.thread.exists()
+    assert bridge.load_session(dead.bot['name'])['jsonl'] == 'old.jsonl'
+
+
+def test_releasing_a_dead_process_keeps_epoch_for_a_later_reboot_check(dead, monkeypatch):
+    bridge.save_session(dead.bot['name'], {**dead.rec, 'daemon_fp': 'old'})
+    assert bridge._release_exited_session_unlocked(dead.bot)
+    assert bridge.load_session(dead.bot['name'])['daemon_fp'] == 'old'
+    monkeypatch.setattr(bridge.wmux_session, 'daemon_fingerprint', lambda: 'new')
+    assert bridge._invalidate_restart_resume_unlocked(dead.bot)
+    assert not dead.thread.exists()
 
 
 @pytest.mark.parametrize("pid,ppid", [(101, 1), (102, 1), (103, 1), (999, 101), (999, 102)])
@@ -68,6 +108,62 @@ def test_unknown_os_query_never_means_dead(dead):
         bridge._release_exited_session_unlocked(dead.bot)
     assert bridge.load_session(dead.bot["name"]) == dead.rec
     dead.close.assert_not_called()
+
+
+def test_read_only_exit_probe_does_not_erase_runtime_or_conversation(dead):
+    assert bridge._release_exited_session_unlocked(dead.bot, release=False)
+    assert bridge.load_session(dead.bot['name']) == dead.rec
+    dead.close.assert_not_called()
+    assert dead.thread.exists()
+
+
+def test_reused_pid_after_old_native_receipt_does_not_block_reboot_recovery(dead):
+    dead.start['ts'] = 1700000000
+    dead.inventory.return_value = [{'pid': 101, 'ppid': 1,
+        'birth': str((1700000010 + 11644473600) * 10_000_000), 'cmd': 'unrelated', 'name': 'other.exe'}]
+    assert bridge._release_exited_session_unlocked(dead.bot)
+    assert dead.thread.exists()
+
+
+def test_child_started_after_receipt_still_prevents_releasing_dead_parent(dead):
+    dead.start['ts'] = 1700000000
+    dead.inventory.return_value = [{'pid': 999, 'ppid': 101,
+        'birth': str((1700000010 + 11644473600) * 10_000_000), 'cmd': 'task', 'name': 'python.exe'}]
+    assert not bridge._release_exited_session_unlocked(dead.bot)
+    dead.close.assert_not_called()
+
+
+def test_child_of_proven_reused_parent_does_not_block_reboot_recovery(dead):
+    dead.start['ts'] = 1700000000
+    dead.inventory.return_value = [
+        {'pid': 101, 'ppid': 1, 'birth': str((1700000010 + 11644473600) * 10_000_000), 'cmd': 'other', 'name': 'other.exe'},
+        {'pid': 999, 'ppid': 101, 'birth': str((1700000020 + 11644473600) * 10_000_000), 'cmd': 'child', 'name': 'other.exe'},
+    ]
+    assert bridge._release_exited_session_unlocked(dead.bot)
+
+
+@pytest.mark.parametrize('change', ['valid', 'profile', 'directory', 'outside-home', 'missing'])
+def test_claude_resume_uses_only_exact_profile_directory_and_pinned_history(tmp_path, monkeypatch, change):
+    home = tmp_path / 'home'
+    path = home / 'projects' / 'project' / '8cce3f30-2294-4211-9f2c-0377e306dcf2.jsonl'
+    path.parent.mkdir(parents=True)
+    path.write_text('{}')
+    bot = {'name': 'claude-bot'}
+    rec = dict(agent='claude', profile='ccp2', cwd=str(tmp_path), jsonl=str(path))
+    if change == 'profile':
+        rec['profile'] = 'ccp'
+    elif change == 'directory':
+        rec['cwd'] = str(tmp_path / 'other')
+    elif change == 'outside-home':
+        rec['jsonl'] = str(tmp_path / path.name)
+        (tmp_path / path.name).write_text('{}')
+    elif change == 'missing':
+        rec['jsonl'] = str(path.parent / 'missing.jsonl')
+    monkeypatch.setattr(bridge, 'load_session', lambda name: rec)
+    monkeypatch.setattr(bridge.agent_runtime, 'runtime_name', lambda bot: 'claude')
+    monkeypatch.setattr(bridge.agent_runtime, 'profile_name', lambda *a, **kw: 'ccp2')
+    monkeypatch.setattr(bridge.agent_runtime, 'profile_spec', lambda profile: SimpleNamespace(home_path=home))
+    assert bridge._resumable_claude_jsonl(bot, tmp_path) == (str(path) if change == 'valid' else None)
 
 
 @pytest.mark.parametrize("change", ["missing-pid", "wrong-profile", "pending", "claude"])
@@ -116,7 +212,7 @@ def test_regular_session_creation_releases_before_reuse(dead, monkeypatch):
         pass
     def reuse(bot, rec):
         assert rec["pty"] is None
-        assert not dead.thread.exists()
+        assert dead.thread.exists()
         raise Checked
     monkeypatch.setattr(bridge, "_reuse_check", reuse)
     with pytest.raises(Checked):

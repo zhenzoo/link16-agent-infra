@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""在新 Windows 用户下建立 ccp / ccp2 / cxp 账号目录与 Shell 函数。
-
-只建目录、ccp2 launcher 和带 marker 的启动函数；不复制 auth.json、
-token、session 或历史。三个名字是动态函数，不是 shell alias。
-"""
+"""按用户选择建立本机账号目录与 Shell 函数，不安装维护者个人配置或复制认证。"""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +9,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -26,7 +24,7 @@ BASH_BEGIN = profile_wrappers.MARKER_BEGIN
 BASH_END = profile_wrappers.MARKER_END
 PS_BEGIN = BASH_BEGIN
 PS_END = BASH_END
-DEFAULT_PROFILES = ("ccp", "ccp2", "cxp")
+DEFAULT_PROFILES = ()
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FEISHU_SKILL_SOURCE = PROJECT_ROOT / ".agents" / "skills" / "feishu"
 WORKLINE_SKILL_SOURCE = PROJECT_ROOT / ".agents" / "skills" / "feishu-workline"
@@ -434,9 +432,87 @@ def _selected_specs(profiles, registry_path=None):
     if profiles is not None:
         return [agent_runtime.profile_spec(name, registry_path) for name in profiles]
     available = agent_runtime.profile_specs(registry_path)
-    by_name = {spec.name for spec in available}
-    names = DEFAULT_PROFILES if all(name in by_name for name in DEFAULT_PROFILES) else tuple(spec.name for spec in available)
-    return [agent_runtime.profile_spec(name, registry_path) for name in names]
+    return available
+
+
+def account_choices(registry_path=None, home=None):
+    """Existing registry accounts first; offer unused personal/work slots for each runtime."""
+    registry = Path(registry_path) if registry_path else agent_runtime.profile_registry_path()
+    home = Path(home) if home else Path.home()
+    specs = agent_runtime.profile_specs(registry) if registry.is_file() else []
+    def label(spec):
+        match = re.fullmatch(r"~/\." + re.escape(spec.runtime) + r"-(work|personal)(\d*)", spec.home)
+        if match:
+            return f"{spec.runtime.capitalize()}-{match[1]}" + (f" {match[2]}" if match[2] else "")
+        return f"{spec.runtime.capitalize()} · {spec.label or spec.name}"
+    rows = [{"name": s.name, "runtime": s.runtime, "home": s.home,
+             "label": label(s), "existing": True} for s in specs]
+    names = {s.name for s in specs}
+    homes = {s.home.replace('\\', '/').rstrip('/').casefold() for s in specs}
+    for runtime in agent_runtime._RUNTIME_ADAPTER_SPECS:
+        for kind in ("work", "personal"):
+            number = 1
+            while True:
+                suffix = "" if number == 1 else str(number)
+                name = f"{runtime}-{kind}{suffix}"
+                profile_home = f"~/.{name}"
+                if (name not in names and profile_home.casefold() not in homes
+                        and not (home / profile_home[2:]).exists()):
+                    break
+                number += 1
+            rows.append({"name": name, "runtime": runtime, "home": profile_home,
+                         "label": f"{runtime.capitalize()}-{kind}" + (f" {number}" if number > 1 else ""),
+                         "existing": False})
+    return rows
+
+
+def select_account(name, *, home=None, registry_path=None, apply=False):
+    """Selection authorizes only the selected account, preserving every existing identity."""
+    home = Path(home) if home else Path.home()
+    registry = Path(registry_path) if registry_path else agent_runtime.profile_registry_path()
+    # The distributed empty registry is never a writable account store.
+    if registry.resolve() == agent_runtime.PROFILE_REGISTRY_PATH.resolve():
+        if agent_runtime.profile_specs(registry):
+            raise ValueError("检测到旧 registry；先迁入 local，避免覆盖已有账号")
+        registry = agent_runtime.PROFILE_REGISTRY_LOCAL_PATH
+    choices = account_choices(registry, home)
+    selected = next((row for row in choices if row["name"] == name.lower()), None)
+    if selected is None:
+        raise ValueError("账号选项已变化或不存在，请重新读取 --choices")
+    if not apply:
+        return selected, []
+    if not selected["existing"]:
+        if registry.is_file():
+            document = agent_runtime._profile_document(registry)
+            register_profile(registry, name=selected["name"], runtime=selected["runtime"],
+                             profile_home=selected["home"], label=selected["label"],
+                             set_default=selected["runtime"] not in document["default_profiles"], apply=True)
+        else:
+            initialize_registry(registry, [{"name": selected["name"], "runtime": selected["runtime"],
+                                           "home": selected["home"], "label": selected["label"]}], apply=True)
+    rows = bootstrap(home, apply=True, profiles=[selected["name"]], registry_path=registry)
+    bad = [row for row in rows if row["status"] not in {"ok", "retired"}]
+    if bad:
+        raise ValueError("账号安装存在冲突：" + "；".join(str(row.get("path")) for row in bad))
+    selected["registry"] = str(registry)
+    return selected, rows
+
+
+def login_account(selected):
+    """The selected native login opens the browser itself; no second profile confirmation."""
+    args = ["auth", "login"] if selected["runtime"] == "claude" else ["login"]
+    env = dict(os.environ, **{agent_runtime.PROFILE_REGISTRY_ENV: selected["registry"]})
+    # Keep the human's interactive stdin/terminal; never impose a short OAuth timeout.
+    cli = str(PROJECT_ROOT / "feishu" / "agent_profile_cli.py")
+    spec = agent_runtime.profile_spec(selected["name"], selected["registry"])
+    if agent_runtime.profile_login_state(spec).get("status") != "ok":
+        result = subprocess.call([sys.executable, cli, "run", "--profile", selected["name"], "--", *args], env=env)
+        if result:
+            return result
+    else:
+        print("所选账号已有本机登录记录，复用并检查启动入口。", flush=True)
+    # Same executable environment as the bridge; success is not a model/DM roundtrip.
+    return subprocess.call([sys.executable, cli, "selftest", "--profile", selected["name"]], env=env)
 
 
 def _home_relative_target(home: Path, profile_home: str) -> Path:
@@ -540,6 +616,10 @@ def main(argv=None) -> int:
                            help="为新用户用所选 Claude/Codex/Kimi 名称与 home 建 local registry")
     operation.add_argument("--register-profile", metavar="NAME",
                            help="向已存在的 local registry 新增一个隔离 profile")
+    operation.add_argument("--choices", action="store_true", help="列出全部已有账号及可新增的工作/个人账号")
+    operation.add_argument("--select", metavar="NAME", help="使用 --choices 的选项自动建立内部 profile；配 --apply")
+    operation.add_argument("--interactive", action="store_true", help="在 wmux 终端选择一次，然后自动配置并登录")
+    parser.add_argument("--login", action="store_true", help="--select --apply 后直接启动官方浏览器登录")
     parser.add_argument("--profile", action="append", default=[],
                         help="install/doctor 只处理指定 profile（可重复）")
     parser.add_argument("--runtime", choices=sorted(agent_runtime._PROFILE_RUNTIMES))
@@ -556,9 +636,43 @@ def main(argv=None) -> int:
     parser.add_argument("--migrate-legacy-feishu-adapter", action="store_true",
                         help="把 marker-owned 旧 Codex feishu adapter 移到可恢复备份目录")
     args = parser.parse_args(argv)
+    if args.login and not (args.select or args.interactive):
+        parser.error("--login 需要 --select 或 --interactive")
     if args.apply and args.doctor:
         parser.error("--apply 与 --doctor 不能同时使用")
     home = Path(args.home).resolve() if args.home else Path.home()
+    if args.choices or args.select or args.interactive:
+        choices = account_choices(home=home)
+        if args.choices:
+            if args.json:
+                print(json.dumps(choices, ensure_ascii=False, indent=2))
+            else:
+                for row in choices:
+                    print(f"{row['name']} · {row['label']} · {'已有账号' if row['existing'] else '新增账号'}")
+            return 0
+        if args.interactive:
+            for index, row in enumerate(choices, 1):
+                print(f"{index}. {row['label']} · {'已有' if row['existing'] else '新增'} ({row['name']})")
+            try:
+                number = int(input("选择账号编号（选择后自动配置并打开官方登录）："))
+                if not 1 <= number <= len(choices):
+                    raise ValueError()
+                args.select = choices[number - 1]["name"]
+            except (ValueError, EOFError):
+                parser.error("未选择有效账号，未修改配置")
+            args.apply = args.login = True
+        if args.login and not args.apply:
+            parser.error("--login 需要 --select --apply")
+        if args.home and args.login:
+            parser.error("测试 --home 不允许启动真实登录")
+        try:
+            selected, rows = select_account(args.select, home=home, apply=args.apply)
+            print(json.dumps({"selected": selected, "applied": args.apply, "rows": rows}, ensure_ascii=False, indent=2))
+            if args.login:
+                return login_account(selected)
+            return 0
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
     local_registry = agent_runtime.PROFILE_REGISTRY_LOCAL_PATH
     if args.migrate_registry:
         rows = [migrate_registry(agent_runtime.PROFILE_REGISTRY_PATH, local_registry,

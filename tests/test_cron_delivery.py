@@ -74,6 +74,21 @@ def test_busy_or_unknown_native_state_never_retries(scene, state):
     scene.fb.wmux.assert_not_called()
 
 
+@pytest.mark.parametrize('retry_safe', [False, True])
+def test_compacting_footer_blocks_enter_and_repasting_even_if_native_state_says_idle(scene, retry_safe):
+    if retry_safe:
+        scene.inbox.scheduled_not_submitted(scene.row['id'], RetryableHandoffError('not written'), limit=3, delay=0)
+    scene.fb.read_screen.return_value = (
+        '• Compacting context (1m 34s • esc to interrupt)\n'
+        '  └ Making room to continue.\n\n'
+        f'› {"" if retry_safe else scene.marker}\n\nstatus')
+    with pytest.raises(RuntimeError, match='compacting context'):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    scene.fb.wmux.assert_not_called()
+    scene.fb._inject.assert_not_called()
+    assert not delivery.accepted(scene.inbox.get(scene.row['id']))
+
+
 def test_lost_enter_retries_only_owned_draft_and_waits_for_receipt(scene):
     def enter(*args):
         if scene.fb.wmux.call_count == 2:
@@ -81,6 +96,27 @@ def test_lost_enter_retries_only_owned_draft_and_waits_for_receipt(scene):
     scene.fb.wmux.side_effect = enter
     assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=2)
     assert scene.fb.wmux.call_count == 2
+
+
+def test_scheduled_multiline_draft_uses_same_receipt_guard(scene):
+    scene.job['prompt'] = '第一段\n\n第二段\n第三行'
+    marker = cron._marker(scene.job)
+    row = delivery._register(scene.fb, scene.bot, scene.job, 'ws', 'pty', marker,
+                             stamp='2026-11-03 00:00')
+    scene.fb.read_screen.return_value = f'› {marker}\n\n  GPT-6-Astra xhigh · project\n\n'
+    scene.fb.wmux.side_effect = lambda *a: scene.inbox.confirm(marker, 'thread')
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, row, timeout=0)
+    scene.fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
+
+
+@pytest.mark.parametrize('screen,expected', [
+    ('› 第一段\n  \n  第二段\n\n  GPT-6-Astra xhigh · project', '第一段\n  \n  第二段'),
+    ('› \n\n  GPT-6-Astra xhigh · project\n\n', ''),
+    ('› partial frame without footer', None),
+    ('unreadable', None),
+])
+def test_composer_parser_keeps_internal_blank_lines_and_rejects_incomplete_frames(screen, expected):
+    assert delivery._draft(screen) == expected
 
 
 def test_missing_receipt_has_durable_retry_limit_across_restarts(scene):

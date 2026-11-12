@@ -16,8 +16,8 @@ import turn_delivery_guard
 import bridge_outbox
 
 
-def row(kind, **kwargs):
-    return {"type": kind, "agentId": "main", "time": 100000, **kwargs}
+def row(event_type, **kwargs):
+    return {"type": event_type, "agentId": "main", "time": 100000, **kwargs}
 
 
 def loop(kind, uuid, step="one", **kwargs):

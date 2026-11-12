@@ -52,7 +52,12 @@ class KimiProfileTests(unittest.TestCase):
             command = runtime.standalone_worker_cmd("kp")
             probe = ('kimi() { printf "%s|%s|%s" "$LINK16_AGENT_PROFILE" '
                      '"$KIMI_CODE_HOME" "${KIMI_MODEL_NAME-unset}"; }; ' + command)
-            result = subprocess.run([runtime.resolve_shell(), "-lc", probe],
+            probe_env = {key: os.environ[key] for key in (
+                "SYSTEMROOT", "WINDIR", "COMSPEC", "SYSTEMDRIVE", "TEMP", "TMP",
+                "USERPROFILE", "HOME", "PATH", "MSYSTEM", "KIMI_MODEL_NAME") if key in os.environ}
+            result = subprocess.run([runtime.resolve_shell(), "--noprofile", "--norc", "-c", probe],
+                                    env=probe_env, stdin=subprocess.DEVNULL,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                                     capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(result.stdout.startswith("kp|"), result.stdout)

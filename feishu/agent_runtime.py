@@ -1027,14 +1027,15 @@ def standalone_worker_cmd(
     if profile.launcher == "launch-sh":
         prefix = f". {_q((profile.home_path / 'launch.sh').as_posix())}; "
     if profile.runtime == "claude":
+        auth_command = bool(provider_args) and str(provider_args[0]) == "auth"
         command = (
             _unset_shell_env(CLAUDE_HARNESS_ENV_KEYS + ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES"))
             + prefix
             + env_text
             + f"CLAUDE_CONFIG_DIR={_q(profile.home_path.as_posix())} "
-            + "claude --dangerously-skip-permissions"
+            + ("claude" if auth_command else "claude --dangerously-skip-permissions")
         )
-        if not any(str(arg) == "--setting-sources" or str(arg).startswith("--setting-sources=")
+        if not auth_command and not any(str(arg) == "--setting-sources" or str(arg).startswith("--setting-sources=")
                    for arg in (provider_args or [])):
             command += _claude_home_settings_args(profile, cwd)
     elif profile.runtime == "kimi":
@@ -1064,21 +1065,22 @@ def standalone_worker_cmd(
         # a stricter permission profile.  Do not silently punch through that
         # boundary or enable search on its behalf.
         codex_exec = bool(provider_args) and str(provider_args[0]) == "exec"
+        auth_command = bool(provider_args) and str(provider_args[0]) in {"login", "logout"}
         command = (
             prefix
             + env_text
             + f"CODEX_HOME={_q(profile.home_path.as_posix())} "
             + "codex"
         )
-        if not codex_exec:
+        if not codex_exec and not auth_command:
             command += (
                 " --dangerously-bypass-approvals-and-sandbox"
                 " --dangerously-bypass-hook-trust --search"
                 " -c shell_environment_policy.inherit=all"
             )
-        if cwd:
+        if cwd and not auth_command:
             command += f" -C {_q(str(cwd))}"
-        model_args = codex_saved_model_args(profile.home_path, cwd)
+        model_args = [] if auth_command else codex_saved_model_args(profile.home_path, cwd)
         if model_args:
             command += " " + " ".join(shlex.quote(arg) for arg in model_args)
     else:
@@ -1091,7 +1093,7 @@ def standalone_worker_cmd(
     is_probe = (
         any(arg in {"--version", "-V", "-p", "--prompt"} or arg.startswith("--prompt=")
             for arg in args)
-        or args[:1] in (["doctor"], ["session"], ["update"], ["upgrade"])
+        or args[:1] in (["doctor"], ["session"], ["update"], ["upgrade"], ["login"], ["logout"], ["auth"])
     )
     if auto_update and not is_probe:
         command = auto_update_prefix(

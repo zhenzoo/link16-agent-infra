@@ -213,10 +213,39 @@ def check_git_bash():
         str(bash), "--noprofile", "--norc", "-c",
         'printf "BASH_VERSION=%s\\nMSYSTEM=%s\\n" "$BASH_VERSION" "$MSYSTEM"',
     ]) or ""
-    if "BASH_VERSION=" in output and "MSYSTEM=MINGW" in output:
-        return Result("Git Bash", OK, f"{bash} · MINGW 运行态正常")
+    if "BASH_VERSION=" in output and ("MSYSTEM=MINGW" in output or "MSYSTEM=UCRT" in output):
+        return Result("Git Bash", OK, f"{bash} · MINGW/UCRT 运行态正常")
     return Result("Git Bash", FAIL, f"{bash} 能找到，但不是正常的 Git Bash 运行态：{output or '无输出'}",
                   "重装 Git for Windows，并确认 bin\\bash.exe 可直接启动")
+
+
+def _fast_startup_enabled():
+    """Read the power setting only; never change hibernation or machine policy."""
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                        r"SYSTEM\CurrentControlSet\Control\Session Manager\Power") as key:
+        value, _ = winreg.QueryValueEx(key, "HiberbootEnabled")
+    if value not in (0, 1):
+        raise ValueError("HiberbootEnabled 不是 0/1")
+    return bool(value)
+
+
+def check_fast_startup():
+    if os.name != "nt":
+        return Result("Windows 快速启动", OK, "非 Windows，无此设置")
+    try:
+        enabled = _fast_startup_enabled()
+    except (ImportError, OSError, ValueError) as exc:
+        return Result("Windows 快速启动", WARN, f"未能读取，未修改系统设置：{exc}",
+                      "在电源选项中查看快速启动状态；未知不等于已关闭")
+    if not enabled:
+        return Result("Windows 快速启动", OK, "已关闭；仍需验登录启动项和真实连接")
+    return Result("Windows 快速启动", WARN,
+                  "已启用：关机可能采用混合关机，不等同完整重启；不据此认定桥启动失败原因",
+                  "若关机再开机后服务未恢复，先核登录、自启任务和桥日志；"
+                  "可在控制面板 → 电源选项 → 选择电源按钮的功能 → 更改当前不可用的设置中"
+                  "审阅“启用快速启动”。Link16 只提醒，不自动修改电源设置")
 
 
 def check_bash_on_path():
@@ -567,7 +596,7 @@ CHECKS = (check_python, check_deps, check_node, check_github_cli, check_reposito
           check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_identity,
           check_wmux_default_shell, check_wmux_update_settings,
           check_encoding, check_env_file, check_proxy_config, check_local_roster, check_registry,
-          check_agent_cli, check_codex_installation, check_profile_login)
+          check_agent_cli, check_codex_installation, check_profile_login, check_fast_startup)
 
 
 def run_checks(checks=CHECKS):

@@ -30,6 +30,35 @@ def nested_bridge_function(name, env):
 
 
 class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_card_creation_does_not_append_a_result_card(self):
+        handler = self.handler()
+        self.env["command_card"].return_value = None
+        await handler("chat", "/close", arrived=time.time())
+        self.env["command_card"].assert_awaited_once()
+        self.env["reply"].assert_not_awaited()
+        self.env["clear_session"].assert_called_once_with("unit")
+
+    async def test_command_card_creates_once_and_retries_only_same_id(self):
+        channel = SimpleNamespace(
+            _ensure_card_snapshot=mock.AsyncMock(return_value="om_single"),
+            update_card=mock.AsyncMock(side_effect=[TimeoutError(), SimpleNamespace(success=True)]))
+        with mock.patch.object(feishu_bridge, "_card_payload", return_value={"card": "test"}):
+            mid = await feishu_bridge.command_card(channel, "oc_chat", "closing", "unit")
+            result = await feishu_bridge.command_card(channel, "oc_chat", "closed", "unit", message_id=mid)
+        self.assertEqual(result, "om_single")
+        channel._ensure_card_snapshot.assert_awaited_once()
+        self.assertEqual([c.args[0] for c in channel.update_card.call_args_list], ["om_single", "om_single"])
+
+    async def test_rejected_edit_never_sends_another_card(self):
+        channel = SimpleNamespace(_ensure_card_snapshot=mock.AsyncMock(),
+                                  update_card=mock.AsyncMock(return_value=SimpleNamespace(success=False)))
+        with mock.patch.object(feishu_bridge, "_card_payload", return_value={}), \
+             mock.patch.object(feishu_bridge, "blog"):
+            result = await feishu_bridge.command_card(channel, "oc_chat", "closed", "unit", message_id="om_single")
+        self.assertIsNone(result)
+        channel._ensure_card_snapshot.assert_not_awaited()
+        self.assertEqual(channel.update_card.await_count, 3)
+
     def handler(self, runtime="codex"):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -38,6 +67,7 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
         self.env.update(
             asyncio=asyncio, bot={"name": "unit", "agent": runtime}, STATE_DIR=Path(temporary.name),
             reply=mock.AsyncMock(), account_default={}, default_account=lambda: "profile",
+            channel=mock.Mock(), command_card=mock.AsyncMock(return_value="om_close"),
             default_cwd=lambda _: "repo", load_session=mock.Mock(return_value=self.rec),
             clear_session=mock.Mock(), clear_codex_thread=mock.Mock(),
             durable_inbox=mock.Mock(), bridge_outbox=mock.Mock(), agent_runtime=mock.Mock(),
@@ -67,9 +97,12 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
                 self.env["clear_session"].assert_called_once_with("unit")
                 self.env["clear_codex_thread"].assert_called_once_with("unit")
                 self.env["durable_inbox"].cancel_before.assert_called_once_with("mid")
-                self.assertIn("已关闭会话", self.env["reply"].call_args.args[1])
-                self.assertIn("正在关闭会话", self.env["reply"].call_args_list[0].args[1])
-                self.assertEqual(self.env["reply"].await_count, 2)
+                cards = self.env["command_card"].call_args_list
+                self.assertIn("正在关闭会话", cards[0].args[2])
+                self.assertIn("已关闭会话", cards[1].args[2])
+                self.assertEqual(cards[1].kwargs["message_id"], "om_close")
+                self.assertEqual(len(cards), 2)
+                self.env["reply"].assert_not_awaited()
 
     async def test_account_ack_precedes_profile_check_and_close(self):
         handler = self.handler()
@@ -100,8 +133,10 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
         handler = self.handler()
         self.env["wmux_session"].close.side_effect = RuntimeError("close failed")
         await handler("chat", "/close", arrived=time.time())
-        self.assertIn("关闭未完成", self.env["reply"].call_args.args[1])
-        self.assertIn("close failed", self.env["reply"].call_args.args[1])
+        self.assertIn("关闭未完成", self.env["command_card"].call_args.args[2])
+        self.assertIn("close failed", self.env["command_card"].call_args.args[2])
+        self.assertEqual(self.env["command_card"].call_args.kwargs["message_id"], "om_close")
+        self.env["reply"].assert_not_awaited()
         self.env["clear_session"].assert_not_called()
         self.env["clear_codex_thread"].assert_not_called()
         self.env["durable_inbox"].cancel_before.assert_not_called()
