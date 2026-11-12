@@ -2,7 +2,7 @@
 doc_type: PLAN
 doc_id: PLAN-1270
 title: Kimi 输入控制序列排查与正式 HTML 文档归档
-status: active
+status: completed
 url: "https://n8r2cr07gk.feishu.cn/docx/W5DPdrsagoXLFMxMFPgcwvsynYc"
 purpose: 合入远端有用更新，定位 Kimi 输入卡点，并让正式 HTML 文档按用途命名归档。
 owns:
@@ -29,7 +29,7 @@ last_reviewed: 2026-11-11
 
 已拍板、无需重复确认：合入有帮助的远端更新、必要可逆修复、三份权限异常暂停、正式HTML归docs及PRD命名、共享规则同步。待调研回传与决定：OSC回复由谁发起/消费，当前卡点在输入还是模型请求；由证据选最小修复。生产桥整体重启、改变用户会话内容或无法保留的冲突不擅自执行。
 
-当前 Step／恢复点：仅2.4等待单桥重载维护窗口；其他交付已完成。主会话写本计划；Kimi历史依据PLAN-1240、1181、1151。TC101O正文现为OBSBOT-baseball/docs/PRD-190-tc101o-prd.html；PLAN-842当前入口已更新，旧路径仅跳转。正式HTML共享真源与三runtime入口已同步，8profile doctor通过，重复apply零写入。权限旧计划1250→1260，在线URL不变，三份历史权限继续暂停。个人配置仓与业务仓既有dirty保留，本轮仅定点修改、不批量提交其原有工作。证据放feishu/_state/kimi-osc11-20261111/。
+当前 Step／恢复点：全部交付完成。用户13:33明确“确认重载”，2.4已于13:34仅重载tb26-baseball飞书桥并验证ready及飞书连接；原Kimi进程、会话绑定和566条队列记录均保留。生产代理检查修复已加载；dark主题设置仍在Kimi下次启动生效，本轮未重启Kimi，历史OSC启动回显未复现的边界保持。主会话写本计划；Kimi历史依据PLAN-1240、1181、1151。TC101O正文现为OBSBOT-baseball/docs/PRD-190-tc101o-prd.html；PLAN-842当前入口已更新，旧路径仅跳转。正式HTML共享真源与三runtime入口已同步，8profile doctor通过，重复apply零写入。权限旧计划1250→1260，在线URL不变，三份历史权限继续暂停。个人配置仓与业务仓既有dirty保留，本轮仅定点修改、不批量提交其原有工作。证据放feishu/_state/kimi-osc11-20261111/。
 
 ## §1 执行与交付
 
@@ -38,11 +38,11 @@ last_reviewed: 2026-11-11
 　✅ 1.2 读准确launcher、tb26-baseball启动/绑定/队列日志及对应Kimi原生Wire；当前原生kimi.EXE PID24072仍存活，12:06有prompt.completed。旧10:46启动已被两次/new替换，11:40消息明确在注入前被代理探测拖到11:45。原生MCP不允许未认领PTY，使用既有Link16只读诊断，不改访问控制（实际 13:06）
 　✅ 1.3 远端启动/注册及权限发布回归260项与45subtests通过；三runtime接入点保留，远端更新不含OSC修复。核过两次历史Kimi修复分别涉及active steer和上游请求超时，不把不同卡点合并归因（实际 13:08）
 
-🔄 **⭐ Stage 2｜交付：Kimi 启动与消息注入 · 已验证输入边界与代理检查修复，单桥生效待维护窗口（外部等待：tb26-baseball飞书桥重载许可；恢复：用户确认后执行2.4）**
+✅ **⭐ Stage 2｜交付：Kimi 启动与消息注入 · 输入边界已验证，代理检查修复已在单桥加载且原会话保留（实际 13:34）**
 　✅ 2.1 核Kimi2.5.2官方源码：启动前自动主题OSC11探测仅250ms，TUI内部另有完整/分段回复过滤。原生终端与Wmux测试均消费完整和分段回复，未复现原用户的启动回显污染；因此自动主题改为明确dark只是避开该启动探测，不宣称确证全部根因。日志已证11:40消息被代理辅助进程枚举超时拖延5分钟，发生在注入前（实际 13:19）
 　✅ 2.2 原位修network_route健康端口分支：辅助进程枚举限2秒，失败不挡投递、清掉旧自动启动对象并按300秒节流；端口不可用仍严格验证。新增超时放行、节流和禁止旧客户端复活反例。kp/kp2官方tui.toml改dark、其他偏好不动；next启动生效，运行中会话不重启。active直接Ctrl+S、idle Enter及Claude/Codex语义未改（实际 13:20）
 　✅ 2.3 使用隔离临时home、dummy凭据和本机固定回复服务测试官方Kimi2.5.2，不复制账号或委派智能体任务。原生PTY2条、真实Wmux自动主题3条、dark3条均有精确turn.prompt和prompt.completed，短/多行/分段OSC无污染，输入框恢复空白；旧启动回显仍未复现，生产供应商长等待未纳入此样本。61回归与7subtests通过，自建Wmux已退出关闭（实际 13:23）
-　⏳ 2.4 修复通过后已异步询问只重载tb26-baseball飞书桥的维护窗口，依据ROLE-010 §3；不重启wmux或Kimi，不清队列。获许可后核旧session/原生PID、桥队列与单bot运行态，start --bot tb26-baseball，再核新桥ready且原session/PID保留；未许可不执行，不把代码落盘称已在生产加载（外部等待：用户维护窗口许可；恢复：明确现在可重载后执行）
+　✅ 2.4 用户13:33确认重载后，先保存旧session、原生PID与完整队列记录的快照，再执行start --bot tb26-baseball。桥PID31392替换为40812，13:34新桥ready且飞书WebSocket已连接，无新Traceback；Kimi PID24072与worker23276启动时间不变，session与PTY绑定文件逐字未变，566条队列记录逐项相同、SQLite quick_check为ok。未重启wmux/Kimi、未清队列；证据reload-before.json与reload-after.json（实际 13:34）
 
 ✅ **⭐ Stage 3｜交付：正式 HTML 文档规则与 TC101O PRD · docs 中按 PRD 编号查看，mockups 只留真实草图（实际 13:27）**
 　✅ 3.1 审共享真源及目标漂移，保留既有独有规则；taxonomy原位增加HTML同名规则、PRD类型和head内等价元数据，正式阅读交付默认HTML，不强制Markdown副本。Claude共享段、Codex/Kimi模板已同步到8个profile，doctor通过、重复apply零写入；内部PLAN/入口/skill保留Markdown（实际 13:23）
@@ -56,3 +56,4 @@ last_reviewed: 2026-11-11
 - 2026-11-11 12:58｜远端80035f3及前置3笔已合入main；本地权限默认值先提交0364962，README/TOOLS/bridge三方自动合并。旧权限计划改号1260，三份异常暂停。远端没有改OSC回复处理；现有Kimi2.5.2、Claude2.1.310、Codex0.167.1。当前MCP外部调用不能直接读未认领PTY，转既有Link16只读诊断。
 - 2026-11-11 13:24｜Kimi代码与真实隔离终端验证完成，生产单桥重载按ROLE等待维护窗口；配置仅避开自动主题启动探测，未复现历史颜色回显，不宣称全部根治。HTML采用原页面迁移和现成Roadmap构建器，Stage3从13:55提前到13:30；原正文逐字保留及浏览器验证已通过。
 - 2026-11-11 13:27｜TC101O页面及在线Roadmap路径修正交付；共享入口doctor全通过。本计划新文档的owner/link/group三项实际回读通过；再以未单独加入该新文档的tb26-baseball应用查询members/auth action=edit，auth_result=true，证明登记群编辑在此样本可由另一bot继承。原生PTY2条和真实Wmux6条正文/完成回执在native-results.json，HTML与Roadmap浏览器验收在html-verification.json，权限样本在group-edit-auth.json。
+- 2026-11-11 13:34｜用户13:33确认单桥重载维护窗口；tb26-baseball桥已换新PID并连接飞书，代理检查修复已在常驻进程加载，原Kimi会话与566条队列记录保持不变。Stage2全部完成，无新增待用户动作；dark主题下次Kimi启动生效，未将本次单桥健康验收扩称为全部历史卡顿根治。
