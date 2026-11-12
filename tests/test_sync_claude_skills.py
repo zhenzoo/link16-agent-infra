@@ -75,6 +75,31 @@ class SyncClaudeSkillsTests(unittest.TestCase):
         self.assertEqual(report["counts"], {"skip-existing": 1})
         self.assertFalse((self.destination / "claude-compat-source-dir").exists())
 
+    def test_check_detects_missing_tree_then_deleted_and_stale_skill_without_writes(self):
+        source = self.write_skill("pull")
+        missing = self.run_sync("--include-commands", "--check", check=False)
+        self.assertEqual(missing.returncode, 1)
+        self.assertFalse(self.destination.exists())
+        self.run_sync("--include-commands", "--apply")
+        self.run_sync("--include-commands", "--check")
+        adapter = self.destination / "claude-compat-pull" / "SKILL.md"
+        original = adapter.read_bytes()
+        source.write_text(source.read_text(encoding="utf-8").replace("test workflow", "updated workflow"), encoding="utf-8")
+        self.assertEqual(self.run_sync("--check", check=False).returncode, 1)
+        self.assertEqual(adapter.read_bytes(), original)
+        self.run_sync("--apply")
+        adapter.unlink()
+        self.assertEqual(self.run_sync("--check", check=False).returncode, 1)
+        self.assertFalse(adapter.exists())
+
+    def test_check_accepts_native_skill_and_rejects_mutating_options(self):
+        self.write_skill("pull")
+        native = self.destination / "pull"
+        native.mkdir(parents=True)
+        (native / "SKILL.md").write_text("---\nname: pull\ndescription: native pull\n---\n", encoding="utf-8")
+        self.run_sync("--check")
+        self.assertNotEqual(self.run_sync("--check", "--apply", check=False).returncode, 0)
+
     def test_repo_owned_feishu_is_never_generated_and_old_adapter_is_prunable(self):
         self.write_skill("feishu")
         stale = self.destination / "claude-compat-feishu"
