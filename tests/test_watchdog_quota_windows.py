@@ -19,6 +19,10 @@ SESSION_SCREEN = ("⎿  You've hit your session limit · resets 4:40am (Asia/Sha
                   "⚠ Usage limit reached · limit resets 4:40am\n"
                   "Continuing automatically at 4:40am · esc to cancel")
 WEEKLY_SCREEN = "⎿  You've hit your weekly limit · resets Oct 9, 6pm (Asia/Shanghai)"
+KIMI_WEEKLY_SCREEN = (
+    "Error: [provider.api_error] You've reached your weekly (7-day) usage limit. "
+    "Your quota will reset when the current 7-day window ends.\n"
+    "If this persists, run `/export-debug-zip` and share the file with us for diagnosis.")
 REC = {"profile": "ccp2", "pty": "pty-1", "workspace_id": "ws-1",
        "jsonl": "C:/tmp/original-session.jsonl"}
 BOTS = {"voiceover": {"name": "voiceover", "profile": "ccp2"}}
@@ -29,6 +33,43 @@ def row(*, short=100, weekly=45, reset_at=10400):
             "session_percent": short, "weekly_percent": weekly,
             "session_reset": "10-02 04:40", "session_reset_at": reset_at,
             "weekly_reset": "10-02 17:59", "verdict": "满" if max(short, weekly) >= 95 else "够用"}
+
+
+def test_kimi_weekly_error_belongs_to_quota_even_when_both_windows_are_full():
+    assert w.find_pane_limit(KIMI_WEEKLY_SCREEN)
+    assert w.find_pane_error(KIMI_WEEKLY_SCREEN) is None
+    assert w.limit_kind(KIMI_WEEKLY_SCREEN, row(short=100, weekly=100)) == "weekly"
+
+
+@pytest.mark.parametrize("window", ["monthly", "monthly code", "monthly total", "daily", "5-hour"])
+def test_other_explicit_kimi_quota_errors_also_cannot_trigger_network_retry(window):
+    text = f"Error: [provider.api_error] You've reached your {window} usage limit."
+    assert w.find_pane_limit(text)
+    assert w.find_pane_error(text) is None
+    assert w.limit_kind(text, row(short=0, weekly=0)) is None
+    assert w.limit_kind(text, row(short=100, weekly=100)) is None
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_kimi_weekly_screen_never_falls_through_to_continue(monkeypatch, tmp_path, known):
+    def configure(events):
+        monkeypatch.setattr(w, "_profile_of", lambda *a: "kp")
+        quota = dict(row(short=10, weekly=100), profile="kp", runtime="kimi")
+        if not known:
+            quota.update(status="unknown", verdict="问不到", weekly_percent=None)
+        monkeypatch.setattr(w.agent_quota, "collect", lambda: [quota])
+        monkeypatch.setattr(w, "failover", lambda *a, **kw: events.append(("failover", 1)))
+        monkeypatch.setattr(w, "_short_waits_load", lambda: {})
+    scenes = [{"screen": KIMI_WEEKLY_SCREEN}] * 3
+    events = run_scenes(monkeypatch, tmp_path, scenes, configure=configure)
+    assert not any(kind in ("nudge", "esc") for kind, _ in events)
+    assert any(kind == "failover" for kind, _ in events) is known
+
+
+def test_kimi_transient_provider_error_still_uses_normal_recovery(monkeypatch, tmp_path):
+    screen = "Error: [provider.api_error] Connection lost mid-response"
+    events = run_scenes(monkeypatch, tmp_path, [{"screen": screen}] * 2)
+    assert ("nudge", 1) in events
 
 
 def test_provider_reset_time_is_stored_as_epoch_for_a_restart_safe_wakeup():

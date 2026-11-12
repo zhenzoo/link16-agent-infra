@@ -66,12 +66,17 @@ HEARTBEAT_PATH_NAME = "watchdog-heartbeat.json"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # 别闪黑窗抢焦点（4956aae 同款 bug 类）
 
 # ---- 限流的屏幕签名 ----
-# 只认 Claude/Codex 【自己渲染】的限流提示，不认正文里随口提到的 "limit" 等话题词
+# 识别 Claude/Codex/Kimi 的具体限额提示，不认正文里的 "limit" 等话题词。
 # （沿用 xhs 看门狗 2026-06-18 的教训：广义话题词会把正在写 AI 内容的会话误判成卡死）。
+_WEEKLY_LIMIT = r"weekly(?:\s+\(7-day\))?(?:\s+usage)?\s+limit"
+_OTHER_LIMIT = r"(?:monthly(?: (?:code|total))?|daily|5-hour) usage limit"
+_EXPLICIT_LIMIT_RE = re.compile(rf"{_WEEKLY_LIMIT}|session limit|{_OTHER_LIMIT}", re.I)
 _LIMIT_RE = re.compile(
     r"(hit your (weekly|usage|session) limit"
     r"|usage limit reached"
     r"|you've reached your (usage )?limit"
+    rf"|you['’]ve reached your {_WEEKLY_LIMIT}"
+    rf"|you['’]ve reached your {_OTHER_LIMIT}"
     r"|/usage-credits"
     r"|rate limit(ed)? · resets"
     r"|weekly limit · resets)",
@@ -177,8 +182,10 @@ def limit_kind(pane_text, quota_row):
     weekly = float(quota_row.get("weekly_percent") or 0) >= agent_quota.CRIT_PERCENT
     # Multiple old limit lines may remain on screen; only the last explicit one is relevant.
     explicit = next((line for line in reversed((pane_text or "").splitlines())
-                     if re.search(r"weekly limit|session limit", line, re.I)), "")
-    if re.search(r"weekly limit", explicit, re.I):
+                     if _EXPLICIT_LIMIT_RE.search(line)), "")
+    if re.search(_OTHER_LIMIT, explicit, re.I):
+        return None  # recognised quota error, but no validated recovery policy for this window
+    if re.search(_WEEKLY_LIMIT, explicit, re.I):
         return "weekly" if weekly else None
     if re.search(r"session limit", explicit, re.I):
         return "short" if short else None
@@ -194,16 +201,19 @@ def limit_kind(pane_text, quota_row):
 
 def _weekly_balance(row):
     used = row.get("weekly_percent")
+    monthly = row.get("monthly_percent")
+    month_text = (f"月额度已用 {monthly:.0f}%，剩余 {max(0, 100 - monthly):.0f}%"
+                  if monthly is not None else "")
     if used is None:
-        return "周额度占用未知"
-    return f"周额度已用 {used:.0f}%，剩余 {max(0, 100 - used):.0f}%"
+        return month_text or "周额度占用未知"
+    return f"周额度已用 {used:.0f}%，剩余 {max(0, 100 - used):.0f}%" + (f"；{month_text}" if month_text else "")
 
 
 def _screen_short_reset(pane_text, now):
     """An explicit session-limit banner can schedule a safe wait when quota API is blind."""
     lines = (pane_text or "").splitlines()[-12:]
     explicit = next((i for i in range(len(lines) - 1, -1, -1)
-                     if re.search(r"weekly limit|session limit", lines[i], re.I)), None)
+                     if _EXPLICIT_LIMIT_RE.search(lines[i])), None)
     if explicit is None or not re.search(r"session limit", lines[explicit], re.I):
         return None
     match = re.search(r"\bresets?\s+(\d{1,2}):(\d{2})\s*(am|pm)\b",
@@ -244,8 +254,8 @@ SELF_MARKER = "[watchdog "   # 自己面板上的日志前缀 → 绝不把自�
 
 
 def find_pane_error(text):
-    """屏上有 Claude 渲染的 API/网络错、且【没在 retry】→ 返回那一行；否则 None。纯函数。"""
-    if not text:
+    """可恢复的 API/网络错且未重试才返回；额度错误统一由 R2 处理。"""
+    if not text or find_pane_limit(text):
         return None
     low = text.lower()
     if any(r in low for r in RETRY_MARKERS):

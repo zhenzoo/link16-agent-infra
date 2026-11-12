@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agent_quota.py — 查【每个 agent profile 还剩多少额度】（Claude Code / Codex 统一一张表）。
+"""agent_quota.py — Claude Code / Codex / Kimi Code 实时额度统一入口。
 
 为什么有这个（2026-08-20 · PLAN-930 S1）：
   会话撞 `You've hit your weekly limit` 时，要决定「换到哪个号」就必须先知道各号还剩多少。
@@ -19,6 +19,8 @@
              （实测 ccp 是 mcpOAuth 在前、ccp2 是 claudeAiOauth 在前）⇒ 递归找会抓到 MCP 的 token 然后 403。
   · codex  → GET https://chatgpt.com/backend-api/codex/usage
              Bearer = <home>/auth.json 的 tokens.access_token（+ chatgpt-account-id 头）
+  · kimi   → 当前 managed:kimi-code provider 的 /usages；401 时由原生 CLI 刷新登录。
+             5h、7d、月套餐分别识别，未知窗口不当作空额度。
 
 🌐 **线路：两条都试，别按机器写死**（2026-08-20 两台机实测结论【正好相反】）：
      TB24 直连 200 / 走代理 429（共享出口被限流）；TB25 直连 403（边缘拒绝）/ 走代理 200。
@@ -37,9 +39,18 @@
 
 import argparse
 import json
+import math
 import os
+import queue
 import re
+import shutil
+import socket
+import subprocess
 import sys
+import threading
+import time
+import tomllib
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -283,13 +294,177 @@ def _codex_quota(home: Path):
     }
 
 
+def _kimi_native_usage(home: Path):
+    """Let the installed CLI own OAuth refresh via its authenticated local usage API.
+
+    No model turn, GUI or lasting service: the temporary loopback-only process
+    is stopped in finally. Startup URLs/tokens stay in memory and never leave
+    this function. Other native sessions and their credential files are untouched
+    by Link16; Kimi coordinates any refresh through its own token lifecycle.
+    """
+    executable = shutil.which("kimi")
+    if not executable:
+        return None, "Kimi 原生 CLI 不可用，无法刷新登录"
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith(("FEISHU_BRIDGE_", "KIMI_")) or key == "LINK16_AGENT_PROFILE":
+            env.pop(key)
+    env["KIMI_CODE_HOME"] = str(home)
+    proc = reader = None
+    try:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        proc = subprocess.Popen(
+            [executable, "web", "--no-open", "--host", "127.0.0.1", "--port", str(port)],
+            env=env, cwd=str(home), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        lines = queue.Queue()
+        def read_lines():
+            for line in proc.stdout:
+                lines.put(line)
+        reader = threading.Thread(target=read_lines, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + TIMEOUT
+        local_token = None
+        while time.monotonic() < deadline:
+            try:
+                line = lines.get(timeout=0.2)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    break
+                continue
+            for match in re.finditer(r"http://[^\s\x1b]+", line):
+                url = urllib.parse.urlparse(match.group(0))
+                if url.hostname not in {"127.0.0.1", "localhost"} or url.port != port:
+                    continue
+                args = urllib.parse.parse_qs(url.query) | urllib.parse.parse_qs(url.fragment)
+                local_token = (args.get("token") or [None])[0]
+                if local_token:
+                    break
+            if local_token:
+                break
+        if not local_token:
+            return None, "Kimi 原生额度入口未就绪，未创建模型会话"
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/oauth/usage",
+                                         headers={"Authorization": f"Bearer {local_token}"})
+        with _opener(False).open(request, timeout=TIMEOUT) as response:
+            result = json.loads(response.read())
+        result = result.get("data") or {}
+        if result.get("kind") != "ok":
+            return None, "Kimi 原生刷新/额度查询失败，需在该 profile 检查登录"
+        usage = result["quota"]["usages"]
+        names = {"limit5h": "limit_5h", "limit7d": "limit_7d",
+                 "monthTotal": "limit_month_total", "monthCode": "limit_month_code"}
+        return {"usages": {names[k]: {"used_ratio": v["usedRatio"], "reset_time": v.get("resetAt")}
+                           for k, v in usage.items() if k in names}}, None
+    except Exception:  # Never disclose subprocess output, URLs, or response bodies.
+        return None, "Kimi 原生刷新/额度查询未完成，保留原会话"
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            if reader is not None:
+                reader.join(timeout=1)
+            proc.stdout.close()
+
+
+def _kimi_quota(home: Path):
+    """Read native Kimi's live /usages, using only this profile's managed identity.
+
+    Provider contract: MoonshotAI/kimi-code packages/oauth/src/managed-usage.ts.
+    Weekly and monthly plans are distinct; missing/malformed quotas are unknown.
+    Credentials remain owned by Kimi; this reader does not rotate or copy them.
+    """
+    try:
+        config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+        model = config.get("models", {}).get(config.get("default_model"), {})
+        if model.get("provider") != "managed:kimi-code":
+            return {"status": "unknown", "note": "当前模型不是 Kimi Code 托管订阅，不能用订阅额度选号"}
+        provider = config.get("providers", {}).get("managed:kimi-code", {})
+        base = str(provider.get("base_url") or "").rstrip("/")
+        if base not in {"https://api.kimi.com/coding/v1", "https://api.kimi.ai/coding/v1"}:
+            return {"status": "unknown", "note": "Kimi 额度端点未验收，不向自定义地址发送登录凭据"}
+        oauth = provider.get("oauth") or {}
+        if oauth.get("storage") != "file" or oauth.get("key") != "oauth/kimi-code":
+            return {"status": "unknown", "note": "Kimi 登录存储不匹配，无法确认当前账号"}
+        credentials = json.loads((home / "credentials" / "kimi-code.json").read_text(encoding="utf-8"))
+        token = credentials.get("access_token")
+        if not isinstance(token, str) or not token.strip():
+            return {"status": "no_creds", "note": "Kimi 原生登录缺少 access_token"}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"status": "no_creds", "note": "Kimi 原生配置或登录凭据无法读取"}
+
+    data, err, route = _get_json_dual(base + "/usages", {
+        "Authorization": f"Bearer {token}", "Accept": "application/json",
+    }, prefer_proxy=False, runtime="kimi")
+    refreshed = data is None and bool(re.search(r"(?:^|: )(?:凭据过期\(401\)|HTTP 401\b)", err or ""))
+    if refreshed:
+        data, err = _kimi_native_usage(home)
+        route = "原生登录刷新" if data is not None else None
+        if data is None:
+            # Native refresh can succeed while its usage request loses the
+            # network connection. Re-read only a newly rotated access token,
+            # then use our existing dual-route reader; never rotate it ourselves.
+            try:
+                renewed = json.loads((home / "credentials" / "kimi-code.json").read_text(encoding="utf-8"))
+                renewed = renewed.get("access_token")
+                if isinstance(renewed, str) and renewed and renewed != token:
+                    data, _, route = _get_json_dual(base + "/usages", {
+                        "Authorization": f"Bearer {renewed}", "Accept": "application/json",
+                    }, prefer_proxy=False, runtime="kimi")
+            except (OSError, ValueError, AttributeError):
+                pass
+    if data is None:
+        # Never forward provider bodies, which may echo request credentials.
+        note = err if refreshed else "Kimi 实时额度查询失败，不能据此自动选号"
+        return {"status": "unknown", "note": note}
+    try:
+        usage = data["usages"]
+        five = usage["limit_5h"]
+        long_keys = [key for key in ("limit_7d", "limit_month_total", "limit_month_code") if key in usage]
+        if not long_keys:
+            raise ValueError("missing long window")
+        windows = {key: usage[key] for key in ["limit_5h", *long_keys]}
+        values = [window["used_ratio"] for window in windows.values()]
+        if any(isinstance(value, bool) or not isinstance(value, (int, float, str)) for value in values):
+            raise ValueError("invalid ratio")
+        percentages = dict(zip(windows, [float(value) * 100 for value in values]))
+        if any(not math.isfinite(value) or value < 0 for value in percentages.values()):
+            raise ValueError("invalid ratio")
+    except (KeyError, ValueError, TypeError):
+        return {"status": "unknown", "note": "Kimi 实时额度缺少有效的短时/周或月窗口，拒绝当作空闲账号"}
+    month_keys = [key for key in long_keys if key.startswith("limit_month_")]
+    month = max(month_keys, key=percentages.get) if month_keys else None
+    week = usage.get("limit_7d") or {}
+    return {
+        "status": "ok", "session_percent": percentages["limit_5h"],
+        "weekly_percent": percentages.get("limit_7d"),
+        "monthly_percent": percentages[month] if month else None,
+        "monthly_reset": _fmt_reset(usage[month].get("reset_time")) if month else "—",
+        "session_reset": _fmt_reset(five.get("reset_time")),
+        "session_reset_at": _reset_epoch(five.get("reset_time")),
+        "weekly_reset": _fmt_reset(week.get("reset_time")),
+        "severity": "normal", "route": route,
+        "note": (f"Kimi 原生实时额度·经{route}"
+                 + (f"·月额度已用{percentages[month]:.0f}%" if month else "")),
+    }
+
+
 # ---------- 汇总 ----------
 
 def _verdict(row):
     """够用 / 紧张 / 满 / 问不到 —— 唯一判定入口，别在别处再写一遍阈值。"""
     if row["status"] != "ok":
         return "问不到"
-    worst = max(row["session_percent"], row["weekly_percent"])
+    worst = max(value for value in (row["session_percent"], row["weekly_percent"],
+                                    row.get("monthly_percent")) if value is not None)
     if row.get("severity") == "critical" or worst >= CRIT_PERCENT:
         return "满"
     if worst >= WARN_PERCENT:
@@ -313,7 +488,7 @@ def collect(names=None):
         elif spec.runtime == "codex":
             base.update(_codex_quota(home))
         elif spec.runtime == "kimi":
-            base.update({"status": "unknown", "note": "Kimi 原生启动已支持；额度接口尚未验收，不参与自动选号"})
+            base.update(_kimi_quota(home))
         else:
             base.update({"status": "unknown", "note": f"不认识的 runtime {spec.runtime}"})
         base.setdefault("session_percent", None)
@@ -393,7 +568,7 @@ def pick(rows, exclude=(), prefer_runtime=None, source=None):
         return None
 
     def score(r):
-        worst = max(r["session_percent"] or 0, r["weekly_percent"] or 0)
+        worst = max(r["session_percent"] or 0, r["weekly_percent"] or 0, r.get("monthly_percent") or 0)
         return worst
 
     return sorted(ok, key=score)[0]

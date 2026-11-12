@@ -23,7 +23,7 @@ read_when:
   - 想知道某个面板为什么被注了「继续」或为什么被换了号
   - 要改告警走哪条通道
   - 在新机器上装桥、想确认看门狗有没有跟着起来
-last_reviewed: 2026-10-02
+last_reviewed: 2026-11-12
 ---
 
 # ARCH-160 · 看门狗
@@ -47,7 +47,7 @@ bot 增减自动跟随。
 |---|---|---|---|
 | **R3** | 停在交互 picker（AskUserQuestion 等） | **什么都不做** | 它在等主人回答，不是卡死。往那儿注回车会**替主人乱选一个答案** |
 | **R2** | 屏命中限流签名、实时额度证实对应窗口已满，且同一提示连续 2 轮出现 | 短时限额保留原会话，到恢复点唤醒一次；周额度到限才在同 runtime、同 profile 系列换号接手（见 §4） | 短时窗口会恢复；跨模型接力会改变任务执行者，不能作为自动兜底 |
-| **R1** | 屏有 `API Error:` / `API Error (` 或错误类型码，**且没在 retry**，且连续 2 轮静止 | 往面板注一句「继续」 | 网络/服务抖动，推一下就能从上次停的地方接着做 |
+| **R1** | 屏有 `API Error:` / `API Error (` 或错误类型码，**排除额度耗尽且没在 retry**，且连续 2 轮静止 | 往面板注一句「继续」 | 网络/服务抖动，推一下就能从上次停的地方接着做；额度不足归 R2，不重复请求 |
 | **R5** | Codex 的 rollout 里，**最后一个回合以 `task_complete{error}` 收尾**、后面没有新回合（限流除外） | 告警 + 注「继续推进」；连着 3 个回合都被掐 → **停手，只告警** | 回合被服务端掐断后**没有任何东西会再踢它一脚**（见 §3.5） |
 | **R4** | 桥进程 活→死 | 告警（仍走 DM·挑名册里第一个能解析出目标的 bot 代发） | 2026-08-30 实测推翻了「桥挂了 DM 发不出」：`send_feishu_msg.py` 直连飞书 REST、不经过桥进程（停掉 tb24-notes-3 的桥后仍 ✅ 已发）。webhook 的最后一条理由消失，随全部兜底一起拆除 |
 | **R6** | `_state/bridge-hwm-corrupt-<bot>.log` 出现【新增】行 | 告警（状态类·30min 冷却·记 `seen` 水位不重报） | 断电会把没落盘的水位书签变成全 NUL。`load_hwm` 已 fail-closed 自动修好（不重放历史），但这意味着①机器崩过②崩溃前最后一批未送达的消息被跳过（仍在 outbox 可捞回）。**这条日志此前只有写入方、没有读取方**——2026-08-30 洪水就是这个形状，42 分钟无人知晓 |
@@ -159,7 +159,13 @@ R8 是运行中长时间没有输出时的恢复检查。执行状态不读屏�
 
 额度真源 = `feishu/agent_quota.py`，**打实时接口**，分别读取短时与周额度：
 Claude 走 `api.anthropic.com/api/oauth/usage`（国内直连、强制绕代理），
-Codex 走 `chatgpt.com/backend-api/codex/usage`（走 `.env` 的 `PROXY_URL`）。
+Codex 走 `chatgpt.com/backend-api/codex/usage`（走 `.env` 的 `PROXY_URL`），
+Kimi 读取该 profile 当前 `managed:kimi-code` 的官方 `/coding/v1/usages`（中国/全球端点随原生配置）。
+三者复用现有直连/代理查询；拿不到实时结果就保持“问不到”。Kimi 按官方返回分别读取 `limit_5h`、`limit_7d` 及月总/代码额度，月套餐不伪装成周额度为零；缺少有效窗口或比例异常不能成为可用候选。
+Kimi 401 时使用已安装原生 CLI 的短生命周期、仅回环地址、`--no-open` 额度入口刷新登录并查询；不发送模型请求，不复写 OAuth 刷新算法，进程结束即清理。原生刷新后查询网络失败但令牌已轮换时，重新读该 profile 的令牌走原双线路查询。刷新或查询仍失败就不切号；不会购买额外额度，也不会跨账号复制凭据。
+接口依据：[Kimi 原生额度实现](https://github.com/MoonshotAI/kimi-code/blob/main/packages/oauth/src/managed-usage.ts)。
+
+Kimi 的 `You've reached your weekly (7-day) usage limit` 与 Claude/Codex 的限额横幅共用 R2；即使同时包含 `provider.api_error`，也不能落入 R1。明确月/日/5小时额度错误同样禁止普通“继续”，未验收的窗口恢复行为只保留告警。周限额与实时余额吻合后才走原接管流程；额度接口未知、无备用号或备用号也耗尽，保留原会话。
 
 > ⚠️ **绝不读本地缓存**（`~/.claude*/.claude.json` 的 `cachedUsageUtilization`）：
 > 2026-08-20 实测那份缓存停在四天前，会把 weekly=**100%** 的号报成 **0%** ——
@@ -183,7 +189,7 @@ transcript 和短时 `session_reset_at`），随原有 120 秒巡检到点核实
 
 **周额度到限**：只有对应周窗口确实到限，才执行下面的换号流程。可自动接手的账号
 必须同时满足：本机 registry 标了 `auto_failover_target: true`、实时额度可用、runtime 相同，
-且 profile 名去掉末尾数字后属于同一系列（`ccp ↔ ccp2`、`cxp ↔ cxp2`；
+且 profile 名去掉末尾数字后属于同一系列（`ccp ↔ ccp2`、`cxp ↔ cxp2`、`kp ↔ kp2`；
 `ccp ↔ cck` 和 `ccp ↔ cxp` 都不行）。同系列没有可用号就留在原会话并告警。
 看门狗的手动 `failover --to` 也守同样的周额度与同系列条件；主人显式 `/account` 是另一条手动选择路径。
 
