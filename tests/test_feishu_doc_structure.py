@@ -91,6 +91,8 @@ class StructureTests(unittest.TestCase):
     def test_failed_write_never_adds_plain_text(self):
         blocks = [text('a', 'hello', 12)]
         with mock.patch.object(fd, '_tenant_token', return_value='token'), \
+             mock.patch('document_access.resolve_policy', return_value={'owner_id': 'human'}), \
+             mock.patch('document_access.apply_new', return_value={'policy_verified': True}), \
              mock.patch.object(fd, '_convert_markdown', return_value=(blocks, ['a'])), \
              mock.patch.object(fd, '_create_docx', return_value='doc'), \
              mock.patch.object(fd, 'api', return_value={'code': 1770001}), \
@@ -102,6 +104,8 @@ class StructureTests(unittest.TestCase):
     def test_successful_write_with_lost_remote_content_is_not_success(self):
         blocks = [text('a', 'hello', 12)]
         with mock.patch.object(fd, '_tenant_token', return_value='token'), \
+             mock.patch('document_access.resolve_policy', return_value={'owner_id': 'human'}), \
+             mock.patch('document_access.apply_new', return_value={'policy_verified': True}), \
              mock.patch.object(fd, '_convert_markdown', return_value=(blocks, ['a'])), \
              mock.patch.object(fd, '_create_docx', return_value='doc'), \
              mock.patch.object(fd, 'api', return_value={'code': 0}), \

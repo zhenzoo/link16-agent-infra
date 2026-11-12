@@ -34,7 +34,7 @@ last_reviewed: 2026-11-01
 
 已拍板、无需重复确认：本次应用维护窗口、两项启动设置及 Link16 跟随官方新版的兼容规则，均已执行。待调研回传与决定：本次无待决定项；旧版安装前退出卡点已定位，新版正常退出及官方安装链路已实测通过，未来上游版本不属于本次已验证范围。
 
-当前 Step／恢复点：Stage 1–6 的本机交付及通知已完成；待 TB24/TB26 实施回执。修复 c2ae198 已推送 fix/official-wmux-codex-bootstrap，尚未发布到 origin/main。已授权对端在干净且可快进时本机 main 集成同一提交，遇交叉改动/非快进先回报，不替其他机器推 main。后续用主工作区 feishu/bridge_history.py --bot tb25-link16 --recent 10 --json 找两条通知的回复，再按结果决定统一主干发布与各机运行加载；不能把送达当修复通过。TB25 主工作区 main 干净，当前为另一会话推进的 ffb4d3c；本轮代码与计划在 VIBECODING_ROOT/Runtime/worktrees/link16-official-bootstrap。沿用本 PLAN，主会话单写；不改 profile 权限、认证或体育业务。
+当前 Step／恢复点：Stage 1–6 的历史本机交付及通知已完成；c2ae198 已进入 origin/main，2026-11-12 已用 Git 祖先关系核实，原“尚未发布到 main”状态已失效。本轮四机统一拉齐、兼容审查和运行加载由 PLAN-1270-four-machine-repository-sync.md 接续；不把代码已合入当作每台机器已重载。本 PLAN 保留原历史验收和通知，不重做安装、系统登录设置或体育业务任务。
 
 ## §1 Stage / Step
 
@@ -77,3 +77,4 @@ last_reviewed: 2026-11-01
 - 2026-11-01 00:14：Stage 4 交付，最终全仓 1441 项与 185 子测试通过、5 跳过；本机 dry-run 零目标配置改动。远端新增 ffb4d3c 只改 SOP-100 网络段，本分支提交后吸收并保留该内容；不扩到网络配置。当前是分支验证/推广中途，不发布新的稳定版本 tag。
 - 2026-11-01 00:16：Stage 5 完成，c2ae198 已推送并回读一致。SOP-100 经 open-local 确认可见；主工作区 main 仍干净且未切换。名册确认 TB24 维护 bot 显示名 tb24-link16、发送键 link16；TB26 为 tb26-link16。
 - 2026-11-01 00:18：Stage 6 通知提前交付（原 ETA 00:25，发送及账本核验无需等待对端维护结束）。TB24 message_id=om_x100b615504e020a4cee3faed094d4a8；TB26 message_id=webhook-1793463459491，镜像回执 om_x100b6155048754a4ce95b6d189fc1bd。发送 JSON 与请求正文留 Runtime/maintenance/wmux-xhs-20261031/official-bootstrap-*；尚无本次远端实施回复。SOP-010 也经 open-local 确认可见。本轮分支未合入 origin/main，不把最新版主干或对端部署说成已包含。
+- 2026-11-12 09:21｜统一四机审查核实 c2ae198 是 origin/main 的祖先，修正旧恢复点的分支待发布状态；各机运行加载由 PLAN-1270 验收，不将本次文档修订称重新执行系统升级。

@@ -79,7 +79,7 @@ class MediaPublishTests(unittest.TestCase):
     def test_wrong_readback_binding_fails_publication(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'video.mp4';path.write_bytes(b'video')
-            with patch.object(docs,'_tenant_token',return_value='token'),patch.object(docs,'_create_docx',return_value='doc'),patch.object(docs,'_create_file_block',return_value='block'),patch.object(docs,'_upload_to_block',return_value='new-token'),patch.object(docs,'_bind_media'),patch.object(docs,'api',return_value={'code':0,'data':{'block':{'file':{'token':'stale-token'}}}}),self.assertRaises(docs.DocImportError):
+            with patch('document_access.resolve_policy'),patch('document_access.apply_new'),patch.object(docs,'_tenant_token',return_value='token'),patch.object(docs,'_create_docx',return_value='doc'),patch.object(docs,'_create_file_block',return_value='block'),patch.object(docs,'_upload_to_block',return_value='new-token'),patch.object(docs,'_bind_media'),patch.object(docs,'api',return_value={'code':0,'data':{'block':{'file':{'token':'stale-token'}}}}),self.assertRaises(docs.DocImportError):
                 docs.publish_media_as_doc('app','secret',[path])
 
     def test_invalid_part_plan_and_empty_media_fail_closed(self):

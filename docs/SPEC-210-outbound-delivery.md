@@ -16,7 +16,7 @@ does_not_own:
   - agent 业务答案内容
 read_when:
   - 修改 bridge_outbox、feishu_bridge、send_feishu_msg、bridge_history 或回传 hooks
-last_reviewed: 2026-10-29
+last_reviewed: 2026-11-11
 ---
 
 # SPEC-210 · Link16 出站投递、分片与去重合同
@@ -82,6 +82,8 @@ Kimi 使用 ARCH-120 §11 的独立 Wire 1.5 观察程序：原生 todo store �
 
 `milestone-v1` 的 `bridge-progress-state-<bot>.json` 保存当前 turn、允许公开的步骤快照、原卡 message_id、已确认 event revision、当前卡包含的事件 ID 和冻结的 route。进度卡使用普通消息 PATCH，重启不需要重建 CardKit 流式连接。
 
+- Kimi 带 `kimi_diagnostic` 的 progress 是局部基础设施更新，不是完整业务快照。同 turn、同回址时按 event ID 合并已经通过工作行闸的既有公开内容，保留正文、计划、安全工具摘要与工作行；不同 turn/回址不继承。未放行的模型内容不因诊断绕过闸门。正常完整快照仍按原合同消费。
+- Kimi 请求重试、等待与恢复在当前卡中仅呈现最新一条短状态，不累积旧告警；原始诊断、事件 ID 和 ACK 仍留在 outbox/状态供重放。升级前已经丢失正文的诊断卡，可从同一授权快照补回最近一条业务 commentary；不把 think、原始错误或工具输入/输出当进度补入。最终失败/取消/阻塞答案继续完整投递，短状态不代表本轮完成。
 - 创建新进度卡之前先持久化 pending 操作：冻结渲染后的每片正文、route、卡片事件归属，以及每片稳定的 64 位摘要 ID；provider UUID 复用 §2 的 UUIDv5 映射。恢复时先完成这个冻结操作，再消费更新的快照，禁止给同一次未确认发送换 ID 或换正文。
 - 每片成功取得 message_id 后立即保存 ACK 和卡号，再发送下一片。pending 完成后保存 event revision；状态保存失败不得推进 outbox HWM，也不得在发送意图尚未保存时调用网络。状态内容 flush/fsync 后原子替换。
 - 新建或改卡的临时失败保留原卡 ID／pending 操作与未确认 revision。同一 PATCH 再次成功只更新原卡；不得把超时或连接失败直接解释为“旧卡不能用了”而创建另一张卡。

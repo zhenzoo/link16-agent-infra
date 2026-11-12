@@ -137,6 +137,7 @@ def main():
     ap.add_argument("--to", default=None, help="目标 chat_id(oc_)/open_id(ou_)；不给=该 bot 会话 chat_id")
     ap.add_argument("--text", default=None, help="链接前附带的说明文字")
     ap.add_argument("--perm", default="view", choices=["view", "edit", "full_access"], help="授权级别（默认 view 只读）")
+    ap.add_argument("--external-reason", default="", help="仅用户明确 external 时填写；默认组织内持链接可读")
     ap.add_argument("--dry", action="store_true", help="只回显将走的链路不真发")
     ap.add_argument("--explicit-online", action="store_true",
                     help="用户本轮明确要求在线副本时，单次覆盖关闭的全局开关；不修改全局值")
@@ -184,6 +185,10 @@ def main():
     grant_oid = (a.to if (a.to or "").startswith("ou_") else None) or sess.get("open_id")
     app_id, app_secret = _bot_creds(a.bot)
     insert_args = {'document_id': doc_id, 'parent_block': a.parent_block, 'index': a.index}
+    if a.external_reason:
+        if doc_id:
+            ap.error('已有文档插入不改变权限；显式权限变更请使用 docio govern')
+        insert_args.update(public=True, external_reason=a.external_reason)
     if a.resume_empty_block:
         insert_args['resume_empty_block'] = a.resume_empty_block
 

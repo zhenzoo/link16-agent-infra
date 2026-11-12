@@ -3,6 +3,7 @@ doc_type: SPEC
 doc_id: SPEC-220
 title: 飞书 scope 等级表与智能体权限基线
 status: active
+url: ""
 purpose: 定义 scope 等级快照的数据契约、判定"是否需要管理员审批"的唯一机器依据，以及每只智能体必须开满的免审批权限基线。
 owns:
   - feishu/feishu-scope-levels.json 的字段与语义
@@ -17,7 +18,7 @@ read_when:
   - 判断某个 scope 能不能自助开通
   - 新增或修改智能体权限基线
   - 把这套机制搬到另一个租户或另一台机器
-last_reviewed: 2026-09-07
+last_reviewed: 2026-11-11
 related:
   - ARCH-130
   - SOP-140
@@ -102,7 +103,7 @@ level 4  →  self_serve = false  →  需要租户管理员审批
 | 导入与导出 | `docs:document:import`、`docs:document:export` | `drive:drive` |
 | 白板 | `board:whiteboard:node:read`、`board:whiteboard:node:create`、`board:whiteboard:node:update`、`board:whiteboard:node:delete` | — |
 | 评论 | `docs:document.comment:read`、`docs:document.comment:create`、`docs:document.comment:update`、`docs:document.comment:delete` | — |
-| 协作者与分享 | `docs:permission.member:create`、`docs:permission.member:retrieve`、`docs:permission.setting:read` | `drive:drive` |
+| 协作者、归属与分享 | `docs:permission.member:create`、`docs:permission.member:retrieve`、`docs:permission.member:update`、`docs:permission.member:transfer`、`docs:permission.member:auth`、`docs:permission.setting:read`、`docs:permission.setting:write_only`、`drive:drive.metadata:readonly` | `drive:drive` |
 | 知识库 | `wiki:node:read`、`wiki:node:retrieve`、`wiki:space:read` | `wiki:wiki` |
 | 文档版本 | `drive:drive:version`、`drive:drive:version:readonly` | `drive:drive` |
 
@@ -151,6 +152,12 @@ level 4 scope **永久不进基线**。它们提供的每一项能力都已有 l
 用户身份的 scope 与应用身份互不替代：文档没分享给应用时，应用补再多 scope 也读不到。
 
 ## 8 · 群协作者（授权面）
+
+**全部 agent 新建资产的统一合同（2026-11-11）**：owner 归已认主人；默认 link_share_entity=tenant_readable；登记的同租户内部群以 openchat/edit 授权。只有用户明确 external 的对象才使用 anyone_readable，并记录其要求。企业租户同时关闭 external_access_entity；个人空间此开关写入后仍回读 open，以 tenant_readable 核实际链接边界。默认不设置密级、不修改复制/下载/评论限制。
+
+owner 来自该 app 的认主记录，群来自 registry.tenants；不按 bot 名后缀或机器推断租户，不使用全局单一群环境变量，不跨 app 复制人的 open_id。创建者原目录不变，转交后保留 full_access；群只需 edit。三项独立回读全部满足才交付，HTTP 成功、URL、edit 协作者均不能替代 owner 证明。
+
+Markdown/HTML/媒体由document_access实施；Sheet/多维表格必须经docio create固定当前bot身份，在同一次调用内自动治理并回读，禁止裸创建后靠手工补govern。缺owner或同租户群时创建前失败；创建后任一权限未通过就保留原token并报未完成，恢复不重建。已有资产用docio govern。妙搭HTML用Drive apps权限，frontend/full_stack分别核应用scope与成员，并核数字owner与已授权主人身份；初始化/发布必须固定已核主人profile，verify-release继续在交付前核三项。妙搭开发接口仍可能要求user token，群edit不会替应用补API scope或替真人完成OAuth。
 
 权限清单之外的第二层是**资源是否分享给这个身份**。逐只应用挂协作者可行但不可扩展：
 每新增一只 bot，所有历史文档都要重挂一遍。

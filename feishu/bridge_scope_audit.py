@@ -51,13 +51,19 @@ CAPABILITY_SPECS = {
         "fix_scopes": ["im:chat:read", "im:message.group_at_msg:readonly"],
     },
     "docs-text": {
-        "label": "文字云文档创建/写入/公开链接",
+        "label": "文字云文档创建/写入/主人归属与组织内链接",
         "groups": [
             ["docx:document", "docx:document:create"],
             ["docx:document", "docx:document:write_only"],
             ["docx:document.block:convert"],
             ["drive:drive.metadata:readonly", "drive:drive"],
-            ["docs:permission.setting:write_only", "docs:permission.member:create", "drive:drive"],
+            ["docs:permission.setting:write_only", "docs:permission.setting", "drive:drive"],
+            ["docs:permission.setting:read", "docs:permission.setting", "drive:drive"],
+            ["docs:permission.member:create", "docs:permission.member", "drive:drive"],
+            ["docs:permission.member:retrieve", "docs:permission.member", "drive:drive"],
+            ["docs:permission.member:auth", "docs:permission.member", "drive:drive"],
+            ["docs:permission.member:transfer", "docs:permission.member", "drive:drive"],
+            ["docs:permission.member:update", "docs:permission.member", "drive:drive"],
         ],
         "requested": [
             "docx:document:create",
@@ -65,6 +71,9 @@ CAPABILITY_SPECS = {
             "docx:document.block:convert",
             "drive:drive.metadata:readonly",
             "docs:permission.setting:write_only",
+            "docs:permission.setting:read", "docs:permission.member:create",
+            "docs:permission.member:retrieve", "docs:permission.member:auth",
+            "docs:permission.member:transfer", "docs:permission.member:update",
         ],
     },
     "docs-consume": {
@@ -144,7 +153,8 @@ BASELINE_SCOPES = (
     "docs:document.comment:update", "docs:document.comment:delete",
     # 协作者与分享 / 知识库 / 版本
     "docs:permission.member:create", "docs:permission.member:retrieve",
-    "docs:permission.setting:read",
+    "docs:permission.member:auth", "docs:permission.member:transfer", "docs:permission.member:update",
+    "docs:permission.setting:read", "docs:permission.setting:write_only", "drive:drive.metadata:readonly",
     "wiki:node:read", "wiki:node:retrieve", "wiki:space:read",
     "drive:drive:version", "drive:drive:version:readonly",
 )

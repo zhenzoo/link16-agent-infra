@@ -38,7 +38,7 @@ class AgentProxyRecoveryTests(unittest.TestCase):
         self.patches = [
             patch.object(nr, "os", SimpleNamespace(name="nt")),
             patch.object(bridge_process, "LOCK_DIR", self.root),
-            patch.object(nr, "_proxy_processes", side_effect=lambda: self.rows),
+            patch.object(nr, "_proxy_processes", side_effect=lambda **kw: self.rows),
             patch.object(nr, "_core_config", side_effect=lambda row: {"url": "http://127.0.0.1:8426", "secret": "hidden"}
                          if row["Name"] == "CATVPNCore.exe" else None),
             patch.object(nr, "_core_request", side_effect=request),
@@ -156,6 +156,26 @@ class AgentProxyRecoveryTests(unittest.TestCase):
         with patch.object(nr.time, "time", return_value=self.saved()["observed_at"] + 301):
             self.run_repair()
         self.assertNotIn("client", self.saved())
+
+    def test_healthy_socket_inventory_timeout_does_not_block_or_reuse_stale_client(self):
+        self.port = 7897
+        self.rows[1]["ListenPorts"] = [7897, 8426]
+        self.run_repair()
+        observed = self.saved()["observed_at"]
+        self.query.side_effect = nr.subprocess.TimeoutExpired("inventory", 2)
+        with patch.object(nr.time, "time", return_value=observed + 301):
+            self.assertEqual(self.run_repair()["status"], "listening")
+        self.assertNotIn("client", self.saved())
+        self.query.assert_called_with(timeout=2)
+        self.query.reset_mock()
+        with patch.object(nr.time, "time", return_value=observed + 302):
+            self.assertEqual(self.run_repair()["status"], "listening")
+        self.query.assert_not_called()
+        self.port, self.rows = 0, []
+        self.query.side_effect = lambda **kw: self.rows
+        with self.assertRaisesRegex(nr.AgentProxyUnavailable, "没有已验证"):
+            self.run_repair()
+        self.launch.assert_not_called()
 
     def test_registry_proxy_not_hidden_by_stale_terminal_environment(self):
         with patch.object(nr.urllib.request, "getproxies", return_value={"https": self.EXPECTED}), \

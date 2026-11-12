@@ -299,9 +299,9 @@ class NativeTableSafetyTests(unittest.TestCase):
         with mock.patch.object(feishu_docs, "_tenant_token", return_value="token"),                 mock.patch.object(feishu_docs, "_create_docx", return_value="doc"),                 mock.patch.object(feishu_docs, "_convert_markdown",
                                   return_value=(blocks, ["t1", "t2"])),                 mock.patch.object(feishu_docs, "_insert_real_table",
                                   return_value=(True, 1, [])) as insert,                 mock.patch.object(feishu_docs, "_create_text_block") as text_block,                 mock.patch.object(feishu_docs, "_read_doc_blocks", return_value=([], [])),                 mock.patch.object(feishu_docs, "verify_structure",
-                                  return_value={"structure_verified": True}),                 mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"),                 mock.patch.object(feishu_docs, "_set_visibility"):
+                                  return_value={"structure_verified": True}), mock.patch.object(feishu_docs, "_doc_url", return_value="https://doc"), mock.patch("document_access.resolve_policy"), mock.patch("document_access.apply_new"), mock.patch("document_access.verify_delivery"):
             result = feishu_docs.publish_text_as_doc(
-                "app", "secret", markdown="tables", visibility="none", table_layout="native",
+                "app", "secret", markdown="tables", table_layout="native",
             )
 
         self.assertEqual(insert.call_count, 2)
@@ -321,7 +321,7 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
             publish_file_as_doc=mock.Mock(return_value={"url": "https://doc/import"}),
             publish_text_as_doc=mock.Mock(return_value={
                 "url": "https://doc/native", "visibility": True, "granted": False,
-                "structure_verified": True,
+                "structure_verified": True, "policy_verified": True,
             }),
         )
         with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
@@ -376,7 +376,7 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
             }),
         )
         with mock.patch.dict(sys.modules, {"feishu_docs": fake}):
-            with self.assertRaisesRegex(RuntimeError, "未证实收件人可读"):
+            with self.assertRaisesRegex(RuntimeError, "owner/link/group"):
                 feishu_bridge._publish_online_doc(
                     self.bot, "answer.md", grant_open_id="ou_owner", name="Answer",
                 )
@@ -398,7 +398,7 @@ class BridgeOnlineDocFallbackTests(unittest.TestCase):
                 'url': 'https://doc/readable', 'visibility': True,
             }))
         with mock.patch.dict(sys.modules, {'feishu_docs': fake}):
-            with self.assertRaisesRegex(RuntimeError, '结构完整'):
+            with self.assertRaisesRegex(RuntimeError, '结构未全部核实'):
                 feishu_bridge._publish_online_doc(self.bot, 'answer.md')
         fake.publish_file_as_doc.assert_not_called()
 
@@ -407,7 +407,7 @@ class PermissionProbeSafetyTests(unittest.TestCase):
     def test_docs_text_includes_a_readability_gate(self):
         groups = bridge_scope_audit.CAPABILITY_SPECS["docs-text"]["groups"]
         self.assertIn(
-            ["docs:permission.setting:write_only", "docs:permission.member:create", "drive:drive"],
+            ["docs:permission.setting:write_only", "docs:permission.setting", "drive:drive"],
             groups,
         )
 

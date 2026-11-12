@@ -1287,17 +1287,23 @@ def _cmd_write(args):
 COLLAB_CHAT_ENV = "FEISHU_DOC_COLLAB_CHAT_ID"
 
 
-def collab_chat_id(explicit=None):
+def collab_chat_id(explicit=None, bot=None):
     """The chat whose members inherit document access (SPEC-220 §8).
 
-    Kept in .env, never in the repo: it is a tenant-specific identifier and this
-    repository is published. Missing config fails loudly rather than silently
-    skipping the share, which would leave the next bot without access.
+    Uses the effective registry's tenant group, verified by the current app.
+    Missing owner/group identity fails instead of skipping the share.
     """
-    chat = explicit or audit._env_val(COLLAB_CHAT_ENV)  # noqa: SLF001
+    if explicit:
+        return explicit
+    if bot:
+        import document_access, feishu_rest
+        from send_feishu_msg import _creds_for
+        app, secret = _creds_for(bot)
+        return document_access.resolve_policy(app, feishu_rest.tenant_token(app, secret))["group_id"]
+    chat = None
     if not chat:
         raise SystemExit(
-            f"没有协作群：请在 .env 设 {COLLAB_CHAT_ENV}=<群 chat_id>，或用 --group 显式指定。"
+            "没有协作群：请提供 bot 身份，并核 registry.tenants 的 group_chat_id，或用 --group 显式指定。"
             "挂群而不是逐只挂 bot —— 新 bot 进群即自动继承（SPEC-220 §8）"
         )
     return chat
@@ -1306,7 +1312,7 @@ def collab_chat_id(explicit=None):
 def cmd_share(args):
     """把承载全部 bot 的群挂为该资源的协作者。默认 dry-run。"""
     bot = resolve_bot(args.bot)
-    chat = collab_chat_id(args.group)
+    chat = collab_chat_id(args.group, bot)
     info = inspect_url(args.url, bot)
     if not info.get("ok"):
         print(f"分享中止 · {info['verdict']}")
@@ -1346,7 +1352,14 @@ def cmd_share(args):
         if verdict.get("hint"):
             print(f"            {verdict['hint']}")
         return 2
-    print(f"  结果      ✅ 已挂群为 {args.perm} 协作者；群内所有 bot 立即生效")
+    checked = run_lark(["drive", "+member-list", "--token", token, "--type", kind, "--as", "bot"], profile=bot)
+    readback = _json_out(checked)
+    if checked.returncode or readback.get("ok") is not True or not any(
+            m.get("member_type") == "openchat" and m.get("member_id") == chat and m.get("perm") == args.perm
+            for m in (readback.get("data") or {}).get("items", [])):
+        print("  结果      ❌ 群权限写入后未回读通过")
+        return 2
+    print(f"  结果      ✅ 已回读群协作者为 {args.perm}")
     return 0
 
 
@@ -1384,6 +1397,43 @@ def _doc_owner_id(bot, token, kind):
         return (metas[0].get("owner_id") or "") if metas else ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def cmd_govern(args):
+    """One policy for docx/sheet/bitable/apps; dry-run is the default."""
+    import document_access
+    from send_feishu_msg import _creds_for
+    import feishu_rest
+    bot = resolve_bot(args.bot)
+    user_profile = None
+    if args.as_user:
+        user_profile, _ = user_read_profile(args.as_user)
+        bot = user_profile
+    app_id, secret = _creds_for(bot)
+    token = feishu_rest.tenant_token(app_id, secret)
+    policy = document_access.resolve_policy(app_id, token,
+        visibility="external" if args.external_reason else "tenant", external_reason=args.external_reason)
+    if user_profile:
+        from miaoda_access import UserDrive
+        logged = (_json_out(run_lark(["auth", "status"], profile=bot)).get("identities") or {}).get("user") or {}
+        if logged.get("openId") != policy["owner_id"]:
+            raise SystemExit("用户授权不是已认主人，拒绝变更权限")
+        response = _json_out(run_lark(["drive", "+inspect", "--url", args.url, "--as", "user"], profile=bot))
+        info = dict(response.get("data") or {}, ok=response.get("ok"))
+        transport = UserDrive(bot)
+    else:
+        info = inspect_url(args.url, bot)
+        transport = token
+    if not info.get("ok"):
+        raise SystemExit(f"资源解析失败：{info.get('verdict')}")
+    bot_info = feishu_rest.api("GET", document_access.BASE + "/bot/v3/info", token=token)
+    creator = (bot_info.get("bot") or {}).get("open_id")
+    if bot_info.get("code") != 0 or not creator:
+        raise SystemExit("创建者身份不可核实")
+    result = document_access.enforce(transport, info["token"], info["type"], policy,
+        apply=args.apply, allowed_owner=creator if not user_profile else None, receipt=args.receipt)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 def cmd_transfer_owner(args):
@@ -1428,7 +1478,7 @@ def cmd_transfer_owner(args):
                            "--token", token, "--type", kind,
                            "--data", json.dumps({"member_type": "openid", "member_id": target}),
                            "--old-owner-perm", args.old_owner_perm,
-                           "--params", json.dumps({"need_notification": False}),
+                           "--params", json.dumps({"need_notification": False, "stay_put": True}),
                            "--as", "bot", "--yes"], profile=bot, timeout=300)
         payload = _json_out(result)
         if result.returncode != 0 or payload.get("ok") is not True:
@@ -1457,6 +1507,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Link16 飞书文档 IO 入口（ARCH-130）")
     parser.add_argument("--bot", help="显式指定身份；缺省从 FEISHU_BRIDGE_SESSION 解析")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_create = sub.add_parser("create", help="原生表格创建：固定bot身份，自动转owner/设群权限并回读")
+    p_create.add_argument("kind", choices=("sheet", "bitable"))
+    p_create.add_argument("--title", required=True)
+    p_create.add_argument("--spec", help="JSON文件：官方sheets/styles/values或Base初始字段等参数")
+    p_create.add_argument("--state", required=True, help="本次创建独占目录；失败后保留并续原资源")
+    p_create.add_argument("--external-reason", default="", help="仅用户明确external时填写其要求")
+    create_action = p_create.add_mutually_exclusive_group()
+    create_action.add_argument("--apply", action="store_true", help="执行一次创建与权限治理；缺省仅预检")
+    create_action.add_argument("--resume", action="store_true", help="只恢复原资源权限，不重发创建")
+    def create(args):
+        import docio_create
+        return docio_create.run(args, sys.modules[__name__])
+    p_create.set_defaults(func=create)
 
     p_prof = sub.add_parser("profiles", help="把每只 bot 的应用注册成同名 lark-cli profile")
     p_prof.add_argument("--apply", dest="dry_run", action="store_false", default=True,
@@ -1503,10 +1567,18 @@ def main(argv=None):
 
     p_share = sub.add_parser("share", help="把协作群挂为该资源的协作者（默认 dry-run）")
     p_share.add_argument("url")
-    p_share.add_argument("--group", help="群 chat_id；缺省读 .env 的 FEISHU_DOC_COLLAB_CHAT_ID")
+    p_share.add_argument("--group", help="群 chat_id；缺省读 registry 中该 bot 租户的 group_chat_id")
     p_share.add_argument("--perm", default="edit", choices=("view", "edit", "full_access"))
     p_share.add_argument("--apply", action="store_true", help="真正挂上（缺省只预览）")
     p_share.set_defaults(func=cmd_share)
+
+    p_govern = sub.add_parser("govern", help="统一 owner/组织内链接/租户协作群，并回读验收")
+    p_govern.add_argument("url")
+    p_govern.add_argument("--apply", action="store_true")
+    p_govern.add_argument("--external-reason", default="", help="仅用户明确 external 时填写其要求")
+    p_govern.add_argument("--receipt", help="新回执 JSON 路径；默认自动保存")
+    p_govern.add_argument("--as-user", nargs="?", const="auto", help="显式使用已授权主人身份；可指定 CLI profile")
+    p_govern.set_defaults(func=cmd_govern)
 
     p_own = sub.add_parser("transfer-owner",
                            help="把 bot 建的文档所有权交给主人，bot 保留可管理（默认 dry-run）")
