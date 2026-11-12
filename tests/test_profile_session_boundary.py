@@ -108,17 +108,26 @@ def test_kimi_uses_supervised_close_before_retiring_pointer(boundary, tmp_path, 
 
 
 @pytest.fixture
-def failover_env(boundary, tmp_path, monkeypatch):
+def failover_env(boundary, tmp_path, monkeypatch, request):
     bot, rec, thread, history, close = boundary
+    source_profile, source_runtime = getattr(request, 'param', ('cxp2', 'codex'))
+    bot.update(profile=source_profile, agent=source_runtime)
+    rec.update(profile=source_profile, agent=source_runtime)
+    fb._session_file('unit').write_text(json.dumps(rec), encoding='utf-8')
     persisted = dict(bot)
     monkeypatch.setattr(fb, 'load_bots', lambda: [dict(persisted)])
     monkeypatch.setattr(watchdog, 'session_record', lambda _: fb.load_session('unit'))
-    rows = [dict(profile='cxp2', runtime='codex', status='ok', weekly_percent=100, verdict='满'),
-            dict(profile='cxp', runtime='codex', status='ok', weekly_percent=30, verdict='够用')]
+    rows = [dict(profile=source_profile, runtime=source_runtime, status='ok', session_percent=0,
+                 weekly_percent=100, verdict='满'),
+            dict(profile='cxp', runtime='codex', status='ok', session_percent=0,
+                 weekly_percent=30, verdict='够用')]
     monkeypatch.setattr(watchdog.agent_quota, 'collect', lambda: rows)
     monkeypatch.setattr(watchdog.agent_quota, 'auto_failover_profiles', lambda: {'cxp', 'cxp2'})
+    monkeypatch.setattr(watchdog.agent_quota.agent_runtime, '_profile_document', lambda: {'profiles': {
+        source_profile: {'runtime': source_runtime, 'auto_failover_fallbacks': ['cxp']},
+        'cxp': {'runtime': 'codex'}}})
     monkeypatch.setattr(watchdog, '_failover_gate', lambda _: (True, 'test gate'))
-    snapshot = Mock(return_value={'bot': 'unit', 'old_profile': 'cxp2', 'cwd': str(tmp_path),
+    snapshot = Mock(return_value={'bot': 'unit', 'old_profile': source_profile, 'cwd': str(tmp_path),
                                  'session_id': 'old-thread', 'transcript': str(history)})
     monkeypatch.setattr(watchdog, 'snapshot_handoff', snapshot)
     monkeypatch.setattr(watchdog, 'build_handoff_prompt', lambda *args: 'resume original work, verify receipts first')
@@ -152,6 +161,34 @@ def test_watchdog_failover_uses_fresh_thread_after_exact_profile_change(failover
     assert watchdog.failover('unit', target='cxp') is True
     failover_env['starter'].assert_called_once()
     failover_env['injected'].assert_called_once()
+
+
+@pytest.mark.parametrize('failover_env', [('kp', 'kimi')], indirect=True)
+def test_approved_kimi_to_codex_handoff_clears_both_pointers_and_keeps_history(
+        failover_env, boundary, tmp_path, monkeypatch):
+    pointer = tmp_path / 'bridge-kimi-thread-unit.json'
+    pointer.write_text('{"session_id":"old-kimi-session"}', encoding='utf-8')
+
+    class Recovery:
+        def __init__(self, *args): pass
+        def __enter__(self): return self
+        def finish(self, **kwargs):
+            assert failover_env['snapshot'].called
+            failover_env['commands'].assert_called_once_with(['stop', '--bot', 'unit'])
+            assert boundary[4].called
+            return {'reaped_pids': []}
+        def __exit__(self, *args): pass
+
+    monkeypatch.setattr(fb.kimi_process, 'KimiClose', Recovery)
+    assert watchdog.failover('unit') is True
+    assert not boundary[2].exists()
+    assert json.loads(pointer.read_text()) == {'closed': True}
+    assert boundary[3].read_text(encoding='utf-8') == 'native-history-must-remain'
+    assert fb.load_session('unit')['chat_id'] == 'original-chat'
+    assert fb.load_session('unit')['cwd'] == str(tmp_path)
+    failover_env['starter'].assert_called_once()
+    failover_env['injected'].assert_called_once()
+    assert failover_env['injected'].call_args.kwargs['runtime_bot']['profile'] == 'cxp'
 
 
 def test_watchdog_close_failure_never_starts_or_injects_another_session(failover_env, boundary):

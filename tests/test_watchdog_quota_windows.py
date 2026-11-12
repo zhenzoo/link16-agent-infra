@@ -253,6 +253,60 @@ def test_status_does_not_report_cross_series_account_as_a_usable_failover(monkey
     assert w.failover_readiness([source, cxp, ccp2])["claude"]["usable"] == ["ccp2"]
 
 
+@pytest.fixture
+def kimi_fallback(monkeypatch):
+    profiles = {"kp": {"runtime": "kimi", "auto_failover_target": True,
+                       "auto_failover_fallbacks": ["cxp"]},
+                "kp2": {"runtime": "kimi", "auto_failover_target": True},
+                "cxp": {"runtime": "codex", "auto_failover_target": True},
+                "ccp": {"runtime": "claude", "auto_failover_target": True}}
+    monkeypatch.setattr(q.agent_runtime, "_profile_document", lambda: {"profiles": profiles})
+    source = dict(row(short=0, weekly=100), profile="kp", runtime="kimi")
+    backup = dict(source, profile="kp2", weekly_percent=80, verdict="够用")
+    cxp = dict(backup, profile="cxp", runtime="codex", weekly_percent=20)
+    return profiles, source, backup, cxp
+
+
+def test_approved_fallback_is_used_only_after_same_series_is_unavailable(kimi_fallback):
+    _, source, backup, cxp = kimi_fallback
+    assert q.pick([source, cxp, backup], exclude=["kp"], source=source) == backup
+    assert q.pick([source, cxp], exclude=["kp"], source=source) == cxp
+    assert q.pick([cxp], source=source, prefer_runtime="kimi") is None
+    assert q.pick([dict(cxp, verdict="问不到")], source=source) is None
+    assert q.pick([dict(cxp, verdict="满", weekly_percent=100)], source=source) is None
+    assert q.pick([dict(cxp, profile="ccp", runtime="claude")], source=source) is None
+    assert q.pick([dict(source, verdict="够用")], source=cxp) is None
+
+
+def test_fallback_still_requires_target_opt_in(kimi_fallback):
+    profiles, source, _, cxp = kimi_fallback
+    profiles["cxp"]["auto_failover_target"] = False
+    assert q.pick([cxp], source=source) is None
+
+
+@pytest.mark.parametrize("configured", ["cxp", ["missing"], ["cxp", "cxp"], ["kp"], [None]])
+def test_malformed_fallback_never_broadens_selection(kimi_fallback, configured):
+    profiles, source, _, cxp = kimi_fallback
+    profiles["kp"]["auto_failover_fallbacks"] = configured
+    with pytest.raises(ValueError, match="auto_failover_fallbacks"):
+        q.pick([cxp], source=source)
+
+
+def test_readiness_and_explicit_failover_share_approved_fallback(kimi_fallback, monkeypatch):
+    import feishu_bridge as fb
+    _, source, _, cxp = kimi_fallback
+    monkeypatch.setattr(w, "_iter_bots", lambda: [{"name": "unit"}])
+    monkeypatch.setattr(w, "_profile_of", lambda *a: "kp")
+    assert w.failover_readiness([source, cxp])["kimi"]["usable"] == ["cxp"]
+    monkeypatch.setattr(fb, "load_bots", lambda: [{"name": "unit", "profile": "kp"}])
+    monkeypatch.setattr(w, "session_record", lambda _: {"profile": "kp"})
+    monkeypatch.setattr(q, "collect", lambda: [source, cxp])
+    monkeypatch.setattr(w, "_failover_gate", lambda _: (True, "allowed"))
+    monkeypatch.setattr(w, "snapshot_handoff", lambda *a, **kw: {"bot": "unit"})
+    monkeypatch.setattr(w, "build_handoff_prompt", lambda *a: "original task")
+    assert w.failover("unit", target="cxp", dry_run=True)
+
+
 @pytest.mark.parametrize("screen,quota_row,expected", [
     (SESSION_SCREEN, row(reset_at=20000), "short_wait"),
     (SESSION_SCREEN, {"profile": "ccp2", "runtime": "claude", "status": "error",

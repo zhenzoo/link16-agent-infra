@@ -188,17 +188,20 @@ transcript 和短时 `session_reset_at`），随原有 120 秒巡检到点核实
 排队进限额屏；原 cron 配置不被删除，到点恢复后的下次正常时刻照原计划运行。
 
 **周额度到限**：只有对应周窗口确实到限，才执行下面的换号流程。可自动接手的账号
-必须同时满足：本机 registry 标了 `auto_failover_target: true`、实时额度可用、runtime 相同，
-且 profile 名去掉末尾数字后属于同一系列（`ccp ↔ ccp2`、`cxp ↔ cxp2`、`kp ↔ kp2`；
-`ccp ↔ cck` 和 `ccp ↔ cxp` 都不行）。同系列没有可用号就留在原会话并告警。
-看门狗的手动 `failover --to` 也守同样的周额度与同系列条件；主人显式 `/account` 是另一条手动选择路径。
+必须同时满足：本机 registry 标了 `auto_failover_target: true`、实时额度可用，并符合源账号的接管范围。
+默认优先选 runtime 相同且 profile 名去掉末尾数字后同系列的账号（`ccp ↔ ccp2`、`cxp ↔ cxp2`、`kp ↔ kp2`）。
+同系列无可用号时，只能按源 profile 的 `auto_failover_fallbacks` 有序名单选主人明确批准的其他账号；
+例如本机在 `profiles.kp` / `profiles.kp2` 配置 `"auto_failover_fallbacks": ["cxp"]`，允许 Kimi 周额度满后由 CXP 接手。
+这是一条单向授权，不会自动允许 CXP 回切 Kimi，也不放开 Claude 或其他未列出的账号。名单缺失就保持原来的同系列限制；
+重复、未知、自身或类型错误配置拒绝选号。备用目标仍须显式开启候选且实时有额度；所有候选都不可用则保留原会话并告警。
+`pick`、`failover --to` 和 readiness 共用此授权判断；显式 `--prefer-runtime` 仍是严格限制。短时限额和每日切号预算不因跨平台授权改变。
 
 换号八步，第 3 步之后每一步失败都发 DM 喊人、绝不静默：
 
-1. 选号（先按本机 effective registry 中各 `profiles.<name>.auto_failover_target: true` 限定**可自动切入**的账号，再排除刚撞的 → 只留同 runtime、同 profile 系列 → 余量大优先；**「问不到」的号绝不选**）。只要有 profile 写了该开关，未写和 `false` 都不入选；值必须是布尔值。本机尚无任何开关时，迁移期沿用旧 `auto_failover_profiles` 名单；两种配置都没有则不自动换号。不同机器只标记实际已注册的 profile，不为缺席账号补空记录。
+1. 选号（先按本机 effective registry 中各 `profiles.<name>.auto_failover_target: true` 限定**可自动切入**的账号，再排除刚撞的 → 同 runtime、同 profile 系列优先 → 无可用同系列时按已批准 fallback 顺序 → 同优先级余量大优先；**「问不到」的号绝不选**）。只要有 profile 写了该开关，未写和 `false` 都不入选；值必须是布尔值。本机尚无任何开关时，迁移期沿用旧 `auto_failover_profiles` 名单；两种配置都没有则不自动换号。不同机器只标记实际已注册的 profile，不为缺席账号补空记录。
 2. 过闸（同一条周额度提示连续 2 轮出现 · 该 bot 24h 内自动换号 < 2 次）
 3. **交接包快照**（必须在关会话之前——关了会话记录就没了）
-4. DM 播报“周额度挡住了谁、已用/剩余多少、周重置时间和同系列接手号”
+4. DM 播报“周额度挡住了谁、已用/剩余多少、周重置时间和接手号”；明确同系列或已授权的跨平台接管
 5. 写名册 `agent_runtime.persist_account`
 6. 先 `stop --bot X` 停旧桥消费者，核退出成功，避免其按内存旧账号重建会话；再经 `feishu_bridge.close_session_runtime` 关闭旧会话。与 `/account`、`/cd` 共用生命周期锁，确认关闭后清 Codex/Kimi 恢复指针和旧运行绑定，保留原生历史、工作目录与消息路由。关闭失败保留恢复信息并停止，不继续冷启；名册已选新号的状态须如实告知。
 7. **启动该 bot 的新桥进程**（`start --bot X`），核命令成功才继续；同一 bot 的 stop/start 分列在第6/7步。

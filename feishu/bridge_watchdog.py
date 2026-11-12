@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""bridge_watchdog.py — Link16 看门狗：短时限额等恢复，周限额同系列接管。
+"""bridge_watchdog.py — Link16 看门狗：短时限额等恢复，周限额按授权接管。
 
 形态与 `feishu/bridge_cron.py` 完全一致：**单文件 + run/start/stop/status 子命令**，起它就完了。
 （主人 2026-08-19 / 2026-08-20 两次拍板：别搞复杂，原来什么形态就什么形态；
@@ -1483,18 +1483,17 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         if target == cur:
             log(f"❌ 目标号 {target} 就是当前号，拒绝无意义的换号")
             return False
-        if not agent_quota.same_failover_series(curr, chosen):
-            log(f"❌ {cur} → {target} 跨 runtime 或跨 profile 系列，看门狗拒绝换号")
+        if agent_quota.failover_priority(curr, chosen) is None:
+            log(f"❌ {cur} → {target} 不同系列且未配置获准 fallback，看门狗拒绝换号")
             return False
     else:
-        chosen = agent_quota.pick(candidate_rows, exclude=[cur],
-                                  prefer_runtime=curr["runtime"], source=curr)
+        chosen = agent_quota.pick(candidate_rows, exclude=[cur], source=curr)
     if not chosen:
         notify(bot_name, "no_target",
-               f"🔴 {bot_name} 的 {cur} 周额度到限额，但**同 runtime、同 profile 系列**"
+               f"🔴 {bot_name} 的 {cur} 周额度到限额，但**同系列及明确获准的备用账号**"
                "没有可用且获准自动接手的号；原会话未关闭。\n"
                + "\n".join(f"· {r['profile']} {r['verdict']} · {_weekly_balance(r)}"
-                           for r in candidate_rows if agent_quota.same_failover_series(curr, r)))
+                           for r in candidate_rows if agent_quota.failover_priority(curr, r) is not None))
         return False
     tgt = chosen["profile"]
     log(f"选号：{cur}（{curr.get('verdict')}）→ {tgt}（{chosen['verdict']}·周{chosen['weekly_percent']}%"
@@ -1520,10 +1519,12 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         print("\n---- 将注入的接手 prompt ----\n" + prompt)
         return True
 
+    selection = ("同系列" if agent_quota.same_failover_series(curr, chosen)
+                 else f"已获准的备用账号（{curr['runtime']} → {chosen['runtime']}）")
     notify(bot_name, "limit",
            f"🔴 {bot_name} 的 {cur} **周额度**挡住了当前会话；"
            f"{_weekly_balance(curr)}，预计 {curr.get('weekly_reset')} 重置。\n"
-           f"→ 只在同类型账号内切到 {tgt}（{_weekly_balance(chosen)}），"
+           f"→ 切到{selection} {tgt}（{_weekly_balance(chosen)}），"
            "并把原任务交给新会话接手。")
 
     # ④ 写名册
@@ -1719,13 +1720,13 @@ def cmd_run(auto=True):
 
     规则按顺序匹配，先命中先处理：
       R3 停在交互 picker           → **什么都不做**（在等主人回答，注回车会替他乱选）
-      R2 短时限额→原会话到点恢复；周限额→同系列换号并交接
+      R2 短时限额→原会话到点恢复；周限额→同系列优先、获准备用号接管
       R1 API/网络错 + 静止 2 轮     → 注「继续」
       R8 确认执行中连续静默 ≥60min → 复核工具/回合后按 Esc；等待不计时，同回合只动一次
       R5 Codex 回合被服务端掐断     → 告警 + 注「继续」；连着 3 个回合都被掐 → 停手只告警
       R4 桥进程 活→死              → 告警（每轮一次·不针对面板）
     要支持一种新的中断类型，就在这张表里加一行。"""
-    log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 短时等待·周限额同系列换号 / R3 picker跳过 / "
+    log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 短时等待·周限额按授权换号 / R3 picker跳过 / "
         f"R8 执行静默{STALL_MIN}min后台复核 / R5 Codex回合被掐断 / R6 水位损坏 / R4 桥看护 · "
         f"覆盖【全部 workspace 的全部面板】· 一视同仁")
     states = {}                      # {pty: {"hash","err_stuck","lim_stuck","last_nudge"}}
@@ -1790,7 +1791,7 @@ def cmd_run(auto=True):
                     st["err_stuck"] = st["lim_stuck"] = 0
                     continue
 
-                # ---- R2 · 短时限额等恢复；周限额才同系列换号 ----
+                # ---- R2 · 短时限额等恢复；周限额按 registry 授权换号 ----
                 prof = _profile_of(bot_name, bots.get(bot_name)) if bot_name else None
                 limited, why, uncertain = (is_limited(text, quota.get(prof)) if prof
                                            else (False, "认不出是哪个 bot", False))
@@ -2046,7 +2047,7 @@ def failover_readiness(rows=None):
       更要命的是 `status` 照样三行全绿（它只看进程 / 名册 / 桥，**不看"有没有号可切"**）。
       这正是本仓最容易翻车的形状：**不报错、看着正常、什么都没发生。**
 
-    返回每种 runtime 的 bot 数、同系列可接手号及无接手号的源 profile。"""
+    返回每种 runtime 的 bot 数、获准可接手号及无接手号的源 profile。"""
     rows = rows if rows is not None else agent_quota.collect()
     allowed = agent_quota.auto_failover_profiles()
     candidates = [r for r in rows if allowed is None or r["profile"] in allowed]
@@ -2069,7 +2070,7 @@ def failover_readiness(rows=None):
                 continue
             targets = [r["profile"] for r in candidates if r["profile"] != name
                        and agent_quota.is_usable(r)
-                       and agent_quota.same_failover_series(source, r)]
+                       and agent_quota.failover_priority(source, r) is not None]
             if targets:
                 usable.update(targets)
             else:
@@ -2339,14 +2340,14 @@ def cmd_status(verbose=False):
         print("  ⚠️ 名册里没有能解析出 profile 的 bot —— 无从判断")
     for rt, v in sorted(ready.items()):
         mark = "✅" if v["ok"] else "🔴"
-        print(f"  {mark} {rt:7} 本机 {v['bots']:>2} 个 bot 在用 · 同系列可切 {v['usable'] or '无'}"
+        print(f"  {mark} {rt:7} 本机 {v['bots']:>2} 个 bot 在用 · 获准可切 {v['usable'] or '无'}"
               f" · 无接手号 {v['blocked'] or '无'}")
     if stale:
         print("\n" + why)          # 长输出会把开头刷走，结尾再提一次
     dead = [rt for rt, v in ready.items() if not v["ok"]]
     if dead:
-        print(f"  🔴 **{dead} 有 profile 在周额度到限时找不到同系列可用号**。")
-        print("     核对目标号是否登记为 auto_failover_target，以及它的实时额度。")
+        print(f"  🔴 **{dead} 有 profile 在周额度到限时找不到获准可用号**。")
+        print("     核对目标 auto_failover_target、源 auto_failover_fallbacks 及实时额度。")
     return 0
 
 

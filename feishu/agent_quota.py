@@ -508,7 +508,7 @@ def is_usable(row):
 
 
 def same_failover_series(source, target):
-    """Automatic handoff stays inside one runtime and one numbered profile series."""
+    """The first choice stays inside one runtime and one numbered profile series."""
     if not isinstance(source, dict) or not isinstance(target, dict):
         return False
     if not source.get("runtime") or source["runtime"] != target.get("runtime"):
@@ -517,6 +517,31 @@ def same_failover_series(source, target):
     if not all(isinstance(name, str) and name for name in names):
         return False
     return re.sub(r"\d+$", "", names[0]) == re.sub(r"\d+$", "", names[1])
+
+
+def failover_priority(source, target):
+    """Same-series first; other targets require an explicit, directed registry grant.
+
+    This only defines policy/order. Callers must still check live quota and the
+    target's auto_failover_target flag. Missing configuration grants no fallback.
+    """
+    if same_failover_series(source, target):
+        return 0
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return None
+    profiles = agent_runtime._profile_document()["profiles"]
+    name, target_name = source.get("profile"), target.get("profile")
+    registered = profiles.get(name, {})
+    configured = registered.get("auto_failover_fallbacks", [])
+    if (not isinstance(configured, list)
+            or any(not isinstance(item, str) or not item for item in configured)
+            or len(configured) != len(set(configured))
+            or name in configured or any(item not in profiles for item in configured)):
+        raise ValueError(f"profile {name} 的 auto_failover_fallbacks 必须是不重复、已登记且不含自身的 profile 名数组")
+    if (registered.get("runtime") != source.get("runtime")
+            or profiles.get(target_name, {}).get("runtime") != target.get("runtime")):
+        return None
+    return configured.index(target_name) + 1 if target_name in configured else None
 
 
 def auto_failover_profiles():
@@ -554,24 +579,26 @@ def pick(rows, exclude=(), prefer_runtime=None, source=None):
     """选一个「最该切过去」的 profile。规则（按序）：
        ① effective registry 的自动候选范围（如已配置）
        ② 只考虑 verdict=够用/紧张（问不到的绝不选）
-       ③ 指定 runtime 时绝不跨 runtime；指定 source 时还须同 profile 系列
-       ④ 按 5h/周较差的余量排序
+       ③ 指定 runtime 时绝不跨 runtime；指定 source 时先同系列，再按显式 fallback 顺序
+       ④ 同优先级按 5h/周/月较差的余量排序
        返回 row 或 None。"""
     allowed = auto_failover_profiles()
     excluded = set(exclude)
-    ok = [r for r in rows if is_usable(r)
-          and r["profile"] not in excluded
-          and (not prefer_runtime or r["runtime"] == prefer_runtime)
-          and (source is None or same_failover_series(source, r))
-          and (allowed is None or r["profile"] in allowed)]
+    ok = []
+    for r in rows:
+        if (not is_usable(r) or r["profile"] in excluded
+                or (prefer_runtime and r["runtime"] != prefer_runtime)
+                or (allowed is not None and r["profile"] not in allowed)):
+            continue
+        priority = failover_priority(source, r) if source is not None else 0
+        if priority is not None:
+            worst = max(r["session_percent"] or 0, r["weekly_percent"] or 0,
+                        r.get("monthly_percent") or 0)
+            ok.append((priority, worst, r))
     if not ok:
         return None
 
-    def score(r):
-        worst = max(r["session_percent"] or 0, r["weekly_percent"] or 0, r.get("monthly_percent") or 0)
-        return worst
-
-    return sorted(ok, key=score)[0]
+    return min(ok, key=lambda item: item[:2])[2]
 
 
 def _print_table(rows):

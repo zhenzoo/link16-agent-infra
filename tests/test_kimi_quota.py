@@ -53,6 +53,7 @@ def test_live_ratios_profile_identity_and_existing_picker(home, monkeypatch):
     target = dict(source, profile="kp2", verdict="够用", weekly_percent=20)
     cross_runtime = dict(target, profile="cxp", runtime="codex", weekly_percent=0)
     monkeypatch.setattr(q, "auto_failover_profiles", lambda: frozenset({"kp", "kp2", "cxp"}))
+    monkeypatch.setattr(q.agent_runtime, "_profile_document", lambda: {"profiles": {}})
     assert q.pick([source, target, cross_runtime], exclude=["kp"], source=source) == target
     assert q.pick([source, dict(target, verdict="问不到"), cross_runtime],
                   exclude=["kp"], source=source) is None
