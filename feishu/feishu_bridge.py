@@ -1896,7 +1896,7 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
         # A saved/partial draft belongs to its original handoff. Never append a
         # later message to it, and never clear it to make the queue look healthy.
         try:
-            empty = cron_delivery._draft(read_screen(pty, None)) in ('', 'Ask Codex to do anything')
+            empty = cron_delivery.empty_composer(read_screen(pty, None))
         except RuntimeError as exc:
             raise bridge_inbox.RetryableHandoffError('输入框无法读取；本次零写入') from exc
         if not empty:
@@ -1912,7 +1912,8 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
         wmux("enter", pty, *allow)
     if is_codex:
         # This is only a successful transport call. Inbox + the native hook
-        # decide reception; recovery alone may retry Enter on an idle exact draft.
+        # decide reception; recovery may retry Enter on an idle exact draft or
+        # the explicitly advertised queue Tab on an active exact draft.
         return True
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
     tries = 15 if is_kimi else INJECT_VERIFY_TRIES

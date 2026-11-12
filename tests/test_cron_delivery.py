@@ -74,6 +74,34 @@ def test_busy_or_unknown_native_state_never_retries(scene, state):
     scene.fb.wmux.assert_not_called()
 
 
+def test_active_exact_owned_draft_uses_advertised_queue_tab_once(scene):
+    scene.inbox.scheduled_attempt(scene.row['id'])
+    scene.fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    scene.fb.read_screen.return_value = f'Working\n\n› {scene.marker}\n \n  tab to queue message     48% context left'
+    scene.fb.wmux.side_effect = lambda *a: scene.inbox.confirm(scene.marker, 'thread')
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    scene.fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    scene.fb._inject.assert_not_called()
+
+
+@pytest.mark.parametrize('state,screen', [
+    ('active', 'tab to queue message\n\n› {marker}\n\nstatus'),
+    ('active', '› other draft\n\n  tab to queue message'),
+    ('active', '› {marker}\n tab to queue message'),
+    ('waiting', '› {marker}\n\n  tab to queue message'),
+    ('unknown', '› {marker}\n\n  tab to queue message'),
+    ('active', '• Compacting context (1m 34s • esc to interrupt)\n  └ Making room to continue.\n\n› {marker}\n\n  tab to queue message'),
+])
+def test_queue_tab_requires_active_exact_draft_live_footer_and_no_compaction(scene, state, screen):
+    scene.fb.bridge_activity.read_activity.return_value = {'state': state}
+    scene.fb.read_screen.return_value = screen.format(marker=scene.marker)
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    scene.fb.wmux.assert_not_called()
+    scene.fb._inject.assert_not_called()
+
+
 @pytest.mark.parametrize('retry_safe', [False, True])
 def test_compacting_footer_blocks_enter_and_repasting_even_if_native_state_says_idle(scene, retry_safe):
     if retry_safe:
@@ -289,6 +317,32 @@ def test_proven_zero_write_recovers_after_restart_via_protected_injection(scene,
     assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
     assert delivery.recover(scene.fb, scene.bot, scene.job)
     assert scene.fb._inject.call_count == 2
+    scene.fb.wmux.assert_not_called()
+
+
+@pytest.mark.parametrize('placeholder', ['', 'Ask Codex to do anything'])
+def test_proven_unsent_input_can_queue_during_active_turn_without_waiting_for_idle(scene, monkeypatch, placeholder):
+    not_written(scene, monkeypatch)
+    scene.fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    scene.fb.read_screen.return_value = f'Welcome\n› {placeholder}\n\nstatus'
+    scene.fb._inject.side_effect = lambda *a, **k: scene.inbox.confirm(scene.marker, 'thread')
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 2  # one original zero-write, one accepted retry
+    scene.fb.wmux.assert_not_called()
+
+
+@pytest.mark.parametrize('state,screen', [
+    ('active', ''), ('active', '› someone else\n\nstatus'),
+    ('waiting', '› \n\nstatus'), ('unknown', '› \n\nstatus'),
+])
+def test_proven_unsent_active_recovery_still_requires_readable_empty_composer(scene, monkeypatch, state, screen):
+    not_written(scene, monkeypatch)
+    scene.fb.bridge_activity.read_activity.return_value = {'state': state}
+    scene.fb.read_screen.return_value = screen
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 1
     scene.fb.wmux.assert_not_called()
 
 
