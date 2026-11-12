@@ -13,6 +13,7 @@ from bridge_events import normalize_codex_notification
 
 CONTRACT = "codex-startup-v2"
 STARTUP_TIMEOUT_SEC = 60
+ACCOUNT_DISCOVERY_ATTEMPTS = 3
 
 
 def state_path(state_dir, bot, kind="startup"):
@@ -109,13 +110,16 @@ class TuiGateway:
     No prompts, tool arguments, credentials or raw notifications are persisted.
     """
     def __init__(self, upstream_url, before_session, on_request=None, turn_modifier=None,
-                 on_turn_accepted=None, on_turn_result=None):
+                 on_turn_accepted=None, on_turn_result=None, on_retry=None):
         self.upstream_url = upstream_url
         self.before_session = before_session
         self.on_request = on_request or (lambda method: None)
         self.turn_modifier = turn_modifier or (lambda raw: raw)
         self.on_turn_accepted = on_turn_accepted or (lambda effort, turn_id: None)
         self.on_turn_result = on_turn_result or (lambda request, turn_id: None)
+        self.on_retry = on_retry or (lambda method, attempt, limit: None)
+        self.account_retries = 0
+        self.session_requested = threading.Event()
         self.attached = threading.Event()
         self.failed = threading.Event()
         self.error = ""
@@ -129,9 +133,10 @@ class TuiGateway:
         self.event_client_lock = threading.Lock()
 
     def fail(self, message):
-        if not self.attached.is_set():
-            self.error = message
-            self.failed.set()
+        with self.condition:
+            if not self.attached.is_set() and not self.failed.is_set():
+                self.error = message
+                self.failed.set()
 
     def start(self):
         from websockets.sync.server import serve
@@ -208,12 +213,40 @@ class TuiGateway:
         from websockets.sync.client import connect
         pending = {}
         pending_turns = {}
+        pending_accounts = {}
         try:
             with connect(self.upstream_url, proxy=None, max_size=None, open_timeout=5, close_timeout=2) as upstream:
                 def responses():
                     try:
                         for raw in upstream:
                             msg = json.loads(raw)
+                            account_request = pending_accounts.pop(msg.get("id"), None)
+                            if account_request is not None:
+                                error = msg.get("error") or {}
+                                # Codex 0.167 account/read can spend 15 seconds on
+                                # workspace routing discovery, then abort startup.
+                                # Retry only that explicit transient, read-only
+                                # failure. Never replay auth refreshes or turns.
+                                with self.condition:
+                                    retry = (not self.session_requested.is_set()
+                                             and not self.attached.is_set()
+                                             and not self.failed.is_set()
+                                             and not self.stopped
+                                             and client.close_code is None
+                                             and (account_request.get("params") or {}).get("refreshToken", False) is False
+                                             and error.get("code") == -32603
+                                             and error.get("message") == "workspace routing discovery timed out"
+                                             and self.account_retries < ACCOUNT_DISCOVERY_ATTEMPTS - 1)
+                                    if retry:
+                                        self.account_retries += 1
+                                        attempt = self.account_retries + 1
+                                if retry:
+                                    pending_accounts[msg["id"]] = account_request
+                                    self.on_retry("account/read", attempt, ACCOUNT_DISCOVERY_ATTEMPTS)
+                                    upstream.send(json.dumps(account_request))
+                                    continue
+                                if error:
+                                    self.fail("account/read: " + error.get("message", "请求被拒绝"))
                             method = pending.pop(msg.get("id"), None)
                             turn_request = pending_turns.pop(msg.get("id"), None)
                             if turn_request:
@@ -251,10 +284,14 @@ class TuiGateway:
                 reader.start()
                 for raw in client:
                     msg = json.loads(raw)
+                    if msg.get("method") == "account/read" and "id" in msg and not self.attached.is_set():
+                        pending_accounts[msg["id"]] = msg
+                        self.on_request("account/read")
                     if msg.get("method") in {"thread/start", "thread/resume"} and not self.attached.is_set():
                         if "id" not in msg:
                             raise RuntimeError("TUI 会话请求缺少 request id")
                         pending[msg["id"]] = msg["method"]
+                        self.session_requested.set()
                         self.on_request(msg["method"])
                     if msg.get("method") == "turn/start":
                         forwarded = self.turn_modifier(raw)

@@ -605,6 +605,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
 - 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。三平台的官方更新检查先经 `agent_update.ensure` 完成，随后才开始原生就绪计时；更新按连续5秒无进展退出，失败继续启动当前版本，不挤占原生启动窗口。app-server 分支只按协议确认就绪，不等待模型预热。已授权且未过期的文本 `/close /new /stop` 在持久收件箱优先于普通消息、控制之间保持接收顺序；更新、shell和原生就绪等待协作取消，释放原启动锁后由原控制路径处理。终端正文仍串行提交，不并发注入。网络调用、OS查询和正在完成的原子提交不被强行中断，因此不承诺端到端零等待。
+- Codex 启动期的 `account/read` 若返回 `-32603 / workspace routing discovery timed out`，仅在尚未请求 thread 且 `refreshToken` 未启用时，在同一连接内原样重试只读账号查询，整次启动最多 3 次查询；仍受原有 60s 启动窗口约束。原生 CLI 省略的 `refreshToken` 按协议默认 false 处理。展示账号查询与重试阶段，保留第一条具体错误；认证拒绝、主动刷新、已接入会话和业务 `turn/start` 不适用。就绪仍须真实 thread 成功响应及观察连接，不预提交模型任务。持续网络故障耗尽预算后明确报原始原因，不承诺离线可启动。
 - Codex 未取得本次 worker 回执时，若工作区仍是无 agent 标签的 shell、系统核对 shell 的进程创建时间且没有子进程、输入行是空 `$` 或本次完整 launcher，则自动恢复一次：空行重发 launcher，完整草稿只补 Enter。慢 worker、未知读屏、其他草稿或原生失败不重贴。恢复后仍须同一 startup_id 的原生 ready；失败当前提示可清除，但 `bridge-startup-failures-<bot>.jsonl` 保留现场历史。
 - **尚未提交 launcher 的超时**：保留工作区、pty、命令和 startup_id 到原会话记录的 `pending_launch`；持久队列在同一工作区续等，不报永久启动失败、不要求主人重发、不另建窗口。launcher 已提交后的响应不确定仍按原生启动回执判断，不能套用此安全重试分支。
 

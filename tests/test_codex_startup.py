@@ -107,6 +107,75 @@ class ReadyContractTests(unittest.TestCase):
 
 
 class GatewayTests(unittest.TestCase):
+    def account_case(self, *, failures=1, message="workspace routing discovery timed out",
+                     code=-32603, params=None, method="account/read", attached=False,
+                     session_requested=False):
+        calls, retries = [], []
+        def upstream(ws):
+            for raw in ws:
+                msg = json.loads(raw)
+                calls.append(msg)
+                error = {"code": code, "message": message}
+                ws.send(json.dumps({"id": msg["id"], **(
+                    {"error": error} if len(calls) <= failures else
+                    {"result": {"account": {"type": "chatgpt"}}})}))
+        with serve(upstream, "127.0.0.1", 0) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            gateway = startup.TuiGateway(
+                f"ws://127.0.0.1:{server.socket.getsockname()[1]}", mock.Mock(),
+                on_retry=lambda *args: retries.append(args))
+            if attached:
+                gateway.attached.set()
+            if session_requested:
+                gateway.session_requested.set()
+            try:
+                with connect(gateway.start(), proxy=None) as tui:
+                    request = {"id": "account-1", "method": method,
+                               "params": {"refreshToken": False} if params is None else params}
+                    tui.send(json.dumps(request))
+                    reply = json.loads(tui.recv(timeout=3))
+                    self.assertEqual(reply["id"], request["id"])
+                    self.assertTrue(all(call == request for call in calls))
+                    self.assertEqual(gateway.attached.is_set(), attached)
+                # Connection teardown must not erase the original RPC failure.
+                gateway.failed.wait(.1)
+                return reply, calls, retries, gateway.error
+            finally:
+                gateway.close()
+
+    def test_workspace_discovery_timeout_retries_only_read_and_keeps_response_id(self):
+        # Official TUI omits refreshToken=false from the serialized params.
+        for params in ({}, {"refreshToken": False}):
+            with self.subTest(params=params):
+                reply, calls, retries, _ = self.account_case(failures=2, params=params)
+                self.assertIn("result", reply)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(retries, [("account/read", 2, 3), ("account/read", 3, 3)])
+
+    def test_persistent_account_timeout_is_bounded_and_preserves_root_error(self):
+        reply, calls, retries, error = self.account_case(failures=99)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(retries), 2)
+        self.assertIn("error", reply)
+        self.assertIn("account/read: workspace routing discovery timed out", error)
+
+    def test_auth_errors_refresh_and_business_requests_are_never_replayed(self):
+        for overrides in ({"message": "authentication required", "code": 401},
+                          {"params": {"refreshToken": True}},
+                          {"method": "turn/start"}, {"attached": True},
+                          {"session_requested": True}):
+            with self.subTest(overrides=overrides):
+                reply, calls, retries, _ = self.account_case(**overrides)
+                self.assertIn("error", reply)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(retries, [])
+
+    def test_first_startup_failure_survives_later_disconnect(self):
+        gateway = startup.TuiGateway("unused", mock.Mock())
+        gateway.fail("account/read: workspace routing discovery timed out")
+        gateway.fail("TUI 在会话接入完成前断开连接")
+        self.assertEqual(gateway.error, "account/read: workspace routing discovery timed out")
+
     def test_turn_modifier_reaches_upstream_without_touching_steer(self):
         calls = []
         accepted = []

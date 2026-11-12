@@ -758,8 +758,17 @@ def run(args) -> int:
                 turn_effort.result(request, turn_id)
                 record_turn_receipt(state_dir, args.bot, request, turn_id)
 
-            gateway = codex_startup.TuiGateway(url, session_received, on_request=lambda method: progress.update(
-                "tui_session_requested", "官方终端正在" + ("创建新会话" if method == "thread/start" else "恢复已有会话")),
+            def startup_request(method):
+                if method == "account/read":
+                    progress.update("account_check", "Codex 正在核验账号与工作区路由")
+                else:
+                    progress.update("tui_session_requested", "官方终端正在" + (
+                        "创建新会话" if method == "thread/start" else "恢复已有会话"))
+
+            gateway = codex_startup.TuiGateway(
+                url, session_received, on_request=startup_request,
+                on_retry=lambda method, attempt, limit: progress.update(
+                    "account_retry", f"Codex 工作区路由查询超时，正在重试账号查询（{attempt}/{limit}）；任务尚未提交"),
                 turn_modifier=turn_effort.apply, on_turn_result=turn_result)
             tui_url = gateway.start()
             progress.update("observer_connecting", "正在接入飞书回传观察连接")
