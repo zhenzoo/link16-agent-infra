@@ -13,6 +13,7 @@ sync_playwright = playwright.sync_playwright
 
 
 def test_long_caption_scrolls_before_waiting_for_media(tmp_path):
+    pytest.importorskip('PIL.Image')
     source = Path(__file__).resolve().parents[1] / 'feishu/verify_media_doc.py'
     spec = importlib.util.spec_from_file_location('media_verifier', source)
     verifier = importlib.util.module_from_spec(spec)
@@ -58,8 +59,8 @@ def test_long_caption_scrolls_before_waiting_for_media(tmp_path):
                 '--media', str(media), '--out', str(tmp_path / 'review')]
         with patch.object(verifier, 'sync_playwright', return_value=nullcontext(driver)), \
                 patch.object(driver.chromium, 'launch', side_effect=launch), \
-                patch.object(verifier.subprocess, 'check_output', return_value=json.dumps({
-                    'format': {}, 'streams': [{'codec_type': 'video', 'width': 1, 'height': 1}]})), \
+                patch.object(verifier.subprocess, 'check_output', side_effect=AssertionError(
+                    'Images must be inspected directly without ffprobe')), \
                 patch.object(sys, 'argv', argv):
             assert verifier.main() == 0
     result = json.loads((tmp_path / 'review/playback.json').read_text(encoding='utf-8'))

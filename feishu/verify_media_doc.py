@@ -4,11 +4,23 @@ from pathlib import Path
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
+def _is_feishu_document_url(url):
+    host=urlparse(url).hostname or ''
+    return host=='feishu.cn' or host.endswith('.feishu.cn')
+
+def _probe_media(media):
+    if media.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}:
+        from PIL import Image
+        with Image.open(media) as image:
+            return {'streams':[{'codec_type':'video','width':image.width,'height':image.height}]},0
+    probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(media)]))
+    return probe,float(probe.get('format',{}).get('duration',0))
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     for key in ['url','block-id','file-token','media','out']:ap.add_argument('--'+key,required=True)
     ap.add_argument('--mobile',action='store_true');a=ap.parse_args()
-    if urlparse(a.url).hostname not in {'my.feishu.cn','feishu.cn','www.feishu.cn'}:
+    if not _is_feishu_document_url(a.url):
         ap.error('Expected a Feishu document URL')
     media=Path(a.media).resolve();out=Path(a.out).resolve();out.mkdir(parents=True,exist_ok=True)
     report_path=out/'playback.json'
@@ -16,8 +28,7 @@ def main():
     digest=hashlib.sha256()
     with media.open('rb') as f:
         for chunk in iter(lambda:f.read(1024*1024),b''):digest.update(chunk)
-    probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(media)]))
-    duration=float(probe.get('format',{}).get('duration',0))
+    probe,duration=_probe_media(media)
     is_image=media.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.gif'}
     report={'url':a.url,'block_id':a.block_id,'file_token':a.file_token,'media':str(media),
         'source_sha256':digest.hexdigest(),'source_bytes':media.stat().st_size,

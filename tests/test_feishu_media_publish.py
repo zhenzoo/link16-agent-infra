@@ -5,6 +5,22 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'feishu'))
 import feishu_docs as docs
 
 class MediaPublishTests(unittest.TestCase):
+    def test_image_verifier_accepts_tenant_url_and_reads_dimensions_without_ffprobe(self):
+        import pytest
+        Image = pytest.importorskip('PIL.Image')
+        pytest.importorskip('playwright.sync_api')
+        import verify_media_doc as verifier
+        self.assertTrue(verifier._is_feishu_document_url('https://tenant.feishu.cn/docx/doc'))
+        self.assertTrue(verifier._is_feishu_document_url('https://feishu.cn/docx/doc'))
+        self.assertFalse(verifier._is_feishu_document_url('https://feishu.cn.example.com/docx/doc'))
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'image.jpg'
+            Image.new('RGB',(640,320)).save(path)
+            with patch.object(verifier.subprocess,'check_output',side_effect=AssertionError('ffprobe must not run for images')):
+                probe,duration=verifier._probe_media(path)
+        self.assertEqual((probe['streams'][0]['width'],probe['streams'][0]['height']), (640,320))
+        self.assertEqual(duration,0)
+
     def test_resume_empty_file_reuses_block_and_refuses_existing_media(self):
         for occupied in (False,True):
             with self.subTest(occupied=occupied),tempfile.TemporaryDirectory() as folder:
