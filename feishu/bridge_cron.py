@@ -319,6 +319,8 @@ def recover_scheduled(job, *, adopt_draft=False):
     if not bot or fb.agent_runtime.runtime_name(bot) != 'codex':
         raise RuntimeError('此接收回执恢复入口只处理本机 Codex 任务')
     with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', bot['name']):
+        import turn_recovery
+        turn_recovery.require_open(fb, bot)
         ok = cron_delivery.recover(fb, bot, job, adopt_draft=adopt_draft)
         row = cron_delivery.Inbox(fb.STATE_DIR, bot['name']).scheduled_latest(job['name'])
         log(f"recover[{job['name']}] → {bot['name']} 原生接收已确认 session={row['session']} attempts={row['attempts']}")
@@ -374,6 +376,9 @@ def fire(job, dry_run=False):
     if not bot:
         log(f"fire[{name}] 目标 bot '{bot_name}' 不在名册")
         return False
+    import turn_recovery
+    if turn_recovery.blocked(fb, bot):
+        return False  # Due is already durable. Waiting consumes no start budget.
     import cron_delivery
     pending = cron_delivery.Inbox(fb.STATE_DIR, bot_name).scheduled_pending()
     row = next((r for r in pending if r['id'].startswith(f'cron:{name}:')), None)
@@ -390,6 +395,7 @@ def fire(job, dry_run=False):
     try:
         if job.get('_due_id'):
             with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', bot_name, timeout=1):
+                turn_recovery.require_open(fb, bot)
                 cron_due.resume(fb, bot, job)  # Reject a changed pending-launch identity.
                 cron_due.start(fb, bot, job)
                 ws, pty, created, _ = cron_due.ensure(fb, bot, job)

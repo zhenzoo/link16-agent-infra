@@ -43,6 +43,7 @@ import bridge_env          # noqa: E402
 import agent_runtime       # noqa: E402
 import agent_quota         # noqa: E402
 import bridge_activity
+import turn_recovery
 
 bridge_env.force_utf8_std()
 
@@ -412,8 +413,7 @@ def nudge_pane(pty, text=None):
 #   主人当天三次手动追问（15:43 / 15:45 / 15:47）被同一个分类器逐条拦下，
 #   到 08-26 01:12 才自己恢复 —— 单这一天静默烧掉 **17 小时 18 分**。
 #   而看门狗全程 0 动作：R1 只认 "API Error:"、R2 只认限流横幅，**这个错谁都不认**。
-#   （不是我们的 prompt 有问题：openai/codex #39745 #40327 #7250 同期大量同形报告，
-#     服务端分类器误伤，Codex 客户端自己也没把它当可恢复错误处理。）
+#   安全/权限类拒绝只能停下并报告；不能把其他同形报告当作绕过的依据。
 #
 # ⚠️ 为什么这条**不读屏**（和 R1/R2 反着来，不是随手换了个实现）：
 #   这个错的屏幕文本是一句大白话（"your prompt was flagged…"），**正文可以原样出现**
@@ -425,7 +425,7 @@ def nudge_pane(pty, text=None):
 _POLICY_RE = re.compile(r"invalid_prompt|flagged as potentially violating", re.I)
 _TURN_EVENTS = ("task_started", "task_complete", "turn_aborted")
 POLICY_NUDGE_TEXT = "继续推进（上一轮在服务端被掐断了，从上次停的地方接着做）"
-POLICY_NUDGE_MAX = 3         # 连着这么多个回合都被掐断 → 停手，改成只告警（别白烧 token）
+POLICY_NUDGE_MAX = 3         # 同一事故最多三次连接错误续跑；预算跨守护重启保留
 ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
 _ROLLOUT_CACHE = {}          # {(bot, thread): Path} —— sessions/ 递归 glob 不便宜，解析一次就存住
 
@@ -460,12 +460,12 @@ def find_dead_turn(tail_text):
             "policy": bool(_POLICY_RE.search(err))}
 
 
-def codex_thread_id(bot_name):
+def codex_thread_id(bot_name, *, state_dir=None):
     """这个 bot 当前挂在哪个 Codex thread 上。读桥自己落的状态文件，**读不到就返 None、绝不猜**。"""
     for name in (f"bridge-codex-app-thread-{bot_name}.json",
                  f"bridge-codex-app-ready-{bot_name}.json"):
         try:
-            tid = json.loads((STATE_DIR / name).read_text(encoding="utf-8")).get("thread_id")
+            tid = json.loads((Path(state_dir or STATE_DIR) / name).read_text(encoding="utf-8")).get("thread_id")
         except Exception:                 # noqa: BLE001
             continue
         if tid:
@@ -532,7 +532,7 @@ def _is_codex(bot_obj):
         return False
 
 
-def codex_dead_turn(bot_name, bot_obj):
+def codex_dead_turn(bot_name, bot_obj, *, state_dir=None):
     """R5 的对外入口：这个 bot 是不是「最后一个回合被掐断、现在谁都不会再踢它」。
 
     返回 (错误结果, 最后回合事件)。读不到事件返回 None，进心跳的失明计数。
@@ -540,7 +540,7 @@ def codex_dead_turn(bot_name, bot_obj):
     """
     if not _is_codex(bot_obj):
         return None, None
-    thread = codex_thread_id(bot_name)
+    thread = codex_thread_id(bot_name, state_dir=state_dir) if state_dir is not None else codex_thread_id(bot_name)
     if not thread:
         return None, None
     tail = codex_rollout_tail(bot_obj, thread, bot_name=bot_name)
@@ -554,6 +554,132 @@ def codex_dead_turn(bot_name, bot_obj):
     if last:
         last["_thread_id"] = thread
     return find_dead_turn(tail), last
+
+
+def recover_failed_session(bot, dead, last, incident):
+    """One fresh same-profile session, only after exact idle/empty revalidation.
+
+    Reserve the restart durably before close. A crash or ambiguous delivery
+    never authorizes another close/start. The old transcript and Inbox survive.
+    """
+    import feishu_bridge as fb
+    import cron_delivery
+    name = bot['name']
+    with fb.bridge_injection.injection_lock(STATE_DIR, 'ensure-session', name):
+        rec = fb.load_session(name) or {}
+        profile = agent_runtime.profile_name(bot, required=True)
+        if rec.get('profile') != profile or not rec.get('workspace_id') or not rec.get('pty'):
+            raise RuntimeError('故障会话身份不完整或已切换；不关闭')
+        with fb.bridge_injection.injection_lock(STATE_DIR, 'tui-inject', rec['workspace_id']):
+            current_dead, current_last = codex_dead_turn(name, bot)
+            if (not current_dead or current_dead['turn'] != dead['turn']
+                    or current_last.get('_thread_id') != last.get('_thread_id')):
+                return False  # New user input/native progress wins over recovery.
+            if bridge_activity.read_activity(STATE_DIR, bot).get('state') != 'idle':
+                return False
+            if not cron_delivery.empty_composer(fb.read_screen(rec['pty'], None)):
+                raise RuntimeError('输入框仍有草稿；保留现场，不关闭')
+            pack = snapshot_handoff(name, reason='回合请求失败后的同账号恢复')
+            if pack.get('session_id') != last.get('_thread_id'):
+                raise RuntimeError('交接历史与故障 thread 不一致；不关闭')
+            saved = persist_handoff_pack(pack)  # Saving must succeed before close.
+            if not turn_recovery.reserve(STATE_DIR, name, incident, 'fresh', time.time()):
+                return False
+            try:
+                fb._close_session_runtime_unlocked(bot)
+                ws, pty, _, _ = fb._ensure_session_unlocked(bot)
+                new_thread = codex_thread_id(name)
+                current = fb.load_session(name) or {}
+                if (not new_thread or new_thread == last.get('_thread_id')
+                        or current.get('profile') != profile or current.get('cwd') != rec.get('cwd')):
+                    raise RuntimeError('新会话身份/目录未核实，未交接任务')
+                turn_recovery.patch(STATE_DIR, name, incident, phase='recovering',
+                                    thread=new_thread, handoff=str(saved))
+                prompt = (f'[故障恢复] 保持账号 {profile} 与工作目录，接续已授权的任务。\n'
+                          f'{turn_recovery.RESUME_PROMPT}\n'
+                          f'交接包：{saved}（含原会话与后台任务线索；先核后台是否仍运行）。\n'
+                          f'{_handoff_history_hint(pack)}\n'
+                          '先读有界上下文，再按需回查精确历史；禁止整份灌入旧会话。')
+                job = dict(name='watchdog-recovery', bot=name, prompt=prompt,
+                           _turn_recovery=incident, _scheduled_stamp=incident)
+                marker = f'{prompt} [飞书 from=watchdog:{name} to={name} via=故障恢复 · route=p2a]'
+                cron_delivery.submit(fb, bot, job, ws, pty, marker)
+                # submit requires the native receipt, not a successful paste RPC.
+                return True
+            except Exception as exc:
+                turn_recovery.patch(STATE_DIR, name, incident, phase='stopped',
+                                    binding_unknown=True, recovery_error=str(exc)[:300])
+                raise
+
+
+def handle_failed_turn(bot, dead, last, *, auto=True):
+    """Persistent R5 budget; Cron consults the same incident before each write."""
+    name = bot['name']
+    row = turn_recovery.observe(STATE_DIR, name, dead, last, current_thread=lambda: codex_thread_id(name))
+    if not row or (not dead and row.get('phase') not in ('stopped', 'restarting')):
+        return False
+    incident, now = row['incident'], time.time()
+    if row['phase'] == 'failed' and row['kind'] == 'fresh' and auto:
+        try:
+            if recover_failed_session(bot, dead, last, incident):
+                turn_recovery.notice_once(STATE_DIR, name, incident, 'recovered', lambda: notify(
+                    name, 'turn_recovered', f'✅ {name} 原会话请求失败；已保留历史并新建同账号会话。'
+                    '恢复指令已获原生接收回执，将按原规则继续中断任务并核验补做，避免重复发布。'))
+                return True
+            return False
+        except Exception as exc:
+            row = turn_recovery.patch(STATE_DIR, name, incident, phase='stopped', recovery_error=str(exc)[:300])
+    elif row['phase'] == 'failed' and row['kind'] == 'retry':
+        if (row['turn'] not in row['attempts'] and len(row['attempts']) < POLICY_NUDGE_MAX
+                and now - row.get('last_action', 0) >= NUDGE_COOLDOWN):
+            ok = retry_failed_turn(bot, dead, last, incident, now)
+            if ok is None:
+                return False
+            if not ok:
+                row = turn_recovery.patch(STATE_DIR, name, incident, phase='stopped',
+                                          recovery_error='续跑发送失败或结果未知，不重复发送')
+            else:
+                turn_recovery.notice_once(STATE_DIR, name, incident, 'retrying', lambda: notify(
+                    name, 'policy_nudged', f'{name} 回合因连接错误中断，已发送有界续跑请求，等待原生回合结果；'
+                    '期间定时任务保留，不向失败会话追加。'))
+                return True
+        else:
+            if (len(row['attempts']) < POLICY_NUDGE_MAX
+                    and (row['turn'] not in row['attempts'] or now - row.get('last_action', now) < NUDGE_COOLDOWN)):
+                return False
+            row = turn_recovery.patch(STATE_DIR, name, incident, phase='stopped')
+    elif row['phase'] == 'failed':
+        row = turn_recovery.patch(STATE_DIR, name, incident, phase='stopped')
+    # Never repeat a stopped notification every 30 minutes or after restart.
+    if row['phase'] in ('stopped', 'restarting'):
+        turn_recovery.notice_once(STATE_DIR, name, incident, 'stopped', lambda: notify(
+            name, 'turn_stopped', f'❌ {name} 自动恢复已停止；本次故障只提醒一次。'
+            '定时任务和原记录保留，Cron 不再向故障会话投递。\n'
+            f'错误：{row.get("recovery_error") or row.get("error", "")[:200]}'))
+    return False
+
+
+def retry_failed_turn(bot, dead, last, incident, now):
+    """Check the native state again under both writer locks before one nudge."""
+    import bridge_injection
+    name = bot['name']
+    with bridge_injection.injection_lock(STATE_DIR, 'ensure-session', name):
+        rec = session_record(name)
+        if not rec.get('workspace_id') or not rec.get('pty'):
+            return False
+        with bridge_injection.injection_lock(STATE_DIR, 'tui-inject', rec['workspace_id']):
+            current_dead, current_last = codex_dead_turn(name, bot)
+            if (not current_dead or current_dead['turn'] != dead['turn']
+                    or current_last.get('_thread_id') != last.get('_thread_id')
+                    or bridge_activity.read_activity(STATE_DIR, bot).get('state') != 'idle'):
+                return None
+            import cron_delivery
+            if not cron_delivery.empty_composer(read_pane(rec['pty'])):
+                return False
+            if not turn_recovery.reserve(STATE_DIR, name, incident, 'retry', now,
+                                         cooldown=NUDGE_COOLDOWN, retries=POLICY_NUDGE_MAX):
+                return None
+            return nudge_pane(rec['pty'], POLICY_NUDGE_TEXT)
 
 
 # ---------- R8 · 回合进行中静默：屏上在跑、但很久没有任何回传（请求发出去了、响应永不回来）----------
@@ -1712,7 +1838,7 @@ def cmd_run(auto=True):
       R2 短时限额→原会话到点恢复；周限额→同系列换号并交接
       R1 API/网络错 + 静止 2 轮     → 注「继续」
       R8 确认执行中连续静默 ≥60min → 复核工具/回合后按 Esc；等待不计时，同回合只动一次
-      R5 Codex 回合被服务端掐断     → 告警 + 注「继续」；连着 3 个回合都被掐 → 停手只告警
+      R5 Codex 错误收尾             → Cron 停投；连接错有界续跑 / 通用400一次新会话；停止只通知一次
       R4 桥进程 活→死              → 告警（每轮一次·不针对面板）
     要支持一种新的中断类型，就在这张表里加一行。"""
     log(f"看门狗上岗 · 轮询 {POLL_SECONDS}s · 规则表 R1 API错 / R2 短时等待·周限额同系列换号 / R3 picker跳过 / "
@@ -1769,7 +1895,6 @@ def cmd_run(auto=True):
                     continue  # 刚注入继续，本轮不能再让 R8 按 Esc
                 st = states.setdefault(pty, {"err_sig": None, "err_stuck": 0,
                                             "lim_sig": None, "lim_stuck": 0, "last_nudge": 0.0,
-                                            "dead_turn": None, "dead_streak": 0, "dead_alert_at": 0.0,
                                             "stall_ep": None, "stall_alert_at": 0.0})
 
                 # ---- R3 · picker → 什么都不做 ----
@@ -1830,11 +1955,18 @@ def cmd_run(auto=True):
                                "不切账号，继续复查。")
                     continue
 
-                # ---- R1 · API/网络错 + 静止 2 轮 → 注「继续」----
+                bot_obj = bots.get(bot_name) if bot_name else None
+                codex_bot = bool(bot_obj and _is_codex(bot_obj))
+                dead, last_turn = codex_dead_turn(bot_name, bot_obj) if codex_bot else (None, None)
+                recovery = turn_recovery.observe(
+                    STATE_DIR, bot_name, dead, last_turn,
+                    current_thread=lambda: codex_thread_id(bot_name)) if codex_bot else {}
+
+                # ---- R1 · Claude/Kimi 屏签名；Codex 只走结构化 R5 ----
                 err = find_pane_error(text)
                 st["err_stuck"] = _bump(st, "err", err)
-                if st["err_stuck"] >= STUCK_CONFIRM and (now - st["last_nudge"]) >= NUDGE_COOLDOWN:
-                    nudge_pane(pty)
+                if (not codex_bot and st["err_stuck"] >= STUCK_CONFIRM
+                        and (now - st["last_nudge"]) >= NUDGE_COOLDOWN and nudge_pane(pty)):
                     st["last_nudge"] = now
                     st["err_stuck"] = 0
                     acted += 1
@@ -1845,8 +1977,6 @@ def cmd_run(auto=True):
                                f"🔧 {bot_name} 卡在『{err[:60]}』（API/网络错·没在自己重试）· 已自动注「继续」\n"
                                f"面板 {ws} / {pty}｜还卡就去看一眼")
 
-                bot_obj = bots.get(bot_name) if bot_name else None
-                dead, last_turn = codex_dead_turn(bot_name, bot_obj) if bot_name else (None, None)
                 now = time.time()  # a new prompt may arrive while the pane/rollout scan runs
 
                 # ---- R8 · 回合进行中静默 ≥ STALL_MIN → 按 Esc + 注「查原因·继续推进」+ DM ----
@@ -1861,7 +1991,7 @@ def cmd_run(auto=True):
                         log(f"[R8] {bot_name} {unknown} → 不自动打断" if unknown
                             else f"[R8] {bot_name} 状态恢复可判定：{activity['state']}")
                         r8_unknown[bot_name] = unknown
-                if sm is not None and sm >= STALL_MIN:
+                if sm is not None and sm >= STALL_MIN and not recovery:
                     mins = int(sm)
                     ep = activity["key"]                    # 按真实回合去重，不把新回传当成新故障
                     confirmed, current = bridge_activity.confirm_stall(STATE_DIR, bot_obj, activity)
@@ -1901,51 +2031,13 @@ def cmd_run(auto=True):
                 elif activity.get("key") != st.get("stall_ep"):
                     st["stall_ep"] = None
 
-                # ---- R5 · Codex 回合被服务端掐断 → 告警 + 注「继续」（连 3 轮被掐就停手）----
-                # 判据读 Codex 自己的 rollout（结构化），**不读屏** —— 理由见文件上半部 R5 那节的长注释。
-                # 只在「最后一个回合已经收尾」时动手 ⇒ 结构上不可能打断正在跑的活。
-                if bot_name and _is_codex(bot_obj):
+                # ---- R5 · 同一持久预算；Cron 停投，故障通知一次 ----
+                if codex_bot:
                     r5_seen += 1
                     if not last_turn:
                         r5_blind += 1
-                if not dead:
-                    if last_turn and (last_turn.get("type") == "turn_aborted"
-                                      or (last_turn.get("type") == "task_complete" and not last_turn.get("error"))):
-                        st["dead_turn"], st["dead_streak"], st["dead_nudged"] = None, 0, None
-                    continue
-                fresh = dead["turn"] != st.get("dead_turn")
-                if fresh:
-                    st["dead_turn"] = dead["turn"]
-                    st["dead_streak"] = st.get("dead_streak", 0) + 1
-                why = "被 OpenAI 安全分类器拦下（invalid_prompt）" if dead["policy"] else "以错误收尾"
-                if st["dead_streak"] <= POLICY_NUDGE_MAX:
-                    # 注入受 10min 冷却节流，但**告警不跟着一起哑** —— 冷却期内换个说法照实说，
-                    # 绝不发一条「我已自动注『继续推进』」而其实这轮压根没注（那就是自己造假绿灯）。
-                    poked = (st.get("dead_nudged") != dead["turn"]
-                             and (now - st["last_nudge"]) >= NUDGE_COOLDOWN)
-                    if poked:
-                        poked = nudge_pane(pty, POLICY_NUDGE_TEXT)
-                    if poked:
-                        st["dead_nudged"] = dead["turn"]
-                        st["last_nudge"] = now
+                    if handle_failed_turn(bot_obj, dead, last_turn, auto=auto):
                         acted += 1
-                        log(f"[R5] {ws}/{bot_name} 上一回合{why}（第 {st['dead_streak']} 次）→ 已注「继续推进」")
-                    if fresh:
-                        做了 = (f"我已自动注「继续推进」（第 {st['dead_streak']}/{POLICY_NUDGE_MAX} 次自动重推）"
-                              if poked else
-                              "这轮未成功注入，检查发送结果或等待冷却后再试")
-                        notify(bot_name, "policy_nudged",
-                               f"{bot_name} 上一回合{why}，活已经停在那儿了 · {做了}\n"
-                               f"· 服务端原话：{dead['error'][:120]}\n"
-                               f"· 面板 {ws} / {pty}")
-                elif fresh or (now - st.get("dead_alert_at", 0)) >= ALERT_COOLDOWN:
-                    st["dead_alert_at"] = now
-                    log(f"[R5] {ws}/{bot_name} 连着 {st['dead_streak']} 个回合{why} → 停手，只告警")
-                    notify(bot_name, "policy_stuck",
-                           f"{bot_name} 连着 {st['dead_streak']} 个回合{why} —— 我不再自动重推了（重推也是白撞）\n"
-                           f"· 服务端原话：{dead['error'][:120]}\n"
-                           f"· 原会话已保留，请检查上面的具体错误后再继续\n"
-                           f"· 面板 {ws} / {pty}")
 
             checks = {"r6": "ok", "r7": "ok", "r4": "ok",
                       "r8": {"threshold_minutes": STALL_MIN, "bots": activity_checks}}

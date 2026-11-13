@@ -1801,14 +1801,18 @@ def close_session_runtime(bot):
     not let the next worker resume the previous profile or directory.
     """
     with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
-        result = _close_session_unlocked(bot)
-        # Only clear after close succeeded. Failed close retains enough identity
-        # to recover the original runtime, including Kimi's supervised worker.
-        clear_codex_thread(bot["name"])
-        _merge_session(bot["name"], {"workspace_id": None, "pty": None, "jsonl": None,
-                                     "daemon_fp": None, "pending_launch": None,
-                                     "runtime_processes": None})
-        return result
+        return _close_session_runtime_unlocked(bot)
+
+
+def _close_session_runtime_unlocked(bot):
+    """Same lifecycle transaction when the caller already holds ensure-session."""
+    result = _close_session_unlocked(bot)
+    # Failed close retains identity; routing/profile/cwd/history are preserved.
+    clear_codex_thread(bot["name"])
+    _merge_session(bot["name"], {"workspace_id": None, "pty": None, "jsonl": None,
+                                 "daemon_fp": None, "pending_launch": None,
+                                 "runtime_processes": None})
+    return result
 
 
 def replace_session(bot, defaults, *, create=False):

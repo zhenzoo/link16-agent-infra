@@ -104,7 +104,9 @@ def inbound_compacting(fb, bot, row):
     return is_compacting(screen)
 
 
-def _paste(fb, bot, inbox, row, pty, ws, marker):
+def _paste(fb, bot, inbox, row, pty, ws, marker, *, job=None):
+    import turn_recovery
+    turn_recovery.require_open(fb, bot, job)
     if inbox.scheduled_attempt(row['id']):
         try:
             fb._inject_unlocked(pty, ws, marker, runtime_bot=bot)
@@ -196,6 +198,8 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
             current = inbox.get(row['id'])
             if accepted(current):
                 return True
+            import turn_recovery
+            turn_recovery.require_open(fb, bot, job)
             if current['state'] not in {'awaiting_confirmation', 'uncertain'}:
                 raise RuntimeError(f"定时投递已{current['state']}，不补交")
             _binding(fb, bot, ws, pty, row['session'])
@@ -209,7 +213,7 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
                         and time.time() >= current.get('retry_at', 0)):
                     if accepted(inbox.get(row['id'])):
                         return True
-                    _paste(fb, bot, inbox, current, pty, ws, marker)
+                    _paste(fb, bot, inbox, current, pty, ws, marker, job=job)
                     reason = '已按驱动未提交证明重新投递，等待原生接收回执'
                 elif draft_matches(screen, marker) and (
                         state == 'idle' or queue_tab_available(screen)):
@@ -241,6 +245,8 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
 
 def submit(fb, bot, job, ws, pty, marker):
     with injection_lock(fb.STATE_DIR, 'tui-inject', ws):
+        import turn_recovery
+        turn_recovery.require_open(fb, bot, job)
         row = _register(fb, bot, job, ws, pty, marker)
         if accepted(row):
             return True
@@ -248,7 +254,7 @@ def submit(fb, bot, job, ws, pty, marker):
         # caller must observe the first attempt/receipt, never paste twice.
         if row['attempts'] == 0:
             inbox = Inbox(fb.STATE_DIR, bot['name'])
-            _paste(fb, bot, inbox, row, pty, ws, marker)
+            _paste(fb, bot, inbox, row, pty, ws, marker, job=job)
     return confirm(fb, bot, job, row)
 
 

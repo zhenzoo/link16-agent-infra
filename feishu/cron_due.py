@@ -5,6 +5,7 @@ import time
 
 from bridge_inbox import Inbox, RetryableHandoffError
 import cron_delivery
+import turn_recovery
 
 MAX_STARTS = 3
 RETRY_SEC = 20
@@ -88,6 +89,8 @@ def _alert(fb, bot, inbox, row, reason, log):
 
 def process(fb, bot, jobs, fire, log):
     inbox = Inbox(fb.STATE_DIR, bot['name'])
+    if turn_recovery.blocked(fb, bot):
+        return  # Preserve all occurrences and budgets; no per-occurrence alerts.
     for row in inbox.due_rows():
         context = json.loads(row['schedule'])
         job = next((j for j in jobs if j.get('bot') == bot['name']
