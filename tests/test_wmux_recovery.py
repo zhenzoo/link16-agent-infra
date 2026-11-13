@@ -111,6 +111,26 @@ class WmuxRecoveryTests(unittest.TestCase):
 
 
 class InboundRecoveryBoundaryTests(unittest.TestCase):
+    def test_unreadable_background_screen_requires_exact_zero_write_proof(self):
+        reason = ('input.send: pane "pty" is not on screen (it is stashed), and its '
+                  'screen could not be read whole from its output, so a folder-trust prompt cannot be ruled out.')
+        cases = [
+            ('LINK16_HANDOFF {"state":"not_written"}', reason, bridge_inbox.InputSurfaceUnavailable),
+            ('', reason, RuntimeError),
+            ('LINK16_HANDOFF {"state":"cleared_unsubmitted"}', reason, bridge_inbox.RetryableHandoffError),
+            ('LINK16_HANDOFF {"state":"not_written"}', 'input.send: pane is on a folder-trust prompt; answer it in the pane.',
+             bridge_inbox.RetryableHandoffError),
+            ('LINK16_HANDOFF {"state":"not_written"}', 'permission denied', bridge_inbox.RetryableHandoffError),
+        ]
+        for proof, message, expected in cases:
+            with self.subTest(message=message, proof=proof):
+                result = SimpleNamespace(returncode=1, stdout='', stderr=f'[guard] OVERRIDE: target\n{proof}\nERR: {message}')
+                with patch.object(bridge.subprocess, 'run', return_value=result):
+                    with self.assertRaises(expected) as caught:
+                        bridge.wmux('paste', 'pty', 'original prompt')
+                self.assertIs(type(caught.exception), expected)
+                self.assertNotIn('OVERRIDE', str(caught.exception))
+
     def test_unready_shell_is_saved_and_resumed_instead_of_abandoned(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(bridge, "STATE_DIR", Path(tmp)), \

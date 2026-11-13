@@ -1001,12 +1001,20 @@ def wmux(*cmd_args):
                        encoding="utf-8", errors="replace", timeout=30,   # 读取侧：解不了的字节打问号，不崩
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢鼠标焦点
     if r.returncode != 0:
+        # Keep the actionable server reason before guard diagnostics, so the
+        # Inbox's bounded error field does not truncate it behind OVERRIDE.
+        detail = next((line[5:] for line in r.stderr.splitlines() if line.startswith('ERR: ')), r.stderr.strip())
         if (cmd_args[0] == "paste"
                 and any(line in r.stderr.splitlines() for line in (
                     'LINK16_HANDOFF {"state":"not_written"}',
                     'LINK16_HANDOFF {"state":"cleared_unsubmitted"}'))):
-            raise bridge_inbox.RetryableHandoffError(f"wmux-rpc paste not submitted: {r.stderr.strip()}")
-        raise RuntimeError(f"wmux-rpc {cmd_args[0]} failed: {r.stderr.strip()}")
+            if ('LINK16_HANDOFF {"state":"not_written"}' in r.stderr.splitlines()
+                    and 'screen could not be read whole from its output' in detail
+                    and 'folder-trust prompt cannot be ruled out' in detail):
+                raise bridge_inbox.InputSurfaceUnavailable(
+                    'Wmux后台画面暂时无法完整读取，尚不能排除目录信任框；本次未写入，保留原任务等待画面恢复。')
+            raise bridge_inbox.RetryableHandoffError(f"wmux-rpc paste not submitted: {detail}")
+        raise RuntimeError(f"wmux-rpc {cmd_args[0]} failed: {detail}")
     return r.stdout
 
 

@@ -45,6 +45,10 @@ class RetryableHandoffError(RuntimeError):
     """Driver proved no submission: zero writes, or owned draft fully cleared."""
 
 
+class InputSurfaceUnavailable(RetryableHandoffError):
+    """Wmux proved zero writes while its background screen was not readable."""
+
+
 class StartupCancelled(RetryableHandoffError):
     """A queued authorized control command must run before startup continues."""
 
@@ -317,6 +321,25 @@ class Inbox:
         """Only the driver's typed zero-write proof permits a later new paste."""
         if not isinstance(error, RetryableHandoffError):
             raise TypeError('non-submission requires typed driver proof')
+        if isinstance(error, InputSurfaceUnavailable):
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
+                if (not row or row['state'] not in ('awaiting_confirmation', 'uncertain')
+                        or row['retry_safe'] or row['attempts'] < 1):
+                    return  # Receipt/cancellation or an already credited reservation wins.
+                payload = json.loads(row['payload'])
+                context = payload.setdefault('scheduled', {})
+                waiting = context.get('surface_wait') or {}
+                context['surface_wait'] = dict(count=waiting.get('count', 0) + 1,
+                                               last_at=time.time(), reason=str(error)[:300])
+                # The reservation was made before paste. Only this typed proof
+                # credits it back; the wait remains auditable across restarts.
+                db.execute("""UPDATE messages SET state='uncertain',attempts=attempts-1,
+                    retry_safe=1,retry_at=?,error=?,updated=?,payload=? WHERE id=?""",
+                    (time.time() + delay, str(error)[:300], time.time(),
+                     json.dumps(payload, ensure_ascii=False), mid))
+            return
         with self.connect() as db:
             db.execute("""UPDATE messages SET
                 state=CASE WHEN attempts>=? THEN 'failed' ELSE 'uncertain' END,
