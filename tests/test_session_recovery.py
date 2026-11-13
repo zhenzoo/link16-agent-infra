@@ -79,7 +79,8 @@ def scene(tmp_path, monkeypatch):
         _release_exited_session_unlocked=Mock(return_value=True),
         bridge_injection=SimpleNamespace(injection_lock=lambda *a, **kw: nullcontext()),
         bridge_activity=SimpleNamespace(read_activity=Mock(return_value={'state': 'idle'})),
-        agent_runtime=SimpleNamespace(uses_app_server=lambda bot: True, profile_name=lambda *a, **kw: 'cxp2'),
+        agent_runtime=SimpleNamespace(uses_app_server=lambda bot: True, profile_name=lambda *a, **kw: 'cxp2',
+                                      runtime_name=lambda bot: 'codex'),
         read_screen=Mock(), wmux=Mock(),
     )
     def ensure(bot):

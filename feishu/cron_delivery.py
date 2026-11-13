@@ -1,7 +1,7 @@
 """Cron's Codex handoff: native receipt first, retry only with explicit proof.
 
 Uses the existing Inbox and UserPromptSubmit / successful turn/start receipt.
-Wmux input.sendKey performs the same Enter as the terminal. Screen text is
+Wmux input.sendKey performs the same Enter/queue Tab as the terminal. Screen text is
 only a guard against submitting someone else's draft, never proof of receipt.
 No private Codex endpoint, rollout parsing, model call, or blind repaste.
 """
@@ -58,6 +58,20 @@ def draft_matches(screen, prompt):
     return bool(draft) and compact(draft) == compact(prompt)
 
 
+def empty_composer(screen):
+    # Same native placeholder accepted by initial bridge injection. The parser
+    # still requires a complete composer/footer; an unreadable frame is not empty.
+    return _draft(screen) in ('', 'Ask Codex to do anything')
+
+
+def queue_tab_available(screen):
+    """Only the live composer footer may advertise active-turn queueing."""
+    if _draft(screen) is None:
+        return False
+    footer = re.split(r'\n[ \t]*\n', screen.rstrip())[-1]
+    return bool(re.search(r'(?m)^[ \t]*tab to queue message(?:[ \t].*)?$', footer))
+
+
 def is_compacting(screen):
     """Recognize only Codex's live footer, never a word in history or a draft."""
     lines = screen.splitlines()
@@ -90,7 +104,9 @@ def inbound_compacting(fb, bot, row):
     return is_compacting(screen)
 
 
-def _paste(fb, bot, inbox, row, pty, ws, marker):
+def _paste(fb, bot, inbox, row, pty, ws, marker, *, job=None):
+    import turn_recovery
+    turn_recovery.require_open(fb, bot, job)
     if inbox.scheduled_attempt(row['id']):
         try:
             fb._inject_unlocked(pty, ws, marker, runtime_bot=bot)
@@ -158,8 +174,11 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
     """Same confirmation/recovery loop for initial fire and later daemon ticks.
 
     A missing receipt is UNKNOWN, not proof of non-delivery. Only an idle native
-    thread with the exact owned draft permits another Enter. A new paste also
-    requires durable driver proof of no submission and a visibly empty composer.
+    thread with the exact owned draft permits another Enter; active may press Tab
+    only when that exact draft's live footer explicitly offers queueing. A new paste requires
+    durable zero-write proof and a visibly empty composer. An active native turn
+    may queue that proven-unsent input just like initial delivery; waiting for
+    idle here can deadlock a long-running agent and every later occurrence.
     """
     inbox = Inbox(fb.STATE_DIR, bot['name'])
     current = inbox.get(row['id'])
@@ -179,26 +198,33 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
             current = inbox.get(row['id'])
             if accepted(current):
                 return True
+            import turn_recovery
+            turn_recovery.require_open(fb, bot, job)
             if current['state'] not in {'awaiting_confirmation', 'uncertain'}:
                 raise RuntimeError(f"定时投递已{current['state']}，不补交")
             _binding(fb, bot, ws, pty, row['session'])
             activity = fb.bridge_activity.read_activity(fb.STATE_DIR, bot)
-            if activity.get('state') == 'idle' and current['attempts'] < MAX_SUBMITS:
+            state = activity.get('state')
+            if state in ('idle', 'active') and current['attempts'] < MAX_SUBMITS:
                 screen = fb.read_screen(pty, None)
                 if is_compacting(screen):
                     reason = 'compacting context'
-                elif (current.get('retry_safe') and _draft(screen) == ''
+                elif (current.get('retry_safe') and empty_composer(screen)
                         and time.time() >= current.get('retry_at', 0)):
                     if accepted(inbox.get(row['id'])):
                         return True
-                    _paste(fb, bot, inbox, current, pty, ws, marker)
+                    _paste(fb, bot, inbox, current, pty, ws, marker, job=job)
                     reason = '已按驱动未提交证明重新投递，等待原生接收回执'
-                elif draft_matches(screen, marker):
+                elif draft_matches(screen, marker) and (
+                        state == 'idle' or queue_tab_available(screen)):
                     # A hook can land while querying the native state/screen.
                     if accepted(inbox.get(row['id'])):
                         return True
                     if inbox.scheduled_attempt(row['id']):
-                        fb.wmux('enter', pty, '--allow-ws', ws)
+                        if state == 'active':
+                            fb.wmux('key', pty, 'tab', '--allow-ws', ws)
+                        else:
+                            fb.wmux('enter', pty, '--allow-ws', ws)
                     reason = '已补交原草稿，等待原生接收回执'
                 else:
                     reason = ('驱动已证未提交，等待可读空输入框及重试间隔；不绕过窗口保护'
@@ -219,6 +245,8 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
 
 def submit(fb, bot, job, ws, pty, marker):
     with injection_lock(fb.STATE_DIR, 'tui-inject', ws):
+        import turn_recovery
+        turn_recovery.require_open(fb, bot, job)
         row = _register(fb, bot, job, ws, pty, marker)
         if accepted(row):
             return True
@@ -226,7 +254,7 @@ def submit(fb, bot, job, ws, pty, marker):
         # caller must observe the first attempt/receipt, never paste twice.
         if row['attempts'] == 0:
             inbox = Inbox(fb.STATE_DIR, bot['name'])
-            _paste(fb, bot, inbox, row, pty, ws, marker)
+            _paste(fb, bot, inbox, row, pty, ws, marker, job=job)
     return confirm(fb, bot, job, row)
 
 

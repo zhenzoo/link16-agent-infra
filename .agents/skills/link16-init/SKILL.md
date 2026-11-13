@@ -61,6 +61,8 @@ python feishu/context_scan.py --out feishu/_state/context-scan.json
 - 活跃项目不对就 `--roots <目录>` 重扫；bot 名用户想改直接改。
 
 ### 2.4 导入（仅已选择的本人内容）
+用户选择导入自己的配置母版时，还要执行该仓的治理启用流程，不能把 clone 或入口文档生成当作技能已同步。维护者的 `~/.claude-personal` 入口为 `docs/SOP-020-config-activation.md`：预览、`govctl sync -Apply`、完整 doctor、原生技能发现验收。未选择个人配置时跳过，不把维护者私有 skills 变成公共安装默认项。
+
 ```powershell
 python feishu/context_import.py --profile <名> --scan feishu/_state/context-scan.json [--only id,id] [--skip id]
 python feishu/context_import.py --profile <名> --scan feishu/_state/context-scan.json --apply

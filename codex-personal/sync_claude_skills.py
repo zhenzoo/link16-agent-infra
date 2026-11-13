@@ -265,12 +265,15 @@ def main() -> int:
     parser.add_argument("--source", default=str(Path.home() / ".claude-personal"))
     parser.add_argument("--destination", default=str(Path.home() / ".agents" / "skills"))
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--check", action="store_true", help="Read-only: fail if any expected skill is missing or stale")
     parser.add_argument("--include-commands", action="store_true")
     parser.add_argument("--name", action="append", dest="names")
     parser.add_argument("--prune", action="store_true")
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args()
 
+    if args.check and (args.apply or args.prune):
+        parser.error("--check cannot be combined with --apply or --prune")
     if args.prune and (args.names or not args.include_commands):
         parser.error("--prune requires a full sync with --include-commands and without --name")
 
@@ -362,6 +365,8 @@ def main() -> int:
             ],
         }
     print(json.dumps(output, ensure_ascii=False, indent=2))
+    if args.check and any(action["action"] not in {"unchanged", "skip-existing"} for action in actions):
+        return 1
     return 0
 
 

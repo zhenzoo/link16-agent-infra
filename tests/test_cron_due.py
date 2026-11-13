@@ -9,7 +9,7 @@ import pytest
 import bridge_cron as cron
 import bridge_inbox
 import cron_due as due
-from tests.test_cron_idle_fresh import scene
+from tests.test_cron_session_reuse import scene
 
 DELIVER = cron._deliver
 
@@ -32,24 +32,22 @@ def scheduled(scene, monkeypatch):
     return s
 
 
-def test_busy_then_restart_then_idle_delivers_original_occurrence_once(scheduled):
+def test_restart_delivers_into_same_busy_session_once(scheduled):
     s = scheduled
     s.fb.bridge_activity.read_activity.return_value = {'state': 'active'}
-    s.process()
-    assert not s.events
-    assert json.loads(s.inbox.get(s.row['id'])['schedule'])['starts'] == 0
     # A new Inbox/consumer after restart must neither lose nor dispatch this as a DM.
     fresh = bridge_inbox.Inbox(s.fb.STATE_DIR, 'target')
     fresh.recover()
     assert fresh.claim() is None
     s.resume()
-    s.fb.bridge_activity.read_activity.return_value = {'state': 'idle'}
     s.process()
     s.process()
     assert s.inbox.get(s.row['id'])['state'] == 'done'
     assert s.inbox.get(s.row['id'])['attempts'] == 1
     assert s.fb._ensure_session_unlocked.call_count == 1
     assert s.fb._inject.call_count == 1
+    assert s.fb._inject.call_args.args[:2] == ('pty', 'old')
+    s.fb._close_session_unlocked.assert_not_called()
 
 
 @pytest.mark.parametrize('runtime', ['claude', 'codex', 'kimi'])
@@ -93,15 +91,13 @@ def test_crash_in_start_transaction_is_not_blindly_recreated(scheduled):
     s.fb._send_text_message.assert_called_once()
 
 
-@pytest.mark.parametrize('change', ['disabled', 'prompt', 'policy', 'profile', 'removed', 'stop'])
+@pytest.mark.parametrize('change', ['disabled', 'prompt', 'profile', 'removed', 'stop'])
 def test_changed_or_cancelled_work_never_resurrects(scheduled, change):
     s = scheduled
     if change == 'disabled':
         s.job['enabled'] = False
     elif change == 'prompt':
         s.job['prompt'] = 'changed'
-    elif change == 'policy':
-        s.job['session_policy'] = 'reuse'
     elif change == 'profile':
         s.fb.agent_runtime.profile_name = lambda *a, **k: 'other'
     elif change == 'stop':
@@ -131,7 +127,7 @@ def test_transport_success_without_native_receipt_is_not_done_or_replayed(schedu
     assert s.inbox.get(s.row['id'])['state'] == 'done'
 
 
-def test_unknown_submission_does_not_reenter_close_start_path(scheduled, monkeypatch):
+def test_unknown_submission_does_not_restart_or_replay(scheduled, monkeypatch):
     s = scheduled
     s.bot['agent'] = 'codex'
     s.inbox.track_scheduled(s.row['id'], cron._marker(s.job), 'native', {'job': s.job['name']})
@@ -144,7 +140,7 @@ def test_unknown_submission_does_not_reenter_close_start_path(scheduled, monkeyp
     s.fb._inject.assert_not_called()
 
 
-def test_busy_expires_alerts_once_and_keeps_prompt(scheduled):
+def test_deferred_work_expires_alerts_once_and_keeps_prompt(scheduled):
     s = scheduled
     with s.inbox.connect() as db:
         db.execute('UPDATE messages SET received=received-? WHERE id=?', (due.MAX_AGE_SEC, s.row['id']))
@@ -246,12 +242,12 @@ def test_owned_pending_launcher_resumes_without_closing_it_again(scheduled):
     s.fb.load_session.return_value = pending
     s.fb._ensure_session_unlocked.side_effect = bridge_inbox.RetryableHandoffError('shell not ready')
     s.process()
-    assert s.events == ['close', 'clear-session', 'clear-thread']
+    assert not s.events
     s.resume()
     s.fb._ensure_session_unlocked.side_effect = lambda b: ('pending', 'pending-pty', True, None)
     s.process()
     assert s.inbox.get(s.row['id'])['state'] == 'done'
-    assert s.fb._close_session_unlocked.call_count == 1
+    s.fb._close_session_unlocked.assert_not_called()
     s.fb._inject.assert_called_once()
 
 
@@ -270,3 +266,21 @@ def test_profile_change_at_the_start_boundary_is_rejected(scheduled):
     with pytest.raises(RuntimeError, match='账号已变化'):
         due.start(s.fb, s.bot, dict(s.job, _due_id=s.row['id']))
     assert json.loads(s.inbox.get(s.row['id'])['schedule'])['starts'] == 0
+
+
+@pytest.mark.parametrize('legacy_policy', ['idle-fresh', 'reuse'])
+def test_removing_legacy_policy_preserves_pending_occurrence(scheduled, legacy_policy):
+    s = scheduled
+    with s.inbox.connect() as db:
+        context = json.loads(s.inbox.get(s.row['id'])['schedule'])
+        context['job']['session_policy'] = legacy_policy
+        db.execute('UPDATE messages SET schedule=? WHERE id=?', (json.dumps(context), s.row['id']))
+    original = s.inbox.get(s.row['id'])['payload']
+    s.process()
+    s.process()
+    assert s.inbox.get(s.row['id'])['state'] == 'done'
+    assert s.fb._inject.call_args.args[2] == json.loads(original)['prompt']
+    assert s.fb._inject.call_count == 1
+    assert s.events == ['reuse']
+    s.fb._close_session_unlocked.assert_not_called()
+    s.fb.clear_codex_thread.assert_not_called()

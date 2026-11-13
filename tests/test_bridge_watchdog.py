@@ -839,7 +839,7 @@ def test_r5_尾巴读不到回合事件就算认不出_而不是报一切正常(
     assert w.codex_dead_turn("某bot", {}) == (None, None)
 
 
-def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypatch):
+def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypatch, tmp_path):
     """把 cmd_run 的**真循环**跑一轮（靠 time.sleep 抛异常收尾），面板 I/O 与网络全部打桩。
 
     单测判据全绿 ≠ 接线是通的 —— 本仓最贵的一课就是「尺子对、但那根线早断了」
@@ -849,11 +849,14 @@ def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypa
         pass
 
     注了, 喊了 = [], []
+    monkeypatch.setattr(w, 'STATE_DIR', tmp_path)
     import network_route
     monkeypatch.setattr(network_route, "ensure_agent_proxy", lambda **kw: {"status": "unmanaged"})
     monkeypatch.setattr(w, "revive_dead_bridges", lambda: 0)
     monkeypatch.setattr(w, "scan_topology", lambda: ({"pty-1": "ws-voiceover"}, ["pty-1"]))
-    monkeypatch.setattr(w, "read_pane", lambda *a, **k: "• Ran node scripts/audit.mjs")
+    monkeypatch.setattr(w, "read_pane", lambda *a, **k: "• Ran node scripts/audit.mjs\n› Ask Codex to do anything\n\nstatus")
+    monkeypatch.setattr(w, 'session_record', lambda *a: {'workspace_id': 'ws-voiceover', 'pty': 'pty-1'})
+    monkeypatch.setattr(w.bridge_activity, 'read_activity', lambda *a: {'state': 'idle'})
     monkeypatch.setattr(w, "live_bot_by_pty", lambda: {"pty-1": "假codex-bot"})
     monkeypatch.setattr(w, "_iter_bots", lambda: [{"name": "假codex-bot"}])
     monkeypatch.setattr(w, "_profile_of", lambda *a, **k: "cxp")
@@ -863,8 +866,10 @@ def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypa
     monkeypatch.setattr(q, "collect", lambda *a, **k: [])
     monkeypatch.setattr(w, "_is_codex", lambda _b: True)
     monkeypatch.setattr(w, "codex_dead_turn", lambda *a, **k: (
-        {"turn": "turn-掐断", "error": "Invalid prompt: ... flagged as potentially violating ...",
-         "policy": True}, True))
+        {"turn": "turn-掐断", "error": "Connection failed: error sending request", "policy": False},
+        {'type': 'task_complete', '_thread_id': 'thread', 'turn_id': 'turn-掐断',
+         'error': {'message': 'Connection failed: error sending request'}}))
+    monkeypatch.setattr(w, 'codex_thread_id', lambda *a, **kw: 'thread')
     monkeypatch.setattr(w, "nudge_pane", lambda pty, text=None: 注了.append((pty, text)) or True)
     monkeypatch.setattr(w, "notify", lambda bot, kind, text: 喊了.append((bot, kind)) or True)
 
@@ -879,17 +884,14 @@ def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypa
     assert ("假codex-bot", "policy_nudged") in 喊了, f"必须发 DM，绝不静默地救；实际 {喊了}"
 
 
-def test_r5_只在回合收尾时动手_结构上不会打断正在跑的活():
-    """守住循环里的接线：R5 唯一的动手条件来自 find_dead_turn，而它要求最后一个事件是 task_complete。"""
-    src = (HERE.parent / "feishu" / "bridge_watchdog.py").read_text(encoding="utf-8")
-    body = src[src.index("def cmd_run("):]
-    i = body.index("R5 · Codex")
-    seg = body[i:i + 3200]
-    assert "dead, last_turn = codex_dead_turn(" in body[:i]  # shared snapshot read before R8 and R5
-    assert "if not dead:" in seg
-    assert "POLICY_NUDGE_TEXT" in seg, "R5 要注的是自己那句，不是 R1 的 NUDGE_TEXT"
-    assert "POLICY_NUDGE_MAX" in seg, "连着被掐 N 次必须停手，别无限白撞"
-    assert 'notify(bot_name, "policy_stuck"' in seg, "停手之后【绝不静默】——静默正是这套东西要根治的病"
+def test_r5_只在回合收尾时动手_结构上不会打断正在跑的活(monkeypatch, tmp_path):
+    """Assert behavior, not the spelling/order of the loop's implementation."""
+    monkeypatch.setattr(w, 'STATE_DIR', tmp_path)
+    def forbidden(*a, **kw):
+        raise AssertionError('active turn must not be interrupted')
+    monkeypatch.setattr(w, 'nudge_pane', forbidden)
+    monkeypatch.setattr(w, 'recover_failed_session', forbidden)
+    assert not w.handle_failed_turn({'name': 'bot'}, None, {'_thread_id': 'thread', 'type': 'task_started'})
 
 
 if __name__ == "__main__":

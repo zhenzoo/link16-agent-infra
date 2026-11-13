@@ -45,6 +45,10 @@ class RetryableHandoffError(RuntimeError):
     """Driver proved no submission: zero writes, or owned draft fully cleared."""
 
 
+class InputSurfaceUnavailable(RetryableHandoffError):
+    """Wmux proved zero writes while its background screen was not readable."""
+
+
 class StartupCancelled(RetryableHandoffError):
     """A queued authorized control command must run before startup continues."""
 
@@ -317,6 +321,25 @@ class Inbox:
         """Only the driver's typed zero-write proof permits a later new paste."""
         if not isinstance(error, RetryableHandoffError):
             raise TypeError('non-submission requires typed driver proof')
+        if isinstance(error, InputSurfaceUnavailable):
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
+                if (not row or row['state'] not in ('awaiting_confirmation', 'uncertain')
+                        or row['retry_safe'] or row['attempts'] < 1):
+                    return  # Receipt/cancellation or an already credited reservation wins.
+                payload = json.loads(row['payload'])
+                context = payload.setdefault('scheduled', {})
+                waiting = context.get('surface_wait') or {}
+                context['surface_wait'] = dict(count=waiting.get('count', 0) + 1,
+                                               last_at=time.time(), reason=str(error)[:300])
+                # The reservation was made before paste. Only this typed proof
+                # credits it back; the wait remains auditable across restarts.
+                db.execute("""UPDATE messages SET state='uncertain',attempts=attempts-1,
+                    retry_safe=1,retry_at=?,error=?,updated=?,payload=? WHERE id=?""",
+                    (time.time() + delay, str(error)[:300], time.time(),
+                     json.dumps(payload, ensure_ascii=False), mid))
+            return
         with self.connect() as db:
             db.execute("""UPDATE messages SET
                 state=CASE WHEN attempts>=? THEN 'failed' ELSE 'uncertain' END,
@@ -455,21 +478,6 @@ class Inbox:
     def counts(self):
         with self.connect() as db:
             return dict(db.execute("SELECT state,COUNT(*) FROM messages GROUP BY state").fetchall())
-
-    def reset_blockers(self, session=None):
-        """Pending work that could be interrupted by resetting the current thread.
-
-        Queued preparation always blocks. An unresolved handoff bound to a
-        different native thread remains in history, but cannot be interrupted
-        by closing this thread. Unknown/current bindings still fail closed.
-        This is not a delivery receipt or permission to replay old messages.
-        """
-        with self.connect() as db:
-            return dict(db.execute("""SELECT state,COUNT(*) FROM messages
-                WHERE state IN ('queued','processing') OR
-                (state IN ('submitting','awaiting_confirmation','uncertain')
-                 AND (? IS NULL OR session IS NULL OR session='' OR session=?))
-                GROUP BY state""", (session or None, session or None)).fetchall())
 
     def delivery_status(self):
         """Latest ordinary handoff, including its real native receipt (no body)."""

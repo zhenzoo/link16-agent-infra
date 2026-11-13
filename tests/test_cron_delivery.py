@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / 'feishu'))
 import bridge_cron as cron
 import bridge_injection
 import codex_startup
-from bridge_inbox import Inbox, RetryableHandoffError
+from bridge_inbox import Inbox, RetryableHandoffError, InputSurfaceUnavailable
 from codex_app_server_worker import record_turn_receipt
 import cron_delivery as delivery
 
@@ -72,6 +72,34 @@ def test_busy_or_unknown_native_state_never_retries(scene, state):
     with pytest.raises(RuntimeError):
         delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
     scene.fb.wmux.assert_not_called()
+
+
+def test_active_exact_owned_draft_uses_advertised_queue_tab_once(scene):
+    scene.inbox.scheduled_attempt(scene.row['id'])
+    scene.fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    scene.fb.read_screen.return_value = f'Working\n\n› {scene.marker}\n \n  tab to queue message     48% context left'
+    scene.fb.wmux.side_effect = lambda *a: scene.inbox.confirm(scene.marker, 'thread')
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    scene.fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    scene.fb._inject.assert_not_called()
+
+
+@pytest.mark.parametrize('state,screen', [
+    ('active', 'tab to queue message\n\n› {marker}\n\nstatus'),
+    ('active', '› other draft\n\n  tab to queue message'),
+    ('active', '› {marker}\n tab to queue message'),
+    ('waiting', '› {marker}\n\n  tab to queue message'),
+    ('unknown', '› {marker}\n\n  tab to queue message'),
+    ('active', '• Compacting context (1m 34s • esc to interrupt)\n  └ Making room to continue.\n\n› {marker}\n\n  tab to queue message'),
+])
+def test_queue_tab_requires_active_exact_draft_live_footer_and_no_compaction(scene, state, screen):
+    scene.fb.bridge_activity.read_activity.return_value = {'state': state}
+    scene.fb.read_screen.return_value = screen.format(marker=scene.marker)
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    scene.fb.wmux.assert_not_called()
+    scene.fb._inject.assert_not_called()
 
 
 @pytest.mark.parametrize('retry_safe', [False, True])
@@ -292,6 +320,32 @@ def test_proven_zero_write_recovers_after_restart_via_protected_injection(scene,
     scene.fb.wmux.assert_not_called()
 
 
+@pytest.mark.parametrize('placeholder', ['', 'Ask Codex to do anything'])
+def test_proven_unsent_input_can_queue_during_active_turn_without_waiting_for_idle(scene, monkeypatch, placeholder):
+    not_written(scene, monkeypatch)
+    scene.fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    scene.fb.read_screen.return_value = f'Welcome\n› {placeholder}\n\nstatus'
+    scene.fb._inject.side_effect = lambda *a, **k: scene.inbox.confirm(scene.marker, 'thread')
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 2  # one original zero-write, one accepted retry
+    scene.fb.wmux.assert_not_called()
+
+
+@pytest.mark.parametrize('state,screen', [
+    ('active', ''), ('active', '› someone else\n\nstatus'),
+    ('waiting', '› \n\nstatus'), ('unknown', '› \n\nstatus'),
+])
+def test_proven_unsent_active_recovery_still_requires_readable_empty_composer(scene, monkeypatch, state, screen):
+    not_written(scene, monkeypatch)
+    scene.fb.bridge_activity.read_activity.return_value = {'state': state}
+    scene.fb.read_screen.return_value = screen
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert scene.fb._inject.call_count == 1
+    scene.fb.wmux.assert_not_called()
+
+
 @pytest.mark.parametrize('screen', ['', 'unreadable', '› someone else\n\nstatus'])
 def test_zero_write_proof_does_not_overwrite_or_bypass_unreadable_composer(scene, monkeypatch, screen):
     not_written(scene, monkeypatch)
@@ -318,6 +372,88 @@ def test_zero_write_retry_waits_and_has_durable_failure_limit(scene, monkeypatch
     assert not delivery.accepted(row)
     assert scene.inbox.scheduled_pending() == []
     assert scene.inbox.claim() is None
+
+
+def test_background_screen_wait_survives_three_checks_then_receives_original_once(scene, monkeypatch):
+    monkeypatch.setattr(delivery, '_register', lambda *a: scene.inbox.get(scene.row['id']))
+    monkeypatch.setattr(delivery, 'RETRY_DELAY_SEC', 0)
+    scene.fb._inject.side_effect = InputSurfaceUnavailable('screen unavailable; zero writes')
+    scene.fb.read_screen.return_value = '› Ask Codex to do anything\n\nstatus'
+    original_payload = json.loads(scene.row['payload'])
+    for i in range(6):
+        with pytest.raises(InputSurfaceUnavailable):
+            if i == 0:
+                delivery.submit(scene.fb, scene.bot, scene.job, 'ws', 'pty', scene.marker)
+            else:
+                delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+        row = Inbox(scene.fb.STATE_DIR, 'target').get(scene.row['id'])
+        assert row['state'] == 'uncertain' and row['attempts'] == 0 and row['retry_safe'] == 1
+        payload = json.loads(row['payload'])
+        assert payload['prompt'] == original_payload['prompt']
+        assert payload['scheduled']['surface_wait']['count'] == i + 1
+        assert row['session'] == scene.row['session']
+    scene.fb._inject.side_effect = lambda *a, **kw: scene.inbox.confirm(scene.marker, 'thread')
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    accepted_row = scene.inbox.get(scene.row['id'])
+    assert delivery.accepted(accepted_row) and accepted_row['attempts'] == 1
+    assert scene.fb._inject.call_count == 7  # Six guarded zero writes, one receipt.
+
+
+def test_surface_wait_cannot_credit_same_reservation_twice(scene):
+    scene.inbox.scheduled_attempt(scene.row['id'])
+    exc = InputSurfaceUnavailable('unreadable')
+    for _ in range(2):
+        scene.inbox.scheduled_not_submitted(scene.row['id'], exc, limit=3, delay=30)
+    row = scene.inbox.get(scene.row['id'])
+    assert row['attempts'] == 0
+    assert json.loads(row['payload'])['scheduled']['surface_wait']['count'] == 1
+    assert row['retry_at'] > row['updated']
+
+
+def test_due_surface_wait_has_no_repeat_alert_but_still_expires(scene, monkeypatch):
+    import cron_due
+    scene.fb.load_owner = Mock(return_value='owner')
+    scene.fb._send_text_message = Mock(return_value='notice')
+    scene.bot.update(app_id='test', app_secret='test')
+    schedule = dict(job=scene.job, stamp='2026-11-02 00:00', profile='cxp',
+                    starts=1, phase='pending', notice=None)
+    with scene.inbox.connect() as db:
+        db.execute('UPDATE messages SET schedule=?,retry_safe=1 WHERE id=?',
+                   (json.dumps(schedule), scene.row['id']))
+    scene.fb._inject.side_effect = InputSurfaceUnavailable('unreadable; zero writes')
+    scene.fb.read_screen.return_value = '› Ask Codex to do anything\n\nstatus'
+    monkeypatch.setattr(delivery, 'RETRY_DELAY_SEC', 0)
+    fire = Mock()
+    for _ in range(6):
+        cron_due.process(scene.fb, scene.bot, [scene.job], fire, Mock())
+    row = scene.inbox.get(scene.row['id'])
+    assert row['state'] == 'uncertain' and row['attempts'] == 0
+    assert json.loads(row['payload'])['scheduled']['surface_wait']['count'] == 6
+    scene.fb._send_text_message.assert_not_called()
+    fire.assert_not_called()
+    with scene.inbox.connect() as db:
+        db.execute('UPDATE messages SET received=received-? WHERE id=?',
+                   (cron_due.MAX_AGE_SEC, scene.row['id']))
+    for _ in range(2):
+        cron_due.process(scene.fb, scene.bot, [scene.job], fire, Mock())
+    row = scene.inbox.get(scene.row['id'])
+    assert json.loads(row['schedule'])['phase'] == 'stopped'
+    assert row['payload']
+    scene.fb._send_text_message.assert_called_once()
+    assert scene.fb._inject.call_count == 6
+
+
+@pytest.mark.parametrize('action', ['cancel', 'receipt'])
+def test_surface_wait_does_not_revive_cancelled_or_accepted_input(scene, action):
+    scene.inbox.scheduled_attempt(scene.row['id'])
+    if action == 'cancel':
+        scene.inbox.scheduled_cancel(scene.row['id'], 'owner cancelled')
+    else:
+        scene.inbox.confirm(scene.marker, 'thread')
+    before = scene.inbox.get(scene.row['id'])
+    scene.inbox.scheduled_not_submitted(scene.row['id'], InputSurfaceUnavailable('unreadable'), limit=3, delay=20)
+    assert scene.inbox.get(scene.row['id']) == before
 
 
 def test_unknown_retry_result_consumes_proof_and_never_repastes(scene, monkeypatch):

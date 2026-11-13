@@ -53,6 +53,7 @@ def test_other_explicit_kimi_quota_errors_also_cannot_trigger_network_retry(wind
 @pytest.mark.parametrize("known", [False, True])
 def test_kimi_weekly_screen_never_falls_through_to_continue(monkeypatch, tmp_path, known):
     def configure(events):
+        monkeypatch.setattr(w, "_is_codex", lambda *a: False)
         monkeypatch.setattr(w, "_profile_of", lambda *a: "kp")
         quota = dict(row(short=10, weekly=100), profile="kp", runtime="kimi")
         if not known:
@@ -66,10 +67,14 @@ def test_kimi_weekly_screen_never_falls_through_to_continue(monkeypatch, tmp_pat
     assert any(kind == "failover" for kind, _ in events) is known
 
 
-def test_kimi_transient_provider_error_still_uses_normal_recovery(monkeypatch, tmp_path):
+@pytest.mark.parametrize("is_codex", [False, True])
+def test_provider_screen_recovery_respects_runtime(monkeypatch, tmp_path, is_codex):
     screen = "Error: [provider.api_error] Connection lost mid-response"
-    events = run_scenes(monkeypatch, tmp_path, [{"screen": screen}] * 2)
-    assert ("nudge", 1) in events
+    def configure(events):
+        monkeypatch.setattr(w, "_is_codex", lambda *a: is_codex)
+    events = run_scenes(monkeypatch, tmp_path, [{"screen": screen}] * 2, configure=configure)
+    # Kimi retains screen-based network recovery; Codex requires its native error event.
+    assert (("nudge", 1) in events) is (not is_codex)
 
 
 def test_provider_reset_time_is_stored_as_epoch_for_a_restart_safe_wakeup():

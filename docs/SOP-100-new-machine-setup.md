@@ -413,6 +413,7 @@ Kimi 通过原生终端与 Wire 观察程序接桥，`service_doctor.py` 检查 
 - 选项包含 Claude-work / Claude-personal / Codex-personal / Codex-work / Kimi 及全部已有编号账号；每类同时给下一个空位。选择器自动派生内部 ID 与隔离 home，已存在但未登记的目录不覆盖。高级自定义仍可用 `--init-registry` / `--register-profile`，不作为普通用户必答项。
 - `agent-profiles.local.json` 是 gitignored 的单一本机有效 registry，不与 committed 文件合并；公共 `agent-profiles.json` 为空模板，没有维护者默认账号。旧机未迁移时仍可读旧格式，但必须先保存本机映射再升级；不能从测试 fixture 恢复私人身份。
 - Claude 的 `feishu` / `feishu-workline` 安装到各所选 profile home；Codex/Kimi 共用用户级 `$HOME/.agents/skills/<skill>`。
+- 用户明确选择使用自己的配置母版时，clone 只是取得真源；还必须执行该配置仓的治理启用 SOP。维护者的 `~/.claude-personal` 使用 `docs/SOP-020-config-activation.md`：通过 `scripts/govctl.ps1` 预览、同步、完整 doctor，并核原生技能清单中的 `pull`。未选择个人配置的公开安装不执行此步骤，不默认克隆维护者配置；本节基础 skills 的 `ok` 不能替代已选择的个人技能验收。
 - 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
 - `--select ... --apply --login` 通过登记的 launcher 调用 Claude `auth login`、Codex/Kimi `login`，由原生流程打开浏览器；已有健康登录直接复用。登录进程保留到用户完成，不用短 timeout 截断，也不让用户另开终端重复操作。
 - 登录后自动 selftest，走与桥一致的 shell、环境和 launcher；`--version` 通过只证明实际入口可执行，不覆盖模型与飞书回复，随后仍须真实私聊验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。

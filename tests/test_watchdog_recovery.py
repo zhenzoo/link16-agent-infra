@@ -56,6 +56,8 @@ def run_scenes(monkeypatch, tmp_path, scenes, *, esc_ok=True, nudge_ok=True, con
     monkeypatch.setattr(w.agent_runtime, "profile_name", lambda *a, **kw: (_ for _ in ()).throw(ValueError("isolated")))
     monkeypatch.setattr(w.agent_quota, "collect", lambda: [])
     monkeypatch.setattr(w, "read_pane", lambda *a: current().get("screen", WORKING))
+    monkeypatch.setattr(w, "session_record", lambda *a: {'pty': 'fake-pty', 'workspace_id': 'fake-workspace'})
+    monkeypatch.setattr(w.bridge_activity, "read_activity", lambda *a: current().get('activity', {'state': 'idle'}))
     monkeypatch.setattr(w, "at_picker", lambda screen, bot: current().get("picker", False))
     monkeypatch.setattr(w, "codex_thread_id", lambda *a: "test-thread")
     monkeypatch.setattr(w, "codex_rollout_tail", lambda *a, **kw: json.dumps({
@@ -137,7 +139,7 @@ def test_readonly_preview_respects_picker_gate(monkeypatch, capsys):
 # ---------- R5 · failed turn retry budget (unchanged from main) ----------
 
 def failed_turn(number):
-    return {"screen": "Error running remote compact task", "step_seconds": 700,
+    return {"screen": "Error running remote compact task\n› Ask Codex to do anything\n\nstatus", "step_seconds": 700,
             "turn": {"type": "task_complete", "turn_id": f"failed-{number}",
                      "error": {"message": "Error running remote compact task: idle timeout waiting for SSE"}}}
 
@@ -148,7 +150,7 @@ def test_compact_errors_stop_after_three_retries_across_running_scans(monkeypatc
         scenes.extend([failed_turn(i), {"screen": "retry running"}])
     events = run_scenes(monkeypatch, tmp_path, scenes)
     assert [e for e in events if e[0] == "nudge"] == [("nudge", 0), ("nudge", 2), ("nudge", 4)]
-    assert ("policy_stuck", 6) in events
+    assert ("turn_stopped", 6) in events
 
 
 def test_same_failed_turn_does_not_receive_duplicate_retry(monkeypatch, tmp_path):
@@ -161,15 +163,37 @@ def test_success_or_manual_stop_resets_failure_budget(monkeypatch, tmp_path, ter
     scenes = [failed_turn(i) for i in range(4)]
     scenes += [{"screen": IDLE, "turn": terminal}, failed_turn(5)]
     events = run_scenes(monkeypatch, tmp_path, scenes)
-    assert ("policy_stuck", 3) in events
+    assert ("turn_stopped", 3) in events
     assert ("nudge", 4) not in events
     assert ("nudge", 5) in events
 
 
-def test_failed_turn_while_r8_confirmed_stall_is_left_to_r8(monkeypatch, tmp_path):
+def test_conflicting_live_active_state_never_interrupts_or_retries_failed_turn(monkeypatch, tmp_path):
     scene = failed_turn(1) | {"activity": ACTIVE_60}
     events = run_scenes(monkeypatch, tmp_path, [scene])
-    assert ("esc", 0) in events and ("policy_nudged", 0) not in events
+    assert not [e for e in events if e[0] in ('esc', 'nudge', 'policy_nudged')]
+
+
+def test_overnight_bad_request_replay_no_r1_bypass_or_repeated_stop_notice(monkeypatch, tmp_path):
+    # 06:41 failure; 07/08 cron errors and repeated 30-minute inspections.
+    # Restarting the watchdog halfway must not recreate a fresh budget.
+    recoveries = []
+    def recover(*args):
+        recoveries.append(args)
+        raise RuntimeError('replacement failed too')
+    monkeypatch.setattr(w, 'recover_failed_session', recover)
+    scenes = []
+    for i in (1, 1, 2, 2, 3, 3):
+        scene = failed_turn(i)
+        scene['screen'] = 'API Error: 400 Bad Request\n› Ask Codex to do anything\n\nstatus'
+        scene['step_seconds'] = 1900
+        scene['turn']['error']['message'] = '{"detail":"Bad Request"}'
+        scenes.append(scene)
+    events = run_scenes(monkeypatch, tmp_path, scenes[:3])
+    events += run_scenes(monkeypatch, tmp_path, scenes[3:])
+    assert len(recoveries) == 1
+    assert len([e for e in events if e[0] == 'turn_stopped']) == 1
+    assert not [e for e in events if e[0] in ('nudge', 'esc')]
 
 
 # ---------- RPC transport honesty ----------

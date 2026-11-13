@@ -5,6 +5,7 @@ import time
 
 from bridge_inbox import Inbox, RetryableHandoffError
 import cron_delivery
+import turn_recovery
 
 MAX_STARTS = 3
 RETRY_SEC = 20
@@ -14,11 +15,11 @@ MAX_AGE_SEC = 24 * 60 * 60
 def spec(job):
     return {k: job.get(k, default) for k, default in (
         ('name', None), ('bot', None), ('prompt', None), ('cron', None),
-        ('tz', 'Asia/Shanghai'), ('session_policy', 'reuse'))}
+        ('tz', 'Asia/Shanghai'))}
 
 
 def start(fb, bot, job):
-    """Called under the lifecycle lock, after idle guards, before side effects."""
+    """Called under the lifecycle lock before ensuring the existing session."""
     if job.get('_due_id'):
         inbox = Inbox(fb.STATE_DIR, bot['name'])
         row = inbox.get(job['_due_id'])
@@ -88,6 +89,8 @@ def _alert(fb, bot, inbox, row, reason, log):
 
 def process(fb, bot, jobs, fire, log):
     inbox = Inbox(fb.STATE_DIR, bot['name'])
+    if turn_recovery.blocked(fb, bot):
+        return  # Preserve all occurrences and budgets; no per-occurrence alerts.
     for row in inbox.due_rows():
         context = json.loads(row['schedule'])
         job = next((j for j in jobs if j.get('bot') == bot['name']

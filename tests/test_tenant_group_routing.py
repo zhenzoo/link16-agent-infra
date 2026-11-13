@@ -206,9 +206,20 @@ class MonitorGroupCheckTests(unittest.TestCase):
         probe = self._probe([{"chat_id": "oc_ent", "name": "obsagent 大乱斗"}])
         with mock.patch.dict(sys.modules, {"bridge_feishu_probe": probe}), \
                 mock.patch.object(monitor, "_resolve_group_hint",
-                                  side_effect=AssertionError("显式 --group 时不该再判租户")):
+                                  return_value=("另一共享群", None, "oc_other")):
             result = monitor._group_check("tb26-x", "obsagent")
         self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["expected_group"], "obsagent")
+        self.assertEqual(result["matched"][0]["chat_id"], "oc_ent")
+
+    def test_registered_explicit_group_rejects_same_name_wrong_chat(self):
+        probe = self._probe([{"chat_id": "oc_wrong", "name": "obsagent 大乱斗"}])
+        with mock.patch.dict(sys.modules, {"bridge_feishu_probe": probe}), \
+                mock.patch.object(monitor, "_resolve_group_hint",
+                                  return_value=("obsagent 大乱斗", None, "oc_ent")):
+            result = monitor._group_check("tb26-x", "obsagent 大乱斗")
+        self.assertEqual(result["status"], "missing")
+        self.assertEqual(result["expected_chat_id"], "oc_ent")
 
 
 class TenantRegistrySyncTests(unittest.TestCase):

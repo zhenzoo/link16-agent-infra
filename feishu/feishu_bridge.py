@@ -1001,12 +1001,20 @@ def wmux(*cmd_args):
                        encoding="utf-8", errors="replace", timeout=30,   # 读取侧：解不了的字节打问号，不崩
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # 别闪黑窗抢鼠标焦点
     if r.returncode != 0:
+        # Keep the actionable server reason before guard diagnostics, so the
+        # Inbox's bounded error field does not truncate it behind OVERRIDE.
+        detail = next((line[5:] for line in r.stderr.splitlines() if line.startswith('ERR: ')), r.stderr.strip())
         if (cmd_args[0] == "paste"
                 and any(line in r.stderr.splitlines() for line in (
                     'LINK16_HANDOFF {"state":"not_written"}',
                     'LINK16_HANDOFF {"state":"cleared_unsubmitted"}'))):
-            raise bridge_inbox.RetryableHandoffError(f"wmux-rpc paste not submitted: {r.stderr.strip()}")
-        raise RuntimeError(f"wmux-rpc {cmd_args[0]} failed: {r.stderr.strip()}")
+            if ('LINK16_HANDOFF {"state":"not_written"}' in r.stderr.splitlines()
+                    and 'screen could not be read whole from its output' in detail
+                    and 'folder-trust prompt cannot be ruled out' in detail):
+                raise bridge_inbox.InputSurfaceUnavailable(
+                    'Wmux后台画面暂时无法完整读取，尚不能排除目录信任框；本次未写入，保留原任务等待画面恢复。')
+            raise bridge_inbox.RetryableHandoffError(f"wmux-rpc paste not submitted: {detail}")
+        raise RuntimeError(f"wmux-rpc {cmd_args[0]} failed: {detail}")
     return r.stdout
 
 
@@ -1801,14 +1809,18 @@ def close_session_runtime(bot):
     not let the next worker resume the previous profile or directory.
     """
     with bridge_injection.injection_lock(STATE_DIR, "ensure-session", bot["name"]):
-        result = _close_session_unlocked(bot)
-        # Only clear after close succeeded. Failed close retains enough identity
-        # to recover the original runtime, including Kimi's supervised worker.
-        clear_codex_thread(bot["name"])
-        _merge_session(bot["name"], {"workspace_id": None, "pty": None, "jsonl": None,
-                                     "daemon_fp": None, "pending_launch": None,
-                                     "runtime_processes": None})
-        return result
+        return _close_session_runtime_unlocked(bot)
+
+
+def _close_session_runtime_unlocked(bot):
+    """Same lifecycle transaction when the caller already holds ensure-session."""
+    result = _close_session_unlocked(bot)
+    # Failed close retains identity; routing/profile/cwd/history are preserved.
+    clear_codex_thread(bot["name"])
+    _merge_session(bot["name"], {"workspace_id": None, "pty": None, "jsonl": None,
+                                 "daemon_fp": None, "pending_launch": None,
+                                 "runtime_processes": None})
+    return result
 
 
 def replace_session(bot, defaults, *, create=False):
@@ -1896,7 +1908,7 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
         # A saved/partial draft belongs to its original handoff. Never append a
         # later message to it, and never clear it to make the queue look healthy.
         try:
-            empty = cron_delivery._draft(read_screen(pty, None)) in ('', 'Ask Codex to do anything')
+            empty = cron_delivery.empty_composer(read_screen(pty, None))
         except RuntimeError as exc:
             raise bridge_inbox.RetryableHandoffError('输入框无法读取；本次零写入') from exc
         if not empty:
@@ -1912,7 +1924,8 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
         wmux("enter", pty, *allow)
     if is_codex:
         # This is only a successful transport call. Inbox + the native hook
-        # decide reception; recovery alone may retry Enter on an idle exact draft.
+        # decide reception; recovery may retry Enter on an idle exact draft or
+        # the explicitly advertised queue Tab on an active exact draft.
         return True
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
     tries = 15 if is_kimi else INJECT_VERIFY_TRIES
