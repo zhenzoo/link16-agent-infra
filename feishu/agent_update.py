@@ -255,7 +255,8 @@ def status_text(record):
     if status == "busy":
         return "已有更新在运行，本次使用已安装版本启动。"
     if status in {"stalled", "no_response"}:
-        return "更新连续 5 秒没有进展，已结束本次更新，使用已安装版本启动。"
+        budget = record.get("response_timeout_sec", UPDATE_RESPONSE_TIMEOUT_SEC)
+        return f"更新连续 {budget:g} 秒没有进展，已结束本次更新，使用已安装版本启动。"
     if status == "failed":
         code = record.get("return_code")
         detail = f"（退出码 {code}）" if isinstance(code, int) and code else ""
@@ -282,12 +283,14 @@ def _update_official(profile, state_dir: Path, timeout: float, on_response=None,
                 "started_at": time.time(),
             }
             env = os.environ.copy()
+            update_home = profile.home_path
             if runtime == "claude":
                 env.pop("DISABLE_AUTOUPDATER", None)
                 env.pop("DISABLE_UPDATES", None)
             elif runtime == "codex":
                 network_route.prefer_windows_system_tar(env)
-                env["CODEX_HOME"] = str(profile.home_path)
+                update_home = official_install.codex_standalone_home(executable) or profile.home_path
+                env["CODEX_HOME"] = str(update_home)
                 env["CODEX_NON_INTERACTIVE"] = "1"
             _emit(on_progress, {"status": "checking"})
             latest = None
@@ -313,7 +316,7 @@ def _update_official(profile, state_dir: Path, timeout: float, on_response=None,
                         executable, UPDATE_ARGS[runtime], env=env,
                         response_timeout=timeout, on_response=on_response,
                         on_progress=on_progress, cancelled=cancelled, progress_dir=scratch,
-                        staging_root=(profile.home_path / 'packages' / 'standalone' / 'releases'
+                        staging_root=(update_home / 'packages' / 'standalone' / 'releases'
                                       if runtime == 'codex' else None),
                     )
             except OSError as exc:

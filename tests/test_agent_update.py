@@ -196,6 +196,27 @@ class CodexUpdateTests(unittest.TestCase):
         latest.assert_called_once_with(agent_update.UPDATE_RESPONSE_TIMEOUT_SEC, None)
         run.assert_not_called()
 
+    def test_shared_install_updates_in_payload_home_without_switching_account(self):
+        installation = self.root / 'installation-home'
+        executable = installation / 'packages/standalone/releases/1.0.0-windows/bin/codex.exe'
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b'fixture')
+        completed = {'status': None, 'return_code': 0, 'response_elapsed_sec': 0.01}
+        with patch.object(agent_update.agent_runtime, 'profile_spec', return_value=self.profile), \
+                patch.object(agent_update, '_executable', return_value=str(executable)), \
+                patch.object(agent_update, '_version', side_effect=['1.0.0', '1.1.0']), \
+                patch.object(agent_update, '_codex_latest', return_value='1.1.0'), \
+                patch.object(agent_update, '_run_update_command', return_value=completed) as run, \
+                patch.dict(os.environ, {'CODEX_HOME': str(self.profile.home_path)}):
+            result = agent_update.ensure('cxp', state_dir=self.root / 'state')
+            self.assertEqual(os.environ['CODEX_HOME'], str(self.profile.home_path))
+        self.assertEqual(result['status'], 'updated')
+        self.assertEqual(run.call_args.kwargs['env']['CODEX_HOME'], str(installation))
+        self.assertEqual(run.call_args.kwargs['staging_root'],
+                         installation / 'packages/standalone/releases')
+        self.assertTrue((self.profile.home_path / 'config.toml').is_file())
+        self.assertFalse((installation / 'config.toml').exists())
+
     def test_unavailable_check_is_not_reported_as_latest(self):
         with patch.object(agent_update, '_version', return_value='2.0.0'), \
                 patch.object(agent_update, '_codex_latest', return_value=None), \
@@ -216,6 +237,8 @@ class CodexUpdateTests(unittest.TestCase):
             ({'status': 'never'}, '尚无更新检查记录'),
             ({'status': 'unverified', 'before': '2.0.0'}, '未验证到目标版本'),
             ({'status': 'migration_required'}, '需要迁移'),
+            ({'status': 'no_response'}, '连续 5 秒没有进展'),
+            ({'status': 'stalled', 'response_timeout_sec': 30.0}, '连续 30 秒没有进展'),
             ({'status': 'failed', 'before': '2.0.0', 'return_code': 1}, '退出码 1'),
             ({'status': 'unknown'}, '状态尚未确认'),
         ]

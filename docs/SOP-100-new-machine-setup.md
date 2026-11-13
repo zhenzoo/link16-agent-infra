@@ -116,7 +116,7 @@ Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要�
 
 后续更新也只走各提供方的原生自动更新、CLI 内置更新命令或同一官方安装脚本；不得再用 npm、uv/pip 或第三方包管理器覆盖这三个入口。更新后重新核对实际命令路径和签名，不能只凭版本号判断来源。
 
-Link16 新交互 session 会经过 `feishu/agent_update.py`，统一调用官方 `claude update`、`codex update`、`kimi update --yes`，不另写下载器，也不让多个 profile 并发更新同一程序。没有其他更新在跑时，updater 在 5 秒内从 stdout/stderr 产生实际输出即显示正在更新并等待官方命令完成，不再限制更新总时长；5 秒完全无响应、已有更新继续运行或更新失败则跳过并启动当前已装版本，写脱敏回执。Codex 自带的重复启动检查由 Link16 集中更新后关闭。`agent_update.py status --profile <名>` 查最近结果，紧急时用 `LINK16_AGENT_UPDATE=0` 绕过；已运行的会话不被更新流程中断。
+Link16 新交互 session 会经过 `feishu/agent_update.py`，统一调用官方 `claude update`、`codex update`、`kimi update --yes`，不另写下载器，也不让多个 profile 并发更新同一程序。下载／安装文件增长或数值进度推进时继续等待，不限制更新总时长；默认连续 5 秒没有进展才结束本次安装子树，重复输出提示不算进展。版本检查未完成、已有更新在跑和实际升级失败分别记录、分别提示，均可启动当前已装版本；只有确认版本才说“已是最新版”。Codex 自带的重复启动检查由 Link16 集中更新后关闭。`agent_update.py status --profile <名>` 查最近结果，紧急时用 `LINK16_AGENT_UPDATE=0` 绕过；已运行的会话不被更新流程中断。
 
 | CLI | 官方默认程序入口 | 官方说明 |
 |---|---|---|
@@ -166,6 +166,8 @@ python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 -
 官方程序已在但 PATH 被遮蔽时无需重装。核清命中的旧入口与包装器实际目标，先备份再只修明确属于旧 Codex 的入口；未知自定义脚本保留并报告，不删除整个 npm 目录、不改其他 npm 工具。重新打开终端后体检「Codex 安装渠道」须为 OK。
 
 日常由 `agent_update.py ensure --profile <本机已登记profile>` 调用官方 `codex.exe update`。Windows 更新器直接选择 standalone 稳定入口，不调用 PATH 中的 npm shim；缺少 standalone 时回执为 `migration_required`，不写 profile 的更新设置、不运行旧 npm 更新器，原会话仍可继续。更新改变磁盘程序，已有会话不为此强制终止；新进程再验证版本。
+
+官方稳定入口可能经 junction 指向另一个 home 下的 `packages/standalone/releases/<版本>/bin/codex.exe`。更新器以这个真实程序目录识别安装方式：Link16 仅在更新子进程中把 `CODEX_HOME` 指向该包目录所属 home，安装进度也观察同一目录；不能传所选账号的隔离 home，否则可能报“无法识别安装方式”。账号 home、认证和会话仍由 effective registry 决定；不复制账号配置、不另建映射。未识别出上述官方包布局时保留既有调用方式。
 
 ---
 
