@@ -18,7 +18,7 @@ read_when:
   - 判断某个 scope 能不能自助开通
   - 新增或修改智能体权限基线
   - 把这套机制搬到另一个租户或另一台机器
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-13
 related:
   - ARCH-130
   - SOP-140
@@ -123,7 +123,7 @@ level 4  →  self_serve = false  →  需要租户管理员审批
   并只为 level 3 的缺口生成开通链接；遇到 level 4 缺口直接说明"需管理员审批、
   基线不依赖它"，不生成误导性的开通链接。
 - 注册目标真源为 `bridge_scope_audit.registration_scope_plan(capabilities, granted_pairs, tenant_kind)`：企业返回tenant/user两份免审增量，其他租户保留旧基线；dry-run、登记打印、Monitor共用。实际授权保留scope_type；只有tenant同名权限不能抵消user缺口。开通URL按身份生成，不能把user-only搜索塞进tenant链接。
-- `registration_monitor` 在生成第二条链接前先审计当前授权；`permissions_ready` 同时要求
+- `register_feishu_app` 将同一目标交给官方SDK addons，首次本人确认预填两身份免审权限并保留基础事件preset；已知原AppID续接只补可核缺口，不再固定两轮后台操作。`registration_monitor` 只对实际缺口生成补办链接，初始30秒传播期及读取失败仅继续只读核实；已齐不排重复人工事件。`permissions_ready` 同时要求
   capability 与基线开满，并在里程碑翻绿前独立再读一次接口、两次一致才回调；其后每一轮
   （含 `ready`）继续重读，最终回调不骑在旧读数上。
 
@@ -141,7 +141,9 @@ level 4  →  self_serve = false  →  需要租户管理员审批
 
 注册完成后运行 `bridge_scope_audit.py --bot <bot> --baseline --user-identity`。后台scope开通不等于主人已同意OAuth；同应用用户身份有效且verified、openId匹配该bot持久owner，并具有 `contact:user:search`，才记人员搜索授权就绪，最后仍需一次真实只读姓名查询。真实mention使用本应用返回的用户ID，没有独立的mention授权。基本信息可先走已知ID的bot读取；按姓名搜索是user-only路径。OAuth缺失时用原生lark-cli授权，profile必须匹配当前AppID，不能借兄弟bot的token或open_id。
 
-设备授权链接让主人同意这个企业应用代表自己操作；它与开发者后台的应用权限是两道独立的门，**不是改查个人租户**。只生成当前应用已开通且免审的用户权限请求；管理员权限不进入授权链接。只需本人完成的同意时保留后台等待与成功回读，不能把链接创建当授权成功。
+设备授权确认使企业应用获得代表主人的用户凭据；它与后台应用权限是两道独立的门，**不是改查个人租户**。仅请求当前应用已开通的免审用户权限。用户已授权代办时，由智能体核已登录企业/主人并点击普通确认，不默认发送链接要求主人操作；仅扫码/验证码等无法自主完成的步骤才停。后台交换与真实身份/姓名回读仍必做，不能把链接创建或页面成功当验收。2026-11-13 TB26全部13个企业应用已通过此项真实查询。
+
+人员授权入口为 `personnel_authorization.py --bot <bot> --query <已知同事> --state <独占目录> --background`：先核应用/企业/主人绑定，已有凭据能刷新则先实查；只有缺人员同意才发原生设备确认。真实查询必须返回匹配姓名及本应用人员ID，并再次验证主人，空成功不算通过。成功回调发起会话；不持久保存device code/token，不跨应用复用用户授权。356/322是当前后台免审目录的数量，不是所有用户OAuth已同意的数量，也不是永远固定的注册常量。
 
 以下为2026-09-07的历史授权样本（14→56），不代表当前所有bot已完成用户授权：
 

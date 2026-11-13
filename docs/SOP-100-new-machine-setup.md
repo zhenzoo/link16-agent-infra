@@ -23,7 +23,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-13
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -52,8 +52,8 @@ agent 负责运行后文的命令、选路、修复和验收。用户只会经�
 | Claude / Codex / Kimi 登录页 | 登录用户本轮选择并命名的隔离 profile；不用的 provider 可明确跳过 | 建立 local registry、隔离 home 与对应入口，不复制任何认证 |
 | 「你已有的记忆 / 活跃项目 / 建议 bot 名」勾选清单 | 勾掉不想导入的来源；bot 名不满意就改 | `context_scan.py` 只读盘点 `~/.claude`、Claude 桌面版 Cowork 记忆、`~/.codex`、官方导出包与近 7 天活跃项目 |
 | 导入预览（新建/修改哪些文件） | 点头 | `context_import.py --apply` 把 CLAUDE.md / 记忆 / skills 合并进所选 profile home，留 receipt 可回滚；永不复制凭据 |
-| 飞书 Device Grant 链接（每只 bot 一次） | 在页面核对账号和目标组织，然后授权 | `register_feishu_app.py --from-scan --pick N`：名字 `<机器代号>-<项目简称>`，cwd = 真实项目目录；创建应用并把凭据只写入本机 `.env` |
-| 飞书权限审阅链接 | 核对本次能力与权限，按页面要求创建版本/发布或等管理员审核 | 只申请所选 capability，并持续检查真实授权状态 |
+| 飞书应用确认（每只bot一次） | 已授权普通确认由agent代办；只有扫码/验证码或账号组织未知时介入 | 官方SDK首个确认预填企业免审范围，按模型/CWD派生配置，凭据只写本机；用户OAuth独立验 |
+| 飞书权限与人员查询结果 | 正常无须点链接；管理员审批项直接跳过说明 | 按SOP-120回读应用授权并代办用户OAuth，实查人员ID；工具可自主安装，不强依赖特定浏览器工具 |
 | 绿色验收表 | 在飞书私聊 bot 发一句「在吗」 | 核对 Git Bash、wmux、profile、桥和 `main` 全绿 |
 
 展示给用户的说明应聚焦「现在会发生什么 / 你要点哪里」；
@@ -565,7 +565,7 @@ fi
   ```bash
   python feishu/register_feishu_app.py --name 本机助手 --bot local1
   ```
-  扫码（**只有你能扫**）→ 自动写 `.env` 的 `FEISHU_BRIDGE_LOCAL1_APP_ID` / `FEISHU_BRIDGE_LOCAL1_APP_SECRET`。
+  agent在已有授权范围内复用已登录浏览器核账号/组织并确认 → 自动写本机`.env`。只有登录失效需要用户扫码/验证码时停；不把普通确认也当人工停点，详细验收见SOP-120。
 - **白名单**：`.env` 的 `FEISHU_BRIDGE_ALLOWED_OPEN_IDS`（你的飞书 open_id · 全 bot 共享）。可不填——桥有「首个 @ 它的人自动成 owner」兜底。
 - ~~群喇叭 `FEISHU_XHS_WEBHOOK_URL`~~：**2026-08-30 已废弃**，不用再配。告警一律走 bot 自己的 DM，`notify.py` 已删除（拆除理由见 `ARCH-110` §兜底）。
 - 桥**免代理**（飞书国内端点直连，自动剥 PROXY 环境变量）。

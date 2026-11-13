@@ -21,7 +21,7 @@ read_when:
   - 用户说开始部署 Link16
   - 准备注册 profile、bot 或常驻服务
   - 判断能否宣布部署完成
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-13
 depends_on:
   - SOP-100
   - SOP-120
@@ -45,7 +45,7 @@ effective profile registry 解析。
 
 ## 2. 输入与输出
 
-开始前取得或机械发现这些输入：目标机器与仓库、用户选择的 provider/账号选项、所选 capability、bot 名称/cwd/目标群及本机已有 registry/roster/services。内部 profile ID/runtime/home 由选择器自动登记；组织由用户在官方授权页核对，不以提供准确组织名作为给链接的前置。只有涉及生产重启时才取得维护窗口。
+开始前取得或机械发现这些输入：目标机器与仓库、用户选择的 provider/账号选项、所选 capability、bot 名称/cwd/目标群及本机已有 registry/roster/services。内部 profile ID/runtime/home 由选择器自动登记；组织按本机登记及官方页已登录身份核对，已授权的普通确认由agent代办，身份不明才请用户介入。生产重启沿用当前有效授权，没有授权才取得维护窗口。
 用户没有选择的 provider、bot 或群能力标为“未选择”，不得自行补选。
 
 交付输出必须包含：
@@ -79,19 +79,17 @@ effective profile registry 解析。
 | 安装范围 | 审阅默认清单，只指出不需要的 provider/可选工具 | 选择被记录，dry-run 计划固定 |
 | GitHub private 仓 | 接受邀请并完成浏览器/设备登录 | `gh` 身份可验，clone 后 `main` 与 `origin/main` 为 `0 0` |
 | provider profile | 在所选隔离 home 的官方页面登录 | 对应 profile doctor/selftest 真启动通过 |
-| 飞书组织与应用登记 | 在当前 Device Grant 页面核对账号/组织并授权 | registration job 到 `registered` |
-| capability 与版本发布 | 审阅 scope，按页面发布或等待管理员审批 | job 到 `permissions_ready`；未到位就保持待审 |
+| 飞书组织与应用登记 | 已授权范围内由agent核已登录账号/组织并代点普通确认；只有扫码/验证码或身份未明确时请用户介入 | registration job 到 `registered`；用户OAuth另验 |
+| capability 与版本发布 | 企业免审范围预填首个确认，由agent回读；需管理员审批的跳过、不发申请链接 | job 到 `permissions_ready`；未到位明确缺项 |
 | owner claim | 主人私聊新 bot 一句 | job 到 `owner_ready`，DM route 真回 |
-| 目标群 | 人工把 bot 加进目标群 | job 到 `group_ready`，真实群 @ 往返通过 |
+| 目标群 | 优先由同企业已在群的发起bot用App ID接口邀请；群规则拒绝时说明实际限制 | job 到 `group_ready`，真实群 @ 往返通过 |
 | GUI-only 设置 | 仅在程序运行中无法安全写入时点选 Git Bash | preflight 对相应默认项验绿 |
 | 启动项与生产运维 | 尚未授权的启动项变更审阅 before/after；生产桥重启批准维护窗口 | 已授权启动项直接 apply 并回读；桥进程/心跳验真 |
 | drift/conflict | 决定保留、迁移或替换 | 冲突清零并重新 doctor；不得静默覆盖 |
 
 ## 5. 跨 turn 交互与监督
 
-对用户只说“你现在会看到什么、要点哪里”。每次只给当前阶段的唯一裸链接或页面动作。注册器和 Monitor
-必须以长时后台方式运行；有回调 bot 时以稳定 job event 唤醒原部署会话，无回调的首 bot 用本地 `links --watch` 持续取得链接和下一动作。权限就绪后自动核实际启动环境、补起缺失桥并确认连接，才让用户私聊认主。不能用短 tool timeout 截断授权，也不能让用户重复汇报脚本已能观测到的状态。两链接注册合同保持分步：先应用登记，再 capability
-审阅/发布；不得把人的权限选择折叠成不可审阅的一次操作。
+先报告真实结果和必要人工缺项，不默认把普通授权链接交给用户。接口优先；用户已授权的注册/权限页面可由agent通过已登录本地浏览器核身份后代点，工具缺失按正常官方渠道安装可用本地工具，不以特定browser-use为部署前置。扫码/验证码等无法自主完成时才提供当前必要入口。注册器和Monitor长时后台运行，以稳定事件或本地links通道续跑，不用短timeout截断，也不要求用户汇报机器可观测状态。应用创建确认预填免审权限并独立回读，用户OAuth及认主单独验；不能把一次页面成功说成整条注册完成。
 
 ## 6. 分层完成闸
 
