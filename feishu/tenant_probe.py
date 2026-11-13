@@ -267,7 +267,7 @@ def main():
         elif row.get("in_target"):
             mark = "✅ 在"
         else:
-            mark = "❌ 不在（需人工拉）"
+            mark = "❌ 不在（待核邀请条件）"
         print("%-24s | %-18s | %-13s | %-18s | %s" % (
             row["bot"], tenant, row.get("source", ""), row.get("target_group") or "—", mark))
         if row.get("error"):
@@ -275,8 +275,8 @@ def main():
         if row.get("inferred_from"):
             print("%-24s   ℹ️ 推断依据：%s（非权威·入群后自动转 chats）" % ("", row["inferred_from"]))
     print("")
-    print("注：判定只认 tenant_key，不看 bot 名字前缀。拉 bot 进群只能人工"
-          "（飞书 API 加不了 bot · SOP-120 §2.1）。")
+    print("注：判定只认 tenant_key，不看 bot 名字前缀。注册监督器可由同租户已在群的发起bot"
+          "通过app_id接口邀请；群规则拒绝时报告实际限制（SOP-120 §2.1）。")
     return 0
 
 

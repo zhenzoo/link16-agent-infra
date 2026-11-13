@@ -10,10 +10,9 @@
     python feishu/registration_monitor.py links --job <返回的job> --watch
     → 官方页核对组织；本机 .env 保存凭据，local roster 保存所选账号。
 
-官方 preset 提供消息、事件与 WebSocket 基础能力；注册默认分成两条人工链接：
-第一条只创建应用，第二条按 `--capability` 精确列出 tenant 权限供人审阅/发布。
-默认 core + group-a2a 不申请 broad Drive 或听全群；公司租户默认再加
-docs-consume（Sheet/图片/白板只读）。`--background` 把 Device Grant 和人工步骤监督
+官方 preset 提供消息、事件与 WebSocket 基础能力；首次确认用 addons 预填权限。
+企业按 tenant/user 两身份开齐免审基线，个人租户保留能力档；只有回读仍缺项才补办。
+本人用户 OAuth 与认主独立验收。`--background` 把 Device Grant 和人工步骤监督
 从当前 Claude/Codex turn 生命周期中解耦。
 """
 import argparse
@@ -255,7 +254,7 @@ def _deliver_oauth_link(job_id, info):
     return False
 
 
-def _run_device_grant(name, app_id=None, job_id=None):
+def _run_device_grant(name, app_id=None, job_id=None, permission_plan=None):
     """创建新应用，或用 cli_... App ID 续接同一次 Device Grant。"""
     def qr(info):
         on_qr(info)
@@ -280,7 +279,10 @@ def _run_device_grant(name, app_id=None, job_id=None):
             on_qr_code=qr,
             on_status_change=status,
             app_preset={"name": name},
-            addons=None,
+            # Official addons merge into the base preset. Never disable its
+            # bot/event/WebSocket defaults to request extra scopes.
+            addons={"scopes": {kind: list(scopes) for kind, scopes in permission_plan.items()}}
+            if permission_plan else None,
             # create_only has precedence over app_id in the official launcher.
             create_only=app_id is None,
             app_id=app_id,
@@ -470,7 +472,6 @@ def main():
     # recurring failure this closes. Approval-gated scopes are never requested;
     # the baseline is built entirely from self-serve ones.
     permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, tenant_kind=tenant_kind)
-    permission_scopes = tuple(dict.fromkeys(s for v in permission_plan.values() for s in v))
     try:
         sdk_version = registration_transport.preflight()
         args.app_id = _recovery_app_id(args.app_id, id_key, args.bot or args.name)
@@ -483,11 +484,11 @@ def main():
         print(f"cwd={selected_cwd or '(repo default)'}")
         print(f"tenant_kind={tenant_kind or 'unknown'}")
         print(f"capabilities={','.join(capabilities)}")
-        print("registration_links=2")
+        print("application_confirmation=1;user_consent=separate_if_missing")
         print(f"sdk_version={sdk_version}")
-        print(f"first_link={'existing-app' if args.app_id else 'create-only'};addons=(none)")
-        print(f"second_link_scopes={','.join(permission_scopes) or '(none)'}")
-        print("second_link_scopes_by_identity=" + json.dumps(permission_plan, ensure_ascii=False))
+        print(f"first_link={'existing-app' if args.app_id else 'create-only'};addons=scopes;base_preset=retained")
+        print("prefilled_scopes_by_identity=" + json.dumps(permission_plan, ensure_ascii=False))
+        print("permission_followup=only_confirmed_missing_scopes;unknown=read_only_recheck")
         return
     monitor = registration_monitor.get_job(args.job_id) if args.job_id else None
     monitor_bot = args.bot or args.name
@@ -502,7 +503,7 @@ def main():
             secret_env=sec_key,
             launch=True,
             context={"name": args.name, "profile": selected_profile.name,
-                     "cwd": selected_cwd, "tenant_kind": tenant_kind},
+                     "cwd": selected_cwd, "tenant_kind": tenant_kind, "auto_group": True},
             start_bridge=not args.no_start_bridge,
         )
         print(
@@ -542,10 +543,15 @@ def main():
     try:
         if monitor:
             registration_monitor.record_progress(monitor["job_id"], sdk_version=sdk_version)
+        if args.app_id and tenant_kind == "enterprise":
+            held, error = bridge_scope_audit.granted_scope_pairs(id_key, sec_key)
+            if not error:
+                permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, held, tenant_kind)
         result = _run_device_grant(
             args.name,
             args.app_id,
             job_id=monitor.get("job_id") if monitor else None,
+            permission_plan=permission_plan,
         )
     except Exception as exc:
         error = registration_transport.safe_error(exc)
@@ -582,8 +588,6 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
                           app_id, secret, monitor):
     tenant_kind = args.tenant_kind or _tenant_kind_from_group(args.group)
     capabilities = _registration_capabilities(args.capability, tenant_kind)
-    permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, tenant_kind=tenant_kind)
-    permission_scopes = tuple(dict.fromkeys(s for v in permission_plan.values() for s in v))
     write_env(app_id, secret, id_key, sec_key)
     action = "续接成功" if args.app_id else "创建成功"
     print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
@@ -615,44 +619,29 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
                     f"入群后运行 python feishu/tenant_probe.py --bot {runtime_bot_name} --apply。")
         print(f"\nℹ️ {tenant['error']}；{followup}", flush=True)
 
+    # Configure only this app's native user-auth entry, never the fleet or the
+    # CLI default identity. Consent itself remains a separate owner action.
+    if tenant_kind == "enterprise":
+        import docio_cli
+        try:
+            code = docio_cli.cmd_profiles(argparse.Namespace(bot=runtime_bot_name, dry_run=False, adopt=False))
+            if code:
+                raise ValueError("profile_setup_incomplete")
+            docio_cli.require_profile_identity(runtime_bot_name)
+            print("\n✅ 本应用用户授权入口已配置；认主后用 personnel_authorization.py 完成本人同意与姓名验收。", flush=True)
+        except (Exception, SystemExit) as exc:
+            print(f"\nℹ️ 用户授权入口尚未完成：{type(exc).__name__}；不影响已保存应用，收尾须修复。", flush=True)
+
     if monitor:
         monitor = registration_monitor.record_stage(monitor["job_id"], "registered", app_id=app_id)
         monitor = registration_monitor.request_permission_review(monitor["job_id"])
 
-    # 超长的 q= 串会被飞书整页判「参数不合法」（2026-08-27 tb26-baseball-2 实证：54 条 = 1446 字符挂，
-    # 18 条 = 523 字符通）→ 一律走拆链，每条都点得开。SSOT = feishu_docs.AUTH_URL_MAX_CHARS。
-    permission_links = bridge_scope_audit.scope_plan_urls(app_id, permission_plan)
-    permission_link = (
-        "\n".join(f"   [{i}/{len(permission_links)}] {u}" for i, u in enumerate(permission_links, 1))
-        if len(permission_links) > 1
-        else (permission_links[0] if permission_links else "   （本次无需增量 scope）")
-    )
-
-    labels = [bridge_scope_audit.CAPABILITY_SPECS[name]["label"] for name in capabilities]
-    print("\n🔐 第二步：核对当前租户与免审权限；已授权的开通可执行，需要管理员审批的直接跳过：\n"
-          f"   capability: {', '.join(capabilities)}\n"
-          f"   能力: {'；'.join(labels)}\n"
-          f"   应用后台 scopes（tenant/user 分开开通；不等于主人OAuth已完成）: "
-          f"{', '.join(permission_scopes) or '无（只用官方 preset）'}\n"
-          f"{permission_link}\n"
-          "   第一条链接只创建应用；本链接不自动发布。监督器回调给发起 session 的链接会先审计当前授权、"
-          "只列增量；如飞书把其中某项标为需审核，以当前企业后台为准，跳过且不发送管理员申请链接。"
-          "监督器两次独立复核应用授权；再用 bridge_scope_audit.py --bot <本bot> --baseline --user-identity 单独验主人OAuth和人员查询。",
-          flush=True)
-
-    # 🔒 登记协议：建完必回写。§4 见 docs/SOP-120。agent-registry stub 上面已【自动】补·其余照单核对。
-    group_step = (f"   ③ 人工把 bot 拉进共享群「{args.group}」（API 加不了）\n"
-                  if "group-a2a" in capabilities
-                  else "   ③ 本次未选 group-a2a，不需要入共享群\n")
-    print("\n📋 建完【必做登记】（④ 已自动 · 完整见 docs/SOP-120 §4）：\n"
-          f"   ① ✅ bridge-bots.local.json 已自动登记（profile={selected_profile.name}）—— 运行时 roster·桥靠它 spawn\n"
-          "      换运行档案只改 profile（或飞书 `/account <profile>`）；不要再写 agent/home/account 重复字段。\n"
-          f"   ② 打开上面的第二条链接，人工核对本次 capability：{', '.join(capabilities)}\n"
-          f"{group_step}"
-          "   ④ ✅ agent-registry.json 已【自动】补 stub（谁是谁·跨机目录）→ 你只需核对/补 repo + machine（脚本不知道它管哪个仓）\n"
-          "   ⑤ 跑  python feishu/bridge_scope_audit.py --bot <本bot> --baseline --user-identity  → 核当前企业应用，不能转查个人租户\n"
-          "   ⑥ 不自动重启整座桥；由监督器验权/认主/入群并回调发起 session\n"
-          "   —— 两个名册各司其职：bridge-bots(运行时·跑哪些) + agent-registry(目录·谁是谁·本步已自动)。",
+    print("\n🔐 首次确认已预填默认权限；监督器只读复核实际授权，传播期间不重复申请。\n"
+          "   已齐全不再发后台链接；仍有免审缺口才给增量，管理员审批跳过。\n"
+          "   应用权限与本人OAuth独立验收，原生用户授权完成后还需实查姓名。\n"
+          f"   两份名册已登记，profile={selected_profile.name}；监督器只补起本bot缺失的桥。\n"
+          f"   共享群：{args.group or '未选择'}；由同租户、已在群的发起bot通过app_id接口邀请并回读。\n"
+          "   若缺合法邀请者或群规则拒绝，保留具体原因，不冒称已入群、不申请管理员权限。",
           flush=True)
 
     # 🚨 认主：全流程最后一道、也是最容易漏的一步（2026-08-02 taoci-7 刷群事故后加·见 ARCH-110 §2.5.3）

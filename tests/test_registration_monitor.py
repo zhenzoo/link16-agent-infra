@@ -26,8 +26,11 @@ class _MonitorCase(unittest.TestCase):
         self.tenant_patch = mock.patch("tenant_probe.sync_registry_tenant",
                                       return_value={"status": "unknown", "error": "未入群"})
         self.tenant_patch.start()
+        self.group_hint_patch = mock.patch.object(monitor, "_resolve_group_hint", return_value=(None, "未登记", None))
+        self.group_hint_patch.start()
 
     def tearDown(self):
+        self.group_hint_patch.stop()
         self.tenant_patch.stop()
         self.state_patch.stop()
         self.tmp.cleanup()
@@ -46,6 +49,7 @@ class _MonitorCase(unittest.TestCase):
 
     def registered(self, state):
         monitor.record_sdk_result(state["job_id"], "cli_safe")
+        monitor._mutate(state["job_id"], lambda item: item.update(sdk_returned_at=monitor._now() - 31))
         return monitor.record_stage(state["job_id"], "registered", app_id="cli_safe")
 
 
@@ -223,9 +227,9 @@ class RegistrationMonitorTests(_MonitorCase):
         self.assertEqual(result["last_error"], "local_registration_failed")
         self.assertFalse(result["milestones"]["ready"])
 
-    def test_registered_always_queues_permission_review_before_watcher_can_finish(self):
+    def test_registration_itself_does_not_request_a_second_confirmation(self):
         state = self.registered(self.arm(["core"]))
-        self.assertIn("permissions_review", state["events"])
+        self.assertNotIn("permissions_review", state["events"])
 
     def test_registrar_exit_is_detected_and_recorded(self):
         state = self.arm(["core"])
@@ -283,7 +287,8 @@ class RegistrationMonitorTests(_MonitorCase):
     def test_permission_review_event_has_stable_naked_link_and_no_persisted_url(self):
         state = self.arm(["core", "docs-text"])
         self.registered(state)
-        with mock.patch.object(monitor.bridge_injection, "inject_bot_prompt",
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes", return_value=(set(), None)), \
+             mock.patch.object(monitor.bridge_injection, "inject_bot_prompt",
                                return_value={"ok": True}) as inject:
             result = monitor.request_permission_review(state["job_id"])
         messages = [call.args[1] for call in inject.call_args_list]
@@ -306,7 +311,8 @@ class RegistrationMonitorTests(_MonitorCase):
             {"ok": False, "error": "composer stuck"},
             {"ok": True},
         ]
-        with mock.patch.object(monitor.bridge_injection, "inject_bot_prompt",
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes", return_value=(set(), None)), \
+             mock.patch.object(monitor.bridge_injection, "inject_bot_prompt",
                                side_effect=outcomes):
             first = monitor.request_permission_review(state["job_id"])
             second = monitor._emit_pending(state["job_id"])
@@ -359,6 +365,79 @@ class RegistrationMonitorTests(_MonitorCase):
 class RegistrationPermissionBaselineTests(_MonitorCase):
     """SPEC-220 §6: the second link is audited first, judged against the baseline,
     and permissions_ready only flips after two independent reads agree."""
+
+    def test_complete_or_unknown_grants_do_not_ask_owner_again(self):
+        for granted, error in ((set(monitor.bridge_scope_audit.BASELINE_SCOPES), None), (set(), "timeout")):
+            state = self.registered(self.arm(["core"]))
+            with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes", return_value=(granted, error)), \
+                 mock.patch.object(monitor.bridge_injection, "inject_bot_prompt", return_value={"ok": True}) as inject:
+                result = monitor.request_permission_review(state["job_id"])
+            self.assertNotIn("permissions_review", result["events"])
+            self.assertFalse(any(":permissions_review" in call.args[1] for call in inject.call_args_list))
+
+    def test_new_grants_get_propagation_time_before_followup(self):
+        state = self.registered(self.arm(["core"]))
+        monitor._mutate(state["job_id"], lambda item: item.update(sdk_returned_at=monitor._now()))
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes", return_value=(set(), None)), \
+             mock.patch.object(monitor.bridge_injection, "inject_bot_prompt", return_value={"ok": True}):
+            result = monitor.request_permission_review(state["job_id"])
+        self.assertNotIn("permissions_review", result["events"])
+
+    def test_obsolete_queued_review_is_suppressed_after_grants_arrive(self):
+        state = self.registered(self.arm(["core"]))
+        monitor._mutate(state["job_id"], lambda item: item["events"].update(permissions_review={"event_id": "old"}))
+        with mock.patch.object(monitor.bridge_scope_audit, "granted_scopes",
+                               return_value=(set(monitor.bridge_scope_audit.BASELINE_SCOPES), None)), \
+             mock.patch.object(monitor.bridge_injection, "inject_bot_prompt", return_value={"ok": True}) as inject:
+            result = monitor._emit_pending(state["job_id"])
+        self.assertEqual(result["events"]["permissions_review"]["suppressed"], "already_granted")
+        self.assertFalse(any("auth?q=" in call.args[1] for call in inject.call_args_list))
+
+
+class GroupInvitationTests(_MonitorCase):
+    def test_registered_group_readback_uses_exact_chat_id_not_similar_name(self):
+        probe = types.SimpleNamespace(bot_groups=lambda _bot: [{"name": "交流水吧备份", "chat_id": "oc_wrong"}])
+        with mock.patch.dict(sys.modules, {"bridge_feishu_probe": probe}), \
+             mock.patch.object(monitor, "_resolve_group_hint", return_value=("交流水吧", None, "oc_exact")):
+            self.assertEqual(monitor._group_check("bot", "交流水吧")["status"], "missing")
+
+    def invite(self, *, wrong_tenant=False, response=None, failure=None):
+        import tenant_probe
+        import bridge_feishu_probe as probe
+        state = self.registered(self.arm())
+        target = {"tenant_key": "company", "groups": []}
+        inviter = {"tenant_key": "other" if wrong_tenant else "company",
+                   "groups": [{"chat_id": "oc_exact", "external": False}]}
+        with mock.patch.object(tenant_probe, "resolve_tenant", side_effect=[target, inviter]), \
+             mock.patch.object(tenant_probe, "tenant_entry", return_value={"group_chat_id": "oc_exact", "group_name": "交流水吧"}), \
+             mock.patch.object(monitor.bridge_scope_audit, "_env_val", return_value="cli_safe"), \
+             mock.patch.object(probe, "tenant_token", return_value="private-token"), \
+             mock.patch.object(probe, "_post", return_value=response or {"code": 0}, side_effect=failure) as post:
+            result = monitor._invite_registered_bot(state)
+            if not wrong_tenant:
+                again = monitor._invite_registered_bot(state)
+                self.assertEqual(post.call_count, 1)
+                self.assertIn("member_id_type=app_id", post.call_args.args[0])
+                self.assertEqual(post.call_args.args[1], {"id_list": ["cli_safe"]})
+            else:
+                post.assert_not_called()
+        self.assertNotIn("private-token", json.dumps(monitor.get_job(state["job_id"])))
+        return result
+
+    def test_invite_is_app_id_bound_and_only_request_acceptance(self):
+        self.assertEqual(self.invite()["status"], "accepted_waiting_readback")
+
+    def test_cross_tenant_inviter_never_posts(self):
+        self.assertEqual(self.invite(wrong_tenant=True)["status"], "unavailable")
+
+    def test_role_denial_is_not_success_or_retried(self):
+        self.assertEqual(self.invite(response={"code": 232017})["status"], "rejected")
+
+    def test_approval_pending_is_not_joined(self):
+        self.assertEqual(self.invite(response={"code": 0, "data": {"pending_approval_id_list": ["cli_safe"]}})["status"], "not_joined")
+
+    def test_lost_post_result_is_never_blindly_retried(self):
+        self.assertEqual(self.invite(failure=TimeoutError())["status"], "unknown")
 
     def test_second_link_is_audited_first_and_only_carries_the_gap(self):
         state = self.registered(self.arm(["core", "group-a2a"]))

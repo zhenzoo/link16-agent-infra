@@ -298,11 +298,8 @@ def record_stage(job_id, stage, app_id=None, error=None):
             state["events"].setdefault(
                 "registered", {"event_id": f"{job_id}:registered"}
             )
-            # Queue both events atomically: the watcher may reach ready before
-            # the registrar calls request_permission_review().
-            state["events"].setdefault(
-                "permissions_review", {"event_id": f"{job_id}:permissions_review"}
-            )
+            # The creation page now carries scopes. Only a verified gap should
+            # ask for another action; check_once also owns that decision.
         if stage in {"failed", "cancelled"}:
             state["status"] = stage
         if stage == "failed":
@@ -365,7 +362,10 @@ def local_handoff(job_id):
             result["action"] = "等待注册器生成有效授权链接；沿用当前 job，不重复建应用"
     elif not state.get("milestones", {}).get("permissions_ready"):
         urls, _caps, _scopes, audit = permission_review_link(state)
-        result.update(links=urls, audit=audit, action="核对应租户免审权限；管理员审批跳过；用户OAuth另验")
+        if audit.get("error") or not _scopes or _now() - state.get("sdk_returned_at", 0) < 30:
+            result.update(audit=audit, action="等待实际权限回读或传播；当前不需要重复开通")
+        else:
+            result.update(links=urls, audit=audit, action="仅补已确认缺失的免审权限；管理员审批跳过；用户OAuth另验")
     elif state.get("start_bridge") and not state.get("milestones", {}).get("bridge_ready"):
         result.update(action="正在检查启动环境和飞书连接，暂不要求用户发测试消息",
                       check=(state.get("checks") or {}).get("bridge"))
@@ -419,11 +419,16 @@ def permission_review_link(state):
 
 
 def request_permission_review(job_id):
-    """Create and immediately try to deliver the stable second-link event."""
+    """Request follow-up only for a confirmed gap, never for an audit failure."""
     state = get_job(job_id)
     if not (state or {}).get("milestones", {}).get("registered"):
         raise ValueError("必须完成 SDK 回传和本机登记后才能审阅权限")
-    permission_review_link(state or {})  # validate before mutating durable state
+    _urls, _capabilities, scopes, audit = permission_review_link(state or {})
+    if audit.get("error") or not scopes:
+        return _emit_pending(job_id)
+    # Let the first-page grants propagate; the monitor will re-read afterwards.
+    if _now() - state.get("sdk_returned_at", 0) < 30:
+        return _emit_pending(job_id)
 
     def apply(item):
         if item.get("status") not in TERMINAL_STATUSES:
@@ -498,6 +503,10 @@ def _group_check(bot, group):
     expected_chat_id = None
     if not group:
         group, resolved_note, expected_chat_id = _resolve_group_hint(bot)
+    else:
+        resolved_group, _note, resolved_id = _resolve_group_hint(bot)
+        if resolved_id and group in (resolved_group, resolved_id):
+            expected_chat_id = resolved_id
     if not group:
         return {
             "status": "unknown",
@@ -520,6 +529,62 @@ def _group_check(bot, group):
     if resolved_note:
         result["group_hint_note"] = resolved_note
     return result
+
+
+def _invite_registered_bot(state):
+    """One official app_id invitation, with exact tenant/group read-back.
+
+    The initiating bot is the inviter, not a source of another app's open_id.
+    An unknown POST result is retained for observation, never blindly retried.
+    """
+    import tenant_probe
+    import bridge_feishu_probe as probe
+    job_id = state["job_id"]
+    with bridge_injection.injection_lock(STATE_DIR, "registration-group", job_id):
+        state = get_job(job_id)
+        if not state or state.get("status") in TERMINAL_STATUSES:
+            return {"status": "unavailable", "reason": "注册任务已结束"}
+        if state.get("group_invitation"):
+            return state["group_invitation"]
+        operator = state.get("notify_bot")
+        if not operator or operator == state["bot"]:
+            return {"status": "unavailable", "reason": "缺少已在目标群的注册操作者"}
+        try:
+            target = tenant_probe.resolve_tenant(state["bot"], refresh=True)
+            inviter = tenant_probe.resolve_tenant(operator, refresh=True)
+            tenant = tenant_probe.tenant_entry(target.get("tenant_key")) or {}
+            chat_id = tenant.get("group_chat_id")
+            if (not chat_id or target.get("tenant_key") != inviter.get("tenant_key")
+                    or state.get("group") not in (None, tenant.get("group_name"), chat_id)):
+                return {"status": "unavailable", "reason": "应用租户或目标群尚未精确匹配"}
+            if not any(g.get("chat_id") == chat_id and g.get("external") is False
+                       for g in inviter.get("groups", [])):
+                return {"status": "unavailable", "reason": "注册操作者未在同租户内部目标群"}
+            if any(g.get("chat_id") == chat_id for g in target.get("groups", [])):
+                return {"status": "already_member", "chat_id": chat_id}
+            current_id = bridge_scope_audit._env_val(state.get("id_env"))
+            if not current_id or current_id != state.get("app_id"):
+                return {"status": "unavailable", "reason": "目标应用身份不一致"}
+            token = probe.tenant_token(operator)
+            receipt = {"status": "outcome_unknown", "operator": operator, "chat_id": chat_id,
+                       "app_id": current_id, "attempted_at": _now()}
+            _mutate(job_id, lambda item: item.update(group_invitation=receipt))
+            response = probe._post(
+                f"{probe.BASE}/im/v1/chats/{chat_id}/members?member_id_type=app_id&succeed_type=2",
+                {"id_list": [current_id]}, {"Authorization": f"Bearer {token}"})
+            data = response.get("data") or {}
+            receipt["code"] = response.get("code")
+            if response.get("code") != 0:
+                receipt["status"] = "rejected"
+            elif any(data.get(k) for k in ("invalid_id_list", "not_existed_id_list", "pending_approval_id_list")):
+                receipt["status"] = "not_joined"
+            else:
+                receipt["status"] = "accepted_waiting_readback"
+            _mutate(job_id, lambda item: item.update(group_invitation=receipt))
+            return receipt
+        except (Exception, SystemExit) as exc:
+            # Never persist HTTP responses, tokens, or a guessed success.
+            return {"status": "unknown", "error": type(exc).__name__}
 
 
 def _permission_check(state):
@@ -567,9 +632,9 @@ def _permission_check(state):
     return result
 
 
-def _event_text(state, milestone):
+def _event_text(state, milestone, permission_review=None):
     if milestone == "permissions_review":
-        urls, capabilities, scopes, audit = permission_review_link(state)
+        urls, capabilities, scopes, audit = permission_review or permission_review_link(state)
         labels = [
             bridge_scope_audit.CAPABILITY_SPECS[name]["label"]
             for name in capabilities
@@ -584,12 +649,12 @@ def _event_text(state, milestone):
         links = "\n".join(
             (f"[{i}/{len(urls)}] {u}" if len(urls) > 1 else u) for i, u in enumerate(urls, 1)
         ) or "（无增量 scope：能力档与基线已全部开通）"
-        instruction = ("请核对当前企业后台的tenant/user免审范围；已获授权可直接开通。"
+        instruction = ("优先用官方SDK固定原AppID增量续接，预填已证缺口，不让主人逐项勾选后台。"
                        "需管理员审批的权限或数据范围发布跳过，不发申请链接。应用权限与主人OAuth分别验收：\n"
                        if _registration_tenant_kind(state) == "enterprise" else
                        "请把下面裸链接回复给主人；按本租户权限范围核对，需管理员审批的跳过：\n")
         return (
-            f"Link16 注册回调：{state['bot']} 的第二步权限审阅链接已生成。"
+            f"Link16 注册回调：{state['bot']} 回读仍缺权限，增量审阅链接已生成。"
             f"{instruction}"
             f"能力：{', '.join(capabilities)}（{'；'.join(labels)}）\n"
             f"{audit_line}\n"
@@ -603,7 +668,7 @@ def _event_text(state, milestone):
         if permission.get("verified_twice") else "已按能力档与基线复核"
     )
     labels = {
-        "registered": "OAuth/应用登记已完成",
+        "registered": "应用创建确认与本机登记已完成（用户OAuth另验）",
         "permissions_ready": f"所选 capability 与 SPEC-220 免审基线权限已到位（{scope_note}）",
         "bridge_ready": "启动入口与飞书连接已核验，请主人私聊新 bot 一句完成认主",
         "owner_ready": "主人私聊认领已检测到",
@@ -632,9 +697,21 @@ def _emit_pending(job_id):
         event = state.get("events", {}).get(milestone)
         if not event or event.get("delivered_at"):
             continue
+        review = None
+        if milestone == "permissions_review":
+            review = permission_review_link(state)
+            _urls, _caps, scopes, audit = review
+            if audit.get("error"):
+                continue  # unknown is not a permission gap
+            if not scopes:
+                def suppress(item):
+                    item["events"]["permissions_review"].update(
+                        delivered_at=_now(), suppressed="already_granted")
+                state = _mutate(job_id, suppress)
+                continue
         event_id = event["event_id"]
         marker = (
-            _event_text(state, milestone)
+            _event_text(state, milestone, permission_review=review)
             + f" [飞书 from=registration-monitor:{event_id} to={notify_bot} via=注册回调 · route=p2a]"
         )
         result = bridge_injection.inject_bot_prompt(notify_bot, marker)
@@ -712,6 +789,13 @@ def check_once(job_id, emit=True):
     owner = _owner_check(state["bot"])
     need_group = "group-a2a" in state.get("capabilities", [])
     group = _group_check(state["bot"], state.get("group")) if need_group else {"status": "ready"}
+    if (need_group and group.get("status") == "missing"
+            and state.get("milestones", {}).get("registered")
+            and permission.get("status") == "ready"
+            and (state.get("registration_context") or {}).get("auto_group")):
+        invitation = _invite_registered_bot(state)
+        group = _group_check(state["bot"], state.get("group"))
+        group["invitation"] = invitation
     # 入群前可能没有租户证据；沿用本轮 API 状态补登记，不新增完成闸。
     tenant = None
     if state.get("milestones", {}).get("registered"):
@@ -722,6 +806,12 @@ def check_once(job_id, emit=True):
         if item.get("status") in TERMINAL_STATUSES:
             return
         item["checks"] = {"permissions": permission, "owner": owner, "group": group}
+        if (item["milestones"].get("registered")
+                and permission.get("status") == "missing"
+                and permission.get("remaining_scopes")
+                and _now() - item.get("sdk_returned_at", 0) >= 30):
+            item["events"].setdefault(
+                "permissions_review", {"event_id": f"{job_id}:permissions_review"})
         if activation is not None:
             item["checks"]["bridge"] = activation
         if tenant is not None:

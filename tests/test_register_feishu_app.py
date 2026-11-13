@@ -66,10 +66,15 @@ class DeviceGrantRecoveryTests(unittest.TestCase):
         self.assertEqual(call.call_args.kwargs["app_preset"], {"name": "tb26-link16"})
         self.assertFalse(call.call_args.kwargs["create_only"])
 
-    def test_first_link_never_receives_capability_addons(self):
+    def test_first_confirmation_carries_typed_scopes_and_keeps_base_preset(self):
+        plan = register.bridge_scope_audit.registration_scope_plan(tenant_kind="enterprise")
         with mock.patch.object(register.lark, "register_app", return_value={}) as call:
-            register._run_device_grant("tb26-docs")
-        self.assertIsNone(call.call_args.kwargs["addons"])
+            register._run_device_grant("tb26-docs", permission_plan=plan)
+        addons = call.call_args.kwargs["addons"]
+        self.assertEqual(addons["scopes"], {kind: list(scopes) for kind, scopes in plan.items()})
+        self.assertNotIn("preset", addons)
+        self.assertIn("contact:user:search", addons["scopes"]["user"])
+        self.assertNotIn("im:message.send_as_user", addons["scopes"]["user"])
         self.assertTrue(call.call_args.kwargs["create_only"])
 
     def test_default_capabilities_never_include_broad_drive(self):
