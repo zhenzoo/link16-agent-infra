@@ -125,6 +125,19 @@ class ReadContractTests(unittest.TestCase):
                 self.assertEqual(report["resources"]["whiteboard"]["complete"], expected)
                 self.assertEqual(d.coverage_report(report, quiet=True), 0 if expected else 2)
 
+    def test_native_empty_board_response_does_not_require_an_export_file(self):
+        for ok,code in ((True,0),(False,0),(True,1)):
+            with self.subTest(ok=ok,code=code), tempfile.TemporaryDirectory() as folder:
+                report={"inventory":{},"resources":{},"missing":[]}
+                reply=response({"msg":"whiteboard is empty"},code=code,ok=ok)
+                with patch.object(d,"run_lark",return_value=reply) as engine:
+                    d._read_whiteboard("url","B","bot",Path(folder),report)
+                self.assertEqual(engine.call_count,1)
+                expected=ok and code==0
+                self.assertEqual(report["resources"]["whiteboard"].get("empty",False),expected)
+                self.assertEqual(d.coverage_report(report,quiet=True),0 if expected else 2)
+                if expected:self.assertEqual(json.loads((Path(folder)/'whiteboard.json').read_text()),{"nodes":[]})
+
     def test_complete_coordinates_and_fields_are_preserved(self):
         data = cell_data([[{"value": "display", "rich_text": [{"type": "link", "text": "display", "link": "https://example.com/a"}]}]])
         with patch.object(d, "run_lark", return_value=response(data)) as run:

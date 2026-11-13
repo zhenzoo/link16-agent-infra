@@ -551,6 +551,13 @@ def _read_whiteboard(url, token, bot, out_dir, manifest):
     result = run_lark(["whiteboard", "+export", "--whiteboard-token", token,
                        "--output-type", "raw", "--output", target.name, "--as", "bot"],
                       profile=bot, timeout=300, cwd=str(out_dir))
+    payload = _json_out(result)
+    if (result.returncode == 0 and payload.get("ok") is True
+            and isinstance(payload.get("data"), dict)
+            and payload["data"].get("msg") == "whiteboard is empty"):
+        # The native CLI confirms an empty board without writing an export.
+        # Only this exact successful response may supply an empty node list.
+        target.write_text(json.dumps({"nodes": []}), encoding="utf-8")
     if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
         manifest["missing"].append({"kind": "whiteboard",
                                     **classify_failure((result.stdout or "") + (result.stderr or ""), bot)})
@@ -569,6 +576,8 @@ def _read_whiteboard(url, token, bot, out_dir, manifest):
     count = len(nodes)
     manifest["inventory"] = {"complete": True, "source": "whiteboard.export", "nodes": count}
     manifest["resources"]["whiteboard"] = {"declared": count, "fetched": count, "complete": True}
+    if not count:
+        manifest["resources"]["whiteboard"]["empty"] = True
     if count:
         # Native previews may be JPEG or PNG. Omit the extension so the CLI
         # chooses it, and use a new name so a stale export cannot pass a retry.
@@ -614,6 +623,8 @@ def _read_docx_whiteboards(blocks, bot, out_dir, assets, manifest):
         fetched = child["resources"].get("whiteboard", {})
         record.update(complete=fetched.get("complete") is True,
                       nodes=fetched.get("fetched", 0))
+        if fetched.get("empty"):
+            record["empty"] = True
         if record["complete"]:
             record["path"] = (folder / "whiteboard.json").relative_to(out_dir).as_posix()
         if fetched.get("preview_path"):
