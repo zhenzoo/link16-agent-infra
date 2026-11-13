@@ -545,7 +545,7 @@ def _read_bitable(url, token, bot, out_dir, manifest):
 
 
 def _read_whiteboard(url, token, bot, out_dir, manifest):
-    """白板：导出原始节点结构（raw），节点数进覆盖账本。"""
+    """白板：保留原始节点及原生预览，避免读到节点却交付空白图。"""
     manifest["resources"]["whiteboard"] = {"declared": None, "fetched": 0, "complete": False}
     target = out_dir / "whiteboard.json"
     result = run_lark(["whiteboard", "+export", "--whiteboard-token", token,
@@ -569,6 +569,27 @@ def _read_whiteboard(url, token, bot, out_dir, manifest):
     count = len(nodes)
     manifest["inventory"] = {"complete": True, "source": "whiteboard.export", "nodes": count}
     manifest["resources"]["whiteboard"] = {"declared": count, "fetched": count, "complete": True}
+    if count:
+        # Native previews may be JPEG or PNG. Omit the extension so the CLI
+        # chooses it, and use a new name so a stale export cannot pass a retry.
+        preview = out_dir / ("whiteboard-preview-" + uuid.uuid4().hex[:12])
+        rendered = run_lark(["whiteboard", "+export", "--whiteboard-token", token,
+                             "--output-type", "preview", "--output", preview.name, "--as", "bot"],
+                            profile=bot, timeout=300, cwd=str(out_dir))
+        preview = next((p for p in (preview, preview.with_suffix(".jpg"), preview.with_suffix(".png"))
+                        if p.is_file()), preview)
+        header = preview.read_bytes()[:24] if preview.is_file() else b""
+        valid = (header.startswith(b"\xff\xd8\xff") or
+                 (len(header) == 24 and header.startswith(b"\x89PNG\r\n\x1a\n")
+                 and header[12:16] == b"IHDR"
+                 and int.from_bytes(header[16:20], "big") > 0
+                 and int.from_bytes(header[20:24], "big") > 0))
+        if rendered.returncode == 0 and valid:
+            manifest["resources"]["whiteboard"]["preview_path"] = preview.name
+        else:
+            failure = (classify_failure((rendered.stdout or "") + (rendered.stderr or ""), bot)
+                       if rendered.returncode else {"verdict": "白板预览不是PNG/JPEG图像"})
+            manifest["missing"].append({"kind": "whiteboard-preview", "token": token, **failure})
 
 
 def _read_docx_whiteboards(blocks, bot, out_dir, assets, manifest):
@@ -595,6 +616,8 @@ def _read_docx_whiteboards(blocks, bot, out_dir, assets, manifest):
                       nodes=fetched.get("fetched", 0))
         if record["complete"]:
             record["path"] = (folder / "whiteboard.json").relative_to(out_dir).as_posix()
+        if fetched.get("preview_path"):
+            record["preview_path"] = (folder / fetched["preview_path"]).relative_to(out_dir).as_posix()
         manifest["missing"].extend({**item, "block_id": block.get("block_id"), "token": token}
                                    for item in child["missing"])
     manifest["resources"]["whiteboard"] = {

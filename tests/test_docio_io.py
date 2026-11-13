@@ -53,7 +53,10 @@ class ReadContractTests(unittest.TestCase):
             self.assertEqual(kwargs["profile"], "current-bot")
             token = args[args.index("--whiteboard-token") + 1]
             target = Path(kwargs["cwd"]) / args[args.index("--output") + 1]
-            target.write_text(json.dumps({"nodes": [{"id": token, "text": {"text": token}}]}))
+            if args[args.index("--output-type") + 1] == "preview":
+                target.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01")
+            else:
+                target.write_text(json.dumps({"nodes": [{"id": token, "text": {"text": token}}]}))
             return response({})
 
         with tempfile.TemporaryDirectory() as folder, patch.object(d, "run_lark", side_effect=engine):
@@ -63,9 +66,40 @@ class ReadContractTests(unittest.TestCase):
             self.assertEqual((boards["declared"], boards["fetched"]), (2, 2))
             self.assertEqual([json.loads((out / r["path"]).read_text())["nodes"][0]["id"]
                               for r in boards["boards"]], ["B1", "B2"])
+            self.assertTrue(all((out / r["preview_path"]).is_file() for r in boards["boards"]))
         self.assertEqual(report["inventory"]["source"], "docx.blocks")
         self.assertEqual(report["missing"], [])
         self.assertEqual(d.coverage_report(report, quiet=True), 0)
+
+    def test_whiteboard_preview_failure_retains_nodes_but_fails_full_coverage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report={"inventory":{},"resources":{},"missing":[]}
+            def engine(args, **kwargs):
+                target=Path(kwargs["cwd"])/args[args.index("--output")+1]
+                target.write_text(json.dumps({"nodes":[{"id":"node"}]}))
+                return response({})
+            with patch.object(d,"run_lark",side_effect=engine):
+                d._read_whiteboard("url","B","bot",Path(folder),report)
+            self.assertTrue((Path(folder)/"whiteboard.json").is_file())
+            self.assertNotIn("preview_path",report["resources"]["whiteboard"])
+            self.assertEqual(report["missing"][0]["kind"],"whiteboard-preview")
+            self.assertEqual(d.coverage_report(report,quiet=True),2)
+
+    def test_whiteboard_preview_accepts_native_jpeg_extension(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report={"inventory":{},"resources":{},"missing":[]}
+            def engine(args, **kwargs):
+                target=Path(kwargs["cwd"])/args[args.index("--output")+1]
+                if args[args.index("--output-type")+1]=="raw":
+                    target.write_text(json.dumps({"nodes":[{"id":"node"}]}))
+                else:
+                    self.assertFalse(target.suffix)
+                    target.with_suffix('.jpg').write_bytes(b'\xff\xd8\xff\xe0native-preview')
+                return response({})
+            with patch.object(d,"run_lark",side_effect=engine):
+                d._read_whiteboard("url","B","bot",Path(folder),report)
+            self.assertTrue(report["resources"]["whiteboard"]["preview_path"].endswith('.jpg'))
+            self.assertEqual(d.coverage_report(report,quiet=True),0)
 
     def test_embedded_whiteboard_missing_token_or_denied_export_stays_incomplete(self):
         report = {"url": "url", "inventory": {"complete": True}, "resources": {}, "missing": []}
