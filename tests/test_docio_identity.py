@@ -215,6 +215,13 @@ class CredentialProjectionTests(unittest.TestCase):
         self.assertNotIn("synthetic-v1", out.getvalue())
         run.assert_not_called()
 
+    def test_profile_setup_with_bot_never_touches_other_apps(self):
+        with patch.object(docio_cli, "profile_names", return_value={"tb26-a": {"appId": "cli_synthetic_a"}}), \
+             patch.object(docio_cli, "run_lark") as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            docio_cli.cmd_profiles(argparse.Namespace(bot="tb26-a", dry_run=True, adopt=False))
+        self.assertNotIn("tb26-b", out.getvalue())
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

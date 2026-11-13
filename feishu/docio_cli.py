@@ -222,7 +222,13 @@ def cmd_profiles(args):
     # and the name finally says which bot it belongs to.
     by_app = {row.get("appId"): name for name, row in existing.items() if row.get("appId")}
     planned, skipped, adopt, failed = [], [], [], []
-    for bot, id_env, sec_env in roster():
+    entries = roster()
+    selected = getattr(args, "bot", None)
+    if selected:
+        entries = [entry for entry in entries if entry[0] == selected]
+        if not entries:
+            raise SystemExit("指定bot不在本机名册；未配置任何CLI profile")
+    for bot, id_env, sec_env in entries:
         app_id = audit._env_val(id_env)  # noqa: SLF001
         secret = audit._env_val(sec_env)  # noqa: SLF001
         if not app_id or not secret:
