@@ -189,10 +189,11 @@ class CodexUpdateTests(unittest.TestCase):
 
     def test_current_version_skips_installer(self):
         with patch.object(agent_update, '_version', return_value='2.0.0'), \
-                patch.object(agent_update, '_codex_latest', return_value='2.0.0'), \
+                patch.object(agent_update, '_codex_latest', return_value='2.0.0') as latest, \
                 patch.object(agent_update, '_run_update_command') as run:
             result = self.ensure()
         self.assertEqual(result['status'], 'current')
+        latest.assert_called_once_with(agent_update.UPDATE_RESPONSE_TIMEOUT_SEC, None)
         run.assert_not_called()
 
     def test_unavailable_check_is_not_reported_as_latest(self):
@@ -201,8 +202,30 @@ class CodexUpdateTests(unittest.TestCase):
                 patch.object(agent_update, '_run_update_command') as run:
             result = self.ensure()
         self.assertEqual(result['status'], 'check_failed')
-        self.assertNotIn('最新版', agent_update.status_text(result))
+        self.assertNotIn('已是最新版', agent_update.status_text(result))
+        self.assertIn('未能确认最新版本', agent_update.status_text(result))
+        self.assertIn('已跳过升级', agent_update.status_text(result))
+        self.assertNotIn('失败', agent_update.status_text(result))
         run.assert_not_called()
+
+    def test_update_receipts_distinguish_check_skip_and_install_failure(self):
+        cases = [
+            ({'status': 'current', 'before': '2.0.0'}, '已是最新版 2.0.0'),
+            ({'status': 'updated', 'after': '2.1.0'}, '已升级至 2.1.0'),
+            ({'status': 'disabled'}, '已跳过自动更新'),
+            ({'status': 'never'}, '尚无更新检查记录'),
+            ({'status': 'unverified', 'before': '2.0.0'}, '未验证到目标版本'),
+            ({'status': 'migration_required'}, '需要迁移'),
+            ({'status': 'failed', 'before': '2.0.0', 'return_code': 1}, '退出码 1'),
+            ({'status': 'unknown'}, '状态尚未确认'),
+        ]
+        for record, expected in cases:
+            with self.subTest(status=record['status']):
+                text = agent_update.status_text(record)
+                self.assertIn(expected, text)
+                self.assertNotIn('更新检查或升级失败', text)
+                if record['status'] not in {'current', 'updated'}:
+                    self.assertNotIn('已是最新版', text)
 
     def test_concurrent_updater_does_not_run_twice(self):
         with patch.object(agent_update, "_centralize_codex_updates"), \

@@ -226,6 +226,7 @@ def _codex_latest(timeout, cancelled=None):
 
 def status_text(record):
     version = record.get("after") or record.get("before") or ""
+    installed = f"已安装版本 {version}" if version else "已安装版本"
     status = record.get("status")
     if status == "checking":
         return "正在检查更新…"
@@ -243,11 +244,23 @@ def status_text(record):
         return "已取消启动更新，处理关闭或重开命令。"
     if status == "disabled":
         return "已跳过自动更新，正在启动。"
+    if status == "never":
+        return "尚无更新检查记录。"
+    if status == "check_failed":
+        return f"本次未能确认最新版本，已跳过升级，使用{installed}启动。"
+    if status == "unverified":
+        return f"更新命令已结束，但未验证到目标版本，使用{installed}启动。"
+    if status == "migration_required":
+        return "当前安装方式需要迁移，已跳过自动更新，使用已安装版本启动。"
     if status == "busy":
         return "已有更新在运行，本次使用已安装版本启动。"
     if status in {"stalled", "no_response"}:
         return "更新连续 5 秒没有进展，已结束本次更新，使用已安装版本启动。"
-    return "更新检查或升级失败，使用已安装版本启动。"
+    if status == "failed":
+        code = record.get("return_code")
+        detail = f"（退出码 {code}）" if isinstance(code, int) and code else ""
+        return f"升级未完成{detail}，使用{installed}启动。"
+    return f"本次更新状态尚未确认，使用{installed}启动。"
 
 
 def _update_official(profile, state_dir: Path, timeout: float, on_response=None,
@@ -279,7 +292,7 @@ def _update_official(profile, state_dir: Path, timeout: float, on_response=None,
             _emit(on_progress, {"status": "checking"})
             latest = None
             if runtime == "codex":
-                latest = _codex_latest(min(timeout, 3), cancelled)
+                latest = _codex_latest(timeout, cancelled)
                 record["latest"] = latest
                 if cancelled and cancelled():
                     record["status"] = "cancelled"
