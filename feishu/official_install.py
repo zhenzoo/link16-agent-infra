@@ -35,6 +35,27 @@ def is_npm_entry(path: str | Path | None) -> bool:
     return "/npm/" in value or "/node_modules/" in value or "@openai/codex" in text or "node_modules/" in text
 
 
+def codex_standalone_home(executable: str | Path) -> Path | None:
+    """Locate package storage from the official payload, not an account profile.
+
+    The official updater detects its installation under CODEX_HOME. The shared
+    Windows bin junction may point into a different home than the chosen model
+    account. This is only an updater environment, never a session/home mapping.
+    """
+    try:
+        binary = Path(executable).resolve(strict=True)
+    except OSError:
+        return None
+    parents = binary.parents
+    if (not binary.is_file() or binary.name.lower() not in {"codex.exe", "codex"}
+            or len(parents) < 6 or parents[0].name.lower() != "bin"
+            or parents[2].name.lower() != "releases"
+            or parents[3].name.lower() != "standalone"
+            or parents[4].name.lower() != "packages"):
+        return None
+    return parents[5]
+
+
 def codex_windows_installation(resolved: str | Path | None) -> dict:
     """Separate an installed standalone binary from the entry the shell resolves.
 

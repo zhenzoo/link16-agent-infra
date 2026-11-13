@@ -109,3 +109,17 @@ class OfficialInstallTests(unittest.TestCase):
         for name in ("claude", "kimi"):
             with patch.object(agent_update.shutil, "which", return_value=name + ".exe"):
                 self.assertEqual(agent_update._executable(name), name + ".exe")
+
+    def test_standalone_home_comes_only_from_existing_official_payload_layout(self):
+        package_home = self.root / 'shared-installation'
+        for name in ('codex.exe', 'codex'):
+            with self.subTest(name=name):
+                payload = package_home / 'packages/standalone/releases/1.0.0-platform/bin' / name
+                payload.parent.mkdir(parents=True, exist_ok=True)
+                payload.touch()
+                with patch.dict(os.environ, {'CODEX_HOME': str(self.root / 'model-account')}):
+                    self.assertEqual(oi.codex_standalone_home(payload), package_home)
+        self.install_native()
+        self.assertIsNone(oi.codex_standalone_home(self.native))
+        self.assertIsNone(oi.codex_standalone_home(self.npm))
+        self.assertIsNone(oi.codex_standalone_home(self.root / 'missing/codex.exe'))
