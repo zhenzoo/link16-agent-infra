@@ -93,6 +93,38 @@ def test_mismatched_thread_or_completed_turn_is_unknown(rpc):
     assert a.read_activity("state", CODEX)["state"] == "unknown"
 
 
+def test_system_error_requires_exact_failed_turn(rpc):
+    rpc.live['status'] = {'type': 'systemError'}
+    rpc.turn['status'] = 'failed'
+    assert a.read_activity('state', CODEX)['key'] == ('thread-1', 'turn-1')
+    assert a.read_activity('state', CODEX)['state'] == 'failed'
+    rpc.turn['status'] = 'inProgress'
+    assert a.read_activity('state', CODEX)['state'] == 'unknown'
+
+
+@pytest.mark.parametrize('status,turn_status,expected', [
+    ('idle', 'completed', 'idle'), ('systemError', 'failed', 'idle'),
+    ('active', 'inProgress', 'interrupted')])
+def test_stop_uses_exact_native_turn_without_exit_keys(rpc, status, turn_status, expected):
+    rpc.live['status'] = {'type': status}
+    rpc.turn['status'] = turn_status
+    assert a.stop_codex_turn('state', CODEX) == expected
+    interrupts = [params for method, params in rpc.calls if method == 'turn/interrupt']
+    assert interrupts == ([{'threadId': 'thread-1', 'turnId': 'turn-1'}] if expected == 'interrupted' else [])
+
+
+def test_stop_unknown_or_changed_binding_never_interrupts(rpc, monkeypatch):
+    rpc.live['status'] = {'type': 'notLoaded'}
+    with pytest.raises(ValueError):
+        a.stop_codex_turn('state', CODEX)
+    rpc.live['status'] = {'type': 'active'}
+    endpoints = iter([('url', 'thread-1'), ('different', 'thread-1')])
+    monkeypatch.setattr(a, '_observer_endpoint', lambda *args: next(endpoints))
+    with pytest.raises(ValueError):
+        a.stop_codex_turn('state', CODEX)
+    assert 'turn/interrupt' not in dict(rpc.calls)
+
+
 def test_inbox_reconciliation_uses_native_user_message_only(tmp_path, rpc):
     from bridge_inbox import Inbox
     inbox = Inbox(tmp_path, 'bot')

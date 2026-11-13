@@ -224,7 +224,8 @@ def _codex_activity(state_dir, name, bot, inspect_tools):
         status = live.get("status") or {}
         if status.get("type") == "idle":
             return {"state": "idle", "key": None, "reason": "回合已结束，等待下一步指令"}
-        if status.get("type") != "active":
+        failed = status.get("type") == "systemError"
+        if status.get("type") != "active" and not failed:
             raise ValueError("后台未确认执行中")
         flags = status.get("activeFlags") or []
         if any(x in flags for x in ("waitingOnApproval", "waitingOnUserInput", "waitingOnUser")):
@@ -235,7 +236,10 @@ def _codex_activity(state_dir, name, bot, inspect_tools):
             "threadId": thread, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
         }, timeout=5).get("data")
         turn = (turns or [{}])[-1]
-        if not turn.get("id") or turn.get("status") != "inProgress":
+        if failed and turn.get("id") and turn.get("status") == "failed":
+            return {"state": "failed", "key": (thread, turn["id"]),
+                    "reason": "原生回合已失败结束", "tool_running": False}
+        if failed or not turn.get("id") or turn.get("status") != "inProgress":
             raise ValueError("当前回合状态与后台状态不一致")
         busy = any(
             item.get("type") in {"commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
@@ -254,6 +258,42 @@ def _codex_activity(state_dir, name, bot, inspect_tools):
 
 # One reader per platform in agent_runtime's adapter table (a test enforces it).
 _READERS = {"codex": _codex_activity, "claude": _claude_activity, "kimi": _kimi_activity}
+
+
+def stop_codex_turn(state_dir, bot):
+    """Interrupt the exact native turn; Ctrl+C can exit an idle Codex TUI.
+
+    The caller holds the bot lifecycle and input locks. Never fall back to keys
+    when the native state is unknown, and never interrupt a newer turn.
+    """
+    from codex_app_server_worker import RpcConnection
+    url, thread = _observer_endpoint(state_dir, bot['name'])
+    rpc = RpcConnection(url)
+    try:
+        rpc.request('initialize', {'clientInfo': {'name': 'link16-stop', 'version': '1'},
+                                  'capabilities': {'experimentalApi': True}}, timeout=5)
+        rpc.notify('initialized')
+        live = rpc.request('thread/read', {'threadId': thread, 'includeTurns': False}, timeout=5)['thread']
+        if live.get('id') != thread:
+            raise ValueError('停止目标的原生会话已改变')
+        status = (live.get('status') or {}).get('type')
+        if status == 'idle':
+            return 'idle'
+        if status not in {'active', 'systemError'}:
+            raise ValueError('原生会话状态未知；未发送停止按键')
+        turns = rpc.request('thread/turns/list', {'threadId': thread, 'limit': 1,
+                            'sortDirection': 'desc', 'itemsView': 'notLoaded'}, timeout=5).get('data') or []
+        turn = turns[0] if turns else {}
+        if status == 'systemError' and turn.get('status') == 'failed' and turn.get('id'):
+            return 'idle'
+        if status != 'active' or turn.get('status') != 'inProgress' or not turn.get('id'):
+            raise ValueError('原生回合状态已改变；未发送停止按键')
+        if _observer_endpoint(state_dir, bot['name']) != (url, thread):
+            raise ValueError('停止期间会话绑定已改变')
+        rpc.request('turn/interrupt', {'threadId': thread, 'turnId': turn['id']}, timeout=5)
+        return 'interrupted'
+    finally:
+        rpc.close()
 
 
 def reconcile_codex_inbox(state_dir, bot, inbox):

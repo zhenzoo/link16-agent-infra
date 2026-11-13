@@ -100,7 +100,7 @@ def _answer_record(event: dict, *, session: str, route: dict | None) -> dict | N
         "ts": int(time.time()),
         "session": session,
         "anchor": event.get("turn"),
-        "text": text + "\n\n---\n✅ 已完成",
+        "text": text if event.get('event_type') == 'turn_failed' else text + "\n\n---\n✅ 已完成",
     }
     if isinstance(route, dict):
         record["route"] = turn_delivery_guard.public_route(route)
@@ -357,7 +357,7 @@ class MilestoneObserver:
             **event,
         }
         _append_jsonl(ledger, ledger_record)
-        if event.get("event_type") == "final":
+        if event.get("event_type") in {"final", "turn_failed"}:
             event_id = str(event.get("event_id") or "")
             if event_id and event_id in self.final_event_ids:
                 return
@@ -365,6 +365,10 @@ class MilestoneObserver:
             if session_work.delivery_work(
                     self.bot, {"route": active_route or {}}, self.state_dir) is False:
                 return
+            if event.get('event_type') == 'turn_failed' and self.accumulator.apply(event):
+                progress = self.accumulator.progress_record(session=self.root_thread, route=active_route)
+                progress['ts'] = int(time.time())
+                _append_jsonl(outbox, progress)
             record = _answer_record(
                 event,
                 session=self.root_thread,
@@ -768,7 +772,7 @@ def run(args) -> int:
             gateway = codex_startup.TuiGateway(
                 url, session_received, on_request=startup_request,
                 on_retry=lambda method, attempt, limit: progress.update(
-                    "account_retry", f"Codex 工作区路由查询超时，正在重试账号查询（{attempt}/{limit}）；任务尚未提交"),
+                    "account_retry", f"Codex 工作区路由查询暂时失败，正在重试账号查询（{attempt}/{limit}）；任务尚未提交"),
                 turn_modifier=turn_effort.apply, on_turn_result=turn_result)
             tui_url = gateway.start()
             progress.update("observer_connecting", "正在接入飞书回传观察连接")

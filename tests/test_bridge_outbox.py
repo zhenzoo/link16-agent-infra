@@ -99,6 +99,24 @@ class RoutedResultCards(FakeCards):
 
 
 class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_native_turn_edits_working_card_to_stopped_and_deduplicates(self):
+        import codex_app_server_worker as worker
+        acc, state, cards = MilestoneAccumulator(), fresh_state(), FakeCards()
+        acc.apply({'event_type': 'commentary', 'event_id': 'working', 'turn': 'turn',
+                   'label': '正在生成封面', 'payload': {'text': '正在生成封面'}})
+        await self.drain([acc.progress_record(session='root')], state, cards)
+        event = normalize_codex_notification({'method': 'turn/completed', 'params': {
+            'threadId': 'root', 'turn': {'id': 'turn', 'status': 'failed'}}}, 'root')
+        acc.apply(event)
+        records = [acc.progress_record(session='root'), worker._answer_record(event, session='root', route=None)]
+        await self.drain(records, state, cards)
+        self.assertIn('**已停止**', cards.edits[-1][1])
+        self.assertNotIn('**进行中**', cards.edits[-1][1])
+        self.assertNotIn('✅ 已完成', cards.new[-1][0])
+        count = len(cards.new)
+        await self.drain(records, state, cards)
+        self.assertEqual(len(cards.new), count)
+
     async def drain(self, records, state, cards):
         return await bridge_outbox.drain_batch(
             records,

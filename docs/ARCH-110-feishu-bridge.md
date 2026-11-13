@@ -605,9 +605,10 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 - **cd 行的落地铁证**：git-bash 提示符含 cwd → 探就绪时要求新提示符**含目标目录尾段**，cd 真落进对的目录才算就绪。
 - **分行不合并**（曾试过 `cd "X" && claude` 合并一行 · 已撤回）：要每行清清楚楚、顶层 shell 本身停在对目录。`_worker_cmd` 只回 launch 命令（不含 cd），cwd 交给 `spawn` 单独发 cd 行。
 - 配套 `feishu_bridge._wait_agent_ready`：**先检查后等待**，并按 runtime 分启动窗口。legacy Codex/custom 仍为 30s；Claude 为 90s；Codex app-server 默认上限为 60s，就绪或已确认失败即返回。三平台的官方更新检查先经 `agent_update.ensure` 完成，随后才开始原生就绪计时；更新按连续5秒无进展退出，失败继续启动当前版本，不挤占原生启动窗口。app-server 分支只按协议确认就绪，不等待模型预热。已授权且未过期的文本 `/close /new /stop` 在持久收件箱优先于普通消息、控制之间保持接收顺序；更新、shell和原生就绪等待协作取消，释放原启动锁后由原控制路径处理。终端正文仍串行提交，不并发注入。网络调用、OS查询和正在完成的原子提交不被强行中断，因此不承诺端到端零等待。
-- Codex 启动期的 `account/read` 若返回 `-32603 / workspace routing discovery timed out`，仅在尚未请求 thread 且 `refreshToken` 未启用时，在同一连接内原样重试只读账号查询，整次启动最多 3 次查询；仍受原有 60s 启动窗口约束。原生 CLI 省略的 `refreshToken` 按协议默认 false 处理。展示账号查询与重试阶段，保留第一条具体错误；认证拒绝、主动刷新、已接入会话和业务 `turn/start` 不适用。就绪仍须真实 thread 成功响应及观察连接，不预提交模型任务。持续网络故障耗尽预算后明确报原始原因，不承诺离线可启动。
+- Codex 启动期的 `account/read` 若返回 `-32603 / workspace routing discovery timed out` 或 `workspace routing discovery failed`，仅在尚未请求 thread 且 `refreshToken` 未启用时，在同一连接内原样重试只读账号查询，整次启动最多 3 次查询，两次重试分别等待0.5/1秒；仍受原有 60s 启动窗口约束。原生 CLI 省略的 `refreshToken` 按协议默认 false 处理。展示账号查询与重试阶段，保留第一条具体错误；认证拒绝、主动刷新、已接入会话和业务 `turn/start` 不适用。就绪仍须真实 thread 成功响应及观察连接，不预提交模型任务。持续网络故障耗尽预算后明确报原始原因，不承诺离线可启动。
 - Codex 未取得本次 worker 回执时，若工作区仍是无 agent 标签的 shell、系统核对 shell 的进程创建时间且没有子进程、输入行是空 `$` 或本次完整 launcher，则自动恢复一次：空行重发 launcher，完整草稿只补 Enter。慢 worker、未知读屏、其他草稿或原生失败不重贴。恢复后仍须同一 startup_id 的原生 ready；失败当前提示可清除，但 `bridge-startup-failures-<bot>.jsonl` 保留现场历史。
 - **尚未提交 launcher 的超时**：保留工作区、pty、命令和 startup_id 到原会话记录的 `pending_launch`；持久队列在同一工作区续等，不报永久启动失败、不要求主人重发、不另建窗口。launcher 已提交后的响应不确定仍按原生启动回执判断，不能套用此安全重试分支。
+- **已确认启动失败的工作区**：保存现场后将精确workspace/pty/startup/profile/daemon钉入`failed_launch`，普通关闭失败不再吞掉并丢弃绑定。仅核实工作区未增换面板且系统进程树只剩shell时，才允许清理该失败空壳；工作进程仍在或观察未知则保留，下次先处理同一工作区，不能再开第二个。历史thread、失败快照及Inbox不删除。
 
 **2026-08-26 新机冷启修正**：Claude Code 2.1.240 在同一台 Windows 新机上的真实 wmux 冷启用了约 **42s**，旧 30s 判据会把“还在正常启动”误报成失败，并把整条 launcher 再塞进同一 PTY。现在只有 `pty_state.agentName` 为空且屏尾明确是裸 Git Bash 提示符时才允许补发一次；Claude splash、未知 modal、空屏或读屏失败一律不重复注入。最终仍失败时，桥在关闭 throwaway workspace 前把有界屏尾写入 `bridge-startup-failure-<bot>.json`；`/screen` 在没有活会话时回显这份最近现场，不再让用户查看一个已经被销毁的 pane。手动 `/handoff` 另以 `bridge-handoff-attempt-<bot>.json` 记录 pending/failed/complete：旧会话已经关掉但新会话没起成时，6 小时内再次发 `/handoff` 会复用原快照重试，不会要求已经不存在的旧会话再活一次；complete 后同一快照不可重放。
 
@@ -689,7 +690,7 @@ paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，
 
 ## § 2.12c · /stop 清输入框：有界轮询 + 复用 §2.12b 检测（2026-07-18 根治「慢会话漏清 + 措辞时有时无」）
 
-> 一句话：`/stop` 打断后把「退回 composer 的被打断消息」用**有界轮询**清掉，取代旧「固定 `sleep(0.8s)` 读一次」的时机竞态（慢会话消息晚退回 → 那次读到空 → 漏清·主人实证）。
+> Codex的`/stop`使用原生`turn/interrupt`，在生命周期与输入锁内核对当前thread及turn，空闲或已失败结束只回报并保留会话，未知状态不回退到退出按键。已失败回合被主人停止后记为cancelled，不能被看门狗再开新会话；后续新回合单独判断。Claude/Kimi仍沿用下面既有输入清理路径；其历史验证范围不得冒充Codex保证。
 
 **历史验证范围（2026-07-18 · Claude throwaway 逐键验，仅用于显式 /stop）**：
 - **能清空整个输入框的键只有【单 `ctrl+c`】**（框非空 → 清空且不退出）。`escape` 实测**清不掉**；`ctrl+u` wmux **根本不支持发**（支持键仅 enter/tab/ctrl+c/ctrl+d/ctrl+z/ctrl+l/escape/方向键）→ 旧注释提 `ctrl+u` 作废。
@@ -697,9 +698,9 @@ paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，
 - **旧 `_composer_draft`（只认【行首】❯）有渲染漏判**：composer 的 `❯` 有时黏在 ─── 分隔线**行尾**（不在行首）→ 旧检测漏看草稿、误判「空」→ 不清。已退役，换成 §2.12b 的 `_composer_holds_paste`（`rfind("❯")`·rendering-robust）。
 
 **修法（SSOT：`feishu_bridge._stop_clear_composer` + `/stop` 分支）**：
-1. `/stop` 先从 pending 账本取「被打断消息原文」当 marker（在 B1 清账之前）→ ctrl+c 打断 → `_stop_clear_composer` 有界轮询（`STOP_CLEAR_TRIES=10 × STOP_CLEAR_POLL=0.4s ≈ 4s` 窗口）。
+1. Claude/Kimi的`/stop`先从pending账本取「被打断消息原文」当marker（在B1清账之前）→ ctrl+c打断 → `_stop_clear_composer`有界轮询（`STOP_CLEAR_TRIES=10 × STOP_CLEAR_POLL=0.4s ≈ 4s`窗口）。Codex不进入此分支。
 2. 每轮读屏 `_composer_holds_paste(scr, marker)`：残留在 → 补【单】ctrl+c → 下轮确认；见过残留后变空 = **cleared** / 整窗没见 = **empty**（消息没退回框/本就空）/ 窗末仍在 = **residual**（顽固·喊人去看）。
-3. **措辞统一**：`/stop` 回复永远带一句明确状态（`已清空` / `本就是空的` / `仍有顽固残留·去终端瞄一眼`）——根治「有时带括号有时不带·主人搞混」。marker 检测天然避开占位符「Try …」误判（占位不含 marker 指纹）。
+3. **措辞反映实际结果**：Claude/Kimi清稿分支带`已清空` / `本就是空的` / `仍有残留`；Codex分别报告已请求停止、回合已结束或停止尚未确认，不声称清除了草稿。marker检测避开占位符「Try …」误判。
 
 **验证**：真机 e2e 3 例（基本清 / 空框 / **慢会话草稿 1.8s 晚退回·旧固定 0.8s 必漏·轮询仍 catch = RED→GREEN**）+ CI 单测 5 例（`tests/test_stop_clear_composer.py`）。⚠️ 需**重启桥**才生效（进程持旧码）。
 

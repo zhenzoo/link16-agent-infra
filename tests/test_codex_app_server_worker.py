@@ -44,6 +44,26 @@ class CodexExecutablePriorityTests(unittest.TestCase):
 
 
 class AppServerFinalDeliveryTests(unittest.TestCase):
+    def test_failed_turn_seals_progress_once_without_success_label_or_raw_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            observer = MilestoneObserver(_FakeRpc([]), bot='bot', root_thread='root',
+                                         state_dir=state, workspace_root=ROOT)
+            outbox, ledger = state / 'outbox.jsonl', state / 'ledger.jsonl'
+            event = {'method': 'turn/completed', 'params': {'threadId': 'root',
+                     'turn': {'id': 'turn', 'status': 'failed',
+                              'error': {'message': 'PRIVATE_NATIVE_ERROR'}}}}
+            observer._consume(event, outbox, ledger)
+            observer._consume(event, outbox, ledger)
+            records = [json.loads(x) for x in outbox.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual([r['kind'] for r in records], ['progress', 'answer'])
+            self.assertEqual(records[0]['steps'][-1]['kind'], 'turn_failed')
+            self.assertNotIn('✅ 已完成', records[1]['text'])
+            self.assertNotIn('PRIVATE_NATIVE_ERROR', json.dumps(records))
+            event['params']['threadId'] = 'child'
+            observer._consume(event, outbox, ledger)
+            self.assertEqual(len(outbox.read_text(encoding='utf-8').splitlines()), 2)
+
     def test_app_server_child_gets_root_even_with_missing_or_stale_parent_variable(self):
         import os
         for inherited in ({}, {"LINK16_AGENT_INFRA_ROOT": "/stale/root"}):

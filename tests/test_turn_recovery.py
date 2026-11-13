@@ -186,6 +186,24 @@ def test_draft_prevents_close(fresh_scene):
     s.fb._close_session_runtime_unlocked.assert_not_called()
 
 
+@pytest.mark.parametrize('turn,expected', [('first', True), ('newer', False)])
+def test_system_error_recovers_only_the_exact_failed_turn(fresh_scene, turn, expected):
+    s = fresh_scene
+    w.bridge_activity.read_activity.return_value = {'state': 'failed', 'key': ('old', turn)}
+    assert w.recover_failed_session(s.bot, *failed(), s.row['incident']) is expected
+    assert s.fb._close_session_runtime_unlocked.called is expected
+
+
+def test_owner_stop_cancels_failed_incident_but_later_failures_still_detected(tmp_path):
+    row = recovery.observe(tmp_path, 'bot', *failed())
+    recovery.patch(tmp_path, 'bot', row['incident'], phase='cancelled')
+    for _ in range(3):
+        assert recovery.observe(tmp_path, 'bot', *failed())['phase'] == 'cancelled'
+        assert not recovery.reserve(tmp_path, 'bot', row['incident'], 'fresh', 10000)
+    later = recovery.observe(tmp_path, 'bot', *failed('later'))
+    assert later['phase'] == 'failed' and later['incident'] != row['incident']
+
+
 def test_failed_receipt_does_not_start_another_session(fresh_scene):
     s = fresh_scene
     cron_delivery.submit.side_effect = RuntimeError('no native receipt')

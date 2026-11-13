@@ -585,7 +585,10 @@ def recover_failed_session(bot, dead, last, incident):
             if (not current_dead or current_dead['turn'] != dead['turn']
                     or current_last.get('_thread_id') != last.get('_thread_id')):
                 return False  # New user input/native progress wins over recovery.
-            if bridge_activity.read_activity(STATE_DIR, bot).get('state') != 'idle':
+            activity = bridge_activity.read_activity(STATE_DIR, bot)
+            if not (activity.get('state') == 'idle' or (
+                    activity.get('state') == 'failed'
+                    and activity.get('key') == (last.get('_thread_id'), dead['turn']))):
                 return False
             if not cron_delivery.empty_composer(fb.read_screen(rec['pty'], None)):
                 raise RuntimeError('输入框仍有草稿；保留现场，不关闭')
@@ -679,9 +682,12 @@ def retry_failed_turn(bot, dead, last, incident, now):
             return False
         with bridge_injection.injection_lock(STATE_DIR, 'tui-inject', rec['workspace_id']):
             current_dead, current_last = codex_dead_turn(name, bot)
+            activity = bridge_activity.read_activity(STATE_DIR, bot)
             if (not current_dead or current_dead['turn'] != dead['turn']
                     or current_last.get('_thread_id') != last.get('_thread_id')
-                    or bridge_activity.read_activity(STATE_DIR, bot).get('state') != 'idle'):
+                    or not (activity.get('state') == 'idle' or (
+                        activity.get('state') == 'failed'
+                        and activity.get('key') == (last.get('_thread_id'), dead['turn'])))):
                 return None
             import cron_delivery
             if not cron_delivery.empty_composer(read_pane(rec['pty'])):

@@ -280,6 +280,27 @@ def shell_has_no_children(pty):
         return False
 
 
+def shell_tree_idle(pty):
+    """Positive OS evidence: only terminal shells remain after a failed launch.
+
+    Wmux's login bash has a child interactive bash, so no-children is too strict.
+    This is not an idle-agent detector; callers must prove the exact failed
+    startup and workspace ownership separately. Unknown observation is false.
+    """
+    import kimi_process
+    try:
+        sessions = json.loads((WMUX_HOME / 'sessions.json').read_text(encoding='utf-8'))['sessions']
+        saved = next(r for r in sessions if r.get('id') == pty)
+        rows = kimi_process.inventory()
+        shell = next(r for r in rows if r['pid'] == saved['pid']
+                     and int(r['birth']) // 10 == int(saved['pidCreatedAtFt']) // 10)
+        tree = kimi_process.descendants(rows, {shell['pid']: shell})
+        shells = {'bash', 'sh', 'cmd', 'powershell', 'pwsh'}
+        return all(r.get('name', '').lower().removesuffix('.exe') in shells for r in tree.values())
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, kimi_process.Error):
+        return False
+
+
 def daemon_fingerprint():
     """wmux daemon 实例指纹 = ~/.wmux/daemon.pid 的 `内容:mtime`。
 

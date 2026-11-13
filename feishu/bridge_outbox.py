@@ -987,7 +987,8 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             _safe_count(step.get("tool_count"))
             for step in snapshot if step.get("kind") == "tool"
         )
-        header = "🤖 **进行中**"
+        header = ('❌ **已停止**' if any(step.get('kind') == 'turn_failed' for step in snapshot)
+                  else "🤖 **进行中**")
         if plan and _safe_count(plan.get("plan_total")):
             header += f" · 计划 {_safe_count(plan.get('plan_completed'))}/{_safe_count(plan.get('plan_total'))}"
         header += f" · 工具 {tool_total} 次"

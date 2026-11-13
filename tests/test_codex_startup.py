@@ -159,6 +159,16 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("error", reply)
         self.assertIn("account/read: workspace routing discovery timed out", error)
 
+    def test_workspace_discovery_failed_recovers_or_stops_at_same_budget(self):
+        for failures in (1, 99):
+            with self.subTest(failures=failures):
+                reply, calls, retries, error = self.account_case(
+                    failures=failures, message='workspace routing discovery failed')
+                self.assertEqual(len(calls), min(failures + 1, 3))
+                self.assertEqual('result' in reply, failures == 1)
+                if failures == 99:
+                    self.assertIn('account/read: workspace routing discovery failed', error)
+
     def test_auth_errors_refresh_and_business_requests_are_never_replayed(self):
         for overrides in ({"message": "authentication required", "code": 401},
                           {"params": {"refreshToken": True}},

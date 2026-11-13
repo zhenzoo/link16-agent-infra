@@ -1668,11 +1668,48 @@ def _reuse_check(bot, rec):
     return True, True, ""
 
 
+def _cleanup_failed_launch(bot, launch):
+    """Retain the exact failed workspace until closure is positively confirmed."""
+    name = bot['name']
+    if (launch.get('profile') != agent_runtime.profile_name(bot, required=True)
+            or launch.get('daemon_fp') != wmux_session.daemon_fingerprint()):
+        raise RuntimeError('失败工作区身份已改变，保留现场，不创建第二个窗口')
+    ws, pty = launch['workspace_id'], launch['pty']
+    current = next((w for w in wmux_session.workspaces() if w.get('id') == ws), None)
+    if current:
+        if current.get('ptyIds') != [pty]:
+            raise RuntimeError('失败工作区的面板已改变，保留现场')
+        failure = _load_startup_failure(name) or {}
+        if failure.get('workspace_id') != ws or failure.get('pty') != pty:
+            raise RuntimeError('缺少该工作区的启动失败证据，保留现场')
+        try:
+            wmux_session.close(ws)
+        except Exception as exc:
+            blog(name, f'启动失败工作区普通关闭未确认：{exc}')
+        else:
+            _merge_session(name, {'workspace_id': None, 'pty': None, 'failed_launch': None,
+                                  'pending_launch': None, 'runtime_processes': None})
+            return
+        # A failed receipt can precede the worker's finally block by a moment.
+        for _ in range(12):
+            if wmux_session.shell_tree_idle(pty):
+                break
+            time.sleep(.25)
+        else:
+            raise RuntimeError('启动进程尚未确认退出，保留失败工作区，不另开窗口')
+        wmux_session.close(ws, force=True)  # exact failed launch, only shells remain
+    _merge_session(name, {'workspace_id': None, 'pty': None, 'failed_launch': None,
+                          'pending_launch': None, 'runtime_processes': None})
+
+
 def _ensure_session_unlocked(bot):
     """返回 (workspace_id, pty, created, jsonl)。jsonl=该会话钉死的 transcript 路径(str)或 None。
     复用活会话时带出已钉的 jsonl；新 spawn 时探测新建 jsonl 钉死它（彻底绕开 marker+mtime 猜文件的串台坑）。"""
     _check_startup_cancelled(bot)
     _invalidate_restart_resume_unlocked(bot)
+    failed_launch = (load_session(bot['name']) or {}).get('failed_launch')
+    if failed_launch:
+        _cleanup_failed_launch(bot, failed_launch)
     _release_exited_session_unlocked(bot)
     rec = load_session(bot["name"])
     pending_launch = (rec or {}).get("pending_launch")
@@ -1757,10 +1794,15 @@ def _ensure_session_unlocked(bot):
             'daemon_fp': wmux_session.daemon_fingerprint(), 'pending_launch': None})
         raise
     if not ready:
+        launch = {'workspace_id': ws, 'pty': pty, 'startup_id': startup_bot['_startup_id'],
+                  'profile': agent_runtime.profile_name(bot, required=True),
+                  'daemon_fp': wmux_session.daemon_fingerprint()}
+        _merge_session(bot['name'], {**launch, 'failed_launch': launch, 'pending_launch': None,
+                                     'agent': agent_runtime.runtime_name(bot), 'cwd': cwd})
         try:
-            wmux_session.close(ws)   # 现场已落盘；别长期遗留失败 workspace
-        except Exception:  # noqa: BLE001
-            pass
+            _cleanup_failed_launch(bot, launch)
+        except Exception as exc:  # noqa: BLE001
+            blog(bot['name'], f'启动失败工作区保留，下一次启动先清理同一窗口：{exc}')
         raise RuntimeError(
             f"{agent_runtime.display_name(bot)} 启动未完成："
             + ((_load_startup_failure(bot["name"]) or {}).get("reason") or "未取得就绪信号") + "。"
@@ -1776,6 +1818,21 @@ def _ensure_session_unlocked(bot):
                                  "daemon_fp": wmux_session.daemon_fingerprint(),  # 钉死起这会话时的 daemon 实例·下次复用前比对(变了=daemon 重启过=会话已死)
                                  "cwd": cwd, "pending_launch": None})  # 未发 launcher 的等待状态到此才结束。
     return ws, pty, True, jsonl
+
+
+def stop_codex_session(bot):
+    """Owner /stop cancels this turn, preserving TUI, profile and history."""
+    import turn_recovery
+    with bridge_injection.injection_lock(STATE_DIR, 'ensure-session', bot['name']):
+        rec = load_session(bot['name']) or {}
+        if rec.get('profile') != agent_runtime.profile_name(bot, required=True) or not rec.get('workspace_id'):
+            raise RuntimeError('原生停止目标绑定未确认')
+        with bridge_injection.injection_lock(STATE_DIR, 'tui-inject', rec['workspace_id']):
+            status = bridge_activity.stop_codex_turn(STATE_DIR, bot)
+            row, _ = turn_recovery.probe(sys.modules[__name__], bot)
+            if row:
+                turn_recovery.patch(STATE_DIR, bot['name'], row['incident'], phase='cancelled')
+            return status
 
 
 def ensure_session(bot):
@@ -3096,6 +3153,14 @@ def _run_bot(bot_name=None):
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])   # B1: /stop=撤销投递契约→清账（防 doctor 误判重投·§2.13·根治「/stop 后又乱重投」）
                 if not alive:
                     await reply(chat_id, "🛌 没有会话可打断"); return
+                if agent_runtime.runtime_name(bot) == 'codex':
+                    try:
+                        stopped = await asyncio.to_thread(stop_codex_session, bot)
+                        await reply(chat_id, '✋ 已请求停止当前回合，原会话保留' if stopped == 'interrupted'
+                                    else '✋ 当前回合已经结束，原会话保留')
+                    except Exception as exc:
+                        await reply(chat_id, f'⚠️ 停止尚未确认：{exc}。原会话保留，未发送退出按键。')
+                    return
                 # ① ctrl+c 打断当前任务（与原行为一致·已验证能停）
                 await asyncio.to_thread(wmux, "key", rec["pty"], "ctrl+c", "--allow-ws", rec["workspace_id"])
                 # ② B6（§2.12c·2026-07-18）：打断后 Claude 把消息退回 composer → 【有界轮询】清掉（复用 §2.12b 检测·

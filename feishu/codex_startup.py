@@ -235,7 +235,9 @@ class TuiGateway:
                                              and client.close_code is None
                                              and (account_request.get("params") or {}).get("refreshToken", False) is False
                                              and error.get("code") == -32603
-                                             and error.get("message") == "workspace routing discovery timed out"
+                                             and error.get("message") in {
+                                                 "workspace routing discovery timed out",
+                                                 "workspace routing discovery failed"}
                                              and self.account_retries < ACCOUNT_DISCOVERY_ATTEMPTS - 1)
                                     if retry:
                                         self.account_retries += 1
@@ -243,6 +245,7 @@ class TuiGateway:
                                 if retry:
                                     pending_accounts[msg["id"]] = account_request
                                     self.on_retry("account/read", attempt, ACCOUNT_DISCOVERY_ATTEMPTS)
+                                    time.sleep(.5 * self.account_retries)
                                     upstream.send(json.dumps(account_request))
                                     continue
                                 if error:

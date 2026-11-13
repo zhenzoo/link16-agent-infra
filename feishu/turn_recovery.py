@@ -61,6 +61,10 @@ def observe(state_dir, name, dead, last, *, current_thread=None):
     def reconcile(row):
         if current_thread is not None and current_thread() != thread:
             return row  # A concurrent /close/start superseded this observation.
+        if row.get('phase') == 'cancelled':
+            if dead and row.get('thread') == thread and row.get('turn') == dead['turn']:
+                return row  # /stop on an already failed turn must not restart it.
+            row = {}  # A later explicit/native turn owns its own outcome.
         if last.get('type') == 'turn_aborted' or (
                 last.get('type') == 'task_complete' and not last.get('error')):
             return {}
@@ -95,7 +99,7 @@ def probe(fb, bot):
 def blocked(fb, bot, job=None):
     try:
         row, last = probe(fb, bot)
-        if not row:
+        if not row or row.get('phase') == 'cancelled':
             return False
         # Only the reserved recovery handoff can enter the fresh thread; cron
         # stays deferred until that thread actually completes successfully.

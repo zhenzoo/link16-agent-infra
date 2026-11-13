@@ -327,6 +327,16 @@ def normalize_codex_notification(message: dict, root_thread: str, *, workspace_r
     if thread and thread != root_thread:
         return None
     turn = params.get("turnId") or ((params.get("turn") or {}).get("id"))
+    if method == 'turn/completed' and thread == root_thread and turn:
+        completed = params.get('turn') or {}
+        if completed.get('status') == 'failed':
+            # Do not disclose arbitrary native error payloads, tool inputs or
+            # child-thread output. Native logs retain the diagnostic source.
+            return {'event_id': f'failed:{turn}', 'event_type': 'turn_failed', 'turn': turn,
+                    'label': '❌ 原生回合已失败结束',
+                    'payload': {'text': '❌ 本回合已因原生服务错误结束，当前已停止执行。'
+                                '已保留会话和任务记录；自动恢复结果另行回报。'}}
+        return None
     if method == "turn/plan/updated":
         plan = [deepcopy(item) for item in (params.get("plan") or []) if isinstance(item, dict)]
         return {
