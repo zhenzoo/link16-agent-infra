@@ -84,7 +84,7 @@ python feishu/feishu_bridge.py start --bot <新bot> --only-missing
 ### 授权页核对目标飞书组织 / tenant
 
 - 飞书应用属于**创建时 Device Grant 页面选择的组织/企业 tenant**；权限、管理员审批和能访问的组织资源都在该 tenant 内。它不是“这台电脑的通用飞书账号”。
-- **新机器且本机还没有 roster**：直接提供 Device Grant 链接，让用户在官方页核对当前账号和目标组织；注册器不需要组织准确名称参数，不拆出重复追问名称的停点。
+- **新机器且本机还没有 roster**：安装会话读取 Device Grant 链接，按§2.0.1在官方页核对已登录账号与用户指定的目标组织并代办普通确认；只有无法确定身份/组织或自动操作失败才交链接给主人。注册器不需要组织准确名称参数，不拆出重复追问名称的停点。
 - **本机已有 roster，用户没另说**：沿用当前注册上下文，不重复询问。**用户明确指定组织时永远覆盖沿用。**
 - CLI 本地拿不到可靠的组织显示名，不能假装替用户验证；Claude/Codex 的本机 profile 与飞书组织也没有绑定关系。
 - 只有页面选择、已有上下文与用户指令存在冲突或目标仍不明确时，才追问具体选择；未选择群协作时不以群名阻塞私聊 bot 注册。
@@ -177,7 +177,9 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 注册收尾必须核 `--user-identity`。按姓名查人使用user-only的contact:user:search，需要当前bot对应CLI profile中有效且verified的主人授权；基本信息可用bot已知ID读取，真实mention用该app人员ID。缺同意时走原生 `lark-cli auth login --profile <新bot> --scope <当前应用已开通的免审用户scope>`，保留后台监听和真实成功回读，不借另一个bot的凭据，不仅等待“已授权”文字。本人动作未完成时明确“应用权限已齐、主人OAuth待完成”，不能称已具备人员查询。注册器和授权监听按各自有效期后台运行，不用短timeout截断。
 
-已认主企业bot的人员授权使用 `python feishu/personnel_authorization.py --bot <本bot> --query <已知同事姓名> --state feishu/_state/<本次独占目录> --notify-bot <发起bot> --background`。执行者读取目录内`confirmation.json`，只打开expires_at内的有效链接并代办普通确认；真实登录缺项才交给主人。完成/过期原生交换后自动清理链接，`status.json`保留脱敏验收。它先核企业、AppID、免审与后台授权；能刷新的已有用户凭据先实查，不重复请求同意；仅缺同意才申请三项人员scope。查到匹配姓名及人员ID并核主人身份才完成，成功唤醒发起会话。device code只在进程内；每个AppID分别同意，不能给一只授权就宣称全体完成。新应用CLI profile由注册器只配置本应用；已有缺项用 `docio_cli.py --bot <本bot> profiles --apply`，不覆盖其他应用。
+已认主企业bot使用 `python feishu/personnel_authorization.py --bot <本bot> --query <已知同事姓名> --capability docio-read --state feishu/_state/<本次独占目录> --notify-bot <发起bot> --background`。默认仅三项人员scope；`docio-read`追加文档、Sheet、多维表、白板、Wiki、附件、评论读取和metadata前置，合计19项请求。其他已授权业务用重复`--scope <准确名称>`追加，必须在当前App已开通且属免审用户权限；不将后台300多项一次塞入OAuth，原生可能拒绝过长清单。新应用CLI profile由注册器只配置本应用；已有缺项用 `docio_cli.py --bot <本bot> profiles --apply`，不覆盖其他应用。
+
+工具先核企业、AppID、免审与后台授权，再核本次全部scope的用户同意；已有完整授权直接实查姓名，能刷新则复用。仅查人已通过但仍缺DocIO scope时继续请求本次业务同意，不误判全完成。`--check`只核现有身份与姓名、不会新建OAuth或回调。身份不明、主人不符、网络失败或查询空结果不盲目重授权。`status.json`列请求与缺口，`verified`只表示这批授权及姓名验收，文档读取、编辑、评论写入仍须实际业务验证。
 
 **代办页面的复用顺序**：现读浏览器skill，用本会话独占session打开未过期链接；读取当前页面，核目标应用、企业与已登录主人、仅本次已授权scope；使用当前页面索引点击Authorize，再读成功页并等待原生CLI验人。下一应用重新读页面，不能复用旧索引，也不复制Cookie/token到脚本。页面成功不替代API验收；原生明确token_missing时重新授权，网络失败或查询空结果不盲目重授权。2026-11-13 TB26的12只缺授权应用已按此代办，连同原可用baseball-4共13只实查姓名及本应用ID通过。
 
@@ -185,7 +187,30 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 **2026-08-26 `tb26-baseball` 真测**：当前 47 scopes 里没有 `drive:drive`，旧 `send --doc` 的源文件上传在 `ccm_import_open` 返回 `99991672`；但直接创建 docx、写入文字、设置任何人凭链接可读均成功，且外部读取器读回正文。显式增加 owner 协作者仍缺 `docs:permission.member:create` 等权限。因此：无 Drive ≠ 无在线文档；准确区别是“公开文字文档可做，旧源文件导入和协作者授权不可做”。
 
-### § 2.0.1 · 谁能审核，能不能自己发布
+### § 2.0.1 · 自动代办工具链：默认执行，实际失败才交链接
+
+这是Claude、Codex、Kimi共用的Feishu skill执行路径，首次装机和已有应用补权限都走这里。用户已授权注册/补权限即可执行正常工具安装与普通确认，不在每个页面重新问许可；页面由智能体根据当前内容操作，不承诺脱离智能体的无人值守脚本。
+
+1. **取得本应用的真实待办。** 新注册继续SDK addons预填，安装会话读`python feishu/registration_monitor.py links --job <job>`；已有企业应用用`python feishu/bridge_scope_audit.py --bot <bot> --baseline --user-identity --json`取得`baseline.by_identity`及`baseline.links`，仅处理缺口。企业免审数量随目录变化，不写死300多项。个人租户保留原能力范围。应用scope失败不等于主人OAuth失败，两类链接不混用。
+2. **准备本地浏览器工具。** 优先现有已授权浏览器；已安装`browser-act`技能先完整读它。没有可用工具时按以下正常渠道安装。包名是`browser-act-cli`；须指定Python 3.12，不能直接用机器默认的3.13安装。不需要为本地Chrome购买云浏览器或代理，也不依赖维护者私有skill目录。
+
+   ```powershell
+   # 已有uv则跳过第一条；安装是既有注册授权内的本地依赖动作
+   python -m pip install --user uv
+   python -m uv tool install browser-act-cli --python 3.12
+   # PATH未刷新时用 Path.home()/.local/bin/browser-act.exe（Windows）或browser-act
+   browser-act get-skills core --skill-version 2.0.2
+   browser-act browser list
+   browser-act session list
+   ```
+
+   完整读取CLI返回的使用说明；升级后以安装技能声明的兼容版本为准。需要创建/选择本地Chrome绑定时，先`browser-act get-skills advanced`，按返回指令建立chrome-direct；不导出Cookie/token、不默认复制浏览器profile。已有用户浏览器无法接管且要求关闭重启Chrome时，不擅自中断用户浏览器，按第6项回退。
+3. **独占会话，按当前页面操作。** 用本轮唯一session和现查browser ID打开有效链接：`browser-act --session <本轮名> browser open <id> <URL>`。每次`state`后核应用名/AppID、目标企业、当前已登录主人与本次scope，再用本次输出的索引`click <N>`或`select <N> <选项>`；页面变化后重新`wait stable`、`state`，不复用旧索引。新注册先普通创建确认；已有应用分别选tenant/user身份、免审筛选，勾选真实缺项并确认。当前页面需管理员审批的跳过，不调用scopes/apply代提审批；新邮件/员工等数据范围不在原授权内时保留缺口，不悄悄改范围。仅在页面确有待发布修改且可免审时完成发布，已发布不再建版本。
+4. **API回读才算后台完成。** 原App凭据再次运行scope审计，按`(scope_name, scope_type)`核`grant_status=1`，保留被跳过的准确项目和原因；传播期只读复核，不重复开通。缺口清零只代表本轮后台范围完成。首次安装仍由Monitor检查桥、群与认主，不能因网页成功跳过。
+5. **本机原生OAuth及业务验收。** 按上方`personnel_authorization.py`后台启动；执行者读取独占目录内`confirmation.json`，只打开`expires_at`内链接，逐页核同一应用/企业/主人及所需scope后确认。原生CLI持续监听，完成/过期后自动移除确认文件；token和device code不外发。读取`status.json`核主人匹配、请求scope零缺口及真实姓名结果，再对本次目标执行DocIO读取或已获授权的写入/评论并回读。编辑和评论写入需要其相应用户scope与资源编辑角色；读取包不承诺这些写权限。
+6. **只在实际自动操作失败时交用户。** 登录失效、扫码/验证码、身份组织无法核清、浏览器不可接管或工具操作失败时，给当前有效的原授权链接、具体需点动作和失败原因，保留原生后台等待。过期按原应用恢复新链接，不重建bot；用户点击后自动读机械成功信号继续，不要求其再说“完成”。纯资源ACL拒绝不是链接操作失败：同一主人也无权时按SOP-140告知并结束该项，不拿补scope链接替代原文授权。结束只关闭本会话创建的浏览器session。
+
+### § 2.0.2 · 谁能审核，能不能自己发布
 
 - 企业自建应用生产版本原则上由企业管理员审核；管理员可以给某个应用或开发者配置免审。开发者只有同时是管理员、或命中免审规则时，才会表现为“自己确认发布即可”。
 - 云文档窄权限可免审，伞形scope是否需审以对应身份当前目录为准；`drive:drive`开不了不是Link16故障。需审批的权限或数据范围发布直接跳过，说明当前无法自助操作，不发申请链接。

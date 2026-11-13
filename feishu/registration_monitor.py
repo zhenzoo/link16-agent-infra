@@ -457,7 +457,8 @@ def notify_oauth_link(job_id, url, expire_in=None):
     else:
         marker = (
             f"Link16 注册回调：{state['bot']} 的授权链接已生成"
-            f"（约 {expire_in or '?'} 秒内有效），请把裸链接回复给主人：\n{url}\n"
+            f"（约 {expire_in or '?'} 秒内有效）。按Feishu skill/SOP-120 §2.0.1核应用、主人和组织，"
+            f"默认由智能体打开并完成已授权的普通确认；自动操作失败才把有效链接和具体动作交给主人：\n{url}\n"
             f"[飞书 from=registration-monitor:{event_id} to={notify_bot} via=注册回调 · route=p2a]"
         )
         result = bridge_injection.inject_bot_prompt(notify_bot, marker)
@@ -650,9 +651,11 @@ def _event_text(state, milestone, permission_review=None):
             (f"[{i}/{len(urls)}] {u}" if len(urls) > 1 else u) for i, u in enumerate(urls, 1)
         ) or "（无增量 scope：能力档与基线已全部开通）"
         instruction = ("优先用官方SDK固定原AppID增量续接，预填已证缺口，不让主人逐项勾选后台。"
+                       "按SOP-120 §2.0.1用已登录浏览器代办免审确认，自动操作失败才交有效链接。"
                        "需管理员审批的权限或数据范围发布跳过，不发申请链接。应用权限与主人OAuth分别验收：\n"
                        if _registration_tenant_kind(state) == "enterprise" else
-                       "请把下面裸链接回复给主人；按本租户权限范围核对，需管理员审批的跳过：\n")
+                       "按SOP-120 §2.0.1代办已授权的普通确认，自动操作失败才交有效链接给主人；"
+                       "保持本租户能力范围，需管理员审批的跳过：\n")
         return (
             f"Link16 注册回调：{state['bot']} 回读仍缺权限，增量审阅链接已生成。"
             f"{instruction}"

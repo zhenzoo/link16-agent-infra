@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """register_feishu_app.py — 一键创建飞书智能体应用（官方 OAuth Device Grant 流程）。
 
-跑起来打印授权链接：Publisher 在飞书里打开（或手机扫码）确认 → 脚本拿回 client_id/client_secret
+跑起来打印授权链接：智能体按SOP-120代办普通确认，自动操作失败才交给主人 → 脚本拿回 client_id/client_secret
 → 自动写进 VibeCoding 的 .env（路径跨机解析·见 bridge_env.resolve_env_path·不写死盘符）。
 
   首次安装（仅私聊）：
@@ -55,7 +55,7 @@ ENV_PATH = resolve_env_path()   # 跨机解析·不写死盘符
 
 
 def on_qr(info):
-    print(f"\n=== 请在飞书里打开此链接授权（{info.get('expire_in')}s 内有效）===\n{info.get('url')}\n", flush=True)
+    print(f"\n=== 按SOP-120 §2.0.1代办普通确认，自动操作失败才交给主人（{info.get('expire_in')}s 内有效）===\n{info.get('url')}\n", flush=True)
 
 
 def on_status(info):
@@ -237,7 +237,7 @@ def _deliver_oauth_link(job_id, info):
     state = registration_monitor.get_job(job_id) or {}
     if not state.get("notify_bot"):
         print("ℹ️ 回调目标未绑定（本机还没有可投递的 bot，第一只 bot 就是这样）："
-              "请把上面的链接转给主人，本进程继续等待授权。", flush=True)
+              "安装会话从本地links读取有效链接并代办普通确认；自动操作失败才交给主人，本进程继续等待。", flush=True)
         registration_monitor.notify_oauth_link(job_id, info.get("url"), info.get("expire_in"))
         return False
     receipt = {}
@@ -250,7 +250,7 @@ def _deliver_oauth_link(job_id, info):
         if attempt < 2:
             time.sleep(2 ** (attempt + 1))
     print(f"⚠️ 授权链接没能推给 {state.get('notify_bot')}（{receipt.get('error')}）："
-          "请把上面的链接转给主人，本进程继续等待授权。", flush=True)
+          "安装会话从本地links读取有效链接并代办普通确认；自动操作失败才交给主人，本进程继续等待。", flush=True)
     return False
 
 

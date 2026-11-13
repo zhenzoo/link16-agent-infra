@@ -22,7 +22,7 @@ description: Link16 首次安装 / 初始化的一站式剧本。用于开始部
 | ② 账号 | Claude-work / Claude-personal / Codex-personal / Codex-work / Kimi 及全部已有编号账号 | 选一次并登录 | `profile_bootstrap.py --choices --json` → `--select <name> --apply --login` |
 | ③ 盘点（可选） | 本人记忆、skills、活跃项目和建议 bot | 选择导入范围 | 仅已要求导入时运行 `context_scan.py --out` |
 | ④ 导入（可选） | 选定内容的文件变更预览 | 确认范围内自动执行 | `context_import.py --apply` |
-| ⑤ 建 bot | 官方组织授权页，随后权限审阅页 | 核对组织、授权、发布 | 后台注册；`registration_monitor.py links --job <job> --watch` 持续取得当前动作 |
+| ⑤ 建 bot | 智能体代办应用创建、免审权限与普通OAuth | 正常无需点链接；自动操作失败才按提示介入 | 后台注册并读取links，按Feishu skill / SOP-120 §2.0.1准备工具、核身份、操作页面、回读权限 |
 | ⑥ 验收 | 账号启动与桥连接通过，随后私聊提示 | 私聊认主 | Monitor 自动补起新桥；配置自启并跑 `service_doctor.py` |
 
 只在 ROLE-010 规定的实际人工动作停下。账号选定后不再问内部 profile ID/home；组织在官方授权页核对，不提前追问准确名称。用户已授权配置启动项时，核 before/after 后直接 apply，不重复要许可；生产重启仍需要维护窗口。
@@ -77,7 +77,7 @@ python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <�
 # 已做盘点时可用 --from-scan ... --pick N 代替 name/bot/cwd
 python feishu/registration_monitor.py links --job <返回的job> --watch
 ```
-第一只 bot 无回调通道也能从 `links` 取得链接；后台启动命令只短等链接生成，绝不等待或截断人的授权。将当前裸链接交给用户；第一步在官方页核对组织，登记成功后 `links` 转到权限审阅页。只有用户指令与页面/已有上下文冲突才追问组织，不要求准确名称参数。
+第一只 bot 无回调通道也能从 `links` 取得链接；后台启动命令只短等链接生成，绝不等待或截断授权。安装会话按Feishu skill / SOP-120 §2.0.1自行准备浏览器工具，打开有效链接、核当前主人和组织并代办普通确认；登记后按真实缺口补免审权限、发布及本App业务OAuth。只有真实自动操作失败才把有效链接与具体动作交给用户；身份组织不明或冲突才追问，不要求准确名称参数。不能将拿到链接当交付，也不能将后台开通当本人授权和资源读写已通过。
 发布后 Monitor 自动核权限、所选账号实际启动、补起缺失的 bot 与守护进程，并确认飞书连接，再给私聊认主提示。保持 `links --watch` 或定期读取 job，不能假定没有回调 bot 也能唤醒安装会话。
 用户点过作废链接：拿 App ID 用 `--app-id cli_xxx` 续接，不重复建应用。
 

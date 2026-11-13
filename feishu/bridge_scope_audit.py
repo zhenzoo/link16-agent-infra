@@ -215,6 +215,7 @@ def user_identity_status(bot):
         owner_matches = bool(owner and user.get("openId") == owner)
         return {"status": status, "verified": user.get("verified") is True,
                 "owner_matches": owner_matches,
+                "scopes": sorted(set(scopes)),
                 "personnel_ready": status == "ready" and user.get("verified") is True
                                    and owner_matches and "contact:user:search" in scopes,
                 "personnel_search_scope": "contact:user:search" in scopes,

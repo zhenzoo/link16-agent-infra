@@ -81,9 +81,15 @@ L4 低于可管理时直接下载图片/附件会被拒，`docio read` 自动改
 里 `via: preview`）。两条都失败才报 `denied(role)`。
 
 没分享给 bot、但主人本人能看的链接（别人只分享给主人），报 `denied(resource)` 后改用
-`docio read <url> --into <dir> --as-user`：自动选本机已登录主人账号的 profile，开头播报
-用户名与刷新凭据到期时间，manifest 的 `identity` 记为 user。刷新凭据约 7 天滚动续期，
-连续 7 天没用就要主人重新 `lark-cli auth login --profile <bot>` 点一次确认。
+`docio read <url> --into <dir> --as-user <当前bot>`：明确使用本应用已核主人profile，开头播报
+用户名与刷新凭据到期时间，manifest 的 `identity` 记为 user。已有可刷新凭据先复用，
+原生明确失效时按SOP-120 §2.0.1补所需用户同意，普通确认默认由智能体代办。
+
+核对资源类型、应用主人和所需scope后，主人身份仍被资源ACL拒绝（例如3380004）时，
+告知具体文档、拒绝事实及未读范围，然后结束本项；原入口保留不可读说明。
+不将这项挂成等待主人解决，不改ACL、不轮换其他身份或反复补scope。
+只有后来收到新授权或获准原稿才恢复。后台scope、主人OAuth和文档自身访问/编辑角色是三层独立条件；
+读取成功不证明可编辑、可写评论或其他资源可读，须按实际业务动作分别验收。
 
 ## 4.1 · 发布前冒烟
 
