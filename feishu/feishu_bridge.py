@@ -69,6 +69,8 @@ CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_s
 #   OK / 吞吐截断是 warmup 假象"的结论是错的·已被真实截断推翻——别再据此放行裸 send）。
 #   普通换行原文直发；含 TAB 或超长文本才在 on_message 上游落盘转 Read，TUI 只接收单行短指令。
 SEND_MAX_CHARS = 16000   # marker 作 node 命令行参传递的天花板(~Windows CreateProcess 32767 留余量·send/paste 共用·与截断无关)
+CODEX_INLINE_MAX_UNITS = 1000
+CODEX_INLINE_MAX_LINES = 10
 # 注入投递保证（§2.12b · 2026-07-16）：paste 后别盲等 0.3s 就 enter——settle 按字数线性伸缩 + 回车后读屏闭环校验重按。
 INJECT_SETTLE_BASE = 0.2         # settle 基线秒（短消息 1 块 ≈ 这个值·闭环兜底→可略激进）
 INJECT_SETTLE_PER_CHUNK = 0.03   # 每 100 字块 + 这么多秒（长文本 TUI 消化更久·线性给）
@@ -977,13 +979,17 @@ def _cmdline_units(s):
     return len(s.encode("utf-16-le")) // 2
 
 
-def _prepare_tui_text(bot_name, message_id, text):
+def _prepare_tui_text(bot_name, message_id, text, *, runtime_bot=None):
     """Reuse the inbox-file handoff for text a terminal cannot preserve reliably."""
     reason = ""
     if "\t" in text:
         reason = "含制表符 TAB·内联会损坏"
     elif _cmdline_units(text) > SEND_MAX_CHARS:
         reason = "超长·内联会撑爆命令行上限"
+    elif (runtime_bot and agent_runtime.uses_app_server(runtime_bot)
+          and (_cmdline_units(text) > CODEX_INLINE_MAX_UNITS
+               or len(text.splitlines()) > CODEX_INLINE_MAX_LINES)):
+        reason = "Codex长稿改为完整文件交接，避免后台输入框折叠后无法核实提交"
     if not reason:
         return text, ""
     try:
@@ -2470,7 +2476,9 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                                         sys.modules[__name__], bot, row)
             except Exception as exc:
                 inbox.scheduled_error(row['id'], exc)
+                inbox.handoff_observe(row['id'], '原生接收检查失败；现场与错误记录已保留')
             row = inbox.get(row['id'])
+            context = json.loads(row['handoff'])
         if cron_delivery.accepted(row):
             if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
                 inbox.handoff_notice(row['id'], 'done')
@@ -2481,7 +2489,28 @@ async def settle_inbound_handoffs(bot, inbox, channel):
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'received_modified')
         elif (row['state'] in {'queued', 'awaiting_confirmation', 'uncertain'}
+              and context.get('notice') != 'unconfirmed'
+              and ('wmux-rpc enter failed:' in (row.get('error') or '')
+                   or time.time() - row['received'] >= cron_delivery.INBOUND_ACK_ALERT_SEC)):
+            error = row.get('error') or ''
+            if 'folder-trust prompt cannot be ruled out' in error or '后台画面暂时无法完整读取' in error:
+                reason = 'Wmux 无法完整读取后台面板，输入保护拒绝了投递或提交'
+            elif 'wmux-rpc enter failed:' in error:
+                reason = '文字写入后，提交 Enter 失败；尚无原生接收回执'
+            else:
+                reason = context.get('waiting_reason') or '尚无原生接收回执，当前投递结果无法确认'
+            if cron_delivery.accepted(inbox.get(row['id'])):
+                continue  # A late receipt wins over the timeout notification.
+            result = await card_send(channel, context['chat_id'],
+                                    f'⚠️ 消息投递未确认：{reason}。\n'
+                                    '原消息和现场已保留，桥不会盲目重贴；这不表示 Codex 已开始处理。\n'
+                                    f'消息 ID：{row["id"]}', bot['name'])
+            if result != 'failed':
+                inbox.handoff_notice(row['id'], 'unconfirmed')
+        elif (row['state'] in {'queued', 'awaiting_confirmation', 'uncertain'}
               and time.time() - row['received'] >= 30 and context.get('notice') != 'compacting'):
+            if context.get('notice') == 'unconfirmed':
+                continue
             compacting = False
             try:
                 compacting = await asyncio.to_thread(cron_delivery.inbound_compacting,
@@ -2500,7 +2529,7 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                 continue
             result = await card_send(channel, context['chat_id'],
                                     'compacting context' if compacting else
-                                    '⏳ 等待 Codex 处理这条消息。', bot['name'])
+                                    '⏳ 原消息已保存，尚未取得 Codex 接收确认；正在检查投递状态。', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'compacting' if compacting else 'pending')
 
@@ -3842,7 +3871,7 @@ def _run_bot(bot_name=None):
                         from_disp, via_disp = "host", "DM"
                     # Resolve sender/route from the original before replacing it
                     # with a file pointer, so multiline A2A retains its identity.
-                    text, file_reason = _prepare_tui_text(bot["name"], msg.id, text)
+                    text, file_reason = _prepare_tui_text(bot["name"], msg.id, text, runtime_bot=bot)
                     if file_reason:
                         blog(bot["name"], f"[{tid}] 📄 {file_reason}，原文已存入消息专属 inbox 文件")
                     # The decorative middle dot is lost by Windows Codex input;

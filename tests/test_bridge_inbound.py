@@ -140,6 +140,24 @@ class TuiTextHandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "没有截断提交"):
                 feishu_bridge._prepare_tui_text("unit", "om_full", "1. 一\t2. 二")
 
+    def test_codex_long_or_tall_drafts_use_existing_lossless_file_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, 'STATE_DIR', Path(tmp)), \
+                mock.patch.object(feishu_bridge.agent_runtime, 'uses_app_server', return_value=True):
+            for mid, body in [('om_wide', '保留原文😀' * 210), ('om_tall', '一行\r\n' * 12)]:
+                pointer, reason = feishu_bridge._prepare_tui_text('unit', mid, body, runtime_bot={'profile': 'cxp'})
+                saved = Path(tmp) / f'bridge-inbox-unit-{bridge_inbox.prompt_digest(mid)[:24]}.txt'
+                self.assertEqual(saved.read_bytes(), body.encode('utf-8'))
+                self.assertIn(saved.as_posix(), pointer)
+                self.assertIn('Codex长稿', reason)
+                self.assertLess(len(pointer), 500)
+
+    def test_other_runtimes_retain_existing_inline_policy(self):
+        with mock.patch.object(feishu_bridge.agent_runtime, 'uses_app_server', return_value=False):
+            body = '保留其他平台的内联方式\n' * 150
+            for runtime in ('claude', 'kimi'):
+                self.assertEqual(feishu_bridge._prepare_tui_text('unit', 'om_other', body,
+                                 runtime_bot={'agent': runtime}), (body, ''))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ WAIT_SEC = 20
 MAX_SUBMITS = 3
 POLL_SEC = 1
 RETRY_DELAY_SEC = 20
+INBOUND_ACK_ALERT_SEC = 120
 
 
 def _binding(fb, bot, ws, pty, session=None):
@@ -138,6 +139,9 @@ def confirm_inbound(fb, bot, row):
     if not current or current['state'] not in {'submitting', 'awaiting_confirmation', 'uncertain'}:
         return False
     context = json.loads(current.get('handoff') or '{}')
+    def waiting(reason):
+        inbox.handoff_observe(row['id'], reason)
+        return False
     marker = context.get('prompt')
     if not marker or prompt_digest(marker) != current['digest']:
         raise RuntimeError('待交完整原文缺失或摘要变化；不补交')
@@ -148,16 +152,31 @@ def confirm_inbound(fb, bot, row):
         if accepted(inbox.get(row['id'])):
             return True
         _binding(fb, bot, ws, pty, current['session'])
-        if fb.bridge_activity.read_activity(fb.STATE_DIR, bot).get('state') != 'idle':
-            return False
+        state = fb.bridge_activity.read_activity(fb.STATE_DIR, bot).get('state')
         screen = fb.read_screen(pty, None)
-        if is_compacting(screen) or not draft_matches(screen, marker):
-            return False
         # Recheck the receipt after reading the screen; never replay accepted input.
         if accepted(inbox.get(row['id'])):
             return True
+        _binding(fb, bot, ws, pty, current['session'])
+        if is_compacting(screen):
+            return waiting('Codex 正在压缩上下文，尚未确认接收本条消息')
+        if state not in {'idle', 'active'}:
+            return waiting('原生会话状态不可确认，未补交')
+        if not draft_matches(screen, marker):
+            return waiting('无法从画面核实完整原草稿，未重贴或补按键')
+        if state == 'active' and not queue_tab_available(screen):
+            return waiting('完整原稿仍在输入框，但当前回合未提供排队入口')
         if inbox.handoff_attempt(row['id'], limit=MAX_SUBMITS, delay=RETRY_DELAY_SEC):
-            fb.wmux('enter', pty, '--allow-ws', ws)
+            if state == 'active':
+                fb.wmux('key', pty, 'tab', '--allow-ws', ws)
+            else:
+                fb.wmux('enter', pty, '--allow-ws', ws)
+            inbox.handoff_observe(row['id'], '已补交完整原草稿，仍等待原生接收回执')
+        else:
+            saved = json.loads(inbox.get(row['id'])['handoff'])
+            if saved.get('submits', 0) >= MAX_SUBMITS:
+                return waiting('完整原稿仍在输入框，补交已达上限，停止自动按键')
+            return waiting('完整原稿仍在输入框，等待有界补交间隔')
     return accepted(inbox.get(row['id']))
 
 

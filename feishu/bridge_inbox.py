@@ -245,6 +245,19 @@ class Inbox:
                 db.execute('UPDATE messages SET handoff=? WHERE id=?',
                            (json.dumps(context, ensure_ascii=False), mid))
 
+    def handoff_observe(self, mid, reason):
+        """Persist the latest non-receipt explanation, not a delivery verdict."""
+        with self.connect() as db:
+            row = db.execute('SELECT handoff,state FROM messages WHERE id=?', (mid,)).fetchone()
+            if not row or not row['handoff'] or row['state'] not in (
+                    'queued', 'submitting', 'awaiting_confirmation', 'uncertain'):
+                return
+            context = json.loads(row['handoff'])
+            if context.get('waiting_reason') != reason:
+                context.update(waiting_reason=reason, checked_at=time.time())
+                db.execute('UPDATE messages SET handoff=? WHERE id=?',
+                           (json.dumps(context, ensure_ascii=False), mid))
+
     def handoff_attempt(self, mid, *, limit, delay):
         """Reserve a bounded Enter BEFORE writing; a restart cannot reset it."""
         with self.connect() as db:
@@ -359,7 +372,8 @@ class Inbox:
 
     def scheduled_error(self, mid, error):
         with self.connect() as db:
-            db.execute("""UPDATE messages SET state='uncertain',error=?,updated=?
+            db.execute("""UPDATE messages SET state='uncertain',
+                error=CASE WHEN handoff IS NOT NULL AND error IS NOT NULL THEN error ELSE ? END,updated=?
                 WHERE id=? AND state IN ('awaiting_confirmation','uncertain')""",
                 (str(error)[:300], time.time(), mid))
 
