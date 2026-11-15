@@ -151,6 +151,24 @@ class TuiTextHandoffTests(unittest.TestCase):
                 self.assertIn('Codex长稿', reason)
                 self.assertLess(len(pointer), 500)
 
+    def test_cron_uses_same_lossless_body_policy_and_keeps_occurrence_route(self):
+        import bridge_cron
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, 'STATE_DIR', Path(tmp)), \
+                mock.patch.object(feishu_bridge.agent_runtime, 'uses_app_server', return_value=True):
+            body = '完整中文😀\n\n' * 250
+            job = dict(name='nightly', bot='unit', prompt=body)
+            marker = bridge_cron._marker(job, stamp='2026-11-15 10:00', runtime_bot={'profile': 'cxp'})
+            saved = next(Path(tmp).glob('bridge-inbox-unit-*.txt'))
+            self.assertEqual(saved.read_bytes(), body.strip().encode('utf-8'))
+            self.assertIn(saved.as_posix(), marker)
+            self.assertIn('from=cron:nightly to=unit via=定时 · route=p2a mid=cron:nightly:2026-11-15T10:00', marker)
+            self.assertEqual(marker, bridge_cron._marker(job, stamp='2026-11-15 10:00', runtime_bot={'profile': 'cxp'}))
+            # Editing a job in the same minute must not overwrite a pending input's file.
+            bridge_cron._marker(dict(job, prompt=body + 'changed'), stamp='2026-11-15 10:00',
+                                runtime_bot={'profile': 'cxp'})
+            self.assertEqual(saved.read_bytes(), body.strip().encode('utf-8'))
+            self.assertEqual(len(list(Path(tmp).glob('bridge-inbox-unit-*.txt'))), 2)
+
     def test_other_runtimes_retain_existing_inline_policy(self):
         with mock.patch.object(feishu_bridge.agent_runtime, 'uses_app_server', return_value=False):
             body = '保留其他平台的内联方式\n' * 150

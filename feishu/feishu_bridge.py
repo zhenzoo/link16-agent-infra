@@ -1973,9 +1973,9 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
         try:
             empty = cron_delivery.empty_composer(read_screen(pty, None))
         except RuntimeError as exc:
-            raise bridge_inbox.RetryableHandoffError('输入框无法读取；本次零写入') from exc
+            raise bridge_inbox.InputSurfaceUnavailable('输入框无法读取；本次零写入') from exc
         if not empty:
-            raise bridge_inbox.RetryableHandoffError('输入框不是可核实的空稿；本次零写入')
+            raise bridge_inbox.InputSurfaceUnavailable('输入框不是可核实的空稿；本次零写入')
     wmux("paste", pty, marker, *allow,
          *(["--win32-input"] if win32_input else []))
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
@@ -2465,20 +2465,29 @@ def thumbs_up(channel, message_id, name):
     task.add_done_callback(_BACKGROUND.discard)
 
 
-async def settle_inbound_handoffs(bot, inbox, channel):
-    """Native receipt owns the reaction; unresolved input gets one honest notice."""
+def recover_inbound_handoffs(bot, inbox):
+    """One serial recovery pass. Terminal reads/locks must never hold up notices."""
     import cron_delivery
     for row in inbox.inbound_handoffs():
+        try:
+            if row['state'] in {'awaiting_confirmation', 'uncertain'}:
+                cron_delivery.confirm_inbound(sys.modules[__name__], bot, row)
+            elif row['state'] == 'queued' and row.get('session'):
+                compacting = cron_delivery.inbound_compacting(sys.modules[__name__], bot, row)
+                inbox.handoff_observe(row['id'],
+                    'Codex 正在压缩上下文，尚未确认接收本条消息' if compacting else
+                    (row.get('error') or '等待原消息重新投递'))
+        except Exception as exc:
+            inbox.scheduled_error(row['id'], exc)
+            inbox.handoff_observe(row['id'], '原生接收检查失败；现场与错误记录已保留')
+
+
+async def settle_inbound_handoffs(bot, inbox, channel):
+    """Read the durable ledger only; a hung terminal cannot silence the alarm."""
+    import cron_delivery
+    pending = {'queued', 'submitting', 'awaiting_confirmation', 'uncertain'}
+    for row in inbox.inbound_handoffs():
         context = json.loads(row['handoff'])
-        if row['state'] in {'awaiting_confirmation', 'uncertain'}:
-            try:
-                await asyncio.to_thread(cron_delivery.confirm_inbound,
-                                        sys.modules[__name__], bot, row)
-            except Exception as exc:
-                inbox.scheduled_error(row['id'], exc)
-                inbox.handoff_observe(row['id'], '原生接收检查失败；现场与错误记录已保留')
-            row = inbox.get(row['id'])
-            context = json.loads(row['handoff'])
         if cron_delivery.accepted(row):
             if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
                 inbox.handoff_notice(row['id'], 'done')
@@ -2488,7 +2497,7 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                                     '我不会重复提交；完整原文和接收记录已保留，请核对本条处理结果。', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'received_modified')
-        elif (row['state'] in {'queued', 'awaiting_confirmation', 'uncertain'}
+        elif (row['state'] in pending
               and context.get('notice') != 'unconfirmed'
               and ('wmux-rpc enter failed:' in (row.get('error') or '')
                    or time.time() - row['received'] >= cron_delivery.INBOUND_ACK_ALERT_SEC)):
@@ -2498,7 +2507,7 @@ async def settle_inbound_handoffs(bot, inbox, channel):
             elif 'wmux-rpc enter failed:' in error:
                 reason = '文字写入后，提交 Enter 失败；尚无原生接收回执'
             else:
-                reason = context.get('waiting_reason') or '尚无原生接收回执，当前投递结果无法确认'
+                reason = context.get('waiting_reason') or error or '尚无原生接收回执，当前投递结果无法确认'
             if cron_delivery.accepted(inbox.get(row['id'])):
                 continue  # A late receipt wins over the timeout notification.
             result = await card_send(channel, context['chat_id'],
@@ -2507,23 +2516,18 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                                     f'消息 ID：{row["id"]}', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'unconfirmed')
-        elif (row['state'] in {'queued', 'awaiting_confirmation', 'uncertain'}
+        elif (row['state'] in pending
               and time.time() - row['received'] >= 30 and context.get('notice') != 'compacting'):
             if context.get('notice') == 'unconfirmed':
                 continue
-            compacting = False
-            try:
-                compacting = await asyncio.to_thread(cron_delivery.inbound_compacting,
-                                                    sys.modules[__name__], bot, row)
-            except Exception as exc:
-                inbox.scheduled_error(row['id'], exc)
-            # A receipt can arrive while reading the pane; it always wins.
+            compacting = context.get('waiting_reason') == 'Codex 正在压缩上下文，尚未确认接收本条消息'
+            # A late receipt always wins over a pending notification.
             row = inbox.get(row['id'])
             if cron_delivery.accepted(row):
                 if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
                     inbox.handoff_notice(row['id'], 'done')
                 continue
-            if row['state'] not in {'queued', 'awaiting_confirmation', 'uncertain'}:
+            if row['state'] not in pending:
                 continue
             if not compacting and context.get('notice') == 'pending':
                 continue
@@ -4159,13 +4163,28 @@ def _run_bot(bot_name=None):
         async def _watch_inbound_receipts():
             while not control.stopping():
                 await asyncio.sleep(2)
-                if not agent_runtime.uses_app_server(bot):
-                    continue
                 try:
-                    await settle_inbound_handoffs(bot, durable_inbox, ch)
+                    if agent_runtime.uses_app_server(bot):
+                        await settle_inbound_handoffs(bot, durable_inbox, ch)
+                    import cron_due
+                    await asyncio.to_thread(cron_due.alert_pending, sys.modules[__name__], bot,
+                                            lambda msg: blog(bname, msg))
                 except Exception as exc:
                     blog(bname, f'原生接收检查暂未完成：{str(exc)[:180]}')
         asyncio.create_task(_watch_inbound_receipts())
+
+        async def _recover_inbound_receipts():
+            # Exactly one in-flight recovery per bot, even if readScreen stalls.
+            # Do not cancel a thread and start a second sender behind its back.
+            while not control.stopping():
+                await asyncio.sleep(2)
+                if not agent_runtime.uses_app_server(bot):
+                    continue
+                try:
+                    await asyncio.to_thread(recover_inbound_handoffs, bot, durable_inbox)
+                except Exception as exc:
+                    blog(bname, f'原生接收恢复暂未完成：{str(exc)[:180]}')
+        asyncio.create_task(_recover_inbound_receipts())
 
         wake = asyncio.Event()
         ch.bind_inbox(wake)

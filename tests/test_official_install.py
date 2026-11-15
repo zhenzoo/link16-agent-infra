@@ -105,6 +105,19 @@ class OfficialInstallTests(unittest.TestCase):
             self.assertEqual(preflight.check_wmux_update_settings().status, expected)
             self.assertEqual(session.read_text(), content)
 
+    def test_background_screen_check_is_read_only_and_requires_both_flags(self):
+        session = self.root / 'wmux/session.json'
+        session.parent.mkdir()
+        for content, expected in [
+            (json.dumps({'coldParkEnabled': False, 'hiddenPaneRetentionEnabled': False}), preflight.OK),
+            (json.dumps({'coldParkEnabled': True, 'hiddenPaneRetentionEnabled': False}), preflight.WARN),
+            (json.dumps({'coldParkEnabled': False, 'hiddenPaneRetentionEnabled': True}), preflight.WARN),
+            ('{}', preflight.WARN), ('bad', preflight.WARN), ('[]', preflight.WARN),
+        ]:
+            session.write_text(content)
+            self.assertEqual(preflight.check_wmux_background_input().status, expected)
+            self.assertEqual(session.read_text(), content)
+
     def test_non_codex_provider_updaters_keep_their_existing_executable(self):
         for name in ("claude", "kimi"):
             with patch.object(agent_update.shutil, "which", return_value=name + ".exe"):

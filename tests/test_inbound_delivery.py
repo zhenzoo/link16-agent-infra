@@ -45,6 +45,7 @@ def scene(tmp_path, monkeypatch):
 
 
 def settle(scene):
+    fb.recover_inbound_handoffs(scene.bot, scene.inbox)
     asyncio.run(fb.settle_inbound_handoffs(scene.bot, scene.inbox, scene.channel))
 
 
@@ -293,8 +294,46 @@ def test_pending_notice_is_not_lost_on_zero_write_retry(scene):
 
 
 def test_existing_draft_blocks_next_message_before_any_write(scene):
-    with pytest.raises(bridge_inbox.RetryableHandoffError):
+    with pytest.raises(bridge_inbox.InputSurfaceUnavailable):
         fb._inject_unlocked('pty', 'ws', 'a later message', runtime_bot=scene.bot)
+    fb.wmux.assert_not_called()
+
+
+@pytest.mark.parametrize('state', ['queued', 'submitting', 'awaiting_confirmation', 'uncertain'])
+def test_alarm_does_not_depend_on_terminal_read_or_injection_lock(scene, state):
+    with scene.inbox.connect() as db:
+        db.execute('UPDATE messages SET state=?,received=?', (state, time.time() - 121))
+    fb.read_screen.side_effect = AssertionError('notification must not read terminal')
+    fb.bridge_activity.read_activity.side_effect = AssertionError('notification must not probe runtime')
+    for _ in range(2):
+        asyncio.run(fb.settle_inbound_handoffs(scene.bot, scene.inbox, scene.channel))
+    fb.card_send.assert_awaited_once()
+    assert '消息投递未确认' in fb.card_send.call_args.args[2]
+    fb.wmux.assert_not_called()
+    scene.channel.add_reaction.assert_not_called()
+
+
+def test_alarm_arrives_while_recovery_thread_is_still_reading(scene):
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    with scene.inbox.connect() as db:
+        db.execute('UPDATE messages SET received=?', (time.time() - 121,))
+    def screen(*args):
+        entered.set()
+        assert release.wait(5)
+        return ''
+    fb.read_screen.side_effect = screen
+    async def check():
+        task = asyncio.create_task(asyncio.to_thread(fb.recover_inbound_handoffs, scene.bot, scene.inbox))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            await asyncio.wait_for(fb.settle_inbound_handoffs(scene.bot, scene.inbox, scene.channel), 1)
+            fb.card_send.assert_awaited_once()
+            assert not task.done()
+        finally:
+            release.set()
+            await task
+    asyncio.run(check())
     fb.wmux.assert_not_called()
 
 

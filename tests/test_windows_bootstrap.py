@@ -210,11 +210,17 @@ class WmuxPostInstallTests(unittest.TestCase):
             bash.parent.mkdir(parents=True)
             bash.touch()
             with mock.patch.object(wb.preflight, "_git_bash_path", return_value=bash):
-                row = wb.configure_wmux_git_bash(apply=True, appdata=appdata, running=False)
+                row = wb.configure_wmux_defaults(apply=True, appdata=appdata, running=False)
             saved = json.loads(session.read_text(encoding="utf-8"))
             self.assertEqual(row["status"], "applied")
             self.assertEqual(saved["theme"], "dark")
             self.assertEqual(saved["defaultShell"], str(bash))
+            self.assertIs(saved['hiddenPaneRetentionEnabled'], False)
+            self.assertIs(saved['coldParkEnabled'], False)
+            self.assertIs(saved['autoUpdateEnabled'], True)
+            with mock.patch.object(wb.preflight, '_git_bash_path', return_value=bash):
+                self.assertEqual(wb.configure_wmux_defaults(apply=True, appdata=appdata,
+                                                            running=True)['status'], 'ok')
 
     def test_running_wmux_requires_gui_instead_of_overwriting_its_store(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,7 +228,7 @@ class WmuxPostInstallTests(unittest.TestCase):
             bash.parent.mkdir(parents=True)
             bash.touch()
             with mock.patch.object(wb.preflight, "_git_bash_path", return_value=bash):
-                row = wb.configure_wmux_git_bash(apply=True, appdata=tmp, running=True)
+                row = wb.configure_wmux_defaults(apply=True, appdata=tmp, running=True)
             self.assertEqual(row["status"], "needs-gui")
             self.assertFalse((Path(tmp) / "wmux" / "session.json").exists())
 

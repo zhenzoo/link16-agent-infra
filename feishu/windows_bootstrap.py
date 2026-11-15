@@ -446,31 +446,36 @@ def _atomic_json(path: Path, data):
         raise
 
 
-def configure_wmux_git_bash(*, apply=False, appdata=None, running=None):
+def configure_wmux_defaults(*, apply=False, appdata=None, running=None):
+    """SOP-100 §4: merge the Link16 defaults only while the GUI is stopped."""
     bash = preflight._git_bash_path()
     if not bash:
-        return {"task": "wmux-default-shell", "status": "blocked", "detail": "Git Bash 未安装"}
+        return {"task": "wmux-defaults", "status": "blocked", "detail": "Git Bash 未安装"}
     root = Path(appdata or os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
     session = root / "wmux" / "session.json"
     data = {}
     if session.is_file():
         try:
             data = json.loads(session.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            return {"task": "wmux-default-shell", "status": "blocked",
+            if not isinstance(data, dict):
+                raise ValueError('settings must be an object')
+        except (OSError, ValueError):
+            return {"task": "wmux-defaults", "status": "blocked",
                     "detail": f"无法安全解析 {session}"}
     current = str(data.get("defaultShell") or "").strip().strip('"')
-    if current.lower() == str(bash).lower():
-        return {"task": "wmux-default-shell", "status": "ok", "detail": str(bash)}
+    defaults = dict(hiddenPaneRetentionEnabled=False, coldParkEnabled=False, autoUpdateEnabled=True)
+    if current.lower() == str(bash).lower() and all(data.get(k) is v for k, v in defaults.items()):
+        return {"task": "wmux-defaults", "status": "ok", "detail": f"Git Bash={bash}；后台持续渲染、不卸载；官方自动更新开启"}
     is_running = _wmux_running() if running is None else running
     if is_running:
-        return {"task": "wmux-default-shell", "status": "needs-gui",
-                "detail": "wmux 正在运行；请在 Settings → Default Shell 选择 Git Bash，避免退出时覆盖文件"}
+        return {"task": "wmux-defaults", "status": "needs-gui",
+                "detail": "wmux 正在运行；按 SOP-100 §4 在 Settings 选 Git Bash、关闭隐藏渲染暂停与闲置卸载、开启官方自动更新；不手改运行中的 store"}
     if apply:
         data["defaultShell"] = str(bash)
+        data.update(defaults)
         _atomic_json(session, data)
-    return {"task": "wmux-default-shell", "status": "applied" if apply else "missing",
-            "detail": f"{session} → {bash}"}
+    return {"task": "wmux-defaults", "status": "applied" if apply else "missing",
+            "detail": f"{session} → Git Bash={bash}；后台持续渲染、不卸载；官方自动更新开启"}
 
 
 def _shortcut_target(shortcut: Path):
@@ -665,8 +670,6 @@ def deployment_failures(rows, installs, post_install):
     failures.extend(
         f"post:{row['task']}:{row['status']}" for row in post_install
         if row.get("status") in {"blocked", "needs-gui"}
-        # wmux 默认 Shell 只是「想变绿」的 GUI 项，桥不依赖它（开面板后自己敲 bash）——不算装机失败。
-        and not (row.get("task") == "wmux-default-shell" and row.get("status") == "needs-gui")
     )
     return failures
 
@@ -697,7 +700,7 @@ def main(argv=None):
         post.extend([
             configure_windows_terminal_git_bash(apply=args.apply),
             ensure_wmux_desktop_shortcut(apply=args.apply),
-            configure_wmux_git_bash(apply=args.apply),
+            configure_wmux_defaults(apply=args.apply),
             wmux_identity.ensure(apply=args.apply),
         ])
         update = preflight.check_wmux_update_settings()

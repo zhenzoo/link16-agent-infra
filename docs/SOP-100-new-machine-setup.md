@@ -23,7 +23,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-15
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -73,7 +73,7 @@ alias、PATH、环境变量、wrapper 等内部细节只在排错时再解释。
 - **profile 登录过没有**：`preflight.py` 的「profile 登录态」读凭据文件（Claude `.credentials.json` / `.claude.json` 的
   `oauthAccount`，Codex `auth.json`）；没登录过的 bot 收到消息会开面板但停在登录页。桥在 spawn 前也会拦下并回人话。
 - **`bash` 在 PATH 上**：桥开面板后第一行敲的是裸 `bash`。Git 装在用户目录时 bin 不在 PATH，`windows_bootstrap --apply`
-  的 `user-path` 任务会补进用户级 PATH；改完必须重启 wmux 才继承。「wmux 默认 Shell」只是 WARN，不阻塞。
+  的 `user-path` 任务会补进用户级 PATH；现有进程的环境不会随之更新，所需重开按维护流程进行。§4 的默认 Git Bash 与后台渲染基线是验收必需项，不能以桥临时切入 Bash 代替。
 
 ### 部署工程师的职责与完成闸
 
@@ -517,11 +517,20 @@ jina read "https://example.com" | head -3
 
 ---
 
-## 4 · Windows Terminal + wmux 默认 Git Bash（必做）
+## 4 · Link16 统一 Wmux 配置与默认 Git Bash（新机、存量机、升级后必做）
 
 1. **Windows Terminal**：安装脚本在它未运行时保留全部未知设置并自动补/选择 **Git Bash**；若正在运行，为防内存态覆盖文件，才提示 Settings → Startup → Default profile → Git Bash。若列表没有，脚本会新增 profile，commandline 使用体检发现的真实 `bash.exe --login -i`。
-2. **wmux**：安装脚本在 wmux 未运行时自动写入 Git Bash；若 wmux 正在运行，为防退出时覆盖配置，会明确提示到 Settings → Default Shell → **Git Bash**。路径由体检发现，不假定固定盘符。
-3. 运行 `python feishu/preflight.py`；`Git Bash`、`Windows Terminal 默认 Shell`、`wmux 默认 Shell` 三项都必须是 `[ OK ]`。
+2. **Wmux Settings → Terminal → Default Shell：Git Bash**。使用体检发现的本机 `bash.exe`，不复制别机盘符。仅改变新建面板的默认 shell，不关闭现有 PowerShell／业务进程。
+3. **Terminal → Pause hidden pane rendering：关闭**（`hiddenPaneRetentionEnabled=false`）。隐藏面板继续解析终端输出，保留完整输入框与底栏。后台自动化优先可靠性，不以省渲染成本换取不可读的输入界面。
+4. **Terminal → Unload idle hidden workspaces：关闭**（`coldParkEnabled=false`）。关闭后原生应用解除已冷卸载的工作区，后续不因闲置隐藏而卸载；无需重启 Wmux 或业务会话。
+5. **Settings → Updates → 自动更新：开启**（`autoUpdateEnabled=true`）。允许官方检查与下载；实际 **Install now** 会关闭终端，仍按 SOP-010 的现场保存、必要维护和恢复验收执行，不能把下载许可当作随时重启业务的许可。
+6. **保存方式**：`windows_bootstrap.py --apply --yes` 在 Wmux 未运行时无损合并上述四个字段，保留工作区和未知设置；正在运行时返回 `needs-gui`，由执行者通过原生 Settings 完成并回读，不直接改内存仍持有的 `session.json`。本机初始化与存量机同步均按同一规则；`needs-gui` 是未完成，不能豁免成成功。
+7. 运行 `python feishu/preflight.py`；`Git Bash`、`Windows Terminal 默认 Shell`、`wmux 默认 Shell`、`wmux 后台输入`、`wmux 官方更新` 均须 `[ OK ]`。体检只读，不改设置、不重启。版本缺少设置时记录实际版本／缺项，核官方支持入口，不猜字段生效、不补丁绕过输入保护。
+8. **行为验收**：用隔离面板确认实际新 shell 为 Git Bash；同 profile 的隔离原生会话隐藏超过五分钟后，验证仍能读全输入框、完成中文／空行／emoji 投递，并以原生接收事件或受控本地请求确认原文。另用故障注入核“读屏卡住仍报警、零写入可恢复、已接收不重复”。不得把测试消息发到生产任务，也不能以设置值或 RPC 返回成功替代接收证明。
+
+飞书本人消息与 A2A 共用普通收件链；Cron 在同一注入锁及原生回执机制上保留独立到点记录。Codex 长稿统一使用完整文件交接，Claude/Kimi 保留各自原适配。读屏恢复和通知分开执行；普通 Codex 消息与各平台定时任务超过两分钟仍无接收确认时发一次持久化通知，原记录继续按已证状态恢复；Cron 重试耗尽或终止时另报停止。收到任务不等于业务执行完成，执行结果仍由原生 final／失败事件证明。
+
+本节适用于 TB24、TB25、TB26、TUF19、TX26 及后续新机；机器和 profile 名称不参与配置判断。同步回报所用 main、上述设置与行为证据、业务 PID／绑定和队列保留结果；不要为了拉齐配置清空会话或重建 bot。持续渲染可能增加内存／CPU，占用异常时记录实测再处理，不能静默重新打开暂停或卸载。
 
 wmux 的「默认 Shell」+「启动目录」**不在 `~/.wmux/config.json`**。真实持久化字段是 `%APPDATA%\wmux\session.json.defaultShell`（GUI 渲染层 store）；安装或升级 wmux 后都要复核。**不要为默认 shell 改 `.bashrc`，也不要造 alias。**
 

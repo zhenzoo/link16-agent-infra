@@ -195,23 +195,23 @@ class S13BashOnPathTests(unittest.TestCase):
 
 
 class S14WmuxDefaultShellTests(unittest.TestCase):
-    """S1.4 wmux 默认 Shell 不再永远 FAIL：不是 Git Bash 只 WARN；needs-gui 不算装机失败。"""
+    """SOP-100 unified defaults: an unconfigured GUI is still incomplete."""
 
-    def test_powershell_default_is_warn(self):
+    def test_powershell_default_fails_unified_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "wmux").mkdir()
             (Path(tmp) / "wmux" / "session.json").write_text(
                 json.dumps({"defaultShell": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"}), encoding="utf-8")
             with mock.patch.dict(os.environ, {"APPDATA": tmp}):
                 r = preflight.check_wmux_default_shell()
-        self.assertEqual(r.status, preflight.WARN)
-        self.assertIn("bash", r.detail)
+        self.assertEqual(r.status, preflight.FAIL)
+        self.assertIn("Git Bash", r.detail)
 
-    def test_needs_gui_not_a_deployment_failure(self):
-        post = [{"task": "wmux-default-shell", "status": "needs-gui"},
+    def test_needs_gui_is_an_unfinished_deployment_requirement(self):
+        post = [{"task": "wmux-defaults", "status": "needs-gui"},
                 {"task": "python-utf8", "status": "blocked"}]
         failures = windows_bootstrap.deployment_failures([], [], post)
-        self.assertEqual(failures, ["post:python-utf8:blocked"])
+        self.assertEqual(failures, ["post:wmux-defaults:needs-gui", "post:python-utf8:blocked"])
 
 
 class S15MsixLocalAppDataTests(unittest.TestCase):

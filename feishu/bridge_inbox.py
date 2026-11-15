@@ -408,7 +408,8 @@ class Inbox:
                        (json.dumps(context, ensure_ascii=False), time.time(), mid))
             return True
 
-    def due_update(self, mid, *, error=None, delay=0, phase=None, notice=None, failed=False, launch=None):
+    def due_update(self, mid, *, error=None, delay=0, phase=None, notice=None, failed=False, launch=None,
+                   pending_notice=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
@@ -419,13 +420,16 @@ class Inbox:
                 context['phase'] = phase
             if notice is not None:
                 context['notice'] = notice
+            if pending_notice is not None:
+                context['pending_notice'] = pending_notice
             if launch is not None:
                 context['launch'] = launch
             # Unknown submitted input must remain eligible for a late native receipt.
             state = 'failed' if failed and row['state'] == 'scheduled' else row['state']
             db.execute('UPDATE messages SET schedule=?,error=?,retry_at=?,state=?,updated=? WHERE id=?',
                        (json.dumps(context, ensure_ascii=False), str(error or row['error'] or '')[:300],
-                        time.time() + delay, state, time.time(), mid))
+                        row['retry_at'] if pending_notice is not None else time.time() + delay,
+                        state, time.time(), mid))
 
     def confirm(self, prompt, session=None, receipt=None):
         observed = prompt_digest(prompt)

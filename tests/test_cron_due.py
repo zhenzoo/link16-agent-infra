@@ -50,6 +50,35 @@ def test_restart_delivers_into_same_busy_session_once(scheduled):
     s.fb._close_session_unlocked.assert_not_called()
 
 
+def test_delayed_cron_alert_is_read_free_once_and_does_not_stop_recovery(scheduled):
+    import time
+    s = scheduled
+    s.inbox.due_update(s.row['id'], delay=30)
+    with s.inbox.connect() as db:
+        db.execute('UPDATE messages SET received=? WHERE id=?', (time.time() - 121, s.row['id']))
+    before = s.inbox.get(s.row['id'])
+    s.fb.bridge_activity.read_activity.side_effect = AssertionError('no runtime probe')
+    for _ in range(2):
+        due.alert_pending(s.fb, s.bot, lambda m: None)
+    after = s.inbox.get(s.row['id'])
+    s.fb._send_text_message.assert_called_once()
+    assert '仍按原记录检查和有界恢复' in s.fb._send_text_message.call_args.args[3]
+    assert after['state'] == before['state']
+    assert after['attempts'] == before['attempts']
+    assert after['retry_at'] == before['retry_at']
+    assert json.loads(after['schedule'])['pending_notice'] == 'alert-id'
+    assert not json.loads(after['schedule']).get('notice')
+    s.fb.bridge_activity.read_activity.side_effect = None
+    s.resume()
+    s.process()
+    assert s.inbox.get(s.row['id'])['state'] == 'done'
+    assert s.inbox.get(s.row['id'])['attempts'] == 1
+    assert s.fb._ensure_session_unlocked.call_count == 1
+    assert s.fb._inject.call_count == 1
+    assert s.fb._inject.call_args.args[:2] == ('pty', 'old')
+    s.fb._close_session_unlocked.assert_not_called()
+
+
 @pytest.mark.parametrize('runtime', ['claude', 'codex', 'kimi'])
 def test_start_failure_is_bounded_persisted_and_alerted_once(scheduled, runtime):
     s = scheduled

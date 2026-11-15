@@ -276,12 +276,20 @@ def _save_lastfire(d):
 
 
 # ---------- 触发（真正把任务注入目标 bot 的 Claude Code）----------
-def _marker(job, *, stamp=None):
+def _marker(job, *, stamp=None, runtime_bot=None):
     name = job.get("name", "job")
     bot = job.get("bot", "?")
     stamp = stamp or job.get('_scheduled_stamp')
+    text = job.get('prompt', '').strip()
+    if runtime_bot is not None:
+        import feishu_bridge as fb
+        from bridge_inbox import prompt_digest
+        # Same lossless file handoff as owner and peer messages. Prepare once
+        # at occurrence registration; resumed deliveries keep their saved body.
+        text, _ = fb._prepare_tui_text(bot, f'cron:{name}:{stamp}:{prompt_digest(text)}', text,
+                                       runtime_bot=runtime_bot)
     occurrence = f" mid=cron:{name}:{stamp.replace(' ', 'T')}" if stamp else ''
-    return f"{job.get('prompt', '').strip()} [飞书 from=cron:{name} to={bot} via=定时 · route=p2a{occurrence}]"
+    return f"{text} [飞书 from=cron:{name} to={bot} via=定时 · route=p2a{occurrence}]"
 
 
 def _watchdog_waiting_for_short_limit(bot_name):
@@ -392,6 +400,11 @@ def fire(job, dry_run=False):
             except Exception as exc:
                 log(f"fire[{name}] 原投递尚未确认：{exc}")
                 return False
+    if job.get('_due_id'):
+        saved = cron_due.Inbox(fb.STATE_DIR, bot_name).get(job['_due_id'])
+        marker = json.loads(saved['payload'])['prompt']
+    else:
+        marker = _marker(job, runtime_bot=bot)
     try:
         if job.get('_due_id'):
             with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', bot_name, timeout=1):
@@ -446,7 +459,8 @@ def _tick(lastfire):
             if not cron_match(job['cron'], now) or lastfire.get(key, lastfire.get(job['name'])) == stamp:
                 continue
             cron_due.Inbox(fb.STATE_DIR, bot['name']).due_register(
-                job, stamp, fb.agent_runtime.profile_name(bot, required=True), _marker(job, stamp=stamp))
+                job, stamp, fb.agent_runtime.profile_name(bot, required=True),
+                _marker(job, stamp=stamp, runtime_bot=bot))
             lastfire[key] = stamp  # Legacy file now means registered, never delivered.
             _save_lastfire(lastfire)
         except Exception as exc:

@@ -29,6 +29,7 @@ def scene(tmp_path, monkeypatch):
         bridge_outbox=SimpleNamespace(pending_clear=Mock()),
         session_work=SimpleNamespace(clear=Mock()),
         clear_codex_thread=Mock(), clear_session=Mock(), _close_session_unlocked=Mock(),
+        _prepare_tui_text=Mock(side_effect=lambda name, mid, text, **kw: (text, None)),
     )
     def ensure(bot):
         if path.exists():

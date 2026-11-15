@@ -348,13 +348,10 @@ def check_wmux_default_shell():
                       "在 wmux Settings 重新选择 Git Bash 后重开 wmux")
     if _looks_like_git_bash(shell) and Path(str(shell)).is_file():
         return Result("wmux 默认 Shell", OK, str(shell))
-    # 2026-09-08 机器 3050：wmux 3.5x 的下拉框只列 PowerShell/WSL/CMD，Git 装在用户目录时探测不到，
-    # 写 session.json 也会被 wmux 重启覆盖 → 这项曾经永远 FAIL。它其实不阻塞：桥开面板后自己敲一行
-    # `bash` 切进 Git Bash（见 check_bash_on_path）。降为 WARN，把真正的硬条件交给「bash 在 PATH」。
-    return Result("wmux 默认 Shell", WARN,
-                  f"当前 defaultShell = {shell or '未设置'}（不阻塞：桥开面板后会自己敲 bash 切过去）",
-                  "想变绿：wmux → Settings → Default Shell → Git Bash；下拉框里没有 Git Bash 说明 Git 装在用户目录，"
-                  "wmux 探测不到，可忽略或把 Git 装到 C:\\Program Files\\Git")
+    return Result("wmux 默认 Shell", FAIL,
+                  f"当前 defaultShell = {shell or '未设置'}；Link16 统一配置要求实际 Git Bash",
+                  "按 SOP-100 §4 在 wmux Settings → Terminal → Default Shell 选择本机 Git Bash；"
+                  "若未发现，先核 Git 安装与实际路径，不把临时切入 bash 当作默认配置已通过。")
 
 
 def check_wmux_update_settings():
@@ -370,6 +367,22 @@ def check_wmux_update_settings():
     if enabled is not True:
         return Result("wmux 官方更新", WARN, "未保存明确的自动更新设置，需在 GUI 核实", fix)
     return Result("wmux 官方更新", OK, "自动更新已开启；Install now 使用官方安装流程，不依赖 npm 或旧 deck.mode")
+
+
+def check_wmux_background_input():
+    """The official terminal must keep complete screens for unattended input."""
+    if os.name != 'nt':
+        return Result('wmux 后台输入', WARN, '非 Windows 平台需在本机 Wmux Settings 核实后台渲染设置')
+    fix = ('Wmux Settings → Terminal：关闭 Pause hidden pane rendering 和 '
+           'Unload idle hidden workspaces；使用原生 GUI 保存，不重启业务会话。')
+    try:
+        value = json.loads((Path(os.environ['APPDATA']) / 'wmux' / 'session.json').read_text(encoding='utf-8'))
+    except (KeyError, OSError, ValueError):
+        return Result('wmux 后台输入', WARN, '无法确认隐藏面板是否持续渲染', fix)
+    if not isinstance(value, dict) or any(value.get(key) is not False for key in (
+            'hiddenPaneRetentionEnabled', 'coldParkEnabled')):
+        return Result('wmux 后台输入', WARN, '隐藏面板暂停或卸载未明确关闭，后台提交可能缺少完整画面', fix)
+    return Result('wmux 后台输入', OK, '隐藏面板保持渲染，闲置后台工作区不卸载')
 
 
 def check_codex_installation():
@@ -594,7 +607,7 @@ def check_profile_login():
 
 CHECKS = (check_python, check_deps, check_node, check_github_cli, check_repository_main, check_git_bash,
           check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_identity,
-          check_wmux_default_shell, check_wmux_update_settings,
+          check_wmux_default_shell, check_wmux_update_settings, check_wmux_background_input,
           check_encoding, check_env_file, check_proxy_config, check_local_roster, check_registry,
           check_agent_cli, check_codex_installation, check_profile_login, check_fast_startup)
 

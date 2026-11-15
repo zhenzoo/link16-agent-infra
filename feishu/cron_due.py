@@ -62,29 +62,45 @@ def resume(fb, bot, job):
     return True
 
 
-def _alert(fb, bot, inbox, row, reason, log):
+def _alert(fb, bot, inbox, row, reason, log, *, pending=False):
     context = json.loads(row['schedule'])
-    if context.get('notice'):
+    notice_key = 'pending_notice' if pending else 'notice'
+    if context.get('notice') or context.get(notice_key):
         return
-    inbox.due_update(row['id'], error=reason, failed=True, phase='stopped')
+    if not pending:
+        inbox.due_update(row['id'], error=reason, failed=True, phase='stopped')
     if inbox.get(row['id'])['state'] in ('done', 'cancelled'):
         return
     # Same idempotency key across a crash between the HTTP ack and local commit.
-    key = hashlib.sha256(f"cron-alert:{bot['name']}:{row['id']}".encode()).hexdigest()[:40]
+    kind = 'cron-pending' if pending else 'cron-alert'
+    key = hashlib.sha256(f"{kind}:{bot['name']}:{row['id']}".encode()).hexdigest()[:40]
     target = fb.load_owner(bot['name'])
     if not target:
         log(f"due[{row['id']}] 告警待送：缺 owner；{reason}")
         return
-    message = (f"❌ 定时任务 {context['job']['name']}（{context['stamp']}）未完成接收确认：{reason}。"
-               "已停止自动提交，原任务和现场记录保留，可按记录排障恢复。")
+    status = ('原任务已保存，仍按原记录检查和有界恢复；这不表示智能体已开始执行。' if pending else
+              '已停止自动提交，原任务和现场记录保留，可按记录排障恢复。')
+    message = f"⚠️ 定时任务 {context['job']['name']}（{context['stamp']}）未完成接收确认：{reason}。{status}"
     try:
         sent = fb._send_text_message(bot['app_id'], bot['app_secret'], target, message, message_uuid=key)
         if sent:
-            inbox.due_update(row['id'], notice=sent)
+            inbox.due_update(row['id'], **{notice_key: sent})
         else:
             log(f"due[{row['id']}] 告警发送未确认")
     except Exception as exc:
         log(f"due[{row['id']}] 告警待重试：{type(exc).__name__}")
+
+
+def alert_pending(fb, bot, log):
+    """Receipt monitoring independent of cron startup, terminal reads and locks."""
+    inbox = Inbox(fb.STATE_DIR, bot['name'])
+    for row in inbox.due_rows():
+        if row['state'] not in {'scheduled', 'awaiting_confirmation', 'uncertain'}:
+            continue
+        if json.loads(row['schedule']).get('phase') == 'stopped':
+            continue  # The terminal failure notice owns this state, never claim recovery continues.
+        if time.time() - row['received'] >= cron_delivery.INBOUND_ACK_ALERT_SEC:
+            _alert(fb, bot, inbox, row, row['error'] or '尚未取得原生接收回执', log, pending=True)
 
 
 def process(fb, bot, jobs, fire, log):

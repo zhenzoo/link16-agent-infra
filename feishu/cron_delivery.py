@@ -226,6 +226,15 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
             state = activity.get('state')
             if state in ('idle', 'active') and current['attempts'] < MAX_SUBMITS:
                 screen = fb.read_screen(pty, None)
+                # /close, /account, cancellation or a native receipt may arrive
+                # while the screen RPC is in flight. Revalidate before any key.
+                current = inbox.get(row['id'])
+                if accepted(current):
+                    return True
+                if not current or current['state'] not in {'awaiting_confirmation', 'uncertain'}:
+                    raise RuntimeError('定时投递已取消或状态变化；不补交')
+                _binding(fb, bot, ws, pty, row['session'])
+                turn_recovery.require_open(fb, bot, job)
                 if is_compacting(screen):
                     reason = 'compacting context'
                 elif (current.get('retry_safe') and empty_composer(screen)

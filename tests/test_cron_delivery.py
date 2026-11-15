@@ -55,6 +55,23 @@ def test_existing_draft_submits_once_and_native_receipt_stops_all_future_sends(s
     assert delivery.accepted(Inbox(scene.fb.STATE_DIR, 'target').get(scene.row['id']))
 
 
+@pytest.mark.parametrize('change', ['thread', 'pty', 'profile', 'cancel'])
+def test_binding_change_during_screen_rpc_never_sends_key_or_paste(scene, change):
+    def screen(*args):
+        if change == 'thread':
+            scene.ready['thread_id'] = 'replacement'
+        elif change == 'cancel':
+            scene.inbox.scheduled_cancel(scene.row['id'], 'owner cancelled')
+        else:
+            scene.record[change] = 'replacement'
+        return f'› {scene.marker}\n\nstatus'
+    scene.fb.read_screen.side_effect = screen
+    with pytest.raises(RuntimeError):
+        delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
+    scene.fb.wmux.assert_not_called()
+    scene.fb._inject.assert_not_called()
+
+
 @pytest.mark.parametrize('screen', ['', 'Welcome', '› different draft\n\nstatus',
                                   '› 开启今天的巡航 changed\n\nstatus'])
 def test_empty_unrecognizable_or_modified_screen_is_never_success_or_repaste(scene, screen):
