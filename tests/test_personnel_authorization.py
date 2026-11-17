@@ -12,6 +12,24 @@ import personnel_authorization as auth
 
 
 class PersonnelConsentTests(unittest.TestCase):
+    def test_default_onboarding_requires_chat_even_after_personnel_and_docio_pass(self):
+        scopes = auth.requested_scopes(SimpleNamespace())
+        self.assertIn("drive:drive.metadata:readonly", scopes)
+        self.assertTrue(set(auth.audit.CHAT_READ_USER_SCOPES).issubset(scopes))
+        self.assertNotIn("im:message.send_as_user", scopes)
+        self.assertNotIn("im:resource", scopes)  # Upload is not needed to download a message attachment.
+        identity = {"owner_matches": True, "personnel_search_scope": True, "status": "ready",
+                    "scopes": list(auth.requested_scopes(SimpleNamespace(capability=["docio-read"])))}
+        with mock.patch.object(auth.audit, "user_identity_status", return_value=identity), \
+             mock.patch.object(auth.docio, "run_lark") as run:
+            result = auth.verify("bot", "同事", scopes)
+        self.assertEqual(result["state"], "consent_missing")
+        self.assertEqual(set(result["missing_requested_user_scopes"]), set(auth.audit.CHAT_READ_USER_SCOPES))
+        run.assert_not_called()
+
+    def test_explicit_personnel_keeps_narrow_consent(self):
+        self.assertEqual(auth.requested_scopes(SimpleNamespace(capability=["personnel"])), auth.SCOPES)
+
     def test_refreshable_identity_runs_real_search_without_new_consent(self):
         before = {"owner_matches": True, "personnel_search_scope": True, "status": "needs_refresh", "scopes": list(auth.SCOPES)}
         after = dict(before, personnel_ready=True, status="ready")

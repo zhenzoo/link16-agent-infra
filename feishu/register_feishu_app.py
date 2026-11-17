@@ -628,7 +628,7 @@ def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key,
             if code:
                 raise ValueError("profile_setup_incomplete")
             docio_cli.require_profile_identity(runtime_bot_name)
-            print("\n✅ 本应用用户授权入口已配置；认主后用 personnel_authorization.py 完成本人同意与姓名验收。", flush=True)
+            print("\n✅ 本应用用户授权入口已配置；认主后用 personnel_authorization.py 默认完成人员、文档及聊天读取同意；姓名、消息和附件实际读取分别验收。", flush=True)
         except (Exception, SystemExit) as exc:
             print(f"\nℹ️ 用户授权入口尚未完成：{type(exc).__name__}；不影响已保存应用，收尾须修复。", flush=True)
 

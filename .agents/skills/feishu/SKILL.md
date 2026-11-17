@@ -92,7 +92,7 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 查看或设置 cron | `python feishu/bridge_cron.py board`；详情读 `docs/ARCH-150-agent-cron.md` |
 | 审计 bot 权限 | `python feishu/bridge_scope_audit.py --all-env` |
 | 注册 bot | 先读 SOP-120/121，按用户模型/CWD和当前企业登记派生profile/名称/群，再 `register_feishu_app.py ... --dry-run`；已有明确创建授权即可加 `--background` 执行，不重复问许可。首个确认预填权限，已齐不再要求后台勾选 |
-| 企业bot查人、DocIO及其他业务的本人授权 | `python feishu/personnel_authorization.py --bot <bot> --query <已知同事姓名> --capability docio-read --state feishu/_state/<本次目录> --notify-bot <发起者> --background`；默认仅查人，docio-read含metadata/评论读取，其他业务可追加`--scope`；`--check`只验不新授权。按SOP-120 §2.0.1代办有效confirmation.json，status.json核本次scope与姓名，具体读写另验 |
+| 企业bot默认本人授权（人员、文档及聊天读取） | `python feishu/personnel_authorization.py --bot <bot> --query <已知同事姓名> --state feishu/_state/<本次目录> --notify-bot <发起者> --background`；默认人员+docio-read+chat-read共25项，覆盖消息搜索/读取与消息附件下载。明确缩小范围才传`--capability`，其他业务可追加`--scope`；`--check`只验不新授权。按SOP-120 §2.0.1代办有效confirmation.json，status.json核本次scope与姓名；聊天消息/附件、文档实际读写另验，后台权限和OAuth不互相替代 |
 | 新注册或已有企业应用自动开通免审权限 | 读SOP-120 §2.0.1：注册SDK预填 → scope审计取真实缺项和链接 → 准备本地browser-act-cli/Python3.12 → 独占浏览器核主人/组织/AppID后代办 → 原App API回读；实际自动操作失败才给有效链接，不默认让主人逐项点 |
 | 已有 bot 改名 / 查后台链接 / 改名后新名不识别 | 先读 SOP-125；`python feishu/rename_bot.py plan --bot <原名或别名> --name <准确新名> --out feishu/_state/bot-renames/<本次操作>.json`，按状态给 console_url、watch 或 apply，最后 verify |
 

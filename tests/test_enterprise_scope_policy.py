@@ -113,6 +113,25 @@ def test_live_catalog_includes_people_but_not_send_as_user():
     assert "contact:user.basic_profile:readonly" not in plan["tenant"]
     assert "contact:user.base:readonly" in plan["tenant"]
     assert "im:message.send_as_user" not in plan["user"]
+    assert set(audit.CHAT_READ_USER_SCOPES).issubset(plan["user"])
+
+
+@pytest.mark.parametrize("status,verified,owner,missing,ready", [
+    ("ready", True, "owner", None, True),
+    ("needs_refresh", True, "owner", None, False),
+    ("ready", False, "owner", None, False),
+    ("ready", True, "other", None, False),
+    ("ready", True, "owner", "im:message:readonly", False),
+])
+def test_chat_consent_needs_exact_owner_valid_token_and_all_scopes(status, verified, owner, missing, ready):
+    import docio_cli
+    scopes = [s for s in audit.CHAT_READ_USER_SCOPES if s != missing]
+    data = {"identities": {"user": {"status": status, "verified": verified, "scope": scopes, "openId": owner}}}
+    with patch.object(docio_cli, "run_lark", return_value={}), patch.object(docio_cli, "_json_out", return_value=data), \
+         patch.object(docio_cli, "owner_open_id", return_value="owner"):
+        result = audit.user_identity_status("exact-bot")
+    assert result["chat_read_ready"] is ready
+    assert result["missing_chat_read_scopes"] == ([missing] if missing else [])
 
 
 def test_unexplained_catalog_level_is_not_reported_as_confirmed_approval(capsys):

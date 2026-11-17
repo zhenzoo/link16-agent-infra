@@ -18,6 +18,7 @@ import registration_monitor
 SCOPES = ("contact:user.base:readonly", "contact:user.basic_profile:readonly", "contact:user:search")
 CAPABILITY_SCOPES = {
     "personnel": SCOPES,
+    "chat-read": audit.CHAT_READ_USER_SCOPES,
     "docio-read": (
         "bitable:app:readonly", "base:app:read", "base:table:read", "base:field:read",
         "base:record:read", "base:view:read", "docs:document.comment:read",
@@ -26,12 +27,13 @@ CAPABILITY_SCOPES = {
         "wiki:wiki:readonly", "drive:file:download", "drive:drive.metadata:readonly",
     ),
 }
+DEFAULT_CAPABILITIES = ("docio-read", "chat-read")
 
 
 def requested_scopes(args):
-    """Keep personnel acceptance; add only the requested business capability."""
+    """Default enterprise onboarding includes document and chat read consent."""
     scopes = list(SCOPES)
-    for name in getattr(args, "capability", None) or ():
+    for name in getattr(args, "capability", None) or DEFAULT_CAPABILITIES:
         scopes.extend(CAPABILITY_SCOPES[name])
     scopes.extend(getattr(args, "scope", None) or ())
     if any(not s or s.strip() != s or any(c.isspace() for c in s) for s in scopes):
@@ -159,7 +161,7 @@ def main():
     parser.add_argument("--bot", required=True)
     parser.add_argument("--query", required=True, help="验收用的已知企业同事姓名；不发送消息")
     parser.add_argument("--capability", action="append", choices=sorted(CAPABILITY_SCOPES),
-                        help="追加业务授权包；默认仅personnel，读文档用docio-read（含metadata/评论）")
+                        help="默认人员+docio-read+chat-read；显式指定能力包可缩小范围，人员验收始终保留")
     parser.add_argument("--scope", action="append", help="追加当前业务所需用户scope，可重复；必须已开通且免审")
     parser.add_argument("--check", action="store_true", help="只验现有授权及姓名，不新建OAuth或发回调")
     parser.add_argument("--state", required=True, help="本次授权的独占目录；只存脱敏结果和短期确认链接")

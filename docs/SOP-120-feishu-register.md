@@ -19,7 +19,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-17
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -177,9 +177,9 @@ python feishu/register_feishu_app.py --name <原显示名> --bot <原key> --prof
 
 注册收尾必须核 `--user-identity`。按姓名查人使用user-only的contact:user:search，需要当前bot对应CLI profile中有效且verified的主人授权；基本信息可用bot已知ID读取，真实mention用该app人员ID。缺同意时走原生 `lark-cli auth login --profile <新bot> --scope <当前应用已开通的免审用户scope>`，保留后台监听和真实成功回读，不借另一个bot的凭据，不仅等待“已授权”文字。本人动作未完成时明确“应用权限已齐、主人OAuth待完成”，不能称已具备人员查询。注册器和授权监听按各自有效期后台运行，不用短timeout截断。
 
-已认主企业bot使用 `python feishu/personnel_authorization.py --bot <本bot> --query <已知同事姓名> --capability docio-read --state feishu/_state/<本次独占目录> --notify-bot <发起bot> --background`。默认仅三项人员scope；`docio-read`追加文档、Sheet、多维表、白板、Wiki、附件、评论读取和metadata前置，合计19项请求。其他已授权业务用重复`--scope <准确名称>`追加，必须在当前App已开通且属免审用户权限；不将后台300多项一次塞入OAuth，原生可能拒绝过长清单。新应用CLI profile由注册器只配置本应用；已有缺项用 `docio_cli.py --bot <本bot> profiles --apply`，不覆盖其他应用。
+已认主企业bot使用 `python feishu/personnel_authorization.py --bot <本bot> --query <已知同事姓名> --state feishu/_state/<本次独占目录> --notify-bot <发起bot> --background`。默认请求人员查询、`docio-read`和`chat-read`三类，共25项：文档包含正文、Sheet、多维表、白板、Wiki、附件、评论读取及metadata；聊天包含`im:chat:read`、`im:message:readonly`、`search:message`、`im:message.reactions:read`、`im:message.group_msg:get_as_user`、`im:message.p2p_msg:get_as_user`，覆盖会话定位、消息和消息附件读取、搜索及CLI默认表情补充。下载消息附件使用消息只读权限，不为此追加上传权限`im:resource`或代人发消息权限。用户明确缩小范围时用`--capability personnel`，或重复指定`docio-read`/`chat-read`；人员验收始终保留。其他已授权业务用重复`--scope <准确名称>`追加，必须在当前App已开通且属免审用户权限；不将后台300多项一次塞入OAuth，原生可能拒绝过长清单。新应用CLI profile由注册器只配置本应用；已有缺项用 `docio_cli.py --bot <本bot> profiles --apply`，不覆盖其他应用。
 
-工具先核企业、AppID、免审与后台授权，再核本次全部scope的用户同意；已有完整授权直接实查姓名，能刷新则复用。仅查人已通过但仍缺DocIO scope时继续请求本次业务同意，不误判全完成。`--check`只核现有身份与姓名、不会新建OAuth或回调。身份不明、主人不符、网络失败或查询空结果不盲目重授权。`status.json`列请求与缺口，`verified`只表示这批授权及姓名验收，文档读取、编辑、评论写入仍须实际业务验证。
+工具先核企业、AppID、免审与后台授权，再核本次全部scope的用户同意；已有完整授权直接实查姓名，能刷新则复用。仅查人已通过但仍缺DocIO或聊天scope时继续请求本次业务同意，不误判全完成。`--check`只核现有身份与姓名、不会新建OAuth或回调。身份不明、主人不符、网络失败或查询空结果不盲目重授权。`status.json`列请求与缺口，`verified`只表示这批授权及姓名验收；`bridge_scope_audit --user-identity`另列`chat_read_ready`和聊天scope缺口。聊天业务须用本应用读取一条已授权目标消息、下载其匹配附件并核文件非空；没有业务样本只能报授权就绪。文档读取、编辑、评论写入也须实际业务验证。TX、TB26及后续企业bot均逐应用、逐机器完成原生授权，不复制token；这是Claude/Codex/Kimi共用入口，换模型平台无需重新授权。
 
 **代办页面的复用顺序**：现读浏览器skill，用本会话独占session打开未过期链接；读取当前页面，核目标应用、企业与已登录主人、仅本次已授权scope；使用当前页面索引点击Authorize，再读成功页并等待原生CLI验人。下一应用重新读页面，不能复用旧索引，也不复制Cookie/token到脚本。页面成功不替代API验收；原生明确token_missing时重新授权，网络失败或查询空结果不盲目重授权。2026-11-13 TB26的12只缺授权应用已按此代办，连同原可用baseball-4共13只实查姓名及本应用ID通过。
 

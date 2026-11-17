@@ -198,6 +198,12 @@ def scope_plan_urls(app_id, plan):
             for url in feishu_docs.auth_urls(app_id, scopes, token_type=t)]
 
 
+CHAT_READ_USER_SCOPES = (
+    "im:chat:read", "im:message:readonly", "search:message", "im:message.reactions:read",
+    "im:message.group_msg:get_as_user", "im:message.p2p_msg:get_as_user",
+)
+
+
 def user_identity_status(bot):
     """No login side effect. Verify the exact app profile and personnel scopes."""
     import docio_cli
@@ -219,8 +225,11 @@ def user_identity_status(bot):
                 "personnel_ready": status == "ready" and user.get("verified") is True
                                    and owner_matches and "contact:user:search" in scopes,
                 "personnel_search_scope": "contact:user:search" in scopes,
+                "chat_read_ready": status == "ready" and user.get("verified") is True
+                                   and owner_matches and not (set(CHAT_READ_USER_SCOPES) - set(scopes)),
+                "missing_chat_read_scopes": sorted(set(CHAT_READ_USER_SCOPES) - set(scopes)),
                 "expires_at": user.get("expiresAt"),
-                "note": "应用权限与主人OAuth独立；需身份匹配本应用主人且有有效search授权，再实查姓名验收"}
+                "note": "应用权限与主人OAuth独立；姓名和聊天授权分别验，ready不代替真实消息/附件读取验收"}
     except Exception as exc:
         return {"status": "unknown", "error": type(exc).__name__}
 
