@@ -3,7 +3,7 @@ doc_type: SOP
 doc_id: SOP-100
 title: 把飞书桥装到一台新电脑（新机器部署 runbook）
 status: active
-url: ""
+url: "https://n8r2cr07gk.feishu.cn/docx/FF4odSEDwovemhxMb5NcH4P8nmb"
 purpose: 新机器从 clone 到桥跑起来并配好开机自启的唯一入口操作手册。
 owns:
   - 依赖安装顺序与验证
@@ -23,7 +23,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-18
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -213,7 +213,7 @@ python feishu/network_route.py run --url https://chatgpt.com/codex/install.ps1 -
 | **`VIBECODING_ROOT` 环境变量** | 指向这个用户自己的 `.env` 所在根（例 `C:\410_VibeCoding`）。首次写凭据前必须明确设定，不依赖其他电脑的盘符。 |
 | **`PROXY_URL`** | 放在 `$VIBECODING_ROOT/.env`（如本地 mixed port）。下载/安装由 `feishu/network_route.py` 对实际 URL 同时探测直连与此代理；代码不写死端口、不改 v2rayN。 |
 | **Link16 agent profile launcher** | 先建立 `agent-profiles.local.json`，再由 `profile_bootstrap.py` 为用户选中的 profile 建隔离 home、Git Bash + PowerShell 函数和 `feishu` skill；Codex profile 同时无损合并 `UserPromptSubmit` / `PostToolUse` / `Stop` bridge hooks。函数不是 alias，也不复制认证。 |
-| **Windows Terminal + wmux** | 两者默认 shell 都选 Git Bash；脚本在应用未运行时保留未知字段并安全配置，正在运行时才显示一次 GUI 动作。 |
+| **Windows Terminal + wmux** | 两者默认 shell 都选 Git Bash。安装时自动把 Windows Terminal 的 Shift+Enter 交给前台程序处理；运行中的应用若需调整默认 shell，按 §4 操作。 |
 | **node** | `node --version`（仓库自带的 `wmux/wmux-rpc.js` 要 node 跑）。 |
 | **PowerShell 脚本策略** | 若启动时报「禁止运行脚本」，检查 `Get-ExecutionPolicy -List`；对普通用户设 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force`，重开终端后验收 profile 函数。 |
 | **OpenSSH Server** | 仅在这台机要参加用户级 `envsync` 时必装；Link16 桥本身不依赖。`Get-Service sshd` 查无服务就是未安装，见 §1.4。 |
@@ -519,13 +519,13 @@ jina read "https://example.com" | head -3
 
 ## 4 · Link16 统一 Wmux 配置与默认 Git Bash（新机、存量机、升级后必做）
 
-1. **Windows Terminal**：安装脚本在它未运行时保留全部未知设置并自动补/选择 **Git Bash**；若正在运行，为防内存态覆盖文件，才提示 Settings → Startup → Default profile → Git Bash。若列表没有，脚本会新增 profile，commandline 使用体检发现的真实 `bash.exe --login -i`。
+1. **Windows Terminal**。运行 `python feishu/windows_bootstrap.py --apply --yes`，安装器自动解除终端对 **Shift+Enter** 的绑定，保留其他快捷键。开着终端也能应用按键设置。在 Codex 输入框中，**Shift+Enter 换行，Enter 发送**。这是 Windows Terminal 的全局设置，使用 Claude、Kimi 或 shell 时也由前台程序解释该按键。安装器在终端关闭时自动补选 **Git Bash** 作为默认 shell；终端运行中且默认项仍需修改时，在 Settings → Startup → Default profile 选择 Git Bash。
 2. **Wmux Settings → Terminal → Default Shell：Git Bash**。使用体检发现的本机 `bash.exe`，不复制别机盘符。仅改变新建面板的默认 shell，不关闭现有 PowerShell／业务进程。
 3. **Terminal → Pause hidden pane rendering：关闭**（`hiddenPaneRetentionEnabled=false`）。隐藏面板继续解析终端输出，保留完整输入框与底栏。后台自动化优先可靠性，不以省渲染成本换取不可读的输入界面。
 4. **Terminal → Unload idle hidden workspaces：关闭**（`coldParkEnabled=false`）。关闭后原生应用解除已冷卸载的工作区，后续不因闲置隐藏而卸载；无需重启 Wmux 或业务会话。
 5. **Settings → Updates → 自动更新：开启**（`autoUpdateEnabled=true`）。允许官方检查与下载；实际 **Install now** 会关闭终端，仍按 SOP-010 的现场保存、必要维护和恢复验收执行，不能把下载许可当作随时重启业务的许可。
 6. **保存方式**：`windows_bootstrap.py --apply --yes` 在 Wmux 未运行时无损合并上述四个字段，保留工作区和未知设置；正在运行时返回 `needs-gui`，由执行者通过原生 Settings 完成并回读，不直接改内存仍持有的 `session.json`。本机初始化与存量机同步均按同一规则；`needs-gui` 是未完成，不能豁免成成功。
-7. 运行 `python feishu/preflight.py`；`Git Bash`、`Windows Terminal 默认 Shell`、`wmux 默认 Shell`、`wmux 后台输入`、`wmux 官方更新` 均须 `[ OK ]`。体检只读，不改设置、不重启。版本缺少设置时记录实际版本／缺项，核官方支持入口，不猜字段生效、不补丁绕过输入保护。
+7. 运行 `python feishu/preflight.py`；`Git Bash`、`Windows Terminal 默认 Shell`、`wmux 默认 Shell`、`wmux 后台输入`、`wmux 官方更新` 均须 `[ OK ]`。Windows Terminal 项同时核对 Git Bash 和 Shift+Enter 透传。有 Codex 时，在 Windows Terminal 的空草稿中输入一行、按 Shift+Enter 并输入第二行，两行应留在同一份草稿中。体检只读，不改设置、不重启。版本缺少设置时记录实际版本／缺项，核官方支持入口。
 8. **行为验收**：用隔离面板确认实际新 shell 为 Git Bash；同 profile 的隔离原生会话隐藏超过五分钟后，验证仍能读全输入框、完成中文／空行／emoji 投递，并以原生接收事件或受控本地请求确认原文。另用故障注入核“读屏卡住仍报警、零写入可恢复、已接收不重复”。不得把测试消息发到生产任务，也不能以设置值或 RPC 返回成功替代接收证明。
 
 飞书本人消息与 A2A 共用普通收件链；Cron 在同一注入锁及原生回执机制上保留独立到点记录。Codex 长稿统一使用完整文件交接，Claude/Kimi 保留各自原适配。读屏恢复和通知分开执行；普通 Codex 消息与各平台定时任务超过两分钟仍无接收确认时发一次持久化通知，原记录继续按已证状态恢复；Cron 重试耗尽或终止时另报停止。收到任务不等于业务执行完成，执行结果仍由原生 final／失败事件证明。

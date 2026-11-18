@@ -369,74 +369,76 @@ def _windows_terminal_running():
     return done.returncode == 0
 
 
-def _windows_terminal_settings(localappdata=None):
-    raw = localappdata or os.environ.get("LOCALAPPDATA")
-    if not raw:
-        return None
-    base = Path(raw) / "Packages"
-    candidates = (
-        base / "Microsoft.WindowsTerminal_8wekyb3d8bbwe" / "LocalState" / "settings.json",
-        base / "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe" / "LocalState" / "settings.json",
-    )
-    return next((path for path in candidates if path.is_file()), None)
-
-
 def configure_windows_terminal_git_bash(*, apply=False, localappdata=None, running=None):
-    """Set WT's default profile while preserving all unrelated settings."""
+    """Set the Git Bash default and pass Shift+Enter to the foreground application."""
     bash = preflight._git_bash_path()
     if not bash:
         return {"task": "windows-terminal-default", "status": "blocked", "detail": "Git Bash 未安装"}
-    settings = _windows_terminal_settings(localappdata)
+    local = localappdata or os.environ.get("LOCALAPPDATA")
+    settings = preflight.windows_terminal_settings(local) if local else None
     if not settings:
         return {"task": "windows-terminal-default", "status": "not-found",
                 "detail": "未发现 Windows Terminal settings.json（未安装时不阻塞 Link16）"}
     try:
-        data = json.loads(settings.read_text(encoding="utf-8-sig"))
-        profiles_obj = data.setdefault("profiles", {})
-        profiles = profiles_obj.setdefault("list", [])
+        original = settings.read_bytes() if settings.exists() else None
+        data = json.loads(original.decode("utf-8-sig")) if original is not None else {}
+        if not isinstance(data, dict) or not isinstance(data.get("profiles", {}), dict):
+            raise ValueError("配置根及 profiles 须为对象")
+        profiles = data.get("profiles", {}).get("list", [])
         if not isinstance(profiles, list):
             raise ValueError("profiles.list 不是数组")
+        field, bindings = preflight.shift_enter_bindings(data)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         return {"task": "windows-terminal-default", "status": "blocked",
                 "detail": f"无法安全解析 {settings}: {exc}"}
 
-    row = next(
-        (item for item in profiles if isinstance(item, dict) and (
-            preflight._looks_like_git_bash(item.get("commandline"))
-            or str(item.get("name") or "").strip().casefold() == "git bash"
-        )),
-        None,
-    )
     current = str(data.get("defaultProfile") or "").casefold()
-    if row and current == str(row.get("guid") or "").casefold() \
-            and preflight._looks_like_git_bash(row.get("commandline")):
-        return {"task": "windows-terminal-default", "status": "ok",
-                "detail": f"{settings} → {row.get('name') or 'Git Bash'}"}
+    git_profiles = [item for item in profiles if isinstance(item, dict) and (
+        preflight._looks_like_git_bash(item.get("commandline"))
+        or str(item.get("name") or "").strip().casefold() == "git bash"
+    )]
+    row = next((item for item in git_profiles if str(item.get("guid") or "").casefold() == current),
+               next(iter(git_profiles), None))
+    shell_ready = bool(row and current and current == str(row.get("guid") or "").casefold()
+                       and preflight._looks_like_git_bash(row.get("commandline")))
+    keys_ready = data.get(field) == bindings
+    detail = f"{settings} → Git Bash，Shift+Enter 交给当前程序"
+    if shell_ready and keys_ready:
+        return {"task": "windows-terminal-default", "status": "ok", "detail": detail}
 
-    if (running is None and _windows_terminal_running()) or running is True:
+    # Terminal reloads keybindings from settings.json. Keep the existing GUI
+    # handoff for a running Terminal's startup profile.
+    shell_needs_gui = not shell_ready and (running if running is not None else _windows_terminal_running())
+    if not shell_ready and not shell_needs_gui:
+        guid = "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"link16-git-bash:{str(bash).casefold()}")) + "}"
+        if not row:
+            row = {"guid": guid, "name": "Git Bash"}
+            data.setdefault("profiles", {}).setdefault("list", []).append(row)
+        row.setdefault("guid", guid)
+        row["commandline"] = f'"{bash}" --login -i'
+        data["defaultProfile"] = row["guid"]
+    data[field] = bindings
+    if apply and (not keys_ready or not shell_needs_gui):
+        try:
+            _atomic_json(settings, data, expected=original)
+        except OSError as exc:
+            return {"task": "windows-terminal-default", "status": "blocked", "detail": str(exc)}
+    if shell_needs_gui:
+        key_status = "已配置" if apply or keys_ready else "待写入"
         return {"task": "windows-terminal-default", "status": "needs-gui",
-                "detail": "Windows Terminal 正在运行；请在 Settings → Startup → Default profile 选择 Git Bash"}
-
-    guid = "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"link16-git-bash:{str(bash).casefold()}")) + "}"
-    if not row:
-        row = {"guid": guid, "name": "Git Bash"}
-        profiles.append(row)
-    row.setdefault("guid", guid)
-    row["commandline"] = f'"{bash}" --login -i'
-    data["defaultProfile"] = row["guid"]
-    if apply:
-        _atomic_json(settings, data)
-    return {"task": "windows-terminal-default", "status": "applied" if apply else "drift",
-            "detail": f"{settings} → {row.get('name') or 'Git Bash'}"}
+                "detail": f"Shift+Enter 透传{key_status}；运行中的 Windows Terminal 请在 Settings → Startup 选择 Git Bash"}
+    return {"task": "windows-terminal-default", "status": "applied" if apply else "drift", "detail": detail}
 
 
-def _atomic_json(path: Path, data):
+def _atomic_json(path: Path, data, *, expected=...):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+        if expected is not ... and (path.read_bytes() if path.exists() else None) != expected:
+            raise OSError(f"{path} 已被其他程序修改，请重跑安装以保留最新设置")
         os.replace(tmp_name, path)
     except Exception:
         try:

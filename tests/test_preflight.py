@@ -64,7 +64,20 @@ class TerminalDefaultsChecks(unittest.TestCase):
                 ]},
             }), encoding="utf-8")
             with mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}, clear=False):
+                self.assertEqual(preflight.check_windows_terminal_default().status, preflight.FAIL)
+                data = json.loads(settings.read_bytes())
+                data["keybindings"] = [{"keys": "shift+enter", "id": "unbound"}]
+                settings.write_text(json.dumps(data), encoding="utf-8")
                 self.assertEqual(preflight.check_windows_terminal_default().status, preflight.OK)
+
+    def test_legacy_shift_enter_command_keeps_its_definition_and_other_chords(self):
+        other = {"command": "paste", "keys": "ctrl+shift+v"}
+        command = {"action": "sendInput", "input": "\n"}
+        data = {"actions": [{"command": command, "keys": ["shift+enter"]}, other]}
+        field, rows = preflight.shift_enter_bindings(data)
+        self.assertEqual(field, "actions")
+        self.assertEqual(rows, [{"command": command}, {"command": "unbound", "keys": "shift+enter"}, other])
+        self.assertEqual(preflight.shift_enter_bindings({field: rows}), (field, rows))
 
     def test_windows_terminal_rejects_powershell_default(self):
         with tempfile.TemporaryDirectory() as tmp:

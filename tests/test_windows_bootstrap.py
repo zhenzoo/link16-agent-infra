@@ -184,6 +184,42 @@ class WmuxPostInstallTests(unittest.TestCase):
             self.assertEqual(saved["theme"], "system")
             self.assertEqual(saved["defaultProfile"], saved["profiles"]["list"][0]["guid"])
             self.assertIn("bash.exe", saved["profiles"]["list"][0]["commandline"])
+            self.assertEqual(saved["keybindings"], [{"keys": "shift+enter", "id": "unbound"}])
+
+    def test_live_terminal_key_only_migration_preserves_profile_and_paste(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Path(tmp) / "Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
+            settings.parent.mkdir(parents=True)
+            paste = {"keys": "ctrl+shift+v", "id": "Terminal.PasteFromClipboard"}
+            old_action = {"id": "my.newline", "command": {"action": "sendInput", "input": "\n"}}
+            profiles = {"list": [{"name": "Git Bash", "guid": "{git}",
+                                  "commandline": r'C:\Program Files\Git\bin\bash.exe --login -i'}]}
+            data = {"defaultProfile": "{git}", "profiles": profiles, "actions": [old_action],
+                    "keybindings": [{"id": "my.newline", "keys": "Shift+Enter"}, paste]}
+            settings.write_text(json.dumps(data), encoding="utf-8")
+            original = settings.read_bytes()
+            with mock.patch.object(wb.preflight, "_git_bash_path", return_value=Path("bash.exe")):
+                preview = wb.configure_windows_terminal_git_bash(localappdata=tmp, running=True)
+                self.assertEqual(preview["status"], "drift")
+                self.assertEqual(settings.read_bytes(), original)
+                result = wb.configure_windows_terminal_git_bash(apply=True, localappdata=tmp, running=True)
+                self.assertEqual(result["status"], "applied")
+                saved = settings.read_bytes()
+                self.assertEqual(json.loads(saved), {**data, "keybindings": [
+                    {"id": "unbound", "keys": "shift+enter"}, paste]})
+                self.assertEqual(wb.configure_windows_terminal_git_bash(
+                    apply=True, localappdata=tmp, running=True)["status"], "ok")
+                self.assertEqual(settings.read_bytes(), saved)
+
+    def test_first_launch_seeds_settings_for_an_installed_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe"
+            package.mkdir(parents=True)
+            with mock.patch.object(wb.preflight, "_git_bash_path", return_value=Path("bash.exe")):
+                result = wb.configure_windows_terminal_git_bash(apply=True, localappdata=tmp, running=False)
+            self.assertEqual(result["status"], "applied")
+            saved = json.loads((package / "LocalState/settings.json").read_bytes())
+            self.assertEqual(saved["keybindings"], [{"keys": "shift+enter", "id": "unbound"}])
 
     def test_running_windows_terminal_requires_visible_gui_step(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,6 +235,9 @@ class WmuxPostInstallTests(unittest.TestCase):
                     apply=True, localappdata=local, running=True,
                 )
             self.assertEqual(row["status"], "needs-gui")
+            saved = json.loads(settings.read_bytes())
+            self.assertEqual(saved["keybindings"], [{"keys": "shift+enter", "id": "unbound"}])
+            self.assertNotIn("defaultProfile", saved)
 
     def test_closed_wmux_can_receive_git_bash_default_without_losing_other_fields(self):
         with tempfile.TemporaryDirectory() as tmp:

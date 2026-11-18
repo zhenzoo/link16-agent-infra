@@ -268,31 +268,89 @@ def check_bash_on_path():
                   "改完【重启 wmux】才继承新 PATH")
 
 
+def windows_terminal_settings(localappdata):
+    base = Path(localappdata)
+    candidates = [
+        base / "Packages" / package / "LocalState" / "settings.json"
+        for package in ("Microsoft.WindowsTerminal_8wekyb3d8bbwe", "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe")
+    ]
+    candidates.append(base / "Microsoft" / "Windows Terminal" / "settings.json")
+    for path in candidates:
+        if path.is_file():
+            return path
+    # A Store install may not have written settings (or its user directory) yet.
+    for path in candidates[:2]:
+        if path.parent.parent.is_dir():
+            return path
+    if os.name == "nt" and base == Path(os.environ.get("LOCALAPPDATA", ".")):
+        installed = (_run(["powershell.exe", "-NoProfile", "-Command",
+                           "(Get-AppxPackage -Name 'Microsoft.WindowsTerminal*').PackageFamilyName"]) or "").splitlines()
+        return next((path for path in candidates[:2] if path.parent.parent.name in installed), None)
+    return None
+
+
+def shift_enter_bindings(data):
+    """Return the terminal binding list with an explicit pass-through for Shift+Enter."""
+    # Terminal loads keybindings after actions. Older files keep chords inside actions.
+    actions = data.get("actions", [])
+    if not isinstance(actions, list):
+        raise ValueError("actions 不是数组")
+    field = "keybindings"
+    if field not in data and any(isinstance(row, dict) and "keys" in row for row in actions):
+        field = "actions"
+    rows = data.get(field, [])
+    if not isinstance(rows, list):
+        raise ValueError(f"{field} 不是数组")
+    legacy = field == "actions" or (bool(rows) and all(isinstance(row, dict) and "command" in row for row in rows))
+    unbind = {"command" if legacy else "id": "unbound", "keys": "shift+enter"}
+    updated = []
+    found = False
+    for row in rows:
+        keys = row.get("keys") if isinstance(row, dict) else None
+        if isinstance(keys, list) and len(keys) == 1:
+            keys = keys[0]
+        if not isinstance(keys, str) or keys.strip().casefold() != "shift+enter":
+            updated.append(row)
+            continue
+        # Other shortcuts can still refer to a named command previously bound here.
+        if "command" in row and row["command"] not in (None, "unbound"):
+            updated.append({k: v for k, v in row.items() if k != "keys"})
+        if not found:
+            action = row.get("command") if "command" in row else row.get("id")
+            updated.append(row if action in (None, "unbound") else unbind)
+            found = True
+    if not found:
+        updated.append(unbind)
+    return field, updated
+
+
 def check_windows_terminal_default():
     """Windows Terminal 不是桥硬依赖，但本机操作标准要求新窗口默认进入 Git Bash。"""
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         return Result("Windows Terminal 默认 Shell", WARN, "LOCALAPPDATA 不可用，无法检查")
-    base = Path(local) / "Packages"
-    candidates = [
-        base / "Microsoft.WindowsTerminal_8wekyb3d8bbwe" / "LocalState" / "settings.json",
-        base / "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe" / "LocalState" / "settings.json",
-    ]
-    settings = next((path for path in candidates if path.is_file()), None)
+    settings = windows_terminal_settings(local)
     if not settings:
         return Result("Windows Terminal 默认 Shell", WARN, "没找到 Windows Terminal settings.json",
                       "安装 Windows Terminal；设置 → 启动 → 默认配置文件 → Git Bash")
+    if not settings.is_file():
+        return Result("Windows Terminal 默认 Shell", FAIL, "已安装，尚未生成 settings.json",
+                      "运行 python feishu/windows_bootstrap.py --apply --yes")
     try:
         data = json.loads(settings.read_text(encoding="utf-8-sig"))
         default = str(data.get("defaultProfile") or "").lower()
         profiles = data.get("profiles", {}).get("list", [])
         row = next((p for p in profiles if str(p.get("guid") or "").lower() == default), None)
+        field, bindings = shift_enter_bindings(data)
     except Exception as exc:  # noqa: BLE001
-        return Result("Windows Terminal 默认 Shell", WARN, f"settings.json 解析失败：{exc}",
-                      "打开 Windows Terminal 设置页，手动把默认配置文件设为 Git Bash")
+        return Result("Windows Terminal 默认 Shell", FAIL, f"无法核验 settings.json：{exc}",
+                      "在 Windows Terminal 设置中核对默认 Git Bash 和 Shift+Enter，再重跑体检")
     if row and _looks_like_git_bash(row.get("commandline")):
+        if data.get(field) != bindings:
+            return Result("Windows Terminal 默认 Shell", FAIL, "默认 Git Bash 已设置，Shift+Enter 尚未明确交给终端程序",
+                          "运行 python feishu/windows_bootstrap.py --apply --yes")
         return Result("Windows Terminal 默认 Shell", OK,
-                      f"defaultProfile → {row.get('name') or 'Git Bash'}")
+                      f"defaultProfile → {row.get('name') or 'Git Bash'}，Shift+Enter 交给终端程序")
     actual = (row or {}).get("name") or default or "未设置"
     return Result("Windows Terminal 默认 Shell", FAIL, f"当前默认 = {actual}，不是 Git Bash",
                   "Windows Terminal → 设置 → 启动 → 默认配置文件 → Git Bash；"
