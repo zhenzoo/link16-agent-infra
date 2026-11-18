@@ -53,6 +53,24 @@ class _MonitorCase(unittest.TestCase):
         return monitor.record_stage(state["job_id"], "registered", app_id="cli_safe")
 
 
+class EnterpriseBusinessConsentTests(_MonitorCase):
+    def test_unified_job_requires_owner_consent_even_after_group_and_bridge(self):
+        state = self.registered(self.arm())
+        job = state["job_id"]
+        monitor._mutate(job, lambda item: item.update(
+            registration_context={"tenant_kind": "enterprise", "verify_owner_consent": True}))
+        with mock.patch.object(monitor, "_permission_check", return_value={"status": "ready"}), \
+             mock.patch.object(monitor, "_owner_check", return_value={"status": "ready"}), \
+             mock.patch.object(monitor, "_group_check", return_value={"status": "ready"}), \
+             mock.patch.object(monitor.bridge_scope_audit, "registered_tenant_kind", return_value="enterprise"), \
+             mock.patch.object(monitor, "_registration_consent", side_effect=[
+                 {"status": "waiting_for_owner"}, {"status": "ready"}]):
+            pending = monitor.check_once(job, emit=False)
+            self.assertFalse(pending["milestones"]["ready"])
+            self.assertIn("consent_required", pending["events"])
+            self.assertTrue(monitor.check_once(job, emit=False)["milestones"]["ready"])
+
+
 class RegistrationMonitorTests(_MonitorCase):
     def test_first_bot_monitor_finishes_without_a_nonexistent_callback_channel(self):
         state = {"status": "ready", "notify_bot": None, "events": {"ready": {"event_id": "job:ready"}}}

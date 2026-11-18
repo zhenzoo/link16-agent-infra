@@ -563,7 +563,7 @@ python feishu/feishu_bridge.py send --bot <name> --file-as-text reply.md [--to <
 
 **支持**：`.md`/`.markdown`/`.mark`/`.txt` 同时有 import 与原生链；`.html`/`.doc`/`.docx` 只走 import。旧链单次上传上限 20MB。
 
-**🚨 前置**：权限必须开在【应用身份/tenant】而不是用户身份。原生文字链最小需要 docx 创建/写入/块转换及分享设置；旧 import/媒体链另需 `drive:drive` 或报错列出的窄口替代。注册后的第二个权限链接与复核步骤以 SOP-120 §4.1 为准，不再把 `drive:drive` 当文字在线文档的硬前置。
+原生文字文档发送使用应用身份的 docx 创建、写入、块转换及分享权限。导入或嵌入媒体还要核对应接口的细分权限。注册时的业务清单和两次回读见 [SOP-120 §2](SOP-120-feishu-register.md)。
 
 **边界（诚实）**：① 飞书侧修改不会自动回灌本地源文件。② 每次发布都会在飞书云产生一篇新文档；没有“先清空旧文档再重写”的危险原地更新。③ 企业策略可能禁止外部分享；组织内可见与协作者授权都失败时，桥不会把不可读 URL 当成功。
 
@@ -861,31 +861,25 @@ paste 由 Link16 包裹唯一一层 bracketed-paste，分块使用 `raw:true`，
 Device Grant 的 SDK 会在注册命令内部同步轮询授权结果；它能证明 OAuth 已完成，却不能在调用它的 Claude/Codex turn 已结束后主动再开一轮。Link16 因此把“平台回调”和“agent 唤醒”分成两层：
 
 1. `register_feishu_app.py --background` 在等待 OAuth 前创建无密钥注册状态，并分别启动独立的 Device Grant worker 与 `registration_monitor.py`；发起 tool/turn 退出不会杀掉轮询。
-2. 第一条 SDK 链新建时 `create_only=True`，续接已有应用时 `False`，均不传权限 `addons`；用户直接在该页核对账号与组织，不先追问准确组织名。没有回调 bot 时由 `links --job <id> --watch` 提供本地授权交接，后台输出被丢弃不影响取得链接。
+2. 新建时 SDK 使用 `create_only=True`，在 `addons.scopes` 一次预填两种身份的目标。续接固定原 App ID，已能读取原应用时先核缺口。安装会话核对账号、组织和发布条件，通过 `links --job <id> --watch` 读取有效的官方页面。
 3. 注册器只在 SDK 返回完整 `client_id/client_secret`、凭据落盘、registry 与本机 roster 都成功后，把 OAuth 里程碑写为 `registered`；`polling` 不是成功。
-4. `registered` 后生成稳定的 `permissions_review` 事件；Monitor 用 job 中的 `app_id + capabilities` 临时重建第二条权限审阅链接，正文列出 capability 与 scopes。链接不落盘，代码不自动发布，也不能绕过管理员审批。
+4. `registered` 后，Monitor 独立回读原应用已生效权限。传播期后仍有已证缺口才产生 `permissions_review` 事件。已齐的应用直接进入下一项核验。
 5. Monitor 独立于发起 turn 存活，继续机械检查权限、owner 与所选群；默认在权限两次核验后用所选账号和 bot cwd 真启动 `--version` 探针，再以 `start --bot <name> --only-missing` 补缺失桥和守护进程。现有健康进程保持，连接控制状态就绪才记 `bridge_ready` 并提示私聊认主；模型回复仍需真实往返验证。
 6. 有 `notify_bot` 时里程碑经原 `ensure_session()` + `_inject()` 注回发起 bot，三 runtime 共用这条链。首 bot 没有该通道时安装会话持续读本地 `links`，不声称无回调也能自动唤醒；Monitor 本身的检查与补起不依赖会话在线。
 
 状态文件位于 `feishu/_state/bridge-registration-<job-id>.json`，状态机为：
 
 ```text
-armed → oauth_waiting → registered → permissions_review → manual_pending → ready
-                     ↘ failed / expired / cancelled
+armed → oauth_waiting → registered → manual_pending → ready
+                                    ↳ permissions_review（已核实有缺口）
+未完成的任务可进入 failed / expired / cancelled
 ```
 
 每个里程碑使用稳定事件 ID `<job-id>:<stage>`。投递语义是 **at-least-once**：正常轮询与进程重启不会重复已确认事件；若进程恰在 TUI 已提交、receipt 尚未落盘之间崩溃，可能带同一 event ID 重投，接收方必须把该 ID 当幂等键。不得宣称 exactly-once。
 
-### 能力档决定“完成”，不是全量 scope
+### 企业注册的完成条件
 
-- `core`：DM、发消息与 IM 图片/文件；官方注册预置已满足，不追加权限。
-- `group-a2a`：预置的 granular `im:chat:read/update`、`im:chat.members:bot_access`、群 @ scope，加上“实际已入目标群”；不要求旧 umbrella `im:chat`，也不要求听全群。
-- `docs-text`：docx-only 创建/写入/Markdown 转块/公开链接。2026-08-26 在 `tb26-baseball` 无 `drive:drive` 时真测成功，并由外部读取器读回正文；它与旧导入链不是同一能力。
-- `docs-media`：图片/视频/文件嵌入 docx，优先请求窄 scope `docs:document.media:upload`。直接通过飞书 IM 发图片/文件只依赖 `im:resource`，不属于本档。
-- `docs-import`：旧的“上传源文件 → import task → 授权 owner”完整链。`drive:file:upload` 不能授权 `ccm_import_open` 素材上传，真测返回 `99991672`；只有明确需要保留源文件导入或协作者编辑时，才申请 Drive/导入/permission 类权限。
-- `group-listen`：只有不被 @ 也要读取全群时才要求 `im:message.group_msg`。
-
-本机 SDK 虽支持 `register_app(addons=...)`，但 Link16 默认不把权限并入第一条创建链。第二条权限链接只包含所选能力的 tenant scopes：默认 `core + group-a2a` 不含 broad Drive，也不含听全群；显式 `docs-import` 才会带 `drive:drive`。能力审计必须看具体 API 路径，不能再用“有/无 drive:drive”代替全部文档能力。
+注册器和 Monitor 使用相同的权限清单。企业后台以权限名和身份两次回读；选用共享群时还须核实际成员关系。桥连接就绪并完成认主后，Monitor 在该应用的 CLI profile 中启动本人授权，分批回读已授项目。完整范围和实际姓名检索都通过后，企业任务才进入 `ready`。真实私聊往返和文档读取用业务样本另验。注册命令与企业目标集合见 [SOP-120](SOP-120-feishu-register.md) 和 [SPEC-220](SPEC-220-feishu-scope-baseline.md)。
 
 ### 并发、持久化与秘密边界
 

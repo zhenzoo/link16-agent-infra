@@ -47,7 +47,7 @@ last_reviewed: 2026-09-07
 1. **注册应用 → 显式选择已通过 doctor 的 Codex profile**：
    ```powershell
    python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <codex-profile> `
-     --group "<目标共享群>" --tenant-kind <enterprise|personal> --background
+     --cwd "<项目目录>" --group "<目标共享群>" --tenant-kind <enterprise|personal> --background
    ```
    OAuth 扫码 / 自动写 `.env` / 自动补 `agent-registry.json` stub 全同 SOP-120；脚本先从 Link16 effective
    local registry 解析所选 profile 为 Codex 并 doctor，注册成功后自动 upsert 本机运行名册。
@@ -68,11 +68,11 @@ last_reviewed: 2026-09-07
 3. **运行 Link16 doctor/selftest**；registry 中没有目标 profile 时，用
    `profile_bootstrap.py --register-profile <name> --runtime codex --profile-home <home>` 先预览再 `--apply`。
 
-4. **其余全照 [`SOP-120 §4`](SOP-120-feishu-register.md) 清单**：按用途选能力档；个人租户 Codex agent 默认 `core + group-a2a`，公司租户默认再加 `docs-consume` 三项只读 scope；两者都不默认申请 broad Drive、plain `im:chat` 或听全群。仍需人工拉进共享群、私聊认主、按需同步受信同主设备的 `.env`，并核对 `agent-registry.json` 的 `repo`/`machine`。
+4. **按统一注册 SOP 验权限和入群。** 企业应用在首次创建时预填应用和本人两种身份的清单。监督器回读应用权限、检查目标群成员关系，认主后续办本人授权。个人租户使用同一入口，按个人租户的清单验收。具体权限和缺项处理以 [SOP-120 §0](SOP-120-feishu-register.md) 为准。
 
    注册器会 arm 独立 Monitor。Codex turn 已结束后，OAuth/权限/认主/入群信号由 Link16 经 wmux 注回发起 bot，不能依赖 Claude Code 的后台任务完成通知，也不读取 Codex transcript 猜完成。
 
-5. **重启桥**（只起这一只即可）：
+5. **核对这只桥已运行。** 监督器会启动缺失的桥。需单独启动时运行下面的命令。
    ```powershell
    python feishu/feishu_bridge.py start --bot <key>
    ```

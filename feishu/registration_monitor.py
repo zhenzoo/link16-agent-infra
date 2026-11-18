@@ -33,6 +33,7 @@ EVENT_ORDER = (
     "permissions_ready",
     "bridge_ready",
     "owner_ready",
+    "consent_required",
     "group_ready",
     "ready",
     "failed",
@@ -343,20 +344,25 @@ def _save_oauth_handoff(job_id, url, expire_in):
     path.chmod(0o600)
 
 
+def _enterprise_gap_action(state):
+    return (f"沿用原来的注册参数，在注册器加 --app-id {state['app_id']} 续接同一应用。"
+            "官方 SDK 只预填已核实的免审缺项。通过本任务领取有效确认页，完成后复核。")
+
+
 def local_handoff(job_id):
     """Read the current human action without ever exposing app secrets/device codes."""
     state = get_job(job_id)
     if not state:
         raise ValueError("找不到 registration job")
     result = {"job_id": job_id, "bot": state["bot"], "status": state["status"], "links": []}
+    handoff = _read(_oauth_handoff_path(job_id)) or {}
     if state["status"] in TERMINAL_STATUSES:
         _clear_oauth_handoff(job_id)
         result["action"] = state.get("last_error") or state["status"]
-    elif not state.get("milestones", {}).get("registered"):
-        handoff = _read(_oauth_handoff_path(job_id)) or {}
+    elif not state.get("milestones", {}).get("registered") or handoff.get("expires_at", 0) > _now():
         if handoff.get("expires_at", 0) > _now():
             result.update(links=[handoff["url"]], expires_at=handoff["expires_at"],
-                          action="在授权页核对账号和目标组织，然后授权")
+                          action="核对应用、账号和组织；企业注册须确认本次首次发布免审，无法判断时停在最后的创建按钮前")
         else:
             _clear_oauth_handoff(job_id)
             result["action"] = "等待注册器生成有效授权链接；沿用当前 job，不重复建应用"
@@ -364,11 +370,21 @@ def local_handoff(job_id):
         urls, _caps, _scopes, audit = permission_review_link(state)
         if audit.get("error") or not _scopes or _now() - state.get("sdk_returned_at", 0) < 30:
             result.update(audit=audit, action="等待实际权限回读或传播；当前不需要重复开通")
+        elif "by_identity" in audit:
+            result.update(audit=audit, action=_enterprise_gap_action(state))
         else:
             result.update(links=urls, audit=audit, action="仅补已确认缺失的免审权限；管理员审批跳过；用户OAuth另验")
     elif state.get("start_bridge") and not state.get("milestones", {}).get("bridge_ready"):
         result.update(action="正在检查启动环境和飞书连接，暂不要求用户发测试消息",
                       check=(state.get("checks") or {}).get("bridge"))
+    elif (state.get("checks") or {}).get("consent", {}).get("status") == "waiting_for_owner":
+        handoff = _read(_consent_dir(state) / "confirmation.json") or {}
+        result["action"] = "安装会话代办本应用本人的普通同意；只使用当前有效的官方确认页"
+        if handoff.get("bot") == state["bot"] and handoff.get("expires_at", 0) > _now():
+            result.update(links=[handoff["url"]], expires_at=handoff["expires_at"])
+    elif (state.get("checks") or {}).get("consent"):
+        result.update(action="核验本人授权与姓名查询；失败时续接当前应用和授权目录",
+                      check=state["checks"]["consent"])
     else:
         result["action"] = "请主人私聊新 bot 一句完成认主" if not state["milestones"].get("owner_ready") else "等待所选范围的其他验收"
     return result
@@ -385,25 +401,23 @@ def _registration_tenant_kind(state):
 
 
 def permission_review_link(state):
-    """Rebuild the second human-review links without persisting the URLs.
-
-    SPEC-220 §6: the scope audit runs *before* the link is built, and the link
-    carries everything the app does not yet hold — capability fix scopes plus the
-    whole self-serve baseline — so a new bot leaves registration as fully opened
-    as every other one. Returns (urls, capabilities, scopes, audit); `audit` says
-    how many scopes were already granted, or why the pre-check was unavailable.
-    """
+    """Audit the live grant and return diagnostic URLs for confirmed gaps."""
     app_id = str(state.get("app_id") or "").strip()
     if not app_id:
         raise ValueError("registration job 尚无 app_id，不能生成权限审阅链接")
     capabilities = bridge_scope_audit.normalize_capabilities(state.get("capabilities"))
     if _registration_tenant_kind(state) == "enterprise":
         granted, error = bridge_scope_audit.granted_scope_pairs(state.get("id_env"), state.get("secret_env"))
-        plan = bridge_scope_audit.registration_scope_plan(capabilities, granted if not error else (), "enterprise")
+        if error:
+            return [], capabilities, (), {"granted": None, "error": error}
+        try:
+            plan = bridge_scope_audit.registration_scope_plan(capabilities, granted, "enterprise")
+        except ValueError as exc:
+            return [], capabilities, (), {"granted": len(granted), "error": str(exc)}
         scopes = tuple(dict.fromkeys(s for values in plan.values() for s in values))
         return bridge_scope_audit.scope_plan_urls(app_id, plan), capabilities, scopes, {
             "granted": len(granted), "error": error, "by_identity": plan,
-            "planned": sum(len(v) for v in bridge_scope_audit.registration_scope_plan(capabilities, (), "enterprise").values()),
+            "planned": sum(map(len, bridge_scope_audit.enterprise_registration_targets(capabilities).values())),
         }
     granted, error = bridge_scope_audit.granted_scopes(state.get("id_env"), state.get("secret_env"))
     if error:
@@ -455,10 +469,11 @@ def notify_oauth_link(job_id, url, expire_in=None):
     if not notify_bot:
         result = {"ok": True, "via": "local_handoff"}
     else:
+        instruction = ("按SOP-120 §2.0.1核应用、主人、组织和本次预填项。企业 SDK 最后的创建可能直接发起版本发布；"
+                       "只有发版免审规则或官方预览确认覆盖本次配置才继续，否则停在创建前：")
         marker = (
             f"Link16 注册回调：{state['bot']} 的授权链接已生成"
-            f"（约 {expire_in or '?'} 秒内有效）。按Feishu skill/SOP-120 §2.0.1核应用、主人和组织，"
-            f"默认由智能体打开并完成已授权的普通确认；自动操作失败才把有效链接和具体动作交给主人：\n{url}\n"
+            f"（约 {expire_in or '?'} 秒内有效）。{instruction}\n{url}\n"
             f"[飞书 from=registration-monitor:{event_id} to={notify_bot} via=注册回调 · route=p2a]"
         )
         result = bridge_injection.inject_bot_prompt(notify_bot, marker)
@@ -481,6 +496,35 @@ def _owner_check(bot):
     if not data or not str(data.get("open_id") or "").startswith("ou_"):
         return {"status": "missing"}
     return {"status": "ready"}
+
+
+def _consent_dir(state):
+    return STATE_DIR / ("registration-consent-" + state["job_id"])
+
+
+def _registration_consent(state):
+    """Start this job's native consent once. Failed/expired consent can resume on the same app."""
+    import personnel_authorization as auth
+    root = _consent_dir(state)
+    args = ["--bot", state["bot"], "--state", str(root), "--registration-scopes",
+            "--notify-bot", state.get("notify_bot") or ""]
+    receipt = auth.start_worker(state["bot"], root, args, resume_finished=False)
+    status = receipt.get("state")
+    if status in ("starting", "waiting_for_owner") and not _pid_alive(receipt.get("pid")):
+        status = "worker_exited"
+    if status == "verified":
+        # An old narrowed or different-owner receipt cannot finish registration.
+        identity = bridge_scope_audit.user_identity_status(state["bot"])
+        checked = receipt.get("identity") or {}
+        wanted = set(bridge_scope_audit.registration_scope_plan(tenant_kind="enterprise")["user"])
+        if (identity.get("personnel_ready") and checked.get("app_id") == state["app_id"] == identity.get("app_id")
+                and checked.get("verified_owner_id") and checked["verified_owner_id"] == identity.get("verified_owner_id")
+                and wanted <= set(identity.get("scopes", []))
+                and wanted <= set(receipt.get("requested_user_scopes", [])) and receipt.get("matched_count", 0)):
+            status = "ready"
+        else:
+            status = "consent_unverified"
+    return {"status": status, "directory": str(root)}
 
 
 def _resolve_group_hint(bot):
@@ -636,20 +680,23 @@ def _permission_check(state):
 def _event_text(state, milestone, permission_review=None):
     if milestone == "permissions_review":
         urls, capabilities, scopes, audit = permission_review or permission_review_link(state)
+        if "by_identity" in audit:
+            missing = sum(len(items) for items in audit["by_identity"].values())
+            return (f"Link16 注册回调：{state['bot']} 已复核应用权限，仍缺 {missing} 项。"
+                    f"{_enterprise_gap_action(state)} 请读取 registration job {state['job_id']} 继续处理。")
         labels = [
             bridge_scope_audit.CAPABILITY_SPECS[name]["label"]
             for name in capabilities
         ]
-        pending = sum(len(v) for v in audit["by_identity"].values()) if "by_identity" in audit else len(scopes)
+        pending = len(scopes)
         if audit.get("error"):
-            audit_line = (f"注册前审计：未能读取当前授权（{audit['error']}），"
-                          f"按整套 {audit['planned']} 项申请")
+            audit_line = f"注册前审计：未能核实当前授权（{audit['error']}），请先重新读取后判断缺口"
         else:
             audit_line = (f"注册前审计：已授权 {audit['granted']} 项；能力档 + SPEC-220 免审基线共 "
                           f"{audit['planned']} 项，本次待开 {pending} 项（按权限与身份组合计数）")
         links = "\n".join(
             (f"[{i}/{len(urls)}] {u}" if len(urls) > 1 else u) for i, u in enumerate(urls, 1)
-        ) or "（无增量 scope：能力档与基线已全部开通）"
+        ) or ("（本次无法核实权限缺口）" if audit.get("error") else "（无增量 scope：能力档与基线已全部开通）")
         instruction = ("优先用官方SDK固定原AppID增量续接，预填已证缺口，不让主人逐项勾选后台。"
                        "按SOP-120 §2.0.1用已登录浏览器代办免审确认，自动操作失败才交有效链接。"
                        "需管理员审批的权限或数据范围发布跳过，不发申请链接。应用权限与主人OAuth分别验收：\n"
@@ -675,13 +722,17 @@ def _event_text(state, milestone, permission_review=None):
         "permissions_ready": f"所选 capability 与 SPEC-220 免审基线权限已到位（{scope_note}）",
         "bridge_ready": "启动入口与飞书连接已核验，请主人私聊新 bot 一句完成认主",
         "owner_ready": "主人私聊认领已检测到",
+        "consent_required": "本应用的本人授权页面已生成。安装会话立即按 SOP-120 §2.0.1 读取本任务 links，"
+                            "核本应用及主人后代办官方普通同意，随后回读完整注册用户权限并用姓名核对本人。",
         "group_ready": "目标群成员关系已检测到",
         "ready": (f"官方登记与所选能力验收完成，权限在本次回调前再次复核（{scope_note}）；"
                   "飞书智能体标签以客户端确认为准"),
         "failed": "注册未完成，请查看任务诊断并恢复原应用；无需主人提供密钥",
         "expired": "注册监督已过期，仍有人工步骤未完成",
     }
-    if milestone == "ready" and _registration_tenant_kind(state) == "enterprise":
+    if milestone == "ready" and (state.get("registration_context") or {}).get("verify_owner_consent"):
+        labels["ready"] += "；本应用已核主人、默认业务授权及真实姓名检索。业务资源读写按实际样本验收"
+    elif milestone == "ready" and _registration_tenant_kind(state) == "enterprise":
         labels["ready"] += ("；本次ready只验证应用后台与桥连接，主人OAuth仍须用"
                             " bridge_scope_audit.py --bot " + state["bot"] +
                             " --baseline --user-identity 单独核验并实查人员；缺授权时保留该项未完成")
@@ -804,6 +855,12 @@ def check_once(job_id, emit=True):
     if state.get("milestones", {}).get("registered"):
         import tenant_probe
         tenant = tenant_probe.sync_registry_tenant(state["bot"])
+    consent = None
+    require_consent = bool((state.get("registration_context") or {}).get("verify_owner_consent"))
+    if (require_consent and state["milestones"].get("registered") and owner.get("status") == "ready"
+            and permission.get("status") == "ready" and _registration_tenant_kind(state) == "enterprise"
+            and bridge_scope_audit.registered_tenant_kind(state["bot"]) == "enterprise"):
+        consent = _registration_consent(state)
 
     def apply(item):
         if item.get("status") in TERMINAL_STATUSES:
@@ -819,6 +876,10 @@ def check_once(job_id, emit=True):
             item["checks"]["bridge"] = activation
         if tenant is not None:
             item["checks"]["tenant"] = tenant
+        if consent:
+            item["checks"]["consent"] = consent
+            if consent["status"] == "waiting_for_owner":
+                item["events"].setdefault("consent_required", {"event_id": f"{job_id}:consent_required"})
         milestones = item["milestones"]
         milestones["permissions_ready"] = permission.get("status") == "ready"
         milestones["owner_ready"] = owner.get("status") == "ready"
@@ -834,6 +895,9 @@ def check_once(job_id, emit=True):
         )
         if item.get("start_bridge"):
             milestones["ready"] = milestones["ready"] and milestones.get("bridge_ready", False)
+        if require_consent:
+            milestones["consent_ready"] = bool(consent and consent["status"] == "ready")
+            milestones["ready"] = milestones["ready"] and milestones["consent_ready"]
         if milestones["ready"]:
             item["status"] = item["stage"] = "ready"
             item["events"].setdefault("ready", {"event_id": f"{job_id}:ready"})

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Audit Feishu bot scopes as explicit Link16 capability profiles.
 
-Enterprise registration covers the current self-serve catalog per identity.
+Enterprise registration covers the supported workflows, checked against the tenant catalog.
 Other tenants retain their capability baseline; approval-gated scopes are skipped.
 """
 from __future__ import annotations
@@ -161,6 +161,27 @@ BASELINE_SCOPES = (
 SCOPE_LEVELS_PATH = Path(__file__).resolve().parent / "feishu-scope-levels.json"
 _LEVELS_CACHE = {}
 
+# Official robot preset entries beyond BASELINE_SCOPES, observed on a fresh published app.
+ROBOT_PRESET_SCOPES = (
+    "application:app_slash_command:read", "application:app_slash_command:write",
+    "application:application:self_manage", "application:bot.basic_info:read",
+    "application:bot.menu:write", "cardkit:card:read", "cardkit:card:write",
+    "contact:contact.base:readonly", "docs:document.comment:write_only",
+    "im:chat.members:bot_access", "im:chat:create", "im:chat:update",
+    "im:message.group_at_msg.include_bot:readonly", "im:message.pins:read",
+    "im:message.pins:write_only", "im:message.reactions:read", "im:message.reactions:write_only",
+    "im:message:readonly", "im:message:send_multi_users", "im:message:send_sys_msg", "im:message:update",
+)
+
+PERSONNEL_USER_SCOPES = ("contact:user.base:readonly", "contact:user.basic_profile:readonly", "contact:user:search")
+DOCUMENT_READ_USER_SCOPES = (
+    "bitable:app:readonly", "base:app:read", "base:table:read", "base:field:read",
+    "base:record:read", "base:view:read", "docs:document.comment:read",
+    "docs:document.content:read", "docs:document.media:download", "docx:document:readonly",
+    "board:whiteboard:node:read", "sheets:spreadsheet:read", "sheets:spreadsheet.meta:read",
+    "wiki:wiki:readonly", "drive:file:download", "drive:drive.metadata:readonly",
+)
+
 
 def scope_catalog():
     """Catalog only, never credentials or per-app grants."""
@@ -175,19 +196,53 @@ def registered_tenant_kind(bot):
     return (tenant_probe.tenant_entry(entry.get("tenant_key")) or {}).get("kind")
 
 
+def enterprise_self_serve():
+    data = scope_catalog()
+    if data.get("snapshot", {}).get("tenant_kind") != "enterprise":
+        raise ValueError("企业注册缺少企业权限目录；不得用个人租户目录替代")
+    if not data.get("scopes") or any("identity_levels" not in row for row in data["scopes"]):
+        raise ValueError("企业权限目录缺少身份等级；先按 SOP-140 刷新")
+    return {kind: {row["scope"] for row in data["scopes"] if row["identity_levels"].get(kind) == 3}
+            for kind in ("tenant", "user")}
+
+
+# Product namespaces of the three approved groups. New product families require
+# a decision; a self-serve rating alone does not make HR or mail an onboarding feature.
+REGISTRATION_BUSINESS_PRODUCTS = frozenset((
+    "base", "bitable", "docs", "wiki", "drive", "space", "slides", "sheets", "mindnote",
+    "docx", "board", "ccm", "docs_tool",
+    "im", "task", "vc", "minutes", "calendar", "live", "cardkit",
+    "aily", "app_engine", "application", "block", "collab_plugins", "component",
+    "document_ai", "event", "mfg", "optical_char_recognition", "search", "spark",
+    "speech_to_text", "translation",
+))
+
+
+def enterprise_registration_targets(capabilities=None, *, eligible=None):
+    eligible = enterprise_self_serve() if eligible is None else eligible
+    targets = {
+        "tenant": {*ROBOT_PRESET_SCOPES, *BASELINE_SCOPES, *requested_scopes(capabilities, for_fix=True),
+                   "im:chat.members:read", "im:chat.members:write_only", "contact:user.base:readonly"},
+        "user": {"offline_access", *PERSONNEL_USER_SCOPES, *DOCUMENT_READ_USER_SCOPES, *CHAT_READ_USER_SCOPES},
+    }
+    for kind, scopes in eligible.items():
+        targets[kind].update(s for s in scopes if s.partition(":")[0] in REGISTRATION_BUSINESS_PRODUCTS)
+    return targets
+
+
 def registration_scope_plan(capabilities=None, granted=(), tenant_kind=None):
     """Application-side grants, keyed by token identity; not a user's OAuth consent."""
     held = set(granted)
     if tenant_kind == "enterprise":
-        data = scope_catalog()
-        if data.get("snapshot", {}).get("tenant_kind") != "enterprise":
-            raise ValueError("企业注册缺少企业权限目录；不得用个人租户目录替代")
-        if not data.get("scopes") or any("identity_levels" not in r for r in data["scopes"]):
-            raise ValueError("企业权限目录缺少身份等级；先按 SOP-140 刷新")
-        return {t: tuple(sorted(r["scope"] for r in data["scopes"]
-                               if 0 < int(r["identity_levels"].get(t) or 0) <= 3
-                               and (r["scope"], t) not in held))
-                for t in ("tenant", "user")}
+        eligible = enterprise_self_serve()
+        plan = {}
+        for kind, scopes in enterprise_registration_targets(capabilities, eligible=eligible).items():
+            missing = {s for s in scopes if (s, kind) not in held}
+            blocked = missing - eligible[kind]
+            if blocked:
+                raise ValueError(f"企业注册停止：{kind} 的 {', '.join(sorted(blocked))} 无免审依据；不提交审批")
+            plan[kind] = tuple(sorted(missing))
+        return plan
     return {"tenant": registration_scopes(capabilities, {s for s, t in held if t == "tenant"}),
             "user": ()}
 
@@ -220,6 +275,9 @@ def user_identity_status(bot):
         owner = docio_cli.owner_open_id(bot)
         owner_matches = bool(owner and user.get("openId") == owner)
         return {"status": status, "verified": user.get("verified") is True,
+                "user_name": user.get("userName") if owner_matches else None,
+                "verified_owner_id": owner if owner_matches and user.get("verified") is True else None,
+                "app_id": data.get("appId"),
                 "owner_matches": owner_matches,
                 "scopes": sorted(set(scopes)),
                 "personnel_ready": status == "ready" and user.get("verified") is True
@@ -490,7 +548,10 @@ def audit_entry(id_env, sec_env, capabilities=None, raw=False, reviewers=False, 
             return {"status": "unknown", "error": error, "capabilities": list(names)}
         tenant_scopes = {s for s, t in pairs if t == "tenant"}
         caps = capability_status(tenant_scopes, names)
-        plan = registration_scope_plan(names, pairs, tenant_kind)
+        try:
+            plan = registration_scope_plan(names, pairs, tenant_kind)
+        except ValueError as exc:
+            return {"status": "unknown", "error": str(exc), "capabilities": caps, "total_scopes": len(pairs)}
         ok = not any(plan.values())
         app_id = _env_val(id_env)
         result = {"status": "ready" if all(caps.values()) and (ok or not baseline) else "missing",

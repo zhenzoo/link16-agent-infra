@@ -6,7 +6,7 @@
 → 自动写进 VibeCoding 的 .env（路径跨机解析·见 bridge_env.resolve_env_path·不写死盘符）。
 
   首次安装（仅私聊）：
-    python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <已选账号> --capability core --background
+    python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <已选账号> --tenant-kind <enterprise|personal> --capability core --background
     python feishu/registration_monitor.py links --job <返回的job> --watch
     → 官方页核对组织；本机 .env 保存凭据，local roster 保存所选账号。
 
@@ -461,6 +461,13 @@ def main():
             f"{inferred_tenant_kind} 租户冲突"
         )
     tenant_kind = args.tenant_kind or inferred_tenant_kind
+    if not tenant_kind and args.bot:
+        try:
+            tenant_kind = bridge_scope_audit.registered_tenant_kind(args.bot)
+        except (OSError, ValueError):
+            pass
+    if tenant_kind not in ("enterprise", "personal"):
+        ap.error("请指定 --tenant-kind enterprise 或 personal，或提供已登记的目标共享群，以确定本次注册权限清单")
     capabilities = _registration_capabilities(args.capability, tenant_kind)
     try:
         _validate_group_choice(capabilities, args.group)
@@ -471,10 +478,21 @@ def main():
     # missing scope months later — mid-task, as a bare "no permission" — was the
     # recurring failure this closes. Approval-gated scopes are never requested;
     # the baseline is built entirely from self-serve ones.
-    permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, tenant_kind=tenant_kind)
+    monitor = registration_monitor.get_job(args.job_id) if args.job_id else None
+    if args.job_id and (not monitor or monitor.get("bot") != (args.bot or args.name)):
+        ap.error("注册任务不存在或与当前智能体不符")
+    reuse_grants = False
     try:
+        permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, tenant_kind=tenant_kind)
         sdk_version = registration_transport.preflight()
         args.app_id = _recovery_app_id(args.app_id, id_key, args.bot or args.name)
+        if (args.app_id and tenant_kind == "enterprise"
+                and bridge_scope_audit._env_val(id_key) == args.app_id and bridge_scope_audit._env_val(sec_key)):
+            held, error = bridge_scope_audit.granted_scope_pairs(id_key, sec_key)
+            if error:
+                raise ValueError("无法回读原应用权限；保留原应用，只读复核后续接")
+            permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, held, tenant_kind)
+            reuse_grants = not any(permission_plan.values())
     except (ValueError, registration_transport.RegistrationTransportError) as exc:
         ap.error(str(exc))
     if args.dry_run:
@@ -484,13 +502,13 @@ def main():
         print(f"cwd={selected_cwd or '(repo default)'}")
         print(f"tenant_kind={tenant_kind or 'unknown'}")
         print(f"capabilities={','.join(capabilities)}")
-        print("application_confirmation=1;user_consent=separate_if_missing")
+        print(f"application_confirmation={int(not reuse_grants)};user_consent=separate_if_missing")
         print(f"sdk_version={sdk_version}")
         print(f"first_link={'existing-app' if args.app_id else 'create-only'};addons=scopes;base_preset=retained")
+        print("permission_mode=default")
         print("prefilled_scopes_by_identity=" + json.dumps(permission_plan, ensure_ascii=False))
         print("permission_followup=only_confirmed_missing_scopes;unknown=read_only_recheck")
         return
-    monitor = registration_monitor.get_job(args.job_id) if args.job_id else None
     monitor_bot = args.bot or args.name
     if not monitor and not args.no_monitor:
         monitor = registration_monitor.arm_job(
@@ -503,7 +521,8 @@ def main():
             secret_env=sec_key,
             launch=True,
             context={"name": args.name, "profile": selected_profile.name,
-                     "cwd": selected_cwd, "tenant_kind": tenant_kind, "auto_group": True},
+                     "cwd": selected_cwd, "tenant_kind": tenant_kind, "auto_group": True,
+                     **({"verify_owner_consent": True} if tenant_kind == "enterprise" else {})},
             start_bridge=not args.no_start_bridge,
         )
         print(
@@ -543,16 +562,12 @@ def main():
     try:
         if monitor:
             registration_monitor.record_progress(monitor["job_id"], sdk_version=sdk_version)
-        if args.app_id and tenant_kind == "enterprise":
-            held, error = bridge_scope_audit.granted_scope_pairs(id_key, sec_key)
-            if not error:
-                permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, held, tenant_kind)
-        result = _run_device_grant(
-            args.name,
-            args.app_id,
-            job_id=monitor.get("job_id") if monitor else None,
-            permission_plan=permission_plan,
-        )
+        if reuse_grants:
+            result = {"client_id": args.app_id, "client_secret": bridge_scope_audit._env_val(sec_key)}
+        else:
+            result = _run_device_grant(
+                args.name, args.app_id, job_id=monitor.get("job_id") if monitor else None,
+                permission_plan=permission_plan)
     except Exception as exc:
         error = registration_transport.safe_error(exc)
         if monitor:
@@ -575,7 +590,7 @@ def main():
         registration_monitor.record_sdk_result(monitor["job_id"], app_id)
     try:
         _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
-                              app_id, secret, monitor)
+                              app_id, secret, monitor, tenant_kind)
     except Exception as exc:
         error = registration_transport.safe_error(exc)
         if monitor:
@@ -585,9 +600,7 @@ def main():
 
 
 def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
-                          app_id, secret, monitor):
-    tenant_kind = args.tenant_kind or _tenant_kind_from_group(args.group)
-    capabilities = _registration_capabilities(args.capability, tenant_kind)
+                          app_id, secret, monitor, tenant_kind):
     write_env(app_id, secret, id_key, sec_key)
     action = "续接成功" if args.app_id else "创建成功"
     print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)

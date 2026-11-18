@@ -12,6 +12,49 @@ import personnel_authorization as auth
 
 
 class PersonnelConsentTests(unittest.TestCase):
+    def test_registration_resumes_in_bounded_batches_and_checks_previous_grants(self):
+        for lose_prior in (False, True):
+            with self.subTest(lose_prior=lose_prior), tempfile.TemporaryDirectory() as tmp:
+                args = SimpleNamespace(bot="bot", state=tmp, registration_scopes=True, query=None, notify_bot=None)
+                target = auth.requested_scopes(args)
+                held = {"base:field:read"}
+                batches = []
+
+                def check(bot, query, scopes):
+                    missing = sorted(set(scopes) - held)
+                    return {"state": "consent_missing" if missing else "verified",
+                            "missing_requested_user_scopes": missing}
+
+                def grant(bot, batch, handoff, save, checked):
+                    batches.append(batch)
+                    if lose_prior:
+                        held.clear()
+                    held.update(batch)
+
+                with mock.patch.object(auth, "preflight"), mock.patch.object(auth, "verify", side_effect=check), \
+                     mock.patch.object(auth, "_authorize_batch", side_effect=grant):
+                    result = auth.run(args)
+                self.assertNotIn("base:field:read", batches[0])
+                self.assertTrue(all(len(batch) <= auth.REGISTRATION_BATCH_SIZE for batch in batches))
+                if lose_prior:
+                    self.assertEqual(result["state"], "consent_not_accumulated")
+                    self.assertEqual(len(batches), 1)
+                else:
+                    self.assertEqual(result["state"], "verified")
+                    self.assertGreater(len(batches), 1)
+                    self.assertTrue(set(target) <= held)
+
+    def test_registration_checks_all_user_scopes_even_with_read_consent(self):
+        scopes = auth.requested_scopes(SimpleNamespace(registration_scopes=True))
+        self.assertEqual(scopes, auth.audit.registration_scope_plan(tenant_kind="enterprise")["user"])
+        self.assertIn("offline_access", scopes)
+        old = auth.requested_scopes(SimpleNamespace())
+        identity = {"owner_matches": True, "personnel_search_scope": True, "status": "ready", "scopes": old}
+        with mock.patch.object(auth.audit, "user_identity_status", return_value=identity):
+            result = auth.verify("bot", "同事", scopes)
+        self.assertEqual(result["state"], "consent_missing")
+        self.assertIn("base:record:create", result["missing_requested_user_scopes"])
+
     def test_default_onboarding_requires_chat_even_after_personnel_and_docio_pass(self):
         scopes = auth.requested_scopes(SimpleNamespace())
         self.assertIn("drive:drive.metadata:readonly", scopes)
@@ -134,7 +177,7 @@ class PersonnelConsentTests(unittest.TestCase):
                  mock.patch.object(auth.docio, "owner_open_id", return_value="ou_owner"), \
                  mock.patch.object(auth.docio, "require_profile_identity"), \
                  mock.patch.object(auth.audit, "granted_scope_pairs", return_value=(held, None)), \
-                 mock.patch.object(auth.audit, "registration_scope_plan", return_value={"user": eligible}):
+                 mock.patch.object(auth.audit, "enterprise_self_serve", return_value={"user": eligible}):
                 with self.assertRaises(ValueError):
                     auth.preflight("bot", ("docs:document.comment:create",))
 

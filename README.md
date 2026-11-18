@@ -180,7 +180,7 @@ python feishu/preflight.py
 # 5) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
 #    名字用「机器代号-项目简称」（机器代号由 python feishu/machine_identity.py 给，如 tb26；项目简称=它要干活的仓库名）
 #    --cwd 指向真实项目目录，别给它一个空文件夹
-python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <所选profile> --cwd <项目目录> --capability core --background
+python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <所选profile> --cwd <项目目录> --tenant-kind <enterprise|personal> --capability core --background
 python feishu/registration_monitor.py links --job <返回的job> --watch
 
 # 6) 权限发布后 Monitor 自动核账号启动、补起桥并确认连接
@@ -362,7 +362,7 @@ anysearch、push、pull、align 等个人 workflows 只是可选增强，不是�
 | 排查更新等待拖住消息和关闭、关机后恢复旧对话 | [RESEARCH-120：拥堵原因与证据](docs/RESEARCH-120-bridge-congestion-audit.md)；[PLAN-1260：审查与整改进度](docs/PLAN-1260-bridge-congestion-audit.md) |
 | Kimi 正常过程被连接提示覆盖、告警反复累积 | [PLAN-1311：业务进度保留与诊断降噪](docs/PLAN-1311-kimi-progress-card-preservation.md)，投递合同见 SPEC-210 §2.1 |
 | 智能体文档归主人、默认组织内链接与群编辑 | [PLAN-1300：历史资产修复与统一创建检查](docs/PLAN-1300-document-owner-and-access.md)，执行合同见 SOP-140 §8 |
-| 企业智能体免审权限全开、人员搜索与用户授权分别验收 | [PLAN-1320：企业权限与人员查询](docs/PLAN-1320-enterprise-permission-baseline.md)，基线见 SPEC-220 |
+| 企业智能体按日常业务一次预填权限、人员搜索与用户授权分别验收 | [PLAN-1320：企业权限与人员查询](docs/PLAN-1320-enterprise-permission-baseline.md)，基线见 SPEC-220 |
 | 再建一只 bot | [`docs/SOP-120-feishu-register.md`](docs/SOP-120-feishu-register.md)（选 Codex profile 的增量：[`SOP-121`](docs/SOP-121-codex-bot-register.md)） |
 | 给已有的 bot 改名、查专属后台并同步新旧名称 | [`SOP-125`](docs/SOP-125-bot-rename.md)：`rename_bot.py plan → apply → verify`；执行与本机验证见 [PLAN-1100](docs/PLAN-1100-bot-rename-workflow.md) |
 | 安全升级 wmux | [`docs/SOP-010-wmux-upgrade.md`](docs/SOP-010-wmux-upgrade.md) |
@@ -466,8 +466,7 @@ python feishu/docio_cli.py coverage <产出目录>/manifest.json   # 判它到�
 
 本仓把这份对照表存成 `feishu/feishu-scope-levels.json`（快照，1257 项），并且：
 
-- **给智能体配的那套基线权限，全部选自"自己就能开"的那一档**，一项都不依赖管理员审批；
-  凡是要审批的大权限，都用等效的细权限替代。
+- 企业注册只预填该身份在本企业目录中可以自助开通的权限。云盘文件读写使用细分权限。首次发布还受企业发版规则约束，SDK 最后的“创建”可能直接触发该流程。
 - 查某一项要不要审批：`python feishu/bridge_scope_audit.py --levels <权限名>`
 - 看每只 bot 还缺哪几项、并直接拿到开通链接：`python feishu/bridge_scope_audit.py --baseline`
 - ⚠️ **这份对照表按企业租户而定**。换公司、换租户必须重新抓一份（步骤见 SOP-140），
@@ -475,7 +474,7 @@ python feishu/docio_cli.py coverage <产出目录>/manifest.json   # 判它到�
 
 ### 新建一只机器人时
 
-注册脚本会**一次性把整套基线权限写进授权链接**，不再出现"用到才发现少一项"。
+企业注册脚本一次预填文档与多维表格、消息与会议任务、低代码与 AI，以及查联系人和 @ 所需权限。确认发版免审后完成创建，再核实际生效清单和本人授权。[注册 SOP](docs/SOP-120-feishu-register.md)
 再把它**拉进协作群**，它就自动继承所有已分享给该群的文档——历史文档一份都不用补挂。
 
 ---

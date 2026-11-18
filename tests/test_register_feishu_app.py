@@ -17,6 +17,27 @@ import register_feishu_app as register  # noqa: E402
 
 
 class DeviceGrantRecoveryTests(unittest.TestCase):
+    def test_default_enterprise_dry_run_prefills_business_grants_for_every_runtime(self):
+        for runtime in ("claude", "codex", "kimi"):
+            profile = mock.Mock()
+            profile.name, profile.runtime = "chosen", runtime
+            with mock.patch.object(register.agent_runtime, "profile_spec", return_value=profile), \
+                 mock.patch.object(register.agent_runtime, "profile_doctor", return_value={"ok": True}), \
+                 mock.patch.object(register.registration_transport, "preflight", return_value="test-sdk"), \
+                 mock.patch.object(register, "_recovery_app_id", return_value=None), \
+                 mock.patch.object(register, "_run_device_grant") as grant, \
+                 mock.patch.object(sys, "argv", ["register", "--name", "test", "--profile", "chosen",
+                     "--tenant-kind", "enterprise", "--group", "test-group", "--dry-run"]), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                register.main()
+            text = output.getvalue()
+            self.assertIn("permission_mode=default", text)
+            plan = json.loads(text.split("prefilled_scopes_by_identity=")[1].splitlines()[0])
+            self.assertEqual({k: len(v) for k, v in plan.items()}, {"tenant": 293, "user": 269})
+            self.assertNotIn("mail:", text)
+            self.assertNotIn("corehr:", text)
+            grant.assert_not_called()
+
     def test_explicit_kimi_runtime_registration_dry_run_is_read_only(self):
         profile = mock.Mock(name="kimi_profile")
         profile.name = "kimi-work"

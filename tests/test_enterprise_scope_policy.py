@@ -22,7 +22,9 @@ def catalog():
 
 
 def test_same_scope_tenant_grant_cannot_satisfy_user_grant():
-    with patch.object(audit, "scope_catalog", return_value=catalog()):
+    with patch.object(audit, "scope_catalog", return_value=catalog()), \
+         patch.object(audit, "enterprise_registration_targets", return_value={"tenant": {"both:read"},
+                      "user": {"both:read", "contact:user:search", "mixed:read"}}):
         plan = audit.registration_scope_plan(granted={("both:read", "tenant")}, tenant_kind="enterprise")
     assert plan["tenant"] == ()
     assert plan["user"] == ("both:read", "contact:user:search", "mixed:read")
@@ -30,10 +32,10 @@ def test_same_scope_tenant_grant_cannot_satisfy_user_grant():
 
 def test_approval_and_unknown_never_enter_either_identity_plan():
     with patch.object(audit, "scope_catalog", return_value=catalog()):
-        plan = audit.registration_scope_plan(tenant_kind="enterprise")
-    assert plan["tenant"] == ("both:read",)
-    assert "admin:write" not in plan["user"]
-    assert "mixed:read" in plan["user"]
+        with pytest.raises(ValueError, match="无免审依据"):
+            audit.registration_scope_plan(tenant_kind="enterprise")
+        assert audit.enterprise_self_serve()["tenant"] == {"both:read"}
+        assert "mixed:read" in audit.enterprise_self_serve()["user"]
 
 
 def test_enterprise_rejects_personal_or_untyped_catalog():
@@ -71,6 +73,8 @@ def test_monitor_uses_enterprise_plan_and_remains_missing_for_user_side():
     state = {"app_id": "cli_test", "bot": "test", "capabilities": [],
              "registration_context": {"tenant_kind": "enterprise"}}
     with patch.object(audit, "scope_catalog", return_value=catalog()), \
+         patch.object(audit, "enterprise_registration_targets", return_value={"tenant": {"both:read"},
+                      "user": {"contact:user:search"}}), \
          patch.object(audit, "granted_scope_pairs", return_value=({("both:read", "tenant")}, None)), \
          patch.object(audit, "_env_val", return_value="cli_test"):
         urls, _, _, info = monitor.permission_review_link(state)
@@ -79,6 +83,21 @@ def test_monitor_uses_enterprise_plan_and_remains_missing_for_user_side():
     assert all(x.endswith("token_type=user") for x in urls)
     assert checked["status"] == "missing" and checked["baseline_ok"] is False
     assert checked["user_authorization"].startswith("separate_check_required")
+
+
+def test_enterprise_gap_resumes_original_app_and_exposes_active_sdk_page():
+    state = {"app_id": "cli_same", "bot": "test", "job_id": "job",
+             "status": "permissions_review", "milestones": {"registered": True}}
+    review = (["manual-dashboard"], [], ("both:read",), {"by_identity": {"user": ("both:read",)}})
+    with patch.object(monitor, "get_job", return_value=state), \
+         patch.object(monitor, "permission_review_link", return_value=review), \
+         patch.object(monitor, "_read", return_value={}) as handoff:
+        step = monitor.local_handoff("job")
+        event = monitor._event_text(state, "permissions_review", review)
+        assert step["links"] == [] and "--app-id cli_same" in step["action"]
+        assert "--app-id cli_same" in event and "manual-dashboard" not in event
+        handoff.return_value = {"url": "sdk-page", "expires_at": monitor._now() + 60}
+        assert monitor.local_handoff("job")["links"] == ["sdk-page"]
 
 
 @pytest.mark.parametrize("status,verified,scope,ready", [
@@ -114,6 +133,17 @@ def test_live_catalog_includes_people_but_not_send_as_user():
     assert "contact:user.base:readonly" in plan["tenant"]
     assert "im:message.send_as_user" not in plan["user"]
     assert set(audit.CHAT_READ_USER_SCOPES).issubset(plan["user"])
+    assert set(plan["tenant"]) >= {"im:chat.members:read", "im:chat.members:write_only"}
+    assert not any(s.startswith(("mail:", "corehr:", "admin:")) for grants in plan.values() for s in grants)
+    held = {(s, kind) for kind, grants in plan.items() for s in grants}
+    assert audit.registration_scope_plan(tenant_kind="enterprise", granted=held) == {"tenant": (), "user": ()}
+    extra = audit.registration_scope_plan(["group-listen"], tenant_kind="enterprise", granted=held)
+    assert extra == {"tenant": (), "user": ()}
+    assert {"base:workflow:create", "im:message.group_msg", "calendar:calendar", "mfg:work_order_customer:write"} <= set(plan["tenant"])
+    assert {"base:workflow:create", "spark:app:publish", "space:document:move"} <= set(plan["user"])
+    assert "drive:drive" not in plan["tenant"]
+    assert not any(s.startswith(("directory:", "approval:", "hire:", "security_and_compliance:"))
+                   for grants in plan.values() for s in grants)
 
 
 @pytest.mark.parametrize("status,verified,owner,missing,ready", [

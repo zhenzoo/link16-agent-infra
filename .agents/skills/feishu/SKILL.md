@@ -92,8 +92,8 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 | 查看或设置 cron | `python feishu/bridge_cron.py board`；详情读 `docs/ARCH-150-agent-cron.md` |
 | 审计 bot 权限 | `python feishu/bridge_scope_audit.py --all-env` |
 | 注册 bot | 先读 SOP-120/121，按用户模型/CWD和当前企业登记派生profile/名称/群，再 `register_feishu_app.py ... --dry-run`；已有明确创建授权即可加 `--background` 执行，不重复问许可。首个确认预填权限，已齐不再要求后台勾选 |
-| 企业bot默认本人授权（人员、文档及聊天读取） | `python feishu/personnel_authorization.py --bot <bot> --query <已知同事姓名> --state feishu/_state/<本次目录> --notify-bot <发起者> --background`；默认人员+docio-read+chat-read共25项，覆盖消息搜索/读取与消息附件下载。明确缩小范围才传`--capability`，其他业务可追加`--scope`；`--check`只验不新授权。按SOP-120 §2.0.1代办有效confirmation.json，status.json核本次scope与姓名；聊天消息/附件、文档实际读写另验，后台权限和OAuth不互相替代 |
-| 新注册或已有企业应用自动开通免审权限 | 读SOP-120 §2.0.1：注册SDK预填 → scope审计取真实缺项和链接 → 准备本地browser-act-cli/Python3.12 → 独占浏览器核主人/组织/AppID后代办 → 原App API回读；实际自动操作失败才给有效链接，不默认让主人逐项点 |
+| 企业新注册本人授权 | Monitor 自动请求与 SDK 相同的用户权限，认主后对本应用验本人、全量同意和姓名。手工恢复用 `python feishu/personnel_authorization.py --bot <bot> --registration-scopes --state <本任务目录> --background`。单独排查已有应用时用 `--capability`，加 `--check` 可仅核现状。 |
+| 企业应用业务权限 | 首次注册用官方 SDK 同时预填两身份目标；已有应用用同一 App ID 只补确证缺口。核对应官方确认页、审批边界和 API 回执。具体操作见 SOP-120 §2.0.1 |
 | 已有 bot 改名 / 查后台链接 / 改名后新名不识别 | 先读 SOP-125；`python feishu/rename_bot.py plan --bot <原名或别名> --name <准确新名> --out feishu/_state/bot-renames/<本次操作>.json`，按状态给 console_url、watch 或 apply，最后 verify |
 
 表中没有的操作先读 `TOOLS.md`，不要另造脚本。
@@ -134,7 +134,7 @@ TC101S 的操作顺序、入口网址、父子粒度、全部16节点参数、�
 
 改名由 Link16 承担，不在业务仓建脚本。用户已明确指定新名即授权相应本地同步；先 plan，线上名称已经一致则直接 apply 和 verify，需人操作则给后台链接并启动 `watch --background`。普通改名固定内部代号和凭据键，只更新两本名册的显示名与历史别名；不重建应用、不搬会话、不重启桥。转写有歧义只澄清该名称；只有 API 回读和两本名册核验通过才报告完成。运行时专用旧工具需要内部代号时用 `rename_bot.py resolve --bot <显示名>`，不猜变量名。
 
-注册公司租户 bot 时，传 `--tenant-kind enterprise`（或能由registry唯一识别的公司群）：注册器按SPEC-220默认开齐当前企业目录中tenant/user两身份全部免审权限，并保留docs-consume验收。已批准批量开通的可直接执行；需管理员/企业审批的跳过，只说明不能自助开通，不发申请链接。企业任务只查对应企业，不能转查个人租户；user身份是代表企业用户，不是个人租户。个人租户仍保留原能力范围，不使用企业目录扩权；租户只认registry或官方选择，不按名称、机器或runtime猜。
+企业新注册统一走 SOP-120 的官方 SDK，一次预填应用 293 项、用户 269 项，涵盖文档与多维表格、消息与会议任务、低代码与 AI，保留查联系人及 @。企业人员邮箱及管理类额外权限、需审核的云盘总权限不在清单内。SDK 最后的“创建”可能直接触发首次发布；仅在确认本企业发版免审规则覆盖本次配置后继续。Monitor 收到认主后按同一用户清单启动本人授权并验收。个人租户仍按自身能力范围注册。
 
 注册默认用官方SDK addons在首个应用确认预填权限；接口优先，无等价接口时按 **SOP-120 §2.0.1自动代办工具链** 操作已登录本地浏览器/CDP，含工具安装、具体页面顺序、API回读和失败回退。用户已授权的普通应用创建、权限及OAuth确认由智能体代办，不默认发链接让主人点；逐页核应用、企业、当前主人和scope。实际自动操作失败（登录/验证码、身份不明、浏览器不可接管等）才交有效链接与动作，不强依赖私人skills或新购云服务。未知授权只读核实，已齐不再发第二轮链接；原AppID续接，不重复创建。群邀请用同企业已在登记群的发起bot及app_id，回读实际成员；角色/限额失败如实保留。用户OAuth和本应用认主分别验，不复制其他应用token/open_id；未核定SDK user_info能替代owner记录前不伪造认主。没有具体新建模型/CWD时不创建测试bot。
 
