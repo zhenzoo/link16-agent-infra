@@ -2471,7 +2471,7 @@ def cmd_stall_check(stall_min=STALL_MIN):
 def main():
     ap = argparse.ArgumentParser(description="Link16 看门狗 · 撞限流自动接管")
     sub = ap.add_subparsers(dest="cmd")
-    sub.add_parser("run")
+    sub.add_parser("run").add_argument("--service-log", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("start")
     sub.add_parser("stop")
     st = sub.add_parser("status"); st.add_argument("--verbose", "-v", action="store_true")
@@ -2487,6 +2487,8 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "run":
+        if args.service_log:
+            bridge_process.open_service_log(LOGS_DIR / 'watchdog.log')
         with bridge_process.service('watchdog', HERE / 'bridge_watchdog.py'):
             return cmd_run()
     if args.cmd == "start":

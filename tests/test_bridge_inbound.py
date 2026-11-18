@@ -140,28 +140,25 @@ class TuiTextHandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "没有截断提交"):
                 feishu_bridge._prepare_tui_text("unit", "om_full", "1. 一\t2. 二")
 
-    def test_codex_long_or_tall_drafts_use_existing_lossless_file_handoff(self):
+    def test_codex_long_or_tall_drafts_keep_the_original_in_native_history(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, 'STATE_DIR', Path(tmp)), \
                 mock.patch.object(feishu_bridge.agent_runtime, 'uses_app_server', return_value=True):
-            for mid, body in [('om_wide', '保留原文😀' * 210), ('om_tall', '一行\r\n' * 12)]:
-                pointer, reason = feishu_bridge._prepare_tui_text('unit', mid, body, runtime_bot={'profile': 'cxp'})
-                saved = Path(tmp) / f'bridge-inbox-unit-{bridge_inbox.prompt_digest(mid)[:24]}.txt'
-                self.assertEqual(saved.read_bytes(), body.encode('utf-8'))
-                self.assertIn(saved.as_posix(), pointer)
-                self.assertIn('Codex长稿', reason)
-                self.assertLess(len(pointer), 500)
+            for body in ['保留原文😀' * 210, '一行\r\n' * 15]:
+                self.assertEqual(feishu_bridge._prepare_tui_text(
+                    'unit', 'om_original', body, runtime_bot={'profile': 'cxp'}), (body, ''))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_cron_uses_same_lossless_body_policy_and_keeps_occurrence_route(self):
         import bridge_cron
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, 'STATE_DIR', Path(tmp)), \
                 mock.patch.object(feishu_bridge.agent_runtime, 'uses_app_server', return_value=True):
-            body = '完整中文😀\n\n' * 250
+            body = '完整中文😀\n\n' * 2500
             job = dict(name='nightly', bot='unit', prompt=body)
             marker = bridge_cron._marker(job, stamp='2026-11-15 10:00', runtime_bot={'profile': 'cxp'})
             saved = next(Path(tmp).glob('bridge-inbox-unit-*.txt'))
             self.assertEqual(saved.read_bytes(), body.strip().encode('utf-8'))
             self.assertIn(saved.as_posix(), marker)
-            self.assertIn('from=cron:nightly to=unit via=定时 · route=p2a mid=cron:nightly:2026-11-15T10:00', marker)
+            self.assertIn('from=cron:nightly to=unit via=定时 route=p2a mid=cron:nightly:2026-11-15T10:00', marker)
             self.assertEqual(marker, bridge_cron._marker(job, stamp='2026-11-15 10:00', runtime_bot={'profile': 'cxp'}))
             # Editing a job in the same minute must not overwrite a pending input's file.
             bridge_cron._marker(dict(job, prompt=body + 'changed'), stamp='2026-11-15 10:00',

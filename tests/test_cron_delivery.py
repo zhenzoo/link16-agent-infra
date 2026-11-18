@@ -519,3 +519,14 @@ def test_error_text_alone_is_not_non_submission_proof(scene):
     with pytest.raises(TypeError):
         scene.inbox.scheduled_not_submitted(scene.row['id'], RuntimeError('not_written'), limit=3, delay=0)
     assert scene.inbox.get(scene.row['id'])['retry_safe'] == 0
+
+
+@pytest.mark.parametrize('draft, visible', [
+    ('6[Pasted Content 5 chars]', True), ('[Pasted Content 6 chars]', True),
+    ('[Pasted Content 5 chars]尾', True), ('X[Pasted Content 5 chars]', False),
+    ('[Pasted Content 7 chars]', False), ('unrelated draft', False)])
+def test_folded_composer_only_confirms_rendering_for_the_first_enter(draft, visible):
+    screen = f'› {draft}\n\n  gpt-6 · current workspace'
+    prompt = '6中\n文😀尾'
+    assert delivery.initial_paste_visible(screen, prompt) == visible
+    assert not delivery.draft_matches(screen, prompt)

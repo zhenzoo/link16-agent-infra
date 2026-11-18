@@ -281,6 +281,7 @@ def _marker(job, *, stamp=None, runtime_bot=None):
     bot = job.get("bot", "?")
     stamp = stamp or job.get('_scheduled_stamp')
     text = job.get('prompt', '').strip()
+    separator = ' · '
     if runtime_bot is not None:
         import feishu_bridge as fb
         from bridge_inbox import prompt_digest
@@ -288,8 +289,10 @@ def _marker(job, *, stamp=None, runtime_bot=None):
         # at occurrence registration; resumed deliveries keep their saved body.
         text, _ = fb._prepare_tui_text(bot, f'cron:{name}:{stamp}:{prompt_digest(text)}', text,
                                        runtime_bot=runtime_bot)
+        if fb.agent_runtime.uses_app_server(runtime_bot):
+            separator = ' '
     occurrence = f" mid=cron:{name}:{stamp.replace(' ', 'T')}" if stamp else ''
-    return f"{text} [飞书 from=cron:{name} to={bot} via=定时 · route=p2a{occurrence}]"
+    return f"{text} [飞书 from=cron:{name} to={bot} via=定时{separator}route=p2a{occurrence}]"
 
 
 def _watchdog_waiting_for_short_limit(bot_name):
@@ -962,6 +965,8 @@ def main():
         return value
 
     if cmd == "run":
+        if '--service-log' in argv:
+            bridge_process.open_service_log(LOG_PATH)
         with bridge_process.service('cron', Path(__file__)):
             cmd_run()
     elif cmd == "start":

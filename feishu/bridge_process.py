@@ -16,6 +16,7 @@ import sys
 import time
 
 from bridge_injection import ProcessFileLock
+from codex_startup import process_alive
 
 QUERY_TIMEOUTS = (15, 45)
 LOCK_DIR = Path.home() / '.link16' / 'service-locks'
@@ -24,6 +25,32 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 class ProcessControlError(RuntimeError):
     pass
+
+
+def launch_service(script, cwd, *args):
+    """Create the service under Windows management, outside the invoking PTY tree."""
+    command = subprocess.list2cmdline([sys.executable, '-u', str(script), 'run', *args, '--service-log'])
+    launch = """
+$ErrorActionPreference = 'Stop'
+$startup = New-CimInstance -ClientOnly -ClassName Win32_ProcessStartup -Property @{ShowWindow=[uint16]0}
+$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine=$env:LINK16_START_COMMAND; CurrentDirectory=$env:LINK16_START_DIRECTORY; ProcessStartupInformation=$startup
+}
+if ($result.ReturnValue -ne 0) { throw "Windows service launch failed ($($result.ReturnValue))" }
+@{ok=$true; pid=$result.ProcessId} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        ['powershell', '-NoProfile', '-NonInteractive', '-Command', launch],
+        env={**os.environ, 'LINK16_START_COMMAND': command, 'LINK16_START_DIRECTORY': str(cwd)},
+        capture_output=True, text=True, errors='replace', timeout=45, creationflags=NO_WINDOW)
+    return int(_envelope(result)['pid'])
+
+
+def open_service_log(path):
+    """WMI starts a new process without inheriting the controller's log handles."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream = path.open('a', encoding='utf-8', buffering=1)
+    sys.stdout = sys.stderr = stream
 
 
 def _powershell(script, timeout):
@@ -215,21 +242,16 @@ def start_daemon(script, log_path, identity, cwd):
     with control_lock(identity):
         stop_pids(require_known(service_pids(script)))
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, 'a', encoding='utf-8') as log:
-            proc = subprocess.Popen(
-                [sys.executable, str(script), 'run'], stdout=log, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, cwd=str(cwd),
-                creationflags=NO_WINDOW | getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0),
-            )
+        pid = launch_service(script, cwd)
         deadline = time.monotonic() + sum(QUERY_TIMEOUTS) + 10
         while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise ProcessControlError(f'{identity} 启动退出={proc.returncode}，请看 {log_path}')
-            if ready_pid(identity) == proc.pid:
-                print(f'{identity} 已持有服务锁，pid={proc.pid}；日志 {log_path}')
+            if not process_alive(pid):
+                raise ProcessControlError(f'{identity} 启动退出，请看 {log_path}')
+            if ready_pid(identity) == pid:
+                print(f'{identity} 已持有服务锁，pid={pid}；日志 {log_path}')
                 return 0
             time.sleep(0.1)
-        raise ProcessControlError(f'{identity} 未取得服务锁；启动未验收，pid={proc.pid}')
+        raise ProcessControlError(f'{identity} 未取得服务锁；启动未验收，pid={pid}')
 
 
 def stop_daemon(script, identity):

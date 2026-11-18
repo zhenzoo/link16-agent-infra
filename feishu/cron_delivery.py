@@ -59,6 +59,20 @@ def draft_matches(screen, prompt):
     return bool(draft) and compact(draft) == compact(prompt)
 
 
+def initial_paste_visible(screen, prompt):
+    """Readiness for the first Enter after our own paste, never proof for replay."""
+    if draft_matches(screen, prompt):
+        return True
+    draft = _draft(screen) or ''
+    folded = re.fullmatch(r'(.*?)\[Pasted Content ([0-9]+) chars\](.*)', draft, re.DOTALL)
+    if not folded:
+        return False
+    prefix, count, suffix = folded.groups()
+    text = prompt.replace('\r\n', '\n').replace('\r', '\n')
+    return (text.startswith(prefix) and text.endswith(suffix)
+            and len(prefix) + int(count) + len(suffix) == len(text))
+
+
 def empty_composer(screen):
     # Same native placeholder accepted by initial bridge injection. The parser
     # still requires a complete composer/footer; an unreadable frame is not empty.

@@ -30,6 +30,31 @@ def nested_bridge_function(name, env):
 
 
 class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interrupted_close_edits_original_card_after_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inbox = feishu_bridge.bridge_inbox.Inbox(tmp, 'unit')
+            for mid in ('interrupted', 'finished'):
+                inbox.receive({'message': {'message_id': mid}})
+                self.assertEqual(inbox.claim()['id'], mid)
+                inbox.boundary(mid)
+                inbox.save_close_card(mid, 'oc_chat', 'om_' + mid)
+            inbox.save_close_card('finished', 'oc_chat', 'om_finished', '🗑 已关闭会话')
+            self.assertEqual(inbox.pending_close_cards(), [])
+            inbox.finish('finished')
+            inbox.recover()
+            with mock.patch.object(feishu_bridge, 'command_card', new_callable=mock.AsyncMock) as edit:
+                edit.return_value = None
+                await feishu_bridge.reconcile_close_cards(None, 'unit', inbox)
+                self.assertEqual(len(inbox.pending_close_cards()), 2)
+                edit.reset_mock()
+                edit.return_value = 'edited'
+                await feishu_bridge.reconcile_close_cards(None, 'unit', inbox)
+                by_id = {call.kwargs['message_id']: call.args[2] for call in edit.await_args_list}
+                self.assertIn('中断', by_id['om_interrupted'])
+                self.assertEqual(by_id['om_finished'], '🗑 已关闭会话')
+                self.assertEqual(inbox.pending_close_cards(), [])
+                self.assertEqual(inbox.get('interrupted')['state'], 'uncertain')
+
     async def test_unknown_card_creation_does_not_append_a_result_card(self):
         handler = self.handler()
         self.env["command_card"].return_value = None

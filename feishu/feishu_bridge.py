@@ -69,8 +69,6 @@ CARD_SAFE_CHARS = 3000            # 答案单卡安全容量：≤ 此值 card_s
 #   OK / 吞吐截断是 warmup 假象"的结论是错的·已被真实截断推翻——别再据此放行裸 send）。
 #   普通换行原文直发；含 TAB 或超长文本才在 on_message 上游落盘转 Read，TUI 只接收单行短指令。
 SEND_MAX_CHARS = 16000   # marker 作 node 命令行参传递的天花板(~Windows CreateProcess 32767 留余量·send/paste 共用·与截断无关)
-CODEX_INLINE_MAX_UNITS = 1000
-CODEX_INLINE_MAX_LINES = 10
 # 注入投递保证（§2.12b · 2026-07-16）：paste 后别盲等 0.3s 就 enter——settle 按字数线性伸缩 + 回车后读屏闭环校验重按。
 INJECT_SETTLE_BASE = 0.2         # settle 基线秒（短消息 1 块 ≈ 这个值·闭环兜底→可略激进）
 INJECT_SETTLE_PER_CHUNK = 0.03   # 每 100 字块 + 这么多秒（长文本 TUI 消化更久·线性给）
@@ -986,10 +984,6 @@ def _prepare_tui_text(bot_name, message_id, text, *, runtime_bot=None):
         reason = "含制表符 TAB·内联会损坏"
     elif _cmdline_units(text) > SEND_MAX_CHARS:
         reason = "超长·内联会撑爆命令行上限"
-    elif (runtime_bot and agent_runtime.uses_app_server(runtime_bot)
-          and (_cmdline_units(text) > CODEX_INLINE_MAX_UNITS
-               or len(text.splitlines()) > CODEX_INLINE_MAX_LINES)):
-        reason = "Codex长稿改为完整文件交接，避免后台输入框折叠后无法核实提交"
     if not reason:
         return text, ""
     try:
@@ -1981,6 +1975,15 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
     chunks = max(1, -(-len(marker) // 100))
     time.sleep(min(INJECT_SETTLE_CAP, INJECT_SETTLE_BASE + INJECT_SETTLE_PER_CHUNK * chunks))
+    if is_codex and win32_input and len(marker) > 1000:
+        # ConPTY can take several seconds after the write to render a large paste.
+        # Enter during this interval becomes a newline in the still-growing paste.
+        # We still own the initial injection lock. Recovery requires an exact draft.
+        deadline = time.monotonic() + 30
+        while not cron_delivery.initial_paste_visible(read_screen(pty, None), marker):
+            if time.monotonic() >= deadline:
+                raise RuntimeError('长稿粘贴后未能核实完整输入框，尚未按回车；原稿已保留')
+            time.sleep(0.25)
     if steer_kimi:
         wmux("send", pty, "\x1b[115;5u", *allow)
     else:
@@ -2588,6 +2591,13 @@ async def command_card(channel, target, text, name, *, message_id=None):
         return None
 
 
+async def reconcile_close_cards(channel, bot_name, inbox):
+    for mid, card in await asyncio.to_thread(inbox.pending_close_cards):
+        text = card['result'] or '⚠️ 桥在关闭途中中断，未取得完整关闭回执。可用 /screen 查看当前会话。'
+        if await command_card(channel, card['chat'], text, bot_name, message_id=card['card']):
+            await asyncio.to_thread(inbox.clear_close_card, mid)
+
+
 # ---------- 后台镜像器：把【终端原生轮次】也搬到飞书 DM（双向完整同步 · ARCH-101 §2.8）----------
 def mirror_target(bot_name):
     """镜像 / 主动推送的 DM 目标（优先私聊 open_id）：owner open_id > 会话 open_id > 会话 chat_id。
@@ -2970,11 +2980,13 @@ def _ensure_single_instance(bot_name):
 
 
 # ---------- run：单个 bot（lark_channel 一进程一 WS）----------
-def run(bot_name=None):
+def run(bot_name=None, *, service_log=False):
     bots = load_bots()
     name = bot_name or (bots[0]['name'] if bots else None)
     if not name or name not in {b['name'] for b in bots}:
         raise bridge_process.ProcessControlError(f'未知 bot：{name}')
+    if service_log:
+        bridge_process.open_service_log(LOG_DIR / f"bridge-{name}.log")
     lease = _ensure_single_instance(name)
     try:
         return _run_bot(name)
@@ -3077,6 +3089,8 @@ def _run_bot(bot_name=None):
             if cmd == "/close":
                 close_card = await command_card(channel, chat_id,
                                                 "🔄 已收到 `/close`，正在关闭会话并释放占用……", bot["name"])
+                if close_card and inbound_id:
+                    await asyncio.to_thread(durable_inbox.save_close_card, inbound_id, chat_id, close_card)
             elif cmd in ("/account", "/acc", "/账号") and arg:
                 await reply(chat_id, "🔄 已收到账号切换请求，正在检查账号并关闭旧会话；不会自动启动新会话……")
             rec = load_session(bot["name"])
@@ -3209,12 +3223,19 @@ def _run_bot(bot_name=None):
                         "residual": "（输入框仍有顽固残留·去终端瞄一眼）"}.get(status, "")
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
+                async def finish_close_card(result):
+                    if not close_card:
+                        return
+                    if inbound_id:
+                        await asyncio.to_thread(durable_inbox.save_close_card, inbound_id, chat_id, close_card, result)
+                    edited = await command_card(channel, chat_id, result, bot["name"], message_id=close_card)
+                    if edited and inbound_id:
+                        await asyncio.to_thread(durable_inbox.clear_close_card, inbound_id)
+
                 try:
                     closed = await asyncio.to_thread(replace_session, bot, account_default)
                 except Exception as e:
-                    if close_card:
-                        await command_card(channel, chat_id, f"⛔ 关闭未完成：{str(e)[:200]}。未清除旧会话绑定。",
-                                           bot["name"], message_id=close_card)
+                    await finish_close_card(f"⛔ 关闭未完成：{str(e)[:200]}。未清除旧会话绑定。")
                     return
                 durable_inbox.cancel_before(inbound_id)
                 bridge_outbox.pending_clear(str(STATE_DIR), bot["name"])
@@ -3223,10 +3244,7 @@ def _run_bot(bot_name=None):
                 head = "🗑 已关闭会话" if closed["had_session"] else "🛌 会话已关闭，无残留占用"
                 if closed.get("locks_released"):
                     head += "，Kimi 占用已释放"
-                if close_card:
-                    await command_card(channel, chat_id,
-                                       f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）",
-                                       bot["name"], message_id=close_card)
+                await finish_close_card(f"{head}（下次 @ 我自动重开 · 用默认账号 `{default_acc}` · 默认目录 `{def_dir}`）")
                 return
             if cmd in ("/handoff", "/交接", "/接手"):
                 # `/close` 的进阶版（主人 2026-08-21 定）：**关掉当前会话 → 开一个全新 context →
@@ -3878,9 +3896,8 @@ def _run_bot(bot_name=None):
                     text, file_reason = _prepare_tui_text(bot["name"], msg.id, text, runtime_bot=bot)
                     if file_reason:
                         blog(bot["name"], f"[{tid}] 📄 {file_reason}，原文已存入消息专属 inbox 文件")
-                    # The decorative middle dot is lost by Windows Codex input;
-                    # omit it on file handoffs so the native receipt digest matches.
-                    separator = " " if file_reason else " · "
+                    # Keep the Codex envelope ASCII-delimited for exact native receipts.
+                    separator = " " if file_reason or agent_runtime.uses_app_server(bot) else " · "
                     marker = f"{text} [飞书 from={from_disp} to={bot['name']} via={via_disp}{separator}{env_route} mid={msg.id}]"
                     # 注入前快照各 jsonl mtime → _resolve_jsonl 据此辨「被本次注入唤醒的会话」（防旁观会话串台）
                     pre = ({} if agent_runtime.runtime_name(bot) == 'codex' else
@@ -4160,6 +4177,14 @@ def _run_bot(bot_name=None):
                 outage.poll()
         asyncio.create_task(_watch_outage())
 
+        async def _recover_close_cards():
+            while not control.stopping():
+                try:
+                    await reconcile_close_cards(ch, bname, durable_inbox)
+                except Exception as exc:
+                    blog(bname, f'关闭回执恢复暂未完成：{type(exc).__name__}')
+                await asyncio.sleep(30)
+
         async def _watch_inbound_receipts():
             while not control.stopping():
                 await asyncio.sleep(2)
@@ -4189,6 +4214,7 @@ def _run_bot(bot_name=None):
         wake = asyncio.Event()
         ch.bind_inbox(wake)
         await ch.start_background(timeout=None)
+        asyncio.create_task(_recover_close_cards())
         control.publish('ready', inbox=durable_inbox.counts())
         blog(bname, '持久收件已就绪：落盘后确认接收；stop 立即生效，未完成的待办重启后续接。')
         async def _dispatch(payload, received):
@@ -4276,8 +4302,7 @@ def cmd_start(bot_filter=None, *, only_missing=False):
 
 def _start_locked(bot_filter=None, *, only_missing=False):
     """为每个 bot 各起一个脱离终端的后台进程 run --bot <name>（各自日志 · 各自单实例锁）。
-    用 subprocess.Popen + DETACHED_PROCESS 直接起 —— 比 powershell Start-Process 可靠
-    （后者实测会 hang 住不返回、卡住后续 bot · 2026-06-15）。
+    Windows 管理服务创建常驻进程，使关闭调用者的 Wmux 工作区不会终止桥和守护进程。
     bot_filter 给定（裸命令 + `--bot X`）→ 只起这一个 bot；已在跑则 start 确认退出后替换；run 持有生命周期锁。"""
     bots = load_bots()
     if bot_filter:
@@ -4303,7 +4328,7 @@ def _start_locked(bot_filter=None, *, only_missing=False):
     started = []
     children = []
     total = len(bots)
-    # 逐个起、**逐行打**（2026-08-19 主人提）：子进程是 DETACHED_PROCESS·无窗口，屏幕上看不到任何动静；
+    # 逐个起、逐行打：常驻服务在后台启动，调用方需要看到每个 bot 的启动进度。
     # 34 个 bot 要起约 17 秒，一次性在末尾打一大串 = 这十几秒主人不知道有没有在动、卡在谁身上。
     # 每起一个就 flush 一行（序号/名字/PID），把「正在发生」变成看得见的。flush=True 不能省：
     # stdout 被管道接走时是块缓冲，不 flush 仍会攒到最后一次性吐，等于没改。
@@ -4317,25 +4342,16 @@ def _start_locked(bot_filter=None, *, only_missing=False):
             print(f"  已确认旧 bot 退出：{pids}", flush=True)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         script = str(Path(__file__).resolve())
-        detached = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP  # DETACHED_PROCESS · 无窗口 · 关终端不死
         print(f"⏳ 正在启动 {total} 个 bot（各自脱离终端·关终端不死）…", flush=True)
         for i, b in enumerate(bots, 1):
             nm = b["name"]
             # append 模式：保留历史（旧版 "w" 每次 start 截断 → 出问题无从复盘 · 2026-06-15 修）
-            logf = open(LOG_DIR / f"bridge-{nm}.log", "a", encoding="utf-8")  # noqa: SIM115 — 句柄交给子进程
-            try:
+            with open(LOG_DIR / f"bridge-{nm}.log", "a", encoding="utf-8") as logf:
                 logf.write(f"\n========== restart {time.strftime('%Y-%m-%d %H:%M:%S')} ==========\n")
-                logf.flush()
-                proc = subprocess.Popen(
-                    [sys.executable, script, "run", "--bot", nm],
-                    stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                    creationflags=detached, cwd=str(PROJECT),
-                )
-            finally:
-                logf.close()
+            pid = bridge_process.launch_service(script, PROJECT, '--bot', nm)
             started.append(nm)
-            children.append((nm, proc))
-            print(f"  [{i:>2}/{total}] ✅ {nm:<26} pid={proc.pid}", flush=True)
+            children.append((nm, pid))
+            print(f"  [{i:>2}/{total}] ✅ {nm:<26} pid={pid}", flush=True)
             if i < total:
                 time.sleep(0.5)  # 错开起，给各自 _ensure 单实例锁一点余地（最后一个不用再等）
     finally:
@@ -4355,17 +4371,17 @@ def _start_locked(bot_filter=None, *, only_missing=False):
     deadline = time.monotonic() + sum(_PIDS_QUERY_TIMEOUTS) + 15
     next_report = time.monotonic() + 5
     while children:
-        for name, child in list(children):
-            if child.poll() is not None:
-                problems.append(f'{name} 启动失败 exit={child.returncode}，请看桥日志')
-                children.remove((name, child))
+        for name, pid in list(children):
+            if not bridge_process.process_alive(pid):
+                problems.append(f'{name} 启动失败，进程已退出，请看桥日志')
+                children.remove((name, pid))
                 continue
-            state = bridge_control.read_state(bridge_control.control_path(STATE_DIR, child.pid))
-            if (bridge_process.ready_pid('bridge:' + name) == child.pid
-                    and state.get('pid') == child.pid and state.get('bot') == name
+            state = bridge_control.read_state(bridge_control.control_path(STATE_DIR, pid))
+            if (bridge_process.ready_pid('bridge:' + name) == pid
+                    and state.get('pid') == pid and state.get('bot') == name
                     and state.get('contract') == bridge_control.CONTRACT
                     and state.get('state') in ('ready', 'handling')):
-                children.remove((name, child))
+                children.remove((name, pid))
         if not children:
             break
         if time.monotonic() >= deadline:
@@ -4805,6 +4821,7 @@ def cmd_doctor(bot_filter=None):
 def main():
     _force_utf8_std()          # 必须在任何输出 / SDK logger 建起来之前（见函数注释：tb24 真崩过）
     ap = argparse.ArgumentParser(description="飞书智能体桥（owned-session 多 bot · 每 bot 一进程 · ARCH-101）")
+    ap.add_argument("--service-log", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("cmd", nargs="?", default="start",
                     choices=["run", "start", "stop", "status", "workspaces", "send", "doctor"],
                     help="(默认)start / run[--bot X] / stop / status / workspaces / send=主动推DM / doctor=一眼健康")
@@ -4834,7 +4851,7 @@ def main():
         from bot_names import local_name
         args.bot = local_name(args.bot)
     if args.cmd == "run":
-        run(args.bot)
+        run(args.bot, service_log=args.service_log)
     elif args.cmd == "start":
         try:
             cmd_start(args.bot, only_missing=args.only_missing)

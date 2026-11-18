@@ -154,6 +154,21 @@ class Inbox:
             row = db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
             return dict(row) if row else None
 
+    def save_close_card(self, mid, chat, card, result=None):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',
+                       ('close-card:' + mid, json.dumps(dict(chat=chat, card=card, result=result))))
+
+    def pending_close_cards(self):
+        with self.connect() as db:
+            return [(row['id'], json.loads(row['value'])) for row in db.execute(
+                """SELECT m.id, c.value FROM meta c JOIN messages m ON m.id=substr(c.key,12)
+                   WHERE c.key GLOB 'close-card:*' AND m.state IN ('uncertain','done','failed','cancelled')""")]
+
+    def clear_close_card(self, mid):
+        with self.connect() as db:
+            db.execute('DELETE FROM meta WHERE key=?', ('close-card:' + mid,))
+
     def import_legacy(self, read_records):
         """Carry old accepted IDs across cutover without asserting completion.
 

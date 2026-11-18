@@ -159,10 +159,6 @@ def test_only_missing_preserves_all_running_services(tmp_path, monkeypatch):
 
 def test_whole_start_still_starts_guardians_when_a_bridge_or_cron_fails(tmp_path, monkeypatch):
     """09-25 开机早于联网：一只桥起不来就抛错，看门狗没起，没人复活死桥。失败要最后再报。"""
-    class Exited:
-        pid, returncode = 4242, 1
-        def poll(self):
-            return 1
     guardians = []
     def run(cmd, **kw):
         guardians.append(Path(cmd[1]).name)
@@ -171,7 +167,8 @@ def test_whole_start_still_starts_guardians_when_a_bridge_or_cron_fails(tmp_path
     monkeypatch.setattr(fb, 'load_bots', lambda: [{'name': 'unit-bot'}])
     monkeypatch.setattr(p, 'query_processes', lambda *args: [])
     monkeypatch.setattr(fb, 'LOG_DIR', tmp_path)
-    monkeypatch.setattr(fb.subprocess, 'Popen', lambda *args, **kw: Exited())
+    monkeypatch.setattr(p, 'launch_service', lambda *args: 4242)
+    monkeypatch.setattr(p, 'process_alive', lambda pid: False)
     monkeypatch.setattr(fb.subprocess, 'run', run)
     with pytest.raises(p.ProcessControlError, match='cron 守护进程启动未完成.*unit-bot 启动失败'):
         fb.cmd_start()
@@ -180,10 +177,6 @@ def test_whole_start_still_starts_guardians_when_a_bridge_or_cron_fails(tmp_path
 
 def test_whole_start_stops_old_guardians_before_replacing_bridge(tmp_path, monkeypatch):
     events = []
-    class Exited:
-        pid, returncode = 4242, 1
-        def poll(self):
-            return 1
     monkeypatch.setattr(fb, 'load_bots', lambda: [{'name': 'unit-bot'}])
     monkeypatch.setattr(p, 'query_processes', lambda *args: [
         row(101), row(102, 'bridge_cron.py'), row(103, 'bridge_watchdog.py')])
@@ -191,7 +184,8 @@ def test_whole_start_stops_old_guardians_before_replacing_bridge(tmp_path, monke
     monkeypatch.setattr(fb, '_kill', lambda ids: events.append(('stop', ids)))
     monkeypatch.setattr(fb.bridge_control, 'stop_bridges',
                         lambda sd, ids, kill: events.append(('stop-bot', ids)))
-    monkeypatch.setattr(fb.subprocess, 'Popen', lambda *args, **kw: Exited())
+    monkeypatch.setattr(p, 'launch_service', lambda *args: 4242)
+    monkeypatch.setattr(p, 'process_alive', lambda pid: False)
     monkeypatch.setattr(fb.subprocess, 'run', lambda cmd, **kw: events.append(('start', Path(cmd[1]).name)))
     with pytest.raises(p.ProcessControlError, match='unit-bot 启动失败'):
         fb.cmd_start()
@@ -211,7 +205,7 @@ def test_whole_start_recovers_guardians_when_spawn_is_interrupted(tmp_path, monk
                         lambda sd, ids, kill: events.append(('stop-bot', ids)))
     def interrupted_spawn(*args, **kwargs):
         raise KeyboardInterrupt()
-    monkeypatch.setattr(fb.subprocess, 'Popen', interrupted_spawn)
+    monkeypatch.setattr(p, 'launch_service', interrupted_spawn)
     monkeypatch.setattr(fb.subprocess, 'run', lambda cmd, **kw: events.append(('start', Path(cmd[1]).name)))
     with pytest.raises(KeyboardInterrupt):
         fb.cmd_start()

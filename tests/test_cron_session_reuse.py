@@ -23,7 +23,8 @@ def scene(tmp_path, monkeypatch):
     fb = SimpleNamespace(
         STATE_DIR=tmp_path, bridge_injection=bridge_injection,
         load_bots=lambda: [bot], load_session=Mock(return_value=record),
-        agent_runtime=SimpleNamespace(profile_name=lambda *a, **k: "test", runtime_name=lambda b: b["agent"]),
+        agent_runtime=SimpleNamespace(profile_name=lambda *a, **k: "test", runtime_name=lambda b: b["agent"],
+                                      uses_app_server=lambda b: b["agent"] == "codex"),
         bridge_activity=SimpleNamespace(read_activity=Mock(return_value={"state": "idle"})),
         wmux_session=SimpleNamespace(pty_agent_status=Mock(return_value="idle")),
         bridge_outbox=SimpleNamespace(pending_clear=Mock()),
