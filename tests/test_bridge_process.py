@@ -2,8 +2,10 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -19,6 +21,81 @@ import bridge_cron as cron
 @pytest.fixture(autouse=True)
 def isolate_locks(tmp_path, monkeypatch):
     monkeypatch.setattr(p, 'LOCK_DIR', tmp_path / 'locks')
+    monkeypatch.setattr(p, 'windows_managed', lambda: True)
+    monkeypatch.setattr(p, 'in_restart_worker', True)
+
+
+@pytest.mark.parametrize('target', ['bridge', 'cron', 'watchdog'])
+def test_terminal_start_delegates_before_taking_locks_or_stopping_services(target, monkeypatch):
+    from unittest.mock import Mock
+    # Even an existing WMI-hosted service cannot own its own replacement.
+    monkeypatch.setattr(p, 'in_restart_worker', False)
+    monkeypatch.setattr(p, 'control_lock', lambda *a: pytest.fail('terminal took a production lock'))
+    launch = Mock(side_effect=p.ProcessControlError('WMI unavailable'))
+    monkeypatch.setattr(p, 'restart_in_windows', launch)
+    with pytest.raises(p.ProcessControlError, match='WMI unavailable'):
+        if target == 'bridge':
+            fb.cmd_start('unit-bot', only_missing=True)
+        else:
+            {'cron': cron, 'watchdog': w}[target].cmd_start()
+    if target == 'bridge':
+        assert launch.call_args.args[2:] == ('--bot', 'unit-bot', '--only-missing')
+    else:
+        assert launch.call_count == 1
+
+
+@pytest.mark.parametrize('module, args', [(fb, ['run', '--bot', 'unit-bot']), (w, ['run']), (cron, ['run'])])
+def test_foreground_run_rejects_even_with_internal_log_option(module, args, monkeypatch):
+    monkeypatch.setattr(sys, 'argv', [module.__file__, *args, '--service-log'])
+    monkeypatch.setattr(p, 'windows_managed', lambda: False)
+    monkeypatch.setattr(p, 'open_service_log', lambda *a: pytest.fail('changed service log'))
+    monkeypatch.setattr(p, 'acquire_service', lambda *a: pytest.fail('acquired a service'))
+    with pytest.raises(p.ProcessControlError, match='请用 start'):
+        module.main()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='actual Windows WMI handoff')
+def test_restart_finishes_after_the_requester_exits(tmp_path):
+    """Interrupt only the test client between the old and new service phases."""
+    for name in ('bridge_process.py', 'bridge_injection.py', 'codex_startup.py', 'bridge_events.py'):
+        shutil.copyfile(ROOT / 'feishu' / name, tmp_path / name)
+    entry = tmp_path / 'feishu_bridge.py'
+    entry.write_text('''from pathlib import Path
+import bridge_process as p
+import time
+if not p.in_restart_worker:
+    p.restart_in_windows(__file__, Path.cwd())
+else:
+    p.require_windows_manager()
+    Path("stopped").touch()
+    for _ in range(200):
+        if Path("resume").exists():
+            break
+        time.sleep(.1)
+    else:
+        raise RuntimeError("test resume timeout")
+    Path("ready").touch()
+''', encoding='utf-8')
+    requester = subprocess.Popen([sys.executable, str(entry), 'start'], cwd=tmp_path,
+                                 creationflags=p.NO_WINDOW)
+    try:
+        deadline = time.monotonic() + 30
+        while not (tmp_path / 'stopped').exists():
+            assert requester.poll() is None and time.monotonic() < deadline
+            time.sleep(.1)
+        requester.terminate()
+        requester.wait(timeout=10)
+        (tmp_path / 'resume').touch()
+        log, = (tmp_path / '_logs').glob('restart-*.log')
+        while '[link16-restart-exit] 0' not in log.read_text(encoding='utf-8'):
+            assert time.monotonic() < deadline
+            time.sleep(.1)
+        assert (tmp_path / 'ready').exists()
+    finally:
+        (tmp_path / 'resume').touch()
+        if requester.poll() is None:
+            requester.terminate()
+        requester.wait(timeout=10)
 
 
 def result(value, stderr='', rc=0):

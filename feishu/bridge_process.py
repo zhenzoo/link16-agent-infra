@@ -10,9 +10,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 from bridge_injection import ProcessFileLock
@@ -27,9 +29,8 @@ class ProcessControlError(RuntimeError):
     pass
 
 
-def launch_service(script, cwd, *args):
-    """Create the service under Windows management, outside the invoking PTY tree."""
-    command = subprocess.list2cmdline([sys.executable, '-u', str(script), 'run', *args, '--service-log'])
+def _windows_launch(argv, cwd):
+    command = subprocess.list2cmdline([sys.executable, '-u', *map(str, argv)])
     launch = """
 $ErrorActionPreference = 'Stop'
 $startup = New-CimInstance -ClientOnly -ClassName Win32_ProcessStartup -Property @{ShowWindow=[uint16]0}
@@ -44,6 +45,79 @@ if ($result.ReturnValue -ne 0) { throw "Windows service launch failed ($($result
         env={**os.environ, 'LINK16_START_COMMAND': command, 'LINK16_START_DIRECTORY': str(cwd)},
         capture_output=True, text=True, errors='replace', timeout=45, creationflags=NO_WINDOW)
     return int(_envelope(result)['pid'])
+
+
+def launch_service(script, cwd, *args):
+    return _windows_launch([script, 'run', *args, '--service-log'], cwd)
+
+
+def windows_managed():
+    """Check the actual Windows parent; command-line flags cannot assert ownership."""
+    result = _powershell(
+        f"$parent = Get-Process -Id {os.getppid()} -ErrorAction Stop; "
+        "@{ok=$true; managed=($parent.ProcessName -eq 'WmiPrvSE')} | ConvertTo-Json -Compress", 15)
+    return _envelope(result).get('managed') is True
+
+
+def require_windows_manager():
+    if not windows_managed():
+        raise ProcessControlError('生产服务由 Windows 后台运行；请用 start，禁止从终端直接运行 run')
+
+
+_RESTART_EXIT = '[link16-restart-exit] '
+# Only the verified, short-lived restart worker sets this. Resident WMI services
+# are clients too: replacing a service must never terminate the restart owner.
+in_restart_worker = False
+
+
+def restart_in_windows(script, cwd, *args):
+    """Only the Windows worker can stop services. Its caller just follows the log."""
+    log_dir = Path(script).resolve().parent / '_logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=log_dir, prefix='restart-', suffix='.log', delete=False) as log:
+        path = Path(log.name)
+    pid = _windows_launch([Path(__file__).resolve(), path, Path(script).resolve(), *args], cwd)
+    print(f'Windows 已接管重启（PID {pid}）；关闭终端仍会继续。日志：{path}', flush=True)
+    with path.open(encoding='utf-8', errors='replace') as log:
+        while True:
+            alive = process_alive(pid)
+            for line in log:
+                if line.startswith(_RESTART_EXIT) and line.rstrip().endswith(' ' + path.name):
+                    code = int(line.removeprefix(_RESTART_EXIT).split()[0])
+                    if code:
+                        raise SystemExit(code)
+                    return 0
+                print(line, end='', flush=True)
+            if not alive:
+                raise ProcessControlError(f'后台重启进程已退出，未取得结果；请查 {path}')
+            time.sleep(0.2)
+
+
+def _restart_worker(log_path, script, *args):
+    global in_restart_worker
+    require_windows_manager()
+    open_service_log(Path(log_path))
+    if Path(script).resolve() not in {Path(__file__).with_name(name).resolve() for name in
+                                      ('feishu_bridge.py', 'bridge_cron.py', 'bridge_watchdog.py')}:
+        raise ProcessControlError('未知的桥服务启动脚本')
+    sys.argv = [script, 'start', *args]
+    code = 1
+    try:
+        in_restart_worker = True
+        runpy.run_path(script, run_name='__main__')
+        code = 0
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else int(exc.code is not None)
+        if exc.code is not None and not isinstance(exc.code, int):
+            print(exc.code, file=sys.stderr)
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1) from None
+    finally:
+        in_restart_worker = False
+        print(f'{_RESTART_EXIT}{code} {Path(log_path).name}', flush=True)
 
 
 def open_service_log(path):
@@ -239,6 +313,8 @@ def service(identity, script, bot=None):
 
 
 def start_daemon(script, log_path, identity, cwd):
+    if not in_restart_worker:
+        return restart_in_windows(script, cwd)
     with control_lock(identity):
         stop_pids(require_known(service_pids(script)))
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
@@ -260,3 +336,9 @@ def stop_daemon(script, identity):
         stop_pids(pids)
         print(f'{identity} 已确认停止 PID={pids}')
         return 0
+
+
+if __name__ == '__main__':
+    # The target CLI imports bridge_process by name; keep the worker flag there.
+    import bridge_process
+    bridge_process._restart_worker(*sys.argv[1:])

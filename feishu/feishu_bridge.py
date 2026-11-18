@@ -18,7 +18,7 @@
 斜杠命令：/handoff [profile](=/交接) 换全新 context、可指定接手账号，并让它先读懂历史再跟你对齐 · /clear 清空上下文 · /cd（无参=列当前目录子目录回数字钻进 · `..` 上一级 · `<名字/路径>` 跳别处）· /account（从 agent-profiles.json 动态列出/切换 profile，原子更新该 bot 名册项并关旧会话重起）· /screen 看现场 · /stop 打断 · /close 关会话
 per-bot 会话注册表：feishu/_state/bridge-session-<bot>.json（各进程自写自读 · 无多进程 race）
 配置：feishu/bridge-bots.local.json（本机覆盖）或 feishu/bridge-bots.json（每 bot 只持久 profile + 传输/业务字段）
-子命令：start（默认·裸跑 `python feishu_bridge.py` 即把所有 bot 各起一隐藏进程） / run [--bot X]（前台调试单 bot） / stop（停全部） / status / workspaces
+子命令：start（默认，由 Windows 后台启动所有 bot） / run [--bot X]（Windows 后台专用） / stop（停全部） / status / workspaces
 安全：ALLOWED_OPEN_IDS 白名单（全 bot 共享）。
 """
 import argparse
@@ -2981,6 +2981,7 @@ def _ensure_single_instance(bot_name):
 
 # ---------- run：单个 bot（lark_channel 一进程一 WS）----------
 def run(bot_name=None, *, service_log=False):
+    bridge_process.require_windows_manager()
     bots = load_bots()
     name = bot_name or (bots[0]['name'] if bots else None)
     if not name or name not in {b['name'] for b in bots}:
@@ -4296,6 +4297,11 @@ def _run_bot(bot_name=None):
 
 # ---------- 子命令 ----------
 def cmd_start(bot_filter=None, *, only_missing=False):
+    if not bridge_process.in_restart_worker:
+        args = ['--bot', bot_filter] if bot_filter else []
+        if only_missing:
+            args.append('--only-missing')
+        return bridge_process.restart_in_windows(__file__, PROJECT, *args)
     with bridge_process.control_lock('bridge-fleet'):
         return _start_locked(bot_filter, only_missing=only_missing)
 
@@ -4856,8 +4862,7 @@ def main():
         try:
             cmd_start(args.bot, only_missing=args.only_missing)
         except KeyboardInterrupt:
-            print("\n⏸ 重启等待被 Ctrl+C 中断；已启动的 bot 仍在后台，"
-                  "全局守护恢复已尝试。用 `status` 查看实际连接状态。", file=sys.stderr)
+            print("\n已结束本地等待。已交给 Windows 的重启会继续，用 `status` 查看结果。", file=sys.stderr)
             raise SystemExit(130) from None
     elif args.cmd == "stop":
         cmd_stop(args.bot)

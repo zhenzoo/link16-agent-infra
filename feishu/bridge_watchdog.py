@@ -2487,6 +2487,7 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "run":
+        bridge_process.require_windows_manager()
         if args.service_log:
             bridge_process.open_service_log(LOGS_DIR / 'watchdog.log')
         with bridge_process.service('watchdog', HERE / 'bridge_watchdog.py'):

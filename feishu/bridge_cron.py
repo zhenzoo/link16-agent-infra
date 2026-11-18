@@ -31,7 +31,6 @@
   python bridge_cron.py list [--bot X]              # 列 json（全部 / 某 bot）
   python bridge_cron.py fire <name> [--dry-run]     # 立刻手动触发一个 job（--dry-run 只打印 marker 不注入·测试用）
   python bridge_cron.py recover <name> [--bot X] [--adopt-draft]  # 原生接收确认；旧版遗留草稿须显式接管
-  python bridge_cron.py run                          # 前台跑守护循环（start 用它起后台）
   python bridge_cron.py start | stop | status        # 后台守护进程 起 / 停 / 看
   python bridge_cron.py check "0 9 * * *" [--n 5]    # 调试：打印该 cron 表达式未来 N 次触发（本地时区）
 
@@ -965,6 +964,7 @@ def main():
         return value
 
     if cmd == "run":
+        bridge_process.require_windows_manager()
         if '--service-log' in argv:
             bridge_process.open_service_log(LOG_PATH)
         with bridge_process.service('cron', Path(__file__)):
