@@ -613,6 +613,10 @@ def _ask_key(r):
     return ("ask", r.get("session"), hash(json.dumps(r.get("questions") or [], ensure_ascii=False, sort_keys=True)))
 
 
+def _request_key(record):
+    return record.get("turn_key") or (record.get("route") or {}).get("turn_key")
+
+
 def _route_key(route):
     route = route if isinstance(route, dict) else {}
     kind = route.get("kind") or "p2a"
@@ -1376,6 +1380,9 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             }
             _persist_answers()
         saved["completed_at"] = int(clock())
+        key = _request_key(record)
+        if key and not record.get("mid_turn"):
+            saved["final_turn_key"] = key
         _persist_answers()
         completed = sorted(
             ((value.get("completed_at") or 0, aid) for aid, value in answers.items()
@@ -1390,6 +1397,14 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
     for r in recs:
         kind = r.get("kind")
         state["_active_record_kind"] = kind
+        if kind == "progress":
+            # Late tool snapshots can carry a route captured before the final ACK.
+            key = _request_key(r)
+            answers = state.get("answer_delivery", {}).get("answers", {})
+            if (r.get("route") or {}).get("active") is False or (
+                key and any(receipt.get("final_turn_key") == key for receipt in answers.values())
+            ):
+                continue
         record_workline = None
         if workline_gate and kind in {"answer", "progress", "ask"}:
             record_workline = workline_gate(r)
@@ -1470,10 +1485,7 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 partial_diagnostic = bool(r.get("runtime") == "kimi" and r.get("kimi_diagnostic"))
                 same_context = (turn == state.get("v2_turn")
                                 and _route_key(r.get("route")) == _route_key(state.get("v2_route")))
-                # An answer seals a card, not the active turn's future events:
-                # Codex can ask for input and continue under the same turn ID.
-                # Its saved event/revision ACKs suppress replay while admitting
-                # new progress. Only a retired *other* turn is ignored here.
+                # A new request may continue under the same native Codex turn ID.
                 if turn != state.get("v2_turn") and turn in (state.get("v2_completed") or []):
                     continue
                 if turn != state.get("v2_turn"):

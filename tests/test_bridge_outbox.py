@@ -463,6 +463,41 @@ class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], cards.new)
         self.assertEqual([], cards.edits)
 
+    async def test_final_receipt_blocks_late_tools_even_after_restart(self):
+        state, cards = fresh_state(), RoutedResultCards()
+        commentary = {"event_id": "c1", "revision": 1, "kind": "commentary", "label": "正在核对"}
+        progress = {"kind": "progress", "contract": "milestone-v1", "root_turn": "native",
+                    "route": {"kind": "p2a", "turn_key": "first", "active": True},
+                    "steps": [commentary]}
+        await self.drain([progress], state, cards)
+        await self.drain([{"kind": "answer", "turn_key": "first", "anchor": "native",
+                           "text": "最终答复", "route": {"kind": "p2a"}}], state, cards)
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge_outbox.save_answer_state(tmp, "bot", state["answer_delivery"])
+            state = fresh_state()
+            state["answer_delivery"] = bridge_outbox.load_answer_state(tmp, "bot")
+        late_steps = [commentary, {"event_id": "tools", "revision": 2, "kind": "tool", "tool_count": 27}]
+        await self.drain([{**progress, "steps": late_steps},
+                          {"kind": "progress", "turn_key": "first", "turn": "native", "label": "late hook"}],
+                         state, cards)
+        self.assertEqual(2, len(cards.new))
+        self.assertEqual([], cards.edits)
+        self.assertIn("最终答复", cards.new[-1][0])
+        await self.drain([{**progress, "route": {"kind": "p2a", "turn_key": "next"},
+                           "steps": [{**commentary, "event_id": "c2", "label": "新的请求"}]}], state, cards)
+        self.assertEqual(3, len(cards.new))
+        self.assertIn("新的请求", cards.new[-1][0])
+
+    async def test_closed_route_drops_progress_but_mid_turn_answer_allows_more(self):
+        state, cards = fresh_state(), RoutedResultCards()
+        progress = {"kind": "progress", "turn_key": "request", "turn": "native", "label": "继续查"}
+        await self.drain([{**progress, "route": {"active": False}}], state, cards)
+        self.assertEqual([], cards.new)
+        await self.drain([{"kind": "answer", "turn_key": "request", "text": "阶段答复",
+                           "mid_turn": True}, progress], state, cards)
+        self.assertEqual(2, len(cards.new))
+        self.assertIn("继续查", cards.new[-1][0])
+
     async def test_legacy_progress_header_is_unchanged(self):
         state, cards = fresh_state(), FakeCards()
         await self.drain([{"kind": "progress", "turn": "t", "steps": [
