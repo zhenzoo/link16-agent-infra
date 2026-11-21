@@ -17,8 +17,14 @@ import register_feishu_app as register  # noqa: E402
 
 
 class DeviceGrantRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        # A synthetic unprefixed app must not inherit the test runner's actual fleet machine.
+        patch = mock.patch.object(register.registration_tenant.socket, "gethostname", return_value="test-host")
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_default_enterprise_dry_run_prefills_business_grants_for_every_runtime(self):
-        for runtime in ("claude", "codex", "kimi"):
+        for runtime in sorted(register.agent_runtime._PROFILE_RUNTIMES):
             profile = mock.Mock()
             profile.name, profile.runtime = "chosen", runtime
             with mock.patch.object(register.agent_runtime, "profile_spec", return_value=profile), \
@@ -220,6 +226,8 @@ class RegistrationLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
             root = Path(tmp)
             monitor = register.registration_monitor
+            stack.enter_context(mock.patch.object(register.registration_tenant.socket, "gethostname",
+                                                  return_value="test-host"))
             stack.enter_context(mock.patch.object(monitor, "STATE_DIR", root / "state"))
             stack.enter_context(mock.patch.object(monitor, "launch_monitor", return_value=os.getpid()))
             stack.enter_context(mock.patch.object(monitor.bridge_injection, "inject_bot_prompt", return_value={"ok": True}))

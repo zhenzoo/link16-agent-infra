@@ -289,6 +289,13 @@ def record_stage(job_id, stage, app_id=None, error=None):
             return
         if stage == "registered" and not state.get("sdk_returned_at"):
             raise ValueError("不能用凭据可用代替 SDK 注册回传")
+        target = (state.get("registration_context") or {}).get("tenant_target")
+        if stage == "registered" and target:
+            proof = state.get("tenant_evidence") or {}
+            if (not state.get("app_id") or (app_id and app_id != state["app_id"])
+                    or proof.get("app_id") != state["app_id"]
+                    or proof.get("organization") != target["organization"]):
+                raise ValueError("当前 App ID 的飞书组织尚未核实")
         state["stage"] = stage
         if stage in ACTIVE_STATUSES:
             state["status"] = stage
@@ -355,10 +362,23 @@ def local_handoff(job_id):
     if not state:
         raise ValueError("找不到 registration job")
     result = {"job_id": job_id, "bot": state["bot"], "status": state["status"], "links": []}
+    target = (state.get("registration_context") or {}).get("tenant_target")
     handoff = _read(_oauth_handoff_path(job_id)) or {}
     if state["status"] in TERMINAL_STATUSES:
         _clear_oauth_handoff(job_id)
         result["action"] = state.get("last_error") or state["status"]
+    elif target and not state["milestones"].get("registered"):
+        org = target["organization"]
+        result["expected_organization"] = org
+        if state.get("sdk_returned_at") and state.get("app_id"):
+            result["action"] = (f"正在按 App ID 核对应用详情所属组织「{org}」。"
+                                f"请保留或打开 https://open.feishu.cn/app/{state['app_id']}/baseinfo")
+        elif state["status"] == "oauth_waiting":
+            result["action"] = (f"已在核实「{org}」的同一浏览器窗口打开官方确认页。"
+                                "核主人、权限及当前组织后再点创建；若切换过账号，先返回开发者后台重新核对。")
+        else:
+            result["action"] = (f"请在本机 Chrome/Edge 打开 https://open.feishu.cn/app，"
+                                f"在头像菜单选择「{org}」。注册器读到当前组织后继续。")
     elif not state.get("milestones", {}).get("registered") or handoff.get("expires_at", 0) > _now():
         if handoff.get("expires_at", 0) > _now():
             result.update(links=[handoff["url"]], expires_at=handoff["expires_at"],
@@ -463,7 +483,9 @@ def notify_oauth_link(job_id, url, expire_in=None):
     state = get_job(job_id)
     if not state:
         return {"ok": False, "error": "registration job 不存在"}
-    _save_oauth_handoff(job_id, url, expire_in)
+    target = (state.get("registration_context") or {}).get("tenant_target")
+    if not target:
+        _save_oauth_handoff(job_id, url, expire_in)
     notify_bot = state.get("notify_bot")
     event_id = f"{job_id}:oauth_waiting"
     if not notify_bot:
@@ -471,11 +493,14 @@ def notify_oauth_link(job_id, url, expire_in=None):
     else:
         instruction = ("按SOP-120 §2.0.1核应用、主人、组织和本次预填项。企业 SDK 最后的创建可能直接发起版本发布；"
                        "只有发版免审规则或官方预览确认覆盖本次配置才继续，否则停在创建前：")
-        marker = (
-            f"Link16 注册回调：{state['bot']} 的授权链接已生成"
-            f"（约 {expire_in or '?'} 秒内有效）。{instruction}\n{url}\n"
-            f"[飞书 from=registration-monitor:{event_id} to={notify_bot} via=注册回调 · route=p2a]"
-        )
+        if target:
+            message = (f"已在「{target['organization']}」的同一 Chrome/Edge 窗口打开官方确认页。"
+                       "请按 SOP-120 核当前组织、主人和预填项并代办创建。切换账号或组织不明时停止创建；"
+                       "企业首次发布仍须核免审。")
+        else:
+            message = f"授权链接已生成（约 {expire_in or '?'} 秒内有效）。{instruction}\n{url}"
+        marker = (f"Link16 注册回调：{state['bot']} · {message}\n"
+                  f"[飞书 from=registration-monitor:{event_id} to={notify_bot} via=注册回调 · route=p2a]")
         result = bridge_injection.inject_bot_prompt(notify_bot, marker)
 
     def receipt(item):

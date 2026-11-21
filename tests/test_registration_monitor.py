@@ -54,6 +54,30 @@ class _MonitorCase(unittest.TestCase):
 
 
 class EnterpriseBusinessConsentTests(_MonitorCase):
+    def test_guarded_job_keeps_creation_link_local_to_verified_window_and_requires_app_proof(self):
+        state = self.arm(["core"])
+        job = state["job_id"]
+        target = {"machine": "tb26", "kind": "enterprise", "organization": "测试企业"}
+        monitor._mutate(job, lambda item: item.update(registration_context={"tenant_target": target}))
+        monitor.record_stage(job, "oauth_waiting")
+        url = "https://open.feishu.cn/page/launcher?user_code=fixture"
+        with mock.patch.object(monitor.bridge_injection, "inject_bot_prompt", return_value={"ok": True}) as send:
+            monitor.notify_oauth_link(job, url, 60)
+        self.assertNotIn(url, send.call_args.args[1])
+        self.assertIn(target["organization"], send.call_args.args[1])
+        self.assertEqual(monitor.local_handoff(job)["links"], [])
+        self.assertFalse(monitor._oauth_handoff_path(job).exists())
+        monitor.record_sdk_result(job, "cli_expected")
+        with self.assertRaisesRegex(ValueError, "组织尚未核实"):
+            monitor.record_stage(job, "registered", app_id="cli_expected")
+        monitor._mutate(job, lambda item: item.update(tenant_evidence={
+            "app_id": "cli_other", "organization": "测试企业"}))
+        with self.assertRaisesRegex(ValueError, "组织尚未核实"):
+            monitor.record_stage(job, "registered", app_id="cli_expected")
+        monitor._mutate(job, lambda item: item.update(tenant_evidence={
+            "app_id": "cli_expected", "organization": "测试企业"}))
+        self.assertTrue(monitor.record_stage(job, "registered", app_id="cli_expected")["milestones"]["registered"])
+
     def test_unified_job_requires_owner_consent_even_after_group_and_bridge(self):
         state = self.registered(self.arm())
         job = state["job_id"]

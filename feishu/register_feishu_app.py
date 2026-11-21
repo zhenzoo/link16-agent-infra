@@ -16,6 +16,7 @@
 从当前 Claude/Codex turn 生命周期中解耦。
 """
 import argparse
+from contextlib import nullcontext
 import json
 import os
 import re
@@ -49,6 +50,7 @@ for _s in (sys.stdout, sys.stderr):
 import lark_oapi as lark  # noqa: E402
 import bridge_scope_audit  # noqa: E402
 import registration_monitor  # noqa: E402
+import registration_tenant  # noqa: E402
 import registration_transport  # noqa: E402
 
 ENV_PATH = resolve_env_path()   # 跨机解析·不写死盘符
@@ -236,8 +238,7 @@ def _deliver_oauth_link(job_id, info):
     """
     state = registration_monitor.get_job(job_id) or {}
     if not state.get("notify_bot"):
-        print("ℹ️ 回调目标未绑定（本机还没有可投递的 bot，第一只 bot 就是这样）："
-              "安装会话从本地links读取有效链接并代办普通确认；自动操作失败才交给主人，本进程继续等待。", flush=True)
+        print("回调目标未绑定；安装会话从本地 links 读取当前操作，本进程继续等待。", flush=True)
         registration_monitor.notify_oauth_link(job_id, info.get("url"), info.get("expire_in"))
         return False
     receipt = {}
@@ -249,15 +250,17 @@ def _deliver_oauth_link(job_id, info):
             return True
         if attempt < 2:
             time.sleep(2 ** (attempt + 1))
-    print(f"⚠️ 授权链接没能推给 {state.get('notify_bot')}（{receipt.get('error')}）："
-          "安装会话从本地links读取有效链接并代办普通确认；自动操作失败才交给主人，本进程继续等待。", flush=True)
+    print(f"确认提示未送达 {state.get('notify_bot')}；请从本地 links 读取下一动作，本进程继续等待。", flush=True)
     return False
 
 
-def _run_device_grant(name, app_id=None, job_id=None, permission_plan=None):
+def _run_device_grant(name, app_id=None, job_id=None, permission_plan=None, browser=None):
     """创建新应用，或用 cli_... App ID 续接同一次 Device Grant。"""
     def qr(info):
-        on_qr(info)
+        if browser:
+            browser.open_launcher(info["url"])
+        else:
+            on_qr(info)
         if job_id:
             registration_monitor.record_stage(job_id, "oauth_waiting", app_id=app_id)
             _deliver_oauth_link(job_id, info)
@@ -274,7 +277,7 @@ def _run_device_grant(name, app_id=None, job_id=None, permission_plan=None):
             report(status=value)
         on_status({"status": value if value in {"polling", "slow_down", "domain_switched"} else "unknown"})
 
-    with registration_transport.bounded_http(report):
+    with (browser.window_lock() if browser else nullcontext()), registration_transport.bounded_http(report):
         return lark.register_app(
             on_qr_code=qr,
             on_status_change=status,
@@ -293,6 +296,10 @@ def _recovery_app_id(explicit, id_key, bot):
     local = bridge_scope_audit._env_val(id_key)
     previous = registration_monitor.get_job(bot=bot) or {}
     recorded = previous.get("app_id")
+    if recorded and previous.get("rejected_tenant_app_id") == recorded:
+        if explicit == recorded or local == recorded:
+            raise ValueError("该 App ID 已核实属于错误租户，不能用于本次注册")
+        recorded = None
     if local and recorded and local != recorded:
         raise ValueError("本机凭据与注册任务的 App ID 不一致；先核对原应用")
     known = local or recorded
@@ -391,7 +398,9 @@ def main():
     ap.add_argument("--group", default=None,
                     help="group-a2a 的人工入群验收名片段；新 bot 必须按 Device Grant 选中的组织显式给出")
     ap.add_argument("--tenant-kind", choices=("enterprise", "personal"), default=None,
-                    help="飞书租户类型；不给时按 --group 与 agent-registry.json 的 tenants 映射推导")
+                    help="已定机器自动按机器选租户；其余按显式类型或登记群确定")
+    ap.add_argument("--check-tenant", action="store_true",
+                    help="只读本机已打开的飞书开发者后台核组织；带 --app-id 核该应用的详情页")
     ap.add_argument("--no-monitor", action="store_true",
                     help="只用于测试/故障隔离：不启动独立注册监督器")
     ap.add_argument("--background", action="store_true",
@@ -412,6 +421,18 @@ def main():
     args.name = args.name or args.bot
     if not args.name:
         ap.error("请给 --name/--bot，或用 --from-scan 选择真实项目；不采用维护者的 bot 名称")
+    try:
+        target = registration_tenant.fleet_target(args.bot, args.name)
+        if args.check_tenant:
+            if not target:
+                ap.error("这台机器未约定注册租户")
+            report = registration_tenant.inspect_target(target, args.app_id)
+            print(json.dumps(report, ensure_ascii=False))
+            if not report["matched"]:
+                raise SystemExit(1)
+            return
+    except (ValueError, registration_transport.RegistrationTransportError) as exc:
+        ap.error(str(exc))
 
     requested = (args.profile or "").strip().lower()
     if requested:
@@ -461,6 +482,10 @@ def main():
             f"{inferred_tenant_kind} 租户冲突"
         )
     tenant_kind = args.tenant_kind or inferred_tenant_kind
+    if target:
+        if tenant_kind and target["kind"] != tenant_kind:
+            ap.error(f"{target['machine'].upper()} 固定使用「{target['organization']}」，与指定租户或目标群冲突")
+        tenant_kind = target["kind"]
     if not tenant_kind and args.bot:
         try:
             tenant_kind = bridge_scope_audit.registered_tenant_kind(args.bot)
@@ -481,6 +506,8 @@ def main():
     monitor = registration_monitor.get_job(args.job_id) if args.job_id else None
     if args.job_id and (not monitor or monitor.get("bot") != (args.bot or args.name)):
         ap.error("注册任务不存在或与当前智能体不符")
+    if monitor and (monitor.get("registration_context") or {}).get("tenant_target") != target:
+        ap.error("注册任务的目标组织已变化，请核对并恢复原任务")
     reuse_grants = False
     try:
         permission_plan = bridge_scope_audit.registration_scope_plan(capabilities, tenant_kind=tenant_kind)
@@ -501,6 +528,9 @@ def main():
         print(f"profile={selected_profile.name} runtime={runtime}")
         print(f"cwd={selected_cwd or '(repo default)'}")
         print(f"tenant_kind={tenant_kind or 'unknown'}")
+        if target:
+            print(f"machine={target['machine']};expected_console_organization={target['organization']}")
+            print("tenant_check=official_console_before_create_and_exact_app_id_before_install")
         print(f"capabilities={','.join(capabilities)}")
         print(f"application_confirmation={int(not reuse_grants)};user_consent=separate_if_missing")
         print(f"sdk_version={sdk_version}")
@@ -522,6 +552,7 @@ def main():
             launch=True,
             context={"name": args.name, "profile": selected_profile.name,
                      "cwd": selected_cwd, "tenant_kind": tenant_kind, "auto_group": True,
+                     **({"tenant_target": target} if target else {}),
                      **({"verify_owner_consent": True} if tenant_kind == "enterprise" else {})},
             start_bridge=not args.no_start_bridge,
         )
@@ -559,18 +590,35 @@ def main():
         print(f"复用已有注册任务：job={monitor['job_id']}", flush=True)
         return
 
+    def check_active():
+        if monitor:
+            state = registration_monitor.get_job(monitor["job_id"])
+            if (not state or state["status"] in registration_monitor.TERMINAL_STATUSES
+                    or time.time() >= state["expires_at"]):
+                raise registration_transport.RegistrationTransportError("注册任务已结束")
+
+    browser = registration_tenant.RegistrationBrowser(target, check_active) if target else None
+    evidence = None
     try:
         if monitor:
             registration_monitor.record_progress(monitor["job_id"], sdk_version=sdk_version)
+        if browser:
+            browser.select_console()
+            if args.app_id:
+                evidence = browser.verify_app(args.app_id)
+                if not reuse_grants:
+                    browser.select_console()
         if reuse_grants:
             result = {"client_id": args.app_id, "client_secret": bridge_scope_audit._env_val(sec_key)}
         else:
             result = _run_device_grant(
                 args.name, args.app_id, job_id=monitor.get("job_id") if monitor else None,
-                permission_plan=permission_plan)
+                permission_plan=permission_plan, browser=browser)
     except Exception as exc:
         error = registration_transport.safe_error(exc)
         if monitor:
+            if isinstance(exc, registration_tenant.TenantMismatch) and args.app_id:
+                registration_monitor._mutate(monitor["job_id"], lambda item: item.update(rejected_tenant_app_id=args.app_id))
             registration_monitor.record_stage(monitor["job_id"], "failed", error=error)
         raise SystemExit(f"注册未完成：{error}；读取 registration job 后恢复原应用，无需提供 secret") from None
     app_id = result.get("client_id") if isinstance(result, dict) else None
@@ -589,11 +637,18 @@ def main():
     if monitor:
         registration_monitor.record_sdk_result(monitor["job_id"], app_id)
     try:
+        if browser:
+            evidence = evidence or browser.verify_app(app_id)
+            check_active()
+            if monitor:
+                registration_monitor._mutate(monitor["job_id"], lambda item: item.update(tenant_evidence=evidence))
         _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
                               app_id, secret, monitor, tenant_kind)
     except Exception as exc:
         error = registration_transport.safe_error(exc)
         if monitor:
+            if isinstance(exc, registration_tenant.TenantMismatch):
+                registration_monitor._mutate(monitor["job_id"], lambda item: item.update(rejected_tenant_app_id=app_id))
             registration_monitor.record_stage(monitor["job_id"], "failed", error=f"local_registration:{error}")
         raise SystemExit(f"官方已回传，本机登记未完成：{error}；请读取任务状态恢复") from None
     return
