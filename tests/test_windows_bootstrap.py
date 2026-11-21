@@ -36,13 +36,14 @@ class ComponentPlanTests(unittest.TestCase):
 
     def test_default_plan_has_eight_and_providers_use_official_native_installers(self):
         self.assertEqual([row.key for row in wb.COMPONENTS],
-                         ["git", "gh", "python", "node", "wmux", "claude", "codex", "kimi"])
+                         ["git", "gh", "python", "node", "wmux", "claude", "codex", "kimi", "agy"])
         serialized = json.dumps([row.install_command for row in wb.COMPONENTS]).lower()
         self.assertNotIn("gstack", serialized)
         self.assertNotIn("npm", serialized)
         self.assertIn("https://claude.ai/install.ps1", serialized)
         self.assertIn("https://chatgpt.com/codex/install.ps1", serialized)
         self.assertIn("https://code.kimi.com/kimi-code/install.ps1", serialized)
+        self.assertIn("https://antigravity.google/cli/install.ps1", serialized)
         for row in wb.COMPONENTS:
             if not row.required:
                 self.assertEqual(row.install_command[0], "powershell.exe")
@@ -51,7 +52,7 @@ class ComponentPlanTests(unittest.TestCase):
 
     def test_only_provider_components_can_be_skipped(self):
         self.assertEqual(wb.parse_skips(["claude,codex"]), {"claude", "codex"})
-        self.assertEqual(wb.parse_skips(["kimi"]), {"kimi"})
+        self.assertEqual(wb.parse_skips(["kimi,agy"]), {"kimi", "agy"})
         with self.assertRaisesRegex(ValueError, "核心依赖"):
             wb.parse_skips(["git"])
 
@@ -100,6 +101,7 @@ class ComponentPlanTests(unittest.TestCase):
                 "claude": home / ".local" / "bin" / "claude.exe",
                 "codex": local / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe",
                 "kimi": home / ".kimi-code" / "bin" / "kimi.exe",
+                "agy": local / "agy" / "bin" / "agy.exe",
             }
             for path in paths.values():
                 path.parent.mkdir(parents=True, exist_ok=True)

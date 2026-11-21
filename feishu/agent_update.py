@@ -36,6 +36,7 @@ UPDATE_ARGS = {
     "claude": ("update",),
     "codex": ("update",),
     "kimi": ("update", "--yes"),
+    "agy": ("update",),
 }
 
 

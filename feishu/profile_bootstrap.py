@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import agent_runtime
+import install_agy_bridge_hooks
 import install_codex_bridge_hooks
 import install_kimi_bridge_hooks
 import profile_wrappers
@@ -450,6 +451,11 @@ def account_choices(registry_path=None, home=None):
     names = {s.name for s in specs}
     homes = {s.home.replace('\\', '/').rstrip('/').casefold() for s in specs}
     for runtime in agent_runtime._RUNTIME_ADAPTER_SPECS:
+        if runtime == "agy":
+            if "agy" not in names and "~/.gemini" not in homes:
+                rows.append({"name": "agy", "runtime": "agy", "home": "~/.gemini",
+                             "label": "Antigravity CLI", "existing": False})
+            continue
         for kind in ("work", "personal"):
             number = 1
             while True:
@@ -499,13 +505,24 @@ def select_account(name, *, home=None, registry_path=None, apply=False):
 
 
 def login_account(selected):
-    """The selected native login opens the browser itself; no second profile confirmation."""
-    args = ["auth", "login"] if selected["runtime"] == "claude" else ["login"]
+    """The selected native login opens the browser itself; no second profile confirmation.
+
+    Antigravity CLI (agy) shares one OS keyring login slot and has no ``login``
+    subcommand; never auto-wake the browser during bootstrap — instruct the user
+    to run ``agy`` manually when unauthenticated, then run selftest.
+    """
     env = dict(os.environ, **{agent_runtime.PROFILE_REGISTRY_ENV: selected["registry"]})
     # Keep the human's interactive stdin/terminal; never impose a short OAuth timeout.
     cli = str(PROJECT_ROOT / "feishu" / "agent_profile_cli.py")
     spec = agent_runtime.profile_spec(selected["name"], selected["registry"])
     if agent_runtime.profile_login_state(spec).get("status") != "ok":
+        if selected["runtime"] == "agy":
+            print(
+                "Antigravity CLI (agy) 不自动唤醒浏览器登录；请在终端手动运行 `agy` 完成 Google 登录。",
+                flush=True,
+            )
+            return subprocess.call([sys.executable, cli, "selftest", "--profile", selected["name"]], env=env)
+        args = ["auth", "login"] if selected["runtime"] == "claude" else ["login"]
         result = subprocess.call([sys.executable, cli, "run", "--profile", selected["name"], "--", *args], env=env)
         if result:
             return result
@@ -592,6 +609,7 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
         installer = {
             "codex": install_codex_bridge_hooks,
             "kimi": install_kimi_bridge_hooks,
+            "agy": install_agy_bridge_hooks,
         }.get(installer_name)
         if installer is None:
             raise ValueError(f"runtime {spec.runtime} hook installer 未实现：{installer_name}")
@@ -600,6 +618,13 @@ export CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$HOME/{config_relative}}}"
             installer.apply_hooks(profile_home, PROJECT_ROOT)
         after, _desired = installer.hooks_plan(profile_home, PROJECT_ROOT)
         rows.append({**after, "name": spec.name, "before": before["status"]})
+        if installer_name == "agy":
+            shared_skills = home / ".agents" / "skills"
+            s_before, _s_desired = installer.skills_manifest_plan(profile_home, shared_skills)
+            if apply and s_before["status"] in {"missing", "outdated"}:
+                installer.apply_skills_manifest(profile_home, shared_skills)
+            s_after, _s_desired = installer.skills_manifest_plan(profile_home, shared_skills)
+            rows.append({**s_after, "name": spec.name, "before": s_before["status"]})
     return rows
 
 
@@ -633,6 +658,8 @@ def main(argv=None) -> int:
     parser.add_argument("--codex-home")
     parser.add_argument("--kimi-profile")
     parser.add_argument("--kimi-home")
+    parser.add_argument("--agy-profile")
+    parser.add_argument("--agy-home")
     parser.add_argument("--migrate-legacy-feishu-adapter", action="store_true",
                         help="把 marker-owned 旧 Codex feishu adapter 移到可恢复备份目录")
     args = parser.parse_args(argv)
@@ -682,6 +709,7 @@ def main(argv=None) -> int:
             "claude": (args.claude_profile, args.claude_home),
             "codex": (args.codex_profile, args.codex_home),
             "kimi": (args.kimi_profile, args.kimi_home),
+            "agy": (args.agy_profile, args.agy_home),
         }
         incomplete = [runtime for runtime, pair in pairs.items() if bool(pair[0]) != bool(pair[1])]
         if incomplete:
@@ -692,7 +720,7 @@ def main(argv=None) -> int:
             for runtime, (name, profile_home) in pairs.items() if name
         ]
         if not specs:
-            parser.error("--init-registry 至少需要一组 --claude-profile/--claude-home、--codex-profile/--codex-home 或 --kimi-profile/--kimi-home")
+            parser.error("--init-registry 至少需要一组 --claude-profile/--claude-home、--codex-profile/--codex-home、--kimi-profile/--kimi-home 或 --agy-profile/--agy-home")
         rows = [initialize_registry(local_registry, specs, apply=args.apply)]
     elif args.register_profile:
         if not args.runtime or not args.profile_home:

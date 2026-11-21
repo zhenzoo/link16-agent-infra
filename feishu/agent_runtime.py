@@ -56,7 +56,9 @@ _CODEX_LEGACY_ALIASES = {"cli-legacy", "bare-cli", "standard", "legacy", "cli"}
 CLAUDE_HARNESS_ENV_KEYS = ("CLAUDE_CODE_CHILD_SESSION",)
 # A bot must start without any outer agent's session stamp; its hooks rely on
 # that to tell the bot from agents it launches (bridge_env.nested_agent).
-BOT_LAUNCH_SCRUB_KEYS = CLAUDE_HARNESS_ENV_KEYS + ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
+BOT_LAUNCH_SCRUB_KEYS = CLAUDE_HARNESS_ENV_KEYS + (
+    "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID",
+)
 
 
 def codex_transport(bot) -> str:
@@ -122,6 +124,14 @@ _RUNTIME_ADAPTER_SPECS = {
         skill_scope="shared-agents",
         bridge_event_source="kimi-wire",
         bootstrap_hook_installer="kimi",
+    ),
+    "agy": RuntimeSpec(
+        name="agy",
+        display_name="Antigravity CLI",
+        entry_document="AGENTS.md",
+        skill_scope="shared-agents",
+        bridge_event_source="agy-hooks",
+        bootstrap_hook_installer="agy",
     ),
 }
 
@@ -191,6 +201,8 @@ def runtime_spec(bot) -> RuntimeSpec:
         return runtime_adapter_spec("codex")
     if name == "kimi":
         return runtime_adapter_spec("kimi")
+    if name == "agy":
+        return runtime_adapter_spec("agy")
     if name == "custom":
         label = bot.get("display_name") if isinstance(bot, dict) else None
         return RuntimeSpec(
@@ -595,6 +607,31 @@ def profile_login_state(profile: ProfileSpec) -> dict:
         evidence = ("没有 credentials/kimi-code.json（从没登录过）" if data is None
                     else "credentials/kimi-code.json 无法读取或没有登录 token")
         return {"status": "missing", "evidence": evidence, "fix": fix}
+    if profile.runtime == "agy":
+        settings_path = home / "antigravity-cli" / "settings.json"
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = {}
+        if isinstance(settings, dict) and settings.get("modelProvider") == "gemini":
+            if os.environ.get("GEMINI_API_KEY"):
+                return {"status": "ok", "evidence": "settings.json 走 Gemini API key 模式且已设 GEMINI_API_KEY", "fix": fix}
+            return {"status": "missing", "evidence": "settings.json 设了 modelProvider=gemini 但未设 GEMINI_API_KEY", "fix": fix}
+        if str(os.environ.get("AGY_ADC_AUTH") or "").strip().lower() in {"1", "true", "yes"}:
+            return {"status": "ok", "evidence": "已启用 AGY_ADC_AUTH（Google Cloud ADC）", "fix": fix}
+        if os.name == "nt":
+            try:
+                done = subprocess.run(
+                    ["cmdkey", "/list"], capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if done.returncode == 0 and "gemini:antigravity" in (done.stdout or "").lower():
+                    return {"status": "ok", "evidence": "Windows 凭据管理器存在 gemini:antigravity 登录态", "fix": fix}
+                return {"status": "missing", "evidence": "Windows 凭据管理器未找到 gemini:antigravity 登录态", "fix": fix}
+            except (OSError, subprocess.SubprocessError):
+                return {"status": "unknown", "evidence": "无法查询 Windows 凭据管理器", "fix": fix}
+        return {"status": "unknown", "evidence": "非 Windows 环境无法通过 cmdkey 离线核验 Antigravity 凭据", "fix": fix}
     return {"status": "unknown", "evidence": f"{profile.runtime} 的登录凭据位置尚未纳入合同", "fix": fix}
 
 
@@ -741,7 +778,7 @@ def account_aliases() -> list:
 
 
 def _require_bridge_profile(profile: ProfileSpec) -> None:
-    if profile.runtime not in {"claude", "codex", "kimi"}:
+    if profile.runtime not in {"claude", "codex", "kimi", "agy"}:
         raise ValueError("unsupported bridge runtime")
 
 
@@ -1083,6 +1120,34 @@ def standalone_worker_cmd(
         model_args = [] if auth_command else codex_saved_model_args(profile.home_path, cwd)
         if model_args:
             command += " " + " ".join(shlex.quote(arg) for arg in model_args)
+    elif profile.runtime == "agy":
+        # Always use ``command agy`` so a shell wrapper named ``agy`` never
+        # recurses into itself when launched via ``bash -lc``.
+        command = (
+            _unset_shell_env(("ANTIGRAVITY_CONVERSATION_ID",))
+            + prefix
+            + env_text
+            + "command agy"
+        )
+        args = [str(arg) for arg in (provider_args or [])]
+        subcommands = {
+            "acp", "agent", "agents", "changelog", "help", "install",
+            "mcp", "mic-serve", "models", "plugin", "plugins",
+            "remote-control", "update",
+        }
+        is_subcommand = bool(args) and args[0] in subcommands
+        is_non_interactive = any(
+            arg in {"-p", "--print", "--prompt", "--version", "-V", "-h", "--help"}
+            or arg.startswith("--prompt=")
+            for arg in args
+        )
+        has_perm_flag = any(
+            arg in {"--dangerously-skip-permissions", "--sandbox", "--mode"}
+            or arg.startswith("--mode=")
+            for arg in args
+        )
+        if not is_subcommand and not is_non_interactive and not has_perm_flag:
+            command += " --dangerously-skip-permissions"
     else:
         raise ValueError(f"runtime {profile.runtime} has no standalone launch driver")
     if provider_args:
@@ -1136,7 +1201,7 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None, *, auto_update=Tru
             + f"claude --dangerously-skip-permissions --settings {_q(hooks_json)}"
             + _claude_home_settings_args(profile, cwd)
         )
-    if spec.name in {"codex", "kimi"}:
+    if spec.name in {"codex", "kimi", "agy"}:
         env = _unset_shell_env(BOT_LAUNCH_SCRUB_KEYS) + env
     if spec.name == "codex":
         codex_home = profile.home_path.as_posix()
@@ -1162,6 +1227,8 @@ def worker_cmd(bot, project: Path, autopilot: Path, cwd=None, *, auto_update=Tru
             env + f"python {_q(worker)} --bot {_q(name)} --cwd {_q(cwd)} "
             + f"--state-dir {_q(autopilot.as_posix())}"
         )
+    if spec.name == "agy":
+        return update + env + "command agy --dangerously-skip-permissions"
     if spec.name == "custom" and isinstance(bot, dict) and bot.get("agent_cmd"):
         return env + str(bot["agent_cmd"]).format(
             cwd=cwd,
@@ -1259,6 +1326,40 @@ def ensure_claude_trust(bot, cwd) -> None:
             raise RuntimeError("Claude project trust did not persist")
 
 
+def ensure_agy_trust(bot, cwd) -> None:
+    """Persist Antigravity CLI's workspace trust in <home>/antigravity-cli/settings.json."""
+    if runtime_spec(bot).name != "agy":
+        return
+    from bridge_injection import ProcessFileLock
+
+    profile = resolve_profile(bot, required=True)
+    settings_path = profile.home_path / "antigravity-cli" / "settings.json"
+    project = str(Path(cwd).expanduser().resolve())
+    with ProcessFileLock(settings_path.with_name(".settings.json.link16.lck")):
+        if settings_path.is_file():
+            document = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise ValueError(f"Antigravity settings is not an object: {settings_path}")
+        else:
+            document = {}
+        trusted = document.get("trustedWorkspaces")
+        if trusted is None:
+            trusted = []
+        elif not isinstance(trusted, list):
+            raise ValueError(f"Antigravity trustedWorkspaces is not a list: {settings_path}")
+        already = any(
+            isinstance(item, str) and os.path.normcase(os.path.abspath(item)) == os.path.normcase(project)
+            for item in trusted
+        )
+        if not already:
+            document["trustedWorkspaces"] = [*trusted, project]
+            updated = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = settings_path.with_name(f".settings.json.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(updated, encoding="utf-8")
+            os.replace(tmp, settings_path)
+
+
 def ensure_launch_cwd_trust(bot, cwd) -> None:
     """Trust the exact cwd in the selected runtime profile before launch."""
     spec = runtime_spec(bot)
@@ -1275,6 +1376,8 @@ def ensure_launch_cwd_trust(bot, cwd) -> None:
 
         profile = resolve_profile(bot, required=True)
         ensure_workspace_trust(profile.home_path, cwd)
+    elif spec.name == "agy":
+        ensure_agy_trust(bot, cwd)
 
 
 def codex_composer_visible(screen: str) -> bool:
@@ -1389,6 +1492,17 @@ def is_ready(bot, screen: str) -> bool:
             and "context:" in screen
             and re.search(r"(?m)^\s*│\s*>\s*│\s*$", screen) is not None
         )
+    if spec.name == "agy":
+        if any(block in screen for block in (
+            "Do you trust", "Trust this folder", "Sign in with Google",
+            "Authenticate", "Enter to confirm",
+        )):
+            return False
+        # Captured from real Antigravity CLI 1.5.14 idle composer in wmux:
+        # horizontal divider + bare `>` prompt line + `? for shortcuts` footer.
+        has_empty_prompt = re.search(r"(?m)^\s*[❯›>]\s*$", screen) is not None
+        has_chrome = ("? for shortcuts" in screen or "────" in screen)
+        return has_empty_prompt and has_chrome
     if spec.name == "custom":
         markers = []
         if isinstance(bot, dict):

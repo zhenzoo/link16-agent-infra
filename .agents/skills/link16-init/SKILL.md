@@ -1,6 +1,6 @@
 ---
 name: link16-init
-description: Link16 首次安装 / 初始化的一站式剧本。用于开始部署、首次安装、导入本人记忆或按已有项目建 bot。装依赖后一次选择 Claude/Codex/Kimi 账号，自动配置隔离 profile 并打开原生登录；后台注册的链接本地可读，权限就绪后自动起桥、核连接，再私聊认主。个人配置与记忆导入仅在用户选择时执行；只在 ROLE-010 的人工停点停下。
+description: Link16 首次安装 / 初始化的一站式剧本。用于开始部署、首次安装、导入本人记忆或按已有项目建 bot。装依赖后一次选择 Claude/Codex/Kimi/Antigravity (agy) 账号，自动配置 profile（Claude/Codex/Kimi 打开原生登录，agy 提示手动登录不自动唤醒浏览器）；后台注册的链接本地可读，权限就绪后自动起桥、核连接，再私聊认主。个人配置与记忆导入仅在用户选择时执行；只在 ROLE-010 的人工停点停下。
 ---
 
 # link16-init — 首次安装剧本（PLAN-1000）
@@ -18,8 +18,8 @@ description: Link16 首次安装 / 初始化的一站式剧本。用于开始部
 
 | 阶段 | 他会看到 | 他要做 | 你在做 |
 |---|---|---|---|
-| ① 装依赖 | 8 项软件清单 | 点头 | `windows_bootstrap.py` 预览 → `--apply --yes`（含补用户 PATH） |
-| ② 账号 | Claude-work / Claude-personal / Codex-personal / Codex-work / Kimi 及全部已有编号账号 | 选一次并登录 | `profile_bootstrap.py --choices --json` → `--select <name> --apply --login` |
+| ① 装依赖 | 9 项软件清单 | 点头 | `windows_bootstrap.py` 预览 → `--apply --yes`（含补用户 PATH） |
+| ② 账号 | Claude-work / Claude-personal / Codex-personal / Codex-work / Kimi / Antigravity (`agy`) 及全部已有编号账号 | 选一次并登录 | `profile_bootstrap.py --choices --json` → `--select <name> --apply --login` |
 | ③ 盘点（可选） | 本人记忆、skills、活跃项目和建议 bot | 选择导入范围 | 仅已要求导入时运行 `context_scan.py --out` |
 | ④ 导入（可选） | 选定内容的文件变更预览 | 确认范围内自动执行 | `context_import.py --apply` |
 | ⑤ 建 bot | 智能体代办应用创建、免审权限与普通OAuth | 正常无需点链接；自动操作失败才按提示介入 | 后台注册并读取links，按Feishu skill / SOP-120 §2.0.1准备工具、核身份、操作页面、回读权限 |

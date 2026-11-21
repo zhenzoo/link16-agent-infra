@@ -26,6 +26,7 @@ import bridge_doctor  # noqa: E402
 import bridge_env  # noqa: E402
 import bridge_inbound  # noqa: E402
 import install_codex_bridge_hooks  # noqa: E402
+import install_agy_bridge_hooks  # noqa: E402
 import install_kimi_bridge_hooks  # noqa: E402
 import profile_bootstrap  # noqa: E402
 import service_installer  # noqa: E402
@@ -167,6 +168,29 @@ def _profile_snapshot(roster: dict) -> dict:
                     "status": "missing" if missing else hook_row["status"],
                     "error": ("missing Kimi transport: " + ", ".join(missing)) if missing
                     else hook_row.get("error", ""),
+                })
+            elif spec.runtime == "agy":
+                required = [HERE / "agy_events.py", HERE / "hooks" / "bridge_agy_hook.py"]
+                missing = [str(path) for path in required if not path.is_file()]
+                hook_row, _desired = install_agy_bridge_hooks.hooks_plan(
+                    spec.home_path, REPO,
+                )
+                skills_row, _s_desired = install_agy_bridge_hooks.skills_manifest_plan(
+                    spec.home_path, Path.home() / ".agents" / "skills",
+                )
+                hooks.append({
+                    "profile": name, "runtime": "agy",
+                    "ok": not missing and hook_row["status"] == "ok" and skills_row["status"] == "ok",
+                    "evidence": "; ".join([
+                        *(f"{path} ({'ok' if path.is_file() else 'missing'})" for path in required),
+                        f"hook={hook_row['path']} ({hook_row['status']})",
+                        f"skills={skills_row['path']} ({skills_row['status']})",
+                    ]),
+                    "status": "missing" if missing else (
+                        hook_row["status"] if hook_row["status"] != "ok" else skills_row["status"]
+                    ),
+                    "error": ("missing Agy transport: " + ", ".join(missing)) if missing
+                    else (hook_row.get("error") or skills_row.get("error") or ""),
                 })
             else:
                 worker = HERE / "codex_app_server_worker.py"

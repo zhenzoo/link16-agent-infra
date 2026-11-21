@@ -256,8 +256,21 @@ def _codex_activity(state_dir, name, bot, inspect_tools):
             rpc.close()
 
 
+def _agy_activity(state_dir, name, bot, inspect_tools):
+    """Antigravity CLI binds its exact transcriptPath via bridge_agy_hook."""
+    import agy_events
+
+    binding = json.loads((Path(state_dir) / f"bridge-agy-session-{name}.json").read_text(encoding="utf-8"))
+    if binding.get("closed"):
+        return {"state": "idle", "key": None, "reason": "Antigravity 会话已关闭"}
+    transcript = binding.get("transcript_path")
+    if not transcript:
+        raise ValueError("会话还没绑定 Antigravity transcript")
+    return agy_events.activity_from_transcript(transcript)
+
+
 # One reader per platform in agent_runtime's adapter table (a test enforces it).
-_READERS = {"codex": _codex_activity, "claude": _claude_activity, "kimi": _kimi_activity}
+_READERS = {"codex": _codex_activity, "claude": _claude_activity, "kimi": _kimi_activity, "agy": _agy_activity}
 
 
 def stop_codex_turn(state_dir, bot):

@@ -574,6 +574,9 @@ def clear_codex_thread(bot_name):
     kimi = STATE_DIR / f"bridge-kimi-thread-{bot_name}.json"
     if kimi.exists():
         bridge_injection.atomic_write_json(kimi, {"closed": True})
+    agy = STATE_DIR / f"bridge-agy-session-{bot_name}.json"
+    if agy.exists():
+        bridge_injection.atomic_write_json(agy, {"closed": True})
 
 
 def _startup_failure_file(bot_name):
@@ -1093,7 +1096,7 @@ def _ready_timeout(bot, explicit=None):
         return float(configured)
     if agent_runtime.uses_app_server(bot):
         return float(CODEX_APP_SERVER_READY_TIMEOUT_SEC)
-    if agent_runtime.runtime_spec(bot).name == "kimi":
+    if agent_runtime.runtime_spec(bot).name in {"kimi", "agy"}:
         return 60.0  # Native session discovery is local; model work starts only after readiness.
     if agent_runtime.runtime_spec(bot).name == "claude":
         return float(CLAUDE_READY_TIMEOUT_SEC)

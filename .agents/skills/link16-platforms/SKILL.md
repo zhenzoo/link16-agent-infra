@@ -1,6 +1,6 @@
 ---
 name: link16-platforms
-description: 改 Link16 或 claude-config 里任何智能体机制前的平台检查。列出 Link16 支持的全部智能体平台（当前 Claude Code、Codex、Kimi Code）与本机实际安装的平台，确保方案对每个平台都成立，不因当前会话跑在某个平台上就只改这一个。凡在这两个仓库设计或修改 hook、交互卡片与标题、看门狗、桥、profile 与账号、skill 分发、入口文档等共享机制，或讨论某个功能怎么做时，先跑一次。只读，不改任何东西。
+description: 改 Link16 或 claude-config 里任何智能体机制前的平台检查。列出 Link16 支持的全部智能体平台（当前 Claude Code、Codex、Kimi Code、Antigravity CLI）与本机实际安装的平台，确保方案对每个平台都成立，不因当前会话跑在某个平台上就只改这一个。凡在这两个仓库设计或修改 hook、交互卡片与标题、看门狗、桥、profile 与账号、skill 分发、入口文档等共享机制，或讨论某个功能怎么做时，先跑一次。只读，不改任何东西。
 ---
 
 # Link16 平台检查

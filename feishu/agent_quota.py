@@ -489,6 +489,8 @@ def collect(names=None):
             base.update(_codex_quota(home))
         elif spec.runtime == "kimi":
             base.update(_kimi_quota(home))
+        elif spec.runtime == "agy":
+            base.update({"status": "unknown", "note": "Antigravity CLI 暂无已验收的实时额度 API；不参与自动选号"})
         else:
             base.update({"status": "unknown", "note": f"不认识的 runtime {spec.runtime}"})
         base.setdefault("session_percent", None)

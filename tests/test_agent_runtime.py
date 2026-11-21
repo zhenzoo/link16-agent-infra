@@ -86,12 +86,16 @@ class AgentProfileTests(unittest.TestCase):
 
     def test_runtime_adapter_catalog_is_complete_and_unknown_is_rejected(self):
         specs = {spec.name: spec for spec in agent_runtime.runtime_adapter_specs()}
-        self.assertEqual(set(specs), {"claude", "codex", "kimi"})
+        self.assertEqual(set(specs), {"claude", "codex", "kimi", "agy"})
         self.assertEqual(specs["claude"].entry_document, "CLAUDE.md")
         self.assertEqual(specs["claude"].skill_scope, "profile-home")
         self.assertEqual(specs["codex"].bridge_event_source, "codex-app-server")
         self.assertEqual(specs["kimi"].bridge_event_source, "kimi-wire")
         self.assertEqual(specs["kimi"].bootstrap_hook_installer, "kimi")
+        self.assertEqual(specs["agy"].entry_document, "AGENTS.md")
+        self.assertEqual(specs["agy"].skill_scope, "shared-agents")
+        self.assertEqual(specs["agy"].bridge_event_source, "agy-hooks")
+        self.assertEqual(specs["agy"].bootstrap_hook_installer, "agy")
         self.assertEqual(agent_runtime._PROFILE_RUNTIMES, frozenset(specs))
         with self.assertRaisesRegex(ValueError, "unsupported agent runtime"):
             agent_runtime.runtime_adapter_spec("qwen")

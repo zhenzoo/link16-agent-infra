@@ -1239,6 +1239,12 @@ def _public_transcript_messages(path, runtime):
                     role, text = "assistant", str(part.get("text") or "").strip()
                 else:
                     continue
+            elif runtime == "agy":
+                import agy_events
+                return [
+                    row for row in agy_events.public_transcript_messages(path)
+                    if not (row["role"] == "user" and row["text"].lstrip().startswith(_NON_CONVERSATION_USER_PREFIXES))
+                ]
             if not text:
                 continue
             if role == "user" and text.lstrip().startswith(_NON_CONVERSATION_USER_PREFIXES):
@@ -1372,6 +1378,19 @@ def snapshot_handoff(bot_name, reason=""):
         # Codex does not pin `jsonl` in bridge-session; resolve its exact app-server
         # thread instead.  A newest-file guess could hand another bot's chat to this one.
         pack.update(codex_handoff_source(bot_name, rec["profile"], rec.get("cwd")))
+    elif runtime == "agy":
+        binding_path = STATE_DIR / f"bridge-agy-session-{bot_name}.json"
+        if not binding_path.is_file():
+            raise ValueError("Antigravity handoff 缺当前 session 绑定的精确 transcript")
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        transcript = Path(str(binding.get("transcript_path") or ""))
+        if binding.get("closed") or not binding.get("transcript_path") or not transcript.is_file():
+            raise ValueError("Antigravity handoff 绑定的 transcript 不存在或已关闭")
+        pack.update({
+            "transcript": str(transcript),
+            "session_id": binding.get("conversation_id") or transcript.parent.parent.parent.name,
+            "transcript_runtime": "agy",
+        })
     else:
         raise ValueError(f"handoff 不支持当前 runtime：{runtime or 'unknown'}")
     pack["transcript_chain"] = _handoff_chain(rec, pack)

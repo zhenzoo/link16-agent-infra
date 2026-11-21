@@ -94,11 +94,11 @@ winget install --id Python.Python.3.13 -e --accept-source-agreements --accept-pa
 重开终端，确认 `git --version`、`gh --version`、`python --version`（必须 3.11+），再按 §1.1 登录并 clone。
 若 `winget` 本身不存在，先从 Microsoft Store 安装/更新“应用安装程序”；这是空白机唯一额外人工安装点。
 
-### 部署前只确认一次：8 项安装清单
+### 部署前只确认一次：9 项安装清单
 
 agent 在真正安装前必须一次性展示下表并问：**“默认全装；哪项不要？”**
 已经安装的只验版本/路径，不重复安装。前五项是 Link16 核心依赖，不能取消；
-Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要的 provider。
+Claude Code / Codex CLI / Kimi Code CLI / Antigravity CLI 默认选中，可取消任意不需要的 provider。
 
 | # | 默认 | 组件 | 安装源与规则 |
 |---:|---|---|---|
@@ -110,19 +110,21 @@ Claude Code / Codex CLI / Kimi Code CLI 默认选中，可取消任意不需要�
 | 6 | ☑ 可取消 | Claude Code | Anthropic 官方 native 安装器 `https://claude.ai/install.ps1` |
 | 7 | ☑ 可取消 | Codex CLI | OpenAI 官方 Windows standalone 安装器 `https://chatgpt.com/codex/install.ps1` |
 | 8 | ☑ 可取消 | Kimi Code CLI | Moonshot 官方原生安装器 `https://code.kimi.com/kimi-code/install.ps1`；不是旧 Python kimi-cli |
+| 9 | ☑ 可取消 | Antigravity CLI (`agy`) | Google 官方原生安装器 `https://antigravity.google/cli/install.ps1` |
 
-全新 Windows 用户按默认安装时，三种 CLI 都使用上述官方脚本，不通过 WinGet/npm/uv 安装，
+全新 Windows 用户按默认安装时，四种 CLI 都使用上述官方脚本，不通过 WinGet/npm/uv 安装，
 也不传自定义程序安装目录。官方默认程序入口如下（未设置官方安装目录覆盖变量时）：
 
-后续更新也只走各提供方的原生自动更新、CLI 内置更新命令或同一官方安装脚本；不得再用 npm、uv/pip 或第三方包管理器覆盖这三个入口。更新后重新核对实际命令路径和签名，不能只凭版本号判断来源。
+后续更新也只走各提供方的原生自动更新、CLI 内置更新命令或同一官方安装脚本；不得再用 npm、uv/pip 或第三方包管理器覆盖这些入口。更新后重新核对实际命令路径和签名，不能只凭版本号判断来源。
 
-Link16 新交互 session 会经过 `feishu/agent_update.py`，统一调用官方 `claude update`、`codex update`、`kimi update --yes`，不另写下载器，也不让多个 profile 并发更新同一程序。Codex 最多用 5 秒检查版本。发现新版即进入安装阶段，即使显示 0% 也继续等待。更新器首次响应、进入下载或安装步骤、文件增长及新的数值进度都会重置等待。Codex 安装连续 120 秒未观察到新进度才结束本次更新，Claude 和 Kimi 沿用 5 秒。持续有进展时不限总时长。版本检查未完成、已有更新在跑和实际升级失败分别记录、分别提示，均可启动当前已装版本；只有确认版本才说“已是最新版”。Codex 自带的重复启动检查由 Link16 集中更新后关闭。`agent_update.py status --profile <名>` 查最近结果，紧急时用 `LINK16_AGENT_UPDATE=0` 绕过；已运行的会话不被更新流程中断。
+Link16 新交互 session 会经过 `feishu/agent_update.py`，统一调用官方 `claude update`、`codex update`、`kimi update --yes`、`agy update`，不另写下载器，也不让多个 profile 并发更新同一程序。Codex 最多用 5 秒检查版本。发现新版即进入安装阶段，即使显示 0% 也继续等待。更新器首次响应、进入下载或安装步骤、文件增长及新的数值进度都会重置等待。Codex 安装连续 120 秒未观察到新进度才结束本次更新，Claude、Kimi 和 Agy 沿用 5 秒。持续有进展时不限总时长。版本检查未完成、已有更新在跑和实际升级失败分别记录、分别提示，均可启动当前已装版本；只有确认版本才说“已是最新版”。Codex 自带的重复启动检查由 Link16 集中更新后关闭。`agent_update.py status --profile <名>` 查最近结果，紧急时用 `LINK16_AGENT_UPDATE=0` 绕过；已运行的会话不被更新流程中断。
 
 | CLI | 官方默认程序入口 | 官方说明 |
 |---|---|---|
 | Claude Code | `%USERPROFILE%/.local/bin/claude.exe` | [安装与更新](https://code.claude.com/docs/en/setup) |
 | Codex CLI | `%LOCALAPPDATA%/Programs/OpenAI/Codex/bin/codex.exe` | [官方安装脚本](https://chatgpt.com/codex/install.ps1) |
 | Kimi Code CLI | `%USERPROFILE%/.kimi-code/bin/kimi.exe` | [官方安装说明](https://github.com/MoonshotAI/kimi-code#install) |
+| Antigravity CLI | `%LOCALAPPDATA%/agy/bin/agy.exe` | [官方安装说明](https://antigravity.google/docs/getting-started) |
 
 程序目录与账号数据目录分开：同一程序服务多个隔离 profile，账号 home 由 §1.3 的 registry 决定。
 下载安装不等于已登录；登录后还需 profile 真启动及飞书真实往返验收。
@@ -409,15 +411,16 @@ python feishu/profile_bootstrap.py --doctor
 `--doctor` 必须同时看到 repo-owned `feishu` / `feishu-workline` skills 与所选 Codex home 的 bridge hooks 为 `ok`。已有的私人 hooks 会保留；损坏或结构非法的 `hooks.json` 报 conflict，安装器不会覆盖。
 Kimi 通过原生终端与 Wire 观察程序接桥，`service_doctor.py` 检查 Kimi 的 worker/event 组件，
 不向 Kimi home 安装 Codex `hooks.json`。只选 Kimi 时，Agent CLI 检查也应通过。
+Antigravity CLI（`agy`）单账号使用 `profile=agy`、`home=~/.gemini`，由 `profile_bootstrap.py` 自动配置 `~/.gemini/config/hooks.json` 与 `~/.gemini/config/skills.json`（挂载共享 `~/.agents/skills`）；其个人 Google OAuth 凭据保存在系统凭据管理器全局槽位，bootstrap 不自动唤醒浏览器登录，未登录时由用户在终端手动运行 `agy` 完成登录。
 
 - 前缀约定 = 产品线缩写 + 年份，例 `tb25` / `tb24` / `tuf19`。自动年份来自 BIOS，不等于购买年；用户告知时用 `--year 2025` 覆盖。
 - 本机名示例：`<prefix>-link16`、`<prefix>-baseball`。本机账号、bot 名册和机器取证保留在 gitignored 文件，不把个人配置随公开仓库发布。
-- 选项包含 Claude-work / Claude-personal / Codex-personal / Codex-work / Kimi 及全部已有编号账号；每类同时给下一个空位。选择器自动派生内部 ID 与隔离 home，已存在但未登记的目录不覆盖。高级自定义仍可用 `--init-registry` / `--register-profile`，不作为普通用户必答项。
+- 选项包含 Claude-work / Claude-personal / Codex-personal / Codex-work / Kimi / Antigravity CLI (`agy`) 及全部已有编号账号；Claude/Codex/Kimi 每类同时给下一个空位，`agy` 提供单账号入口。选择器自动派生内部 ID 与 home，已存在但未登记的目录不覆盖。高级自定义仍可用 `--init-registry` / `--register-profile`，不作为普通用户必答项。
 - `agent-profiles.local.json` 是 gitignored 的单一本机有效 registry，不与 committed 文件合并；公共 `agent-profiles.json` 为空模板，没有维护者默认账号。旧机未迁移时仍可读旧格式，但必须先保存本机映射再升级；不能从测试 fixture 恢复私人身份。
-- Claude 的 `feishu` / `feishu-workline` 安装到各所选 profile home；Codex/Kimi 共用用户级 `$HOME/.agents/skills/<skill>`。
+- Claude 的 `feishu` / `feishu-workline` 安装到各所选 profile home；Codex / Kimi / Antigravity (`agy`) 共用用户级 `$HOME/.agents/skills/<skill>`（`agy` 通过 `~/.gemini/config/skills.json` 发现）。
 - 用户明确选择使用自己的配置母版时，clone 只是取得真源；还必须执行该配置仓的治理启用 SOP。维护者的 `~/.claude-personal` 使用 `docs/SOP-020-config-activation.md`：通过 `scripts/govctl.ps1` 预览、同步、完整 doctor，并核原生技能清单中的 `pull`。未选择个人配置的公开安装不执行此步骤，不默认克隆维护者配置；本节基础 skills 的 `ok` 不能替代已选择的个人技能验收。
 - 相同 hash 重跑会跳过；检测到用户改写、同名冲突或 manifest drift 时停止，不静默覆盖。旧 `claude-compat-feishu` 可先用 `--migrate-legacy-feishu-adapter` 移到可恢复备份目录。
-- `--select ... --apply --login` 通过登记的 launcher 调用 Claude `auth login`、Codex/Kimi `login`，由原生流程打开浏览器；已有健康登录直接复用。登录进程保留到用户完成，不用短 timeout 截断，也不让用户另开终端重复操作。
+- `--select ... --apply --login` 通过登记的 launcher 调用 Claude `auth login`、Codex/Kimi `login`，由原生流程打开浏览器；已有健康登录直接复用。`agy` 不自动唤醒浏览器登录，未登录时打印手动运行 `agy` 的提示并完成 `selftest`。登录进程保留到用户完成，不用短 timeout 截断，也不让用户另开终端重复操作。
 - 登录后自动 selftest，走与桥一致的 shell、环境和 launcher；`--version` 通过只证明实际入口可执行，不覆盖模型与飞书回复，随后仍须真实私聊验收。原生 Kimi 机制见 [ARCH-120 §11](ARCH-120-agent-profile-runtime.md#11-原生-kimi-code原生终端与独立-wire-观察程序)。
 
 ### 1.4 · 装 OpenSSH Server（仅 `envsync` 的硬前置 · 要管理员）

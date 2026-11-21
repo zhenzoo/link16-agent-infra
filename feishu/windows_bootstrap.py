@@ -62,6 +62,10 @@ COMPONENTS = (
               "https://code.kimi.com/kimi-code/install.ps1",
               ("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                "irm https://code.kimi.com/kimi-code/install.ps1 | iex")),
+    Component("agy", "Antigravity CLI", False, "Google Antigravity native installer",
+              "https://antigravity.google/cli/install.ps1",
+              ("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+               "irm https://antigravity.google/cli/install.ps1 | iex")),
 )
 COMPONENT_BY_KEY = {row.key: row for row in COMPONENTS}
 OPTIONAL_KEYS = {row.key for row in COMPONENTS if not row.required}
@@ -70,7 +74,7 @@ USER_STATUSES = {
 }
 
 LINK16_ITEMS = (
-    ("profiles", "隔离的 Claude/Codex/Kimi profiles"),
+    ("profiles", "隔离的 Claude/Codex/Kimi 与 Antigravity (agy) profiles"),
     ("feishu_skill", "Link16 飞书 skill"),
     ("hooks_transport", "消息 hooks / typed transport"),
     ("local_roster", "本机 bot 名册"),
@@ -218,6 +222,12 @@ def detect_component(key):
     if key == "kimi":
         found = preflight._fresh_which("kimi")
         return Path(found) if found else _first_file([Path.home() / ".kimi-code" / "bin" / "kimi.exe"])
+    if key == "agy":
+        found = preflight._fresh_which("agy")
+        if found:
+            return Path(found)
+        local = _real_local_appdata()
+        return _first_file([Path(local) / "agy" / "bin" / "agy.exe"] if local else [])
     raise KeyError(key)
 
 
@@ -679,7 +689,7 @@ def deployment_failures(rows, installs, post_install):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=f"Link16 Windows {len(COMPONENTS)} 项依赖安装计划（默认只预览）")
     parser.add_argument("--skip", action="append", default=[],
-                        help="只允许跳过 provider：claude、codex、kimi；可逗号分隔")
+                        help="只允许跳过 provider：claude、codex、kimi、agy；可逗号分隔")
     parser.add_argument("--apply", action="store_true", help="安装缺失项并执行 wmux 收尾")
     parser.add_argument("--yes", action="store_true", help="确认已把完整清单展示给用户")
     parser.add_argument("--json", action="store_true")
@@ -740,7 +750,7 @@ def main(argv=None):
             for note in desktop_notes:
                 print(f"  · {note}")
         if not args.apply:
-            print("下一步：把清单展示给用户；确认后运行 --apply --yes，可用 --skip claude,codex,kimi 跳过不需要的 CLI。")
+            print("下一步：把清单展示给用户；确认后运行 --apply --yes，可用 --skip claude,codex,kimi,agy 跳过不需要的 CLI。")
     return 1 if failures else 0
 
 

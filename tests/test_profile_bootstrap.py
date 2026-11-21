@@ -41,8 +41,8 @@ class ProfileBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rows = pb.account_choices(root / "profiles.json", root)
-            self.assertEqual({r["runtime"] for r in rows}, {"claude", "codex", "kimi"})
-            self.assertEqual(len(rows), 6)
+            self.assertEqual({r["runtime"] for r in rows}, {"claude", "codex", "kimi", "agy"})
+            self.assertEqual(len(rows), 7)
             self.assertTrue(all(not r["existing"] for r in rows))
             self.assertEqual(list(root.iterdir()), [])
 

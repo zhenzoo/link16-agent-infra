@@ -80,7 +80,7 @@ Kimi 原生 TUI 与独立 Wire observer 合同见 §11；逐机部署证据与�
 约束：
 
 1. profile 名只允许小写字母、数字和连字符。
-2. `runtime` 允许 `claude` / `codex` / `kimi`；原生 Kimi 的终端与飞书适配见 §11。
+2. `runtime` 允许 `claude` / `codex` / `kimi` / `agy`；原生 Kimi 的终端与飞书适配见 §11；Antigravity CLI (`agy`) 通过 `~/.gemini/config/hooks.json` 与 `feishu/agy_events.py` 接入 `milestone-v1`、工作行闸与看门狗 R8（个人 Google OAuth 凭据由 OS keyring 统一管理，单号 `home` 为 `~/.gemini`，共享技能经 `~/.gemini/config/skills.json` 挂载 `~/.agents/skills`）。
 3. `home` 必须是 home-relative，不写盘符和用户名。
 4. `launch-sh` 只表示运行时 source `<home>/launch.sh`；registry 不复制脚本内容或密钥。
 5. 没有全局推荐个人账号。首次安装列三平台的工作/个人选项、全部已有编号账号与下一个空位；选择后自动登记 ID/home，立即接官方登录。默认账号仅保存在本机 registry，显示标签不参与身份推导。

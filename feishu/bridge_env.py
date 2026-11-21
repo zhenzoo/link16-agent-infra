@@ -120,7 +120,7 @@ def profile_home_registries():
     profiles = doc.get("profiles") or {}
     defaults = doc.get("default_profiles") or {}
     out = []
-    preferred = ("claude", "codex", "kimi")
+    preferred = ("claude", "codex", "kimi", "agy")
     runtimes = [runtime for runtime in preferred if runtime in defaults]
     runtimes.extend(sorted(set(defaults) - set(preferred)))
     for runtime in runtimes:
@@ -280,7 +280,7 @@ def _may_send_as(me):
 # 智能体给自己派生的进程盖的会话戳：Claude 每次派生都写当前 session（/clear 后跟着换），
 # Codex 给 shell 工具写 thread id。桥启动 bot 前清掉它们（agent_runtime.worker_cmd），
 # 所以 bot 自己的 hook 只会看到「自己的戳」或没有戳。
-AGENT_SESSION_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
+AGENT_SESSION_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID")
 
 
 def nested_agent(payload) -> bool:
@@ -294,7 +294,7 @@ def nested_agent(payload) -> bool:
     stamp, which never equals its own session.
     """
     payload = payload if isinstance(payload, dict) else {}
-    session = str(payload.get("session_id") or payload.get("thread_id") or "")
+    session = str(payload.get("session_id") or payload.get("thread_id") or payload.get("conversationId") or "")
     return bool(session) and any(
         os.environ.get(key) not in (None, "", session) for key in AGENT_SESSION_ENV_KEYS
     )
