@@ -29,6 +29,7 @@ from agent_update_process import UpdateProcess
 
 DISABLE_ENV = "LINK16_AGENT_UPDATE"
 UPDATE_RESPONSE_TIMEOUT_SEC = 5
+CODEX_INSTALL_IDLE_TIMEOUT_SEC = 120
 VERSION_TIMEOUT_SEC = 2
 CODEX_CHANNEL_URL = "https://releases.openai.com/codex/channels/latest"
 UPDATE_ARGS = {
@@ -148,12 +149,14 @@ def _run_update_command(executable, args, *, env, response_timeout, on_response=
                     break
                 if response_elapsed_sec is None:
                     response_elapsed_sec = round(now - started, 3)
+                    last_progress = now
                     _emit(on_response, response_elapsed_sec)
+                    _emit(on_progress, {"status": "updating", "stage": "responded"})
                 # A banner/spinner is not progress. Recognize advancing numeric
                 # progress or finite installation stages; never expose raw output.
                 text = chunk.decode("utf-8", errors="replace").lower()
                 marks = set(re.findall(r"\b\d+(?:\.\d+)?\s*(?:%|[kmgt]?b(?:ytes)?)(?!\w)", text))
-                marks.update(stage for stage in ("extracting", "verifying", "installing", "installed")
+                marks.update(stage for stage in ("downloading", "extracting", "verifying", "installing", "installed")
                              if stage in text)
                 if marks - progress_marks:
                     last_progress = now
@@ -231,11 +234,16 @@ def status_text(record):
     if status == "checking":
         return "正在检查更新…"
     if status == "updating":
+        if record.get('stage') == 'responded':
+            return "官方更新器已响应，正在处理更新…"
         if record.get('stage') == 'installing':
             return "正在升级：安装文件持续写入…"
         size = record.get("bytes", 0)
-        return (f"正在升级：已下载 {size / 1048576:.1f} MB…" if size
-                else f"发现新版本 {record.get('latest', '')}，正在升级…")
+        if size:
+            return f"正在升级：已下载 {size / 1048576:.1f} MB…"
+        if record.get("latest"):
+            return f"发现新版本 {record['latest']}，正在启动更新器…"
+        return "正在升级，等待安装器报告下载量…"
     if status == "current":
         return f"已是最新版 {version}，正在启动。"
     if status == "updated":
@@ -305,6 +313,9 @@ def _update_official(profile, state_dir: Path, timeout: float, on_response=None,
                     record.update(status="current", after=before)
                 else:
                     _emit(on_progress, {"status": "updating", "latest": latest})
+                    # The release check completed. The official installer can spend
+                    # longer than the check budget preparing even its first file.
+                    timeout = max(timeout, CODEX_INSTALL_IDLE_TIMEOUT_SEC)
             if "status" in record:
                 record["elapsed_sec"] = round(time.monotonic() - started, 3)
                 bridge_injection.atomic_write_json(receipt_path, record)

@@ -29,7 +29,8 @@ class OfficialUpdateCommandTests(unittest.TestCase):
                     result = agent_update.ensure(name, state_dir=home / "state")
                 self.assertEqual(result["status"], "unverified" if runtime == "codex" else "current")
                 self.assertEqual(run.call_args.args[:2], (f"{runtime}.exe", update_args))
-                self.assertEqual(run.call_args.kwargs["response_timeout"], 5)
+                self.assertEqual(run.call_args.kwargs["response_timeout"],
+                                 agent_update.CODEX_INSTALL_IDLE_TIMEOUT_SEC if runtime == "codex" else 5)
                 self.assertEqual(result["mode"], "official-foreground")
 
     def test_emergency_switch_does_not_invoke_an_updater(self):
@@ -228,6 +229,26 @@ class CodexUpdateTests(unittest.TestCase):
         self.assertIn('已跳过升级', agent_update.status_text(result))
         self.assertNotIn('失败', agent_update.status_text(result))
         run.assert_not_called()
+
+    def test_confirmed_release_survives_quiet_preparation_at_zero_percent(self):
+        # Run the real monitor and process. Scale both budgets to keep the test short.
+        runner = agent_update._run_update_command
+        script = "import time; print('downloading 0%', flush=True); time.sleep(.8)"
+        events = []
+        def install(executable, args, **kwargs):
+            return runner(sys.executable, ("-c", script), **kwargs)
+        with patch.object(agent_update.agent_runtime, "profile_spec", return_value=self.profile), \
+                patch.object(agent_update, "_executable", return_value="codex.exe"), \
+                patch.object(agent_update, "_codex_latest", return_value="2.1.0") as latest, \
+                patch.object(agent_update, "_version", side_effect=["2.0.0", "2.1.0"]), \
+                patch.object(agent_update, "CODEX_INSTALL_IDLE_TIMEOUT_SEC", 2), \
+                patch.object(agent_update, "_run_update_command", side_effect=install):
+            record = agent_update.ensure("cxp", timeout=.25, state_dir=self.root / "state",
+                                         on_progress=events.append)
+        latest.assert_called_once_with(.25, None)
+        self.assertIn({"status": "updating", "latest": "2.1.0"}, events)
+        self.assertIn({"status": "updating", "stage": "responded"}, events)
+        self.assertEqual(record["status"], "updated")
 
     def test_update_receipts_distinguish_check_skip_and_install_failure(self):
         cases = [

@@ -293,11 +293,11 @@ Link16 提供稳定 CLI，供 Bridge、手工 wrapper 和内容仓共同调用�
 `kimi update --yes`，Link16 不另写下载器。Codex 自己的 `check_for_update_on_startup` 关闭，
 因为更新已由 Link16 集中执行，避免重复检查拖慢 TUI。
 更新按可执行文件跨进程互斥，记录 before/after 版本和脱敏回执；锁忙表示已有更新继续运行，
-当前 session 不等待。Codex 先在最多3秒内读官方 `releases.openai.com/codex/channels/latest`；
+当前 session 不等待。Codex 先在最多 5 秒内读官方 `releases.openai.com/codex/channels/latest`；
 已是当前发布版本跳过安装，检查失败明确报告失败并启动已装版，不冒称最新版。发现更新仍调用官方
-updater，设置所选 `CODEX_HOME` 与非交互安装；三runtime持续观察数值进度、有限安装阶段与本次暂存
+updater，按真实安装目录设置更新子进程的 `CODEX_HOME` 并启用非交互安装；三种运行时持续观察首次响应、数值进度、下载及安装阶段与本次暂存
 目录字节增长。Windows Codex解包目录只统计专属进程Job内PID对应的 `.staging.*.<PID>`，不扫历史存档。
-连续5秒无进展就结束此次更新子树并放行已装版；开场文字、重复spinner不能取消这道限制。
+Codex 发现新版即进入安装阶段，可以在 0% 等待准备。连续 120 秒未观察到新进度才结束安装子树并启动已装版。Claude 和 Kimi 沿用 5 秒。重复的状态提示不会延长等待。
 真实进展持续时不限制总时长。正常退出后回读版本，区分最新版、更新完成和失败；桥用同一张卡片
 合并进度，发送失败不阻塞更新。Windows在挂起启动后先分配专属Job，再恢复运行，退出/取消时结束
 其后代；POSIX使用独立进程组，不按进程名扫杀。控制取消会退出启动流程，而非按一般失败继续开窗。
