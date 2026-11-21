@@ -440,7 +440,12 @@ def account_choices(registry_path=None, home=None):
     """Existing registry accounts first; offer unused personal/work slots for each runtime."""
     registry = Path(registry_path) if registry_path else agent_runtime.profile_registry_path()
     home = Path(home) if home else Path.home()
-    specs = agent_runtime.profile_specs(registry) if registry.is_file() else []
+    registered = {}
+    specs = []
+    if registry.is_file():
+        document = agent_runtime._profile_document(registry)
+        specs, _ = agent_runtime._registry_specs(document)
+        registered = document["profiles"]
     def label(spec):
         match = re.fullmatch(r"~/\." + re.escape(spec.runtime) + r"-(work|personal)(\d*)", spec.home)
         if match:
@@ -448,8 +453,9 @@ def account_choices(registry_path=None, home=None):
         return f"{spec.runtime.capitalize()} · {spec.label or spec.name}"
     rows = [{"name": s.name, "runtime": s.runtime, "home": s.home,
              "label": label(s), "existing": True} for s in specs]
-    names = {s.name for s in specs}
-    homes = {s.home.replace('\\', '/').rstrip('/').casefold() for s in specs}
+    names = set(registered)
+    homes = {str(raw.get("home") or "").replace('\\', '/').rstrip('/').casefold()
+             for raw in registered.values()}
     for runtime in agent_runtime._RUNTIME_ADAPTER_SPECS:
         if runtime == "agy":
             if "agy" not in names and "~/.gemini" not in homes:
@@ -478,7 +484,7 @@ def select_account(name, *, home=None, registry_path=None, apply=False):
     registry = Path(registry_path) if registry_path else agent_runtime.profile_registry_path()
     # The distributed empty registry is never a writable account store.
     if registry.resolve() == agent_runtime.PROFILE_REGISTRY_PATH.resolve():
-        if agent_runtime.profile_specs(registry):
+        if agent_runtime._profile_document(registry)["profiles"]:
             raise ValueError("检测到旧 registry；先迁入 local，避免覆盖已有账号")
         registry = agent_runtime.PROFILE_REGISTRY_LOCAL_PATH
     choices = account_choices(registry, home)

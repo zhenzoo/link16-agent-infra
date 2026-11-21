@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 import shlex
 
@@ -273,6 +274,12 @@ def _no_roster_error(cfg):
     )
 
 
+@lru_cache(maxsize=128)
+def _report_unsupported_bot(name, reason):
+    # The watchdog rereads this roster every scan. Report once per bot/reason.
+    print(f"跳过 {name}：{reason}", file=sys.stderr, flush=True)
+
+
 def load_bots():
     """返回 bot 列表。**只认机器本地 bridge-bots.local.json**（每台机各管各名册+cwd·跨机零冲突）。
 
@@ -293,11 +300,16 @@ def load_bots():
     bots = []
     for s in specs:
         s = _apply_roster_defaults(s, defaults)
-        profile = agent_runtime.profile_name(s, required=False)
+        name = s.get("name", "default")
+        try:
+            profile = agent_runtime.profile_name(s, required=False)
+            runtime = agent_runtime.runtime_name(s)
+        except agent_runtime.UnsupportedProfileRuntime as exc:
+            _report_unsupported_bot(name, str(exc))
+            continue
         id_env = s.get("app_id_env", "FEISHU_BRIDGE_APP_ID")
         sec_env = s.get("app_secret_env", "FEISHU_BRIDGE_APP_SECRET")
         creds = load_env(id_env, sec_env)
-        name = s.get("name", "default")
         # cwd 机器无关：留空 → str(PROJECT)（本仓库根·任何机/盘/有无 tools 层都自适应）；
         # 非空走 _expand_cd_path（同 /cd 跨机 token：`$PROJECT` / `$VIBECODING_ROOT` 等环境变量 / `~`）——
         # 这样别仓 bot（如 ../notes）可用 `$PROJECT/../notes`（无需 env·从仓库根算）或 `$VIBECODING_ROOT/Post/notes`（需设 env）portable 表达，不写死盘符（2026-06-20）。
@@ -314,7 +326,7 @@ def load_bots():
             "marker": f"[飞书-{name}]",
             "cwd": cwd,
             "profile": profile,
-            "agent": agent_runtime.runtime_name(s),
+            "agent": runtime,
             "display_name": s.get("display_name"),
             "codex_transport": s.get("codex_transport"),
             "delivery_contract": s.get("delivery_contract"),
@@ -323,6 +335,8 @@ def load_bots():
             "ready_timeout_sec": s.get("ready_timeout_sec"),
             "resume_interrupted": s.get("resume_interrupted") is True,
         })
+    if not bots:
+        raise ValueError("本机名册中的 bot 均使用当前桥不支持的平台，请更新并重载飞书桥")
     return bots
 
 
@@ -3518,8 +3532,14 @@ def _run_bot(bot_name=None):
                 parts = arg.split(None, 1)
                 al = parts[0].strip().lower()
                 dir_arg = parts[1].strip() if len(parts) > 1 else ""
-                if al not in aliases:
-                    await reply(chat_id, f"❓ 没有账号别名「{al}」。可选：{lst}"); return
+                try:
+                    agent_runtime.profile_spec(al)
+                except agent_runtime.UnsupportedProfileRuntime as exc:
+                    await reply(chat_id, f"⛔ {exc}")
+                    return
+                except KeyError:
+                    await reply(chat_id, f"❓ 没有账号别名「{al}」。可选：{lst}")
+                    return
                 # 同 worker_cmd（agent_runtime.py）：桥只把命令写进 wmux 终端、不自己执行，
                 # 所以开机计划任务那份精简 SHELL/PATH 不该否决一个静态资产完好的 profile。
                 # 真正的 CLI/shell 就绪由 wmux 终端 + ready probe 验（PLAN-924 契约）。
@@ -4416,9 +4436,14 @@ def cmd_stop(bot_filter=None):
         if not bot_filter:
             locks.enter_context(bridge_process.control_lock('cron'))
             locks.enter_context(bridge_process.control_lock('watchdog'))
-        if bot_filter and bot_filter not in {b['name'] for b in load_bots()}:
-            print(f'未知 bot：{bot_filter}', file=sys.stderr)
-            raise SystemExit(2)
+        if bot_filter:
+            # Stopping a registered process needs its identity, even on an older bridge.
+            from bot_names import local_name
+            try:
+                bot_filter = local_name(bot_filter, required=True)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                raise SystemExit(2) from exc
         # Observe before mutation; keep guardians if stopping a bridge fails.
         rows = bridge_process.query_processes()
         bridge_process.require_known(rows)

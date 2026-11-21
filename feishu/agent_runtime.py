@@ -396,8 +396,13 @@ def _profile_document(path=None) -> dict:
     return data
 
 
-def profile_specs(path=None) -> list[ProfileSpec]:
-    data = _profile_document(path)
+class UnsupportedProfileRuntime(ValueError):
+    def __init__(self, name, runtime):
+        super().__init__(f"账号 {name} 使用当前桥不支持的平台 {runtime!r}，请更新并重载飞书桥")
+
+
+def _registry_specs(data) -> tuple[list[ProfileSpec], dict[str, str]]:
+    """Resolve runnable accounts and retain the identities owned by newer adapters."""
     defaults = data["default_profiles"]
     search_policy = data.get("session_search") or {}
     if not isinstance(search_policy, dict):
@@ -409,16 +414,22 @@ def profile_specs(path=None) -> list[ProfileSpec]:
         raise ValueError("profile registry session_search.preferred_profiles 不得重复")
     preferred_set = set(preferred)
     result = []
+    unsupported = {}
     for name, raw in data["profiles"].items():
         if not _PROFILE_NAME_RE.fullmatch(str(name)):
             raise ValueError(f"非法 profile 名：{name!r}")
         if not isinstance(raw, dict):
             raise ValueError(f"profile {name} 必须是 object")
-        runtime = str(raw.get("runtime") or "").strip().lower()
+        runtime = raw.get("runtime")
+        if not isinstance(runtime, str) or not runtime.strip():
+            raise ValueError(f"profile {name} runtime 非法：{runtime!r}")
+        runtime = runtime.strip().lower()
+        if runtime not in _PROFILE_RUNTIMES:
+            # Its launcher and home may also use a schema this process cannot interpret.
+            unsupported[name] = runtime
+            continue
         home = str(raw.get("home") or "").strip().replace("\\", "/")
         launcher = str(raw.get("launcher") or "").strip().lower()
-        if runtime not in _PROFILE_RUNTIMES:
-            raise ValueError(f"profile {name} runtime 非法：{runtime!r}")
         if launcher not in _PROFILE_LAUNCHERS:
             raise ValueError(f"profile {name} launcher 非法：{launcher!r}")
         if not (home == "~" or home.startswith("~/")):
@@ -432,31 +443,36 @@ def profile_specs(path=None) -> list[ProfileSpec]:
             recommended=bool(raw.get("recommended")),
             session_search_preferred=name in preferred_set,
         ))
-    if not result:
+    if not data["profiles"]:
         raise ValueError("profile registry 至少需要一个 profile")
     known = {p.name: p.runtime for p in result}
-    unknown_preferred = preferred_set - set(known)
+    unknown_preferred = preferred_set - data["profiles"].keys()
     if unknown_preferred:
         raise ValueError(
             f"session_search.preferred_profiles 含未知 profile：{sorted(unknown_preferred)!r}"
         )
     present_runtimes = {p.runtime for p in result}
-    unknown_defaults = set(defaults) - _PROFILE_RUNTIMES
-    if unknown_defaults:
-        raise ValueError(f"default_profiles 含未知 runtime：{sorted(unknown_defaults)!r}")
     for runtime in present_runtimes:
         selected = defaults.get(runtime)
         if selected not in known or known[selected] != runtime:
             raise ValueError(f"default_profiles.{runtime} 不是合法 {runtime} profile：{selected!r}")
-    absent_defaults = set(defaults) - present_runtimes
+    absent_defaults = (set(defaults) & _PROFILE_RUNTIMES) - present_runtimes
     if absent_defaults:
         raise ValueError(f"default_profiles 指向未安装 runtime：{sorted(absent_defaults)!r}")
-    return result
+    return result, unsupported
+
+
+def profile_specs(path=None) -> list[ProfileSpec]:
+    profiles, _ = _registry_specs(_profile_document(path))
+    return profiles
 
 
 def profile_spec(name: str, path=None) -> ProfileSpec:
     key = str(name or "").strip().lower()
-    for profile in profile_specs(path):
+    profiles, unsupported = _registry_specs(_profile_document(path))
+    if key in unsupported:
+        raise UnsupportedProfileRuntime(key, unsupported[key])
+    for profile in profiles:
         if profile.name == key:
             return profile
     raise KeyError(f"未知 agent profile：{key or '(empty)'}")

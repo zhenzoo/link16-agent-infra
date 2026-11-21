@@ -130,7 +130,11 @@ def test_第一次超时会用更宽的窗口重试一次(monkeypatch):
 # ─────────── stop · 查不了时绝不能报「没在跑」 ───────────
 
 def _stub_roster(monkeypatch, name="tb-test"):
-    monkeypatch.setattr(fb, "load_bots", lambda: [{"name": name, "app_id": "x", "app_secret": "y"}])
+    import bridge_env
+    from unittest.mock import Mock
+    roster = Mock()
+    roster.read_text.return_value = json.dumps({"bots": [{"name": name, "profile": "future-account"}]})
+    monkeypatch.setattr(bridge_env, "bots_config_path", lambda project: roster)
 
 
 def test_stop查不了时什么都不停并且非零退出(monkeypatch, capsys):

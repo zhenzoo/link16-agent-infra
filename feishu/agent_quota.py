@@ -554,6 +554,9 @@ def auto_failover_profiles():
     for name, profile in document["profiles"].items():
         if "auto_failover_target" not in profile:
             continue
+        runtime = str(profile.get("runtime") or "").strip().lower()
+        if runtime and runtime not in agent_runtime._PROFILE_RUNTIMES:
+            continue
         tagged = True
         value = profile["auto_failover_target"]
         if type(value) is not bool:
@@ -570,11 +573,10 @@ def auto_failover_profiles():
             or any(not isinstance(name, str) or not name for name in configured)
             or len(configured) != len(set(configured))):
         raise ValueError("auto_failover_profiles 必须是不重复的 profile 名数组")
-    known = {spec.name for spec in agent_runtime.profile_specs()}
-    unknown = set(configured) - known
+    unknown = set(configured) - document["profiles"].keys()
     if unknown:
         raise ValueError(f"auto_failover_profiles 含未知 profile：{sorted(unknown)!r}")
-    return frozenset(configured)
+    return frozenset(configured).intersection(spec.name for spec in agent_runtime.profile_specs())
 
 
 def pick(rows, exclude=(), prefer_runtime=None, source=None):
