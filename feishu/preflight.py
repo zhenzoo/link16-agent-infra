@@ -599,14 +599,43 @@ def check_registry():
         return Result("agent 目录名册", WARN, f"读取失败：{e}", "检查名册 JSON 是否合法")
 
 
+def _supported_agent_clis():
+    try:
+        sys.path.insert(0, str(HERE))
+        import agent_runtime
+        return tuple(spec.name for spec in agent_runtime.runtime_adapter_specs())
+    except Exception:  # noqa: BLE001
+        return ("claude", "codex", "kimi", "agy")
+
+
 def check_agent_cli():
-    """面板里真正干活的那个 CLI（claude / codex / kimi / agy）至少得有一个。"""
-    found = [n for n in ("claude", "codex", "kimi", "agy") if _fresh_which(n)]
+    """面板里真正干活的那个 CLI（由 agent_runtime._RUNTIME_ADAPTER_SPECS 统一定义）至少得有一个。"""
+    supported = _supported_agent_clis()
+    found = [n for n in supported if _fresh_which(n)]
     if found:
         return Result("Agent CLI", OK, "、".join(found))
-    return Result("Agent CLI", FAIL, "PATH 里没有 claude、codex、kimi 或 agy",
+    return Result("Agent CLI", FAIL, f"PATH 里没有 {'、'.join(supported)}",
                   "按 SOP-100 安装所选 Claude Code、Codex CLI、Kimi Code CLI 或 Antigravity CLI —— "
                   "桥只负责把消息接进面板，面板里得有东西干活")
+
+
+def check_unregistered_platforms():
+    """拉取新版本后，本机已装但尚未登记到 agent-profiles.local.json 的 Link16 平台。"""
+    try:
+        sys.path.insert(0, str(HERE))
+        import agent_runtime
+        pending = agent_runtime.unregistered_installed_platforms()
+    except Exception as exc:  # noqa: BLE001
+        return Result("新平台账号同步", WARN, f"无法核对本机新平台：{exc}")
+    if not pending:
+        return Result("新平台账号同步", OK, "本机已安装的 Link16 平台均已登记 profile")
+    names = "、".join(row["runtime"] for row in pending)
+    return Result(
+        "新平台账号同步", WARN,
+        f"本机已安装但尚未登记到本机 profile registry：{names}（飞书 /account 暂看不到它）",
+        "python feishu/profile_bootstrap.py --sync-installed --apply"
+        "（单账号平台自动接入；多账号平台按提示用 --select <账号> --apply --login）",
+    )
 
 
 def check_profile_login():
@@ -667,7 +696,7 @@ CHECKS = (check_python, check_deps, check_node, check_github_cli, check_reposito
           check_bash_on_path, check_windows_terminal_default, check_wmux, check_wmux_identity,
           check_wmux_default_shell, check_wmux_update_settings, check_wmux_background_input,
           check_encoding, check_env_file, check_proxy_config, check_local_roster, check_registry,
-          check_agent_cli, check_codex_installation, check_profile_login, check_fast_startup)
+          check_agent_cli, check_unregistered_platforms, check_codex_installation, check_profile_login, check_fast_startup)
 
 
 def run_checks(checks=CHECKS):

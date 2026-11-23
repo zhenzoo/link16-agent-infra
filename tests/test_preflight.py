@@ -164,6 +164,18 @@ class PortableSetupChecks(unittest.TestCase):
         self.assertEqual(row.status, preflight.WARN)
         self.assertNotIn("secret", row.detail)
 
+    def test_unregistered_platforms_warns_until_registered(self):
+        import agent_runtime
+        with mock.patch.object(agent_runtime, "unregistered_installed_platforms",
+                               return_value=[{"runtime": "agy", "display_name": "Antigravity CLI"}]):
+            row = preflight.check_unregistered_platforms()
+        self.assertEqual(row.status, preflight.WARN)
+        self.assertIn("agy", row.detail)
+        self.assertIn("--sync-installed --apply", row.fix)
+
+        with mock.patch.object(agent_runtime, "unregistered_installed_platforms", return_value=[]):
+            self.assertEqual(preflight.check_unregistered_platforms().status, preflight.OK)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

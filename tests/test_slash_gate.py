@@ -148,6 +148,42 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.env["_merge_session"].call_args.args[1]["profile"], "cxp2")
         self.assertIn("已选账号", self.env["reply"].call_args.args[1])
 
+    async def test_account_auto_onboards_installed_new_platform_and_lists_pending(self):
+        handler = self.handler()
+        runtime = self.env["agent_runtime"]
+        runtime.account_aliases.return_value = ["cxp"]
+        runtime.current_account.return_value = "cxp"
+        runtime.display_name.return_value = "Codex"
+        runtime.unregistered_installed_platforms.return_value = [{"runtime": "agy", "display_name": "Antigravity CLI"}]
+        await handler("chat", "/account", arrived=time.time(), inbound_id="mid-list")
+        self.assertIn("本机已装未登记平台", self.env["reply"].call_args.kwargs["md"])
+        self.assertIn("`agy`", self.env["reply"].call_args.kwargs["md"])
+
+        # Explicit `/account agy` onboards installed unregistered platform and switches cleanly.
+        self.env["reply"].reset_mock()
+        runtime.UnsupportedProfileRuntime = feishu_bridge.agent_runtime.UnsupportedProfileRuntime
+        runtime.profile_spec.side_effect = KeyError("未知 agent profile：agy")
+        runtime.profile_doctor.return_value = {"ok": True}
+        runtime.apply_account.return_value = "Antigravity CLI"
+        runtime.account_snapshot.return_value = {}
+        bootstrap = mock.Mock()
+        bootstrap.onboard_account_if_available.return_value = {"status": "onboarded", "profile": "agy", "runtime": "agy"}
+        self.env.update(profile_bootstrap=bootstrap, current_cwd=mock.Mock(return_value="repo"),
+                        load_cd_pending=mock.Mock(return_value=None), clear_cd_pending=mock.Mock(),
+                        _merge_session=mock.Mock(), close_session_runtime=mock.Mock())
+        await handler("chat", "/account agy", arrived=time.time(), inbound_id="mid-agy")
+        bootstrap.onboard_account_if_available.assert_called_once_with("agy")
+        runtime.persist_account.assert_called_once_with("unit", "agy")
+        self.assertIn("已自动登记本机新平台", self.env["reply"].call_args_list[1].args[1])
+
+        # Onboarding error fails closed without closing the current session.
+        self.env["reply"].reset_mock()
+        self.env["close_session_runtime"].reset_mock()
+        bootstrap.onboard_account_if_available.return_value = {"status": "error", "message": "hooks conflict"}
+        await handler("chat", "/account agy", arrived=time.time(), inbound_id="mid-err")
+        self.env["close_session_runtime"].assert_not_called()
+        self.assertIn("hooks conflict", self.env["reply"].call_args_list[1].args[1])
+
     async def test_workspace_is_closed_even_when_recorded_pty_is_gone(self):
         handler = self.handler()
         self.env["wmux_session"].pty_alive.return_value = False

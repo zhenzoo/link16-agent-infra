@@ -121,6 +121,7 @@ import bridge_inbound  # noqa: E402  (accepted inbound 先于 slash/session 持�
 import bridge_inbox  # noqa: E402
 import bridge_control  # noqa: E402
 import agent_runtime  # noqa: E402  (Claude/Codex/future agent CLI 的 SSOT)
+import profile_bootstrap  # noqa: E402  (按主人显式 /account 自动纳管本机已装新平台)
 import agent_quota  # noqa: E402  (本机 profile 实时额度唯一真源)
 import artifact_delivery  # noqa: E402  (本机全局在线产物交付策略)
 import session_work  # noqa: E402  (每 bot「📌 项目 · 任务」工作行·钉在每张卡片顶部+摘要)
@@ -3521,9 +3522,14 @@ def _run_bot(bot_name=None):
                 lst = " · ".join(f"`{a}`" for a in aliases)
                 default_acc = default_account()
                 if not arg:
+                    unregistered = await asyncio.to_thread(agent_runtime.unregistered_installed_platforms)
+                    new_platform_line = ""
+                    if unregistered:
+                        pending = " · ".join(f"`{row['runtime']}`" for row in unregistered)
+                        new_platform_line = f"\n🆕 **本机已装未登记平台**：{pending}（发 `/account <平台名>` 可直接登记接入）"
                     await reply(chat_id, md=(
                         f"🔑 **当前账号** `{cur}`（{agent_runtime.display_name(bot)}）· **名册默认** `{default_acc}`\n"
-                        f"**可切**：{lst}\n"
+                        f"**可切**：{lst}{new_platform_line}\n"
                         f"`/account ccw2` —— **选**新号（**直改名册默认**·关旧会话；**不立刻起新会话**）。\n"
                         f"`/account ccw2 <目录>` —— 一条命令同时**选账号 + 选目录**（目录写法同 `/cd`：子目录名/书签/`..`/绝对路径）。\n"
                         f"💡 **懒启动**：`/cd` 选目录、`/account` 选账号都只是【选·可叠加·互不清除】——**发你下一条正式消息时才真正起会话**（在选好的目录 + 账号冷启·十几秒）。\n"
@@ -3532,14 +3538,47 @@ def _run_bot(bot_name=None):
                 parts = arg.split(None, 1)
                 al = parts[0].strip().lower()
                 dir_arg = parts[1].strip() if len(parts) > 1 else ""
+                auto_onboarded = False
                 try:
                     agent_runtime.profile_spec(al)
                 except agent_runtime.UnsupportedProfileRuntime as exc:
                     await reply(chat_id, f"⛔ {exc}")
                     return
                 except KeyError:
-                    await reply(chat_id, f"❓ 没有账号别名「{al}」。可选：{lst}")
-                    return
+                    outcome = await asyncio.to_thread(profile_bootstrap.onboard_account_if_available, al)
+                    status = outcome.get("status")
+                    if status == "onboarded":
+                        auto_onboarded = True
+                    elif status == "not_installed":
+                        await reply(
+                            chat_id,
+                            f"❓ 平台 `{outcome['runtime']}`（{outcome['display_name']}）已受 Link16 支持，"
+                            "但本机尚未安装该 CLI；请先按 SOP-100 安装后重试。",
+                        )
+                        return
+                    elif status == "choose_existing":
+                        existing_list = " · ".join(f"`{p}`" for p in outcome["profiles"])
+                        await reply(
+                            chat_id,
+                            f"💡 平台 `{outcome['runtime']}` 本机已有账号：{existing_list}，请直接发 `/account <账号名>` 切换。",
+                        )
+                        return
+                    elif status == "needs_choice":
+                        choice_list = " · ".join(f"`{c}`" for c in outcome["choices"])
+                        await reply(
+                            chat_id,
+                            f"🆕 平台 `{outcome['runtime']}` 本机已安装但尚未登记账号；发 `/account <选项>` 可直接登记并切换：{choice_list}",
+                        )
+                        return
+                    elif status == "error":
+                        await reply(
+                            chat_id,
+                            f"⛔ 尝试登记本机新平台 `{al}` 失败，未切账号、未关闭当前会话：{outcome.get('message', '')}",
+                        )
+                        return
+                    else:
+                        await reply(chat_id, f"❓ 没有账号别名「{al}」。可选：{lst}")
+                        return
                 # 同 worker_cmd（agent_runtime.py）：桥只把命令写进 wmux 终端、不自己执行，
                 # 所以开机计划任务那份精简 SHELL/PATH 不该否决一个静态资产完好的 profile。
                 # 真正的 CLI/shell 就绪由 wmux 终端 + ready probe 验（PLAN-924 契约）。
@@ -3610,8 +3649,9 @@ def _run_bot(bot_name=None):
                 _merge_session(bot["name"], patch)
                 staged_dir = str(target_dir).replace("\\", "/") if dir_arg else cur_dir
                 moved = bool(dir_arg) and not _same_dir(target_dir, cur_dir)
+                onboard_note = "（已自动登记本机新平台并安装桥接配置）" if auto_onboarded else ""
                 await reply(chat_id, (
-                    f"🔑 已选账号 `{al}`（{label}）· 目录 `{staged_dir}`{'（新目录）' if moved else ''} · **会话还没起** —— "
+                    f"🔑 已选账号 `{al}`（{label}）{onboard_note}· 目录 `{staged_dir}`{'（新目录）' if moved else ''} · **会话还没起** —— "
                      f"发下一条正式消息我就用它起会话。**已写入名册 profile**（`/close`/整桥重启都落在 `{al}`）")); return
             # 非 bridge 命令 → 当 agent CLI 自己的 slash command 转发进会话。
             # Codex 兼容：只有 `/name` 确实命中一个已安装 skill 时，才转成 `$name`；

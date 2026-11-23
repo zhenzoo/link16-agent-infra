@@ -333,6 +333,18 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual((rows["kimi"]["installed"], rows["kimi"]["version"], rows["kimi"]["profiles"]),
                          (False, None, []))
 
+    def test_unregistered_installed_platforms_skips_version_probes(self):
+        from types import SimpleNamespace
+        profiles = [SimpleNamespace(name="ccp", runtime="claude")]
+        with patch.object(agent_runtime, "profile_specs", return_value=profiles), \
+                patch.object(agent_runtime.shutil, "which",
+                             side_effect=lambda n, **_: f"/bin/{n}" if n in {"claude", "agy"} else None), \
+                patch.object(agent_runtime, "_persistent_path_which", return_value=None), \
+                patch.object(agent_runtime, "cli_version") as version_probe:
+            pending = agent_runtime.unregistered_installed_platforms()
+        version_probe.assert_not_called()
+        self.assertEqual([row["runtime"] for row in pending], ["agy"])
+
     def test_bridge_worker_of_every_runtime_starts_without_outer_agent_stamps(self):
         # The bot's hooks tell it from agents it launches by these stamps
         # (bridge_env.nested_agent); a stale one from the pane must not survive.

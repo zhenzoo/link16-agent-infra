@@ -402,9 +402,10 @@ python feishu/profile_bootstrap.py --select <选项name> --apply --login
 python feishu/profile_bootstrap.py --migrate-registry
 python feishu/profile_bootstrap.py --migrate-registry --apply
 
-# 已有 registry 的修复/升级：预览、安装、体检；新选择流程已自动安装
+# 已有 registry 的修复/升级：预览、安装、纳管本机已装新平台、体检；新选择流程已自动安装
 python feishu/profile_bootstrap.py
 python feishu/profile_bootstrap.py --apply
+python feishu/profile_bootstrap.py --sync-installed --apply
 python feishu/profile_bootstrap.py --doctor
 ```
 

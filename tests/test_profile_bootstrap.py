@@ -495,6 +495,76 @@ class ProfileBootstrapTests(unittest.TestCase):
             "--model", "sample-model", "-c", "model_reasoning_effort=low", "--version", "-p", "/model",
         ])
 
+    def test_sync_installed_platforms_onboards_single_slot_without_guessing_multi_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "user"
+            home.mkdir()
+            registry = root / "agent-profiles.local.json"
+            pb.initialize_registry(registry, [
+                {"name": "ccp", "runtime": "claude", "home": "~/.claude-personal"},
+            ], apply=True)
+            fake_inventory = [
+                {"runtime": "claude", "display_name": "Claude Code", "installed": True, "profiles": ["ccp"]},
+                {"runtime": "codex", "display_name": "Codex", "installed": True, "profiles": []},
+                {"runtime": "kimi", "display_name": "Kimi Code", "installed": False, "profiles": []},
+                {"runtime": "agy", "display_name": "Antigravity CLI", "installed": True, "profiles": []},
+            ]
+            with mock.patch.object(pb.agent_runtime, "platform_inventory", return_value=fake_inventory):
+                preview = pb.sync_installed_platforms(home=home, registry_path=registry, apply=False)
+                by_rt = {r["runtime"]: r for r in preview}
+                self.assertEqual(by_rt["agy"]["status"], "planned")
+                self.assertEqual(by_rt["codex"]["status"], "needs-choice")
+                self.assertNotIn("agy", json.loads(registry.read_text(encoding="utf-8"))["profiles"])
+
+                applied = pb.sync_installed_platforms(home=home, registry_path=registry, apply=True)
+                by_rt_applied = {r["runtime"]: r for r in applied}
+                self.assertEqual(by_rt_applied["agy"]["status"], "ok")
+                self.assertEqual(by_rt_applied["codex"]["status"], "needs-choice")
+
+            saved = json.loads(registry.read_text(encoding="utf-8"))
+            self.assertIn("agy", saved["profiles"])
+            self.assertEqual(saved["default_profiles"]["agy"], "agy")
+            self.assertNotIn("codex", saved["default_profiles"])
+            self.assertTrue((home / ".gemini" / "config" / "hooks.json").is_file())
+            self.assertTrue((home / ".gemini" / "config" / "skills.json").is_file())
+
+    def test_onboard_account_if_available_covers_all_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "user"
+            home.mkdir()
+            registry = root / "agent-profiles.local.json"
+            pb.initialize_registry(registry, [
+                {"name": "ccp", "runtime": "claude", "home": "~/.claude-personal"},
+            ], apply=True)
+            fake_inventory = [
+                {"runtime": "claude", "display_name": "Claude Code", "installed": True, "profiles": ["ccp"]},
+                {"runtime": "codex", "display_name": "Codex", "installed": True, "profiles": []},
+                {"runtime": "kimi", "display_name": "Kimi Code", "installed": False, "profiles": []},
+                {"runtime": "agy", "display_name": "Antigravity CLI", "installed": True, "profiles": []},
+            ]
+            with mock.patch.object(pb.agent_runtime, "platform_inventory", return_value=fake_inventory):
+                self.assertEqual(
+                    pb.onboard_account_if_available("claude", home=home, registry_path=registry)["status"],
+                    "choose_existing",
+                )
+                codex_res = pb.onboard_account_if_available("codex", home=home, registry_path=registry)
+                self.assertEqual(codex_res["status"], "needs_choice")
+                self.assertIn("codex-personal", codex_res["choices"])
+                self.assertEqual(
+                    pb.onboard_account_if_available("kimi", home=home, registry_path=registry)["status"],
+                    "not_installed",
+                )
+                self.assertEqual(
+                    pb.onboard_account_if_available("typo-xyz", home=home, registry_path=registry)["status"],
+                    "unknown",
+                )
+                agy_res = pb.onboard_account_if_available("agy", home=home, registry_path=registry)
+                self.assertEqual(agy_res["status"], "onboarded")
+                self.assertEqual(agy_res["profile"], "agy")
+            self.assertIn("agy", json.loads(registry.read_text(encoding="utf-8"))["profiles"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

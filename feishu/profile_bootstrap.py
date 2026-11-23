@@ -510,6 +510,123 @@ def select_account(name, *, home=None, registry_path=None, apply=False):
     return selected, rows
 
 
+def sync_installed_platforms(*, home=None, registry_path=None, apply=False) -> list[dict]:
+    """Discover supported platforms installed locally with zero registered profiles.
+
+    Single-slot platforms (e.g. ``agy``) have an unambiguous default profile and
+    can be registered + bootstrapped directly on ``apply=True``.  Multi-slot
+    platforms (Claude/Codex/Kimi work vs personal) are reported with exact
+    ``--select`` choices so existing-machine upgrades never guess account identity.
+    """
+    home = Path(home) if home else Path.home()
+    registry = Path(registry_path) if registry_path else agent_runtime.profile_registry_path()
+    pending = agent_runtime.unregistered_installed_platforms(registry)
+    if not pending:
+        return []
+    choices = [row for row in account_choices(registry, home) if not row["existing"]]
+    rows = []
+    for platform in pending:
+        runtime = platform["runtime"]
+        opts = [row for row in choices if row["runtime"] == runtime]
+        if len(opts) == 1:
+            choice = opts[0]
+            cmd = f"python feishu/profile_bootstrap.py --select {choice['name']} --apply"
+            if apply:
+                select_account(choice["name"], home=home, registry_path=registry, apply=True)
+                status = "ok"
+            else:
+                status = "planned"
+            rows.append({
+                "kind": "installed-platform",
+                "runtime": runtime,
+                "name": choice["name"],
+                "path": choice["home"],
+                "status": status,
+                "command": cmd,
+            })
+        else:
+            names = [row["name"] for row in opts]
+            cmd = (
+                f"python feishu/profile_bootstrap.py --select {names[0]} --apply --login"
+                if names else "python feishu/profile_bootstrap.py --choices"
+            )
+            rows.append({
+                "kind": "installed-platform",
+                "runtime": runtime,
+                "name": runtime,
+                "path": ", ".join(names) or runtime,
+                "choices": names,
+                "status": "needs-choice",
+                "command": cmd,
+            })
+    return rows
+
+
+def onboard_account_if_available(alias: str, *, home=None, registry_path=None) -> dict:
+    """Explicit owner `/account <alias>` onboarding for newly pulled platforms.
+
+    Runs only when the owner explicitly requests a supported platform or an exact
+    unregistered choice from ``account_choices()`` whose CLI is already installed
+    on this machine.  Never guesses work/personal slots and fails closed on any
+    registry/hook/skill conflict.
+    """
+    key = str(alias or "").strip().lower()
+    if not key:
+        return {"status": "unknown"}
+    home = Path(home) if home else Path.home()
+    registry = Path(registry_path) if registry_path else agent_runtime.profile_registry_path()
+    try:
+        inventory = agent_runtime.platform_inventory(registry, include_version=False)
+    except ValueError:
+        return {"status": "unknown"}
+    by_runtime = {row["runtime"]: row for row in inventory}
+    new_choices = [row for row in account_choices(registry, home) if not row["existing"]]
+    matched = next((row for row in new_choices if row["name"] == key), None)
+    if matched is not None:
+        info = by_runtime.get(matched["runtime"])
+        if not info or not info["installed"]:
+            return {
+                "status": "not_installed",
+                "runtime": matched["runtime"],
+                "display_name": (info or {}).get("display_name") or matched["runtime"],
+            }
+        if registry.resolve() == agent_runtime.PROFILE_REGISTRY_PATH.resolve():
+            return {
+                "status": "error",
+                "message": "当前仍是旧 committed registry；请先运行 python feishu/profile_bootstrap.py --migrate-registry --apply",
+            }
+        try:
+            select_account(key, home=home, registry_path=registry, apply=True)
+        except (ValueError, OSError) as exc:
+            return {"status": "error", "message": str(exc)}
+        return {
+            "status": "onboarded",
+            "profile": key,
+            "runtime": matched["runtime"],
+            "home": matched["home"],
+        }
+    if key in by_runtime:
+        info = by_runtime[key]
+        if not info["installed"]:
+            return {"status": "not_installed", "runtime": key, "display_name": info["display_name"]}
+        if info["profiles"]:
+            return {
+                "status": "choose_existing",
+                "runtime": key,
+                "display_name": info["display_name"],
+                "profiles": list(info["profiles"]),
+            }
+        opts = [row["name"] for row in new_choices if row["runtime"] == key]
+        if opts:
+            return {
+                "status": "needs_choice",
+                "runtime": key,
+                "display_name": info["display_name"],
+                "choices": opts,
+            }
+    return {"status": "unknown"}
+
+
 def login_account(selected):
     """The selected native login opens the browser itself; no second profile confirmation.
 
@@ -649,6 +766,8 @@ def main(argv=None) -> int:
                            help="向已存在的 local registry 新增一个隔离 profile")
     operation.add_argument("--choices", action="store_true", help="列出全部已有账号及可新增的工作/个人账号")
     operation.add_argument("--select", metavar="NAME", help="使用 --choices 的选项自动建立内部 profile；配 --apply")
+    operation.add_argument("--sync-installed", action="store_true",
+                           help="检测本机已装但未登记的 Link16 新平台；单账号平台配 --apply 自动接入")
     operation.add_argument("--interactive", action="store_true", help="在 wmux 终端选择一次，然后自动配置并登录")
     parser.add_argument("--login", action="store_true", help="--select --apply 后直接启动官方浏览器登录")
     parser.add_argument("--profile", action="append", default=[],
@@ -736,6 +855,8 @@ def main(argv=None) -> int:
             profile_home=args.profile_home, launcher=args.launcher, label=args.label,
             set_default=args.set_default, apply=args.apply,
         )]
+    elif args.sync_installed:
+        rows = sync_installed_platforms(home=home, apply=args.apply)
     else:
         selected = tuple(args.profile) if args.profile else None
         rows = bootstrap(
@@ -756,6 +877,7 @@ def main(argv=None) -> int:
             "conflict": "🔴 冲突",
             "name-conflict": "🔴 同名冲突",
             "planned": "⏳ 待应用",
+            "needs-choice": "💡 需选账号",
             "ready-to-migrate": "⏳ 可迁移",
             "adoptable": "⏳ 可纳管",
             "ready-to-retire": "⏳ 待移出",
@@ -764,7 +886,16 @@ def main(argv=None) -> int:
         for row in rows:
             label = status_text.get(row["status"], row["status"])
             print(f"  {label:<18} {row['kind']:<24} {row['path']}")
-        if not (args.migrate_registry or args.init_registry or args.register_profile):
+        if args.sync_installed and not rows:
+            print("  ✅ 本机已安装的 Link16 平台均已登记 profile")
+        if not (args.migrate_registry or args.init_registry or args.register_profile or args.sync_installed):
+            unregistered = agent_runtime.unregistered_installed_platforms()
+            if unregistered:
+                names = " / ".join(row["runtime"] for row in unregistered)
+                print(
+                    f"💡 发现本机已安装但尚未登记的 Link16 平台：{names} → "
+                    "运行 python feishu/profile_bootstrap.py --sync-installed --apply"
+                )
             print("下一步：重开 Git Bash，用所选 profile 函数启动并在各自浏览器页面登录。")
     bad = {"missing", "outdated", "conflict", "drift", "manifest-drift", "name-conflict", "planned", "ready-to-migrate", "ready-to-retire"}
     return 2 if args.doctor and any(row.get("status") in bad for row in rows) else 0
