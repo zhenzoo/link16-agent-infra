@@ -12,7 +12,7 @@ does_not_own:
   - 运行时协议字段
 read_when:
   - 升级或回滚 Link16
-last_reviewed: 2026-11-22
+last_reviewed: 2026-11-23
 ---
 
 # CHANGELOG · link16-agent-infra
@@ -21,6 +21,13 @@ last_reviewed: 2026-11-22
 
 > 版本历史 · 每条「why + what」。语义化：大=架构重构 / 中=新能力或显著重构 / 小=修复。
 > **git tag 与本表一一对应**（2026-07-02 补建·此前只有 CHANGELOG 无 tag）——回退点看 `git tag`。
+
+## v0.46.1 — 2026-11-23 · 隔离未知平台账号并自动纳管旧机已装新平台
+
+- **旧桥隔离未来平台账号**：从可运行账号中排除旧桥尚未支持的平台，保留其名册项、账号名和目录；绑定未来平台的 bot 只影响自身，已支持平台可继续关闭、启动与注册（`c7ec9ea`）。
+- **旧机升级自动发现并按需纳管已装新平台**：`agent_runtime.unregistered_installed_platforms()` 统一发现「Link16 已支持 + 本机已装 CLI + 尚未登记 profile」的平台；`profile_bootstrap.py` 新增 `--sync-installed [--apply]`（单账号平台如 `agy` 自动登记并装好 hooks/skills，多账号平台列精确 `--select` 选项不猜账号）及预览/体检提醒；`preflight.py` 改由适配器表动态读平台并新增「新平台账号同步」检查。
+- **飞书 `/account` 现场提示并按需接入**：`/account` 列出本机已装未登记平台；主人显式发 `/account <新平台/选项>` 时若本机已装该 CLI 则直接完成登记、安装桥接配置并切换（冲突 fail closed 不关旧会话）。
+- **验证**：TB26 实机经 `--sync-installed --apply` 纳管 `agy`（1.5.14），`profile_bootstrap --doctor --profile agy` 9/9 通过、`selftest --profile agy` 1/1 通过，Windows 后台重启全部 13 只 bot 并核对全部在线；`test_slash_gate` / `test_preflight` / `test_agy_runtime` 64 项及新增回归均通过。
 
 ## v0.46.0 — 2026-11-22 · 注册前核对飞书当前组织
 
