@@ -50,12 +50,45 @@ class AgentProxyRecoveryTests(unittest.TestCase):
                          side_effect=lambda: SimpleNamespace(dwFlags=0, wShowWindow=0)),
             patch.object(nr.subprocess, "STARTF_USESHOWWINDOW", 1, create=True),
             patch.object(nr.subprocess, "Popen"),
+            patch.object(nr.urllib.request, "getproxies_registry", return_value={}, create=True),
         ]
         mocks = [p.start() for p in self.patches]
         for p in self.patches:
             self.addCleanup(p.stop)
         self.query, self.request, self.probe, self.sync = mocks[2], mocks[4], mocks[6], mocks[7]
         self.shutdown, self.launch = mocks[8], mocks[11]
+        self.listening = mocks[5]
+
+    def test_socket_timeout_reports_live_vpn_port_without_trying_a_repair(self):
+        self.rows[0]["ListenPorts"] = [11539]
+        self.listening.side_effect = TimeoutError
+        with self.assertRaises(nr.AgentProxyUnavailable) as failure:
+            self.run_repair()
+        message = failure.exception.user_message
+        self.assertIn("当前 VPN 监听端口 **7890**", message)
+        self.assertIn("手动把本地代理端口（Mixed Port）改成 **7897**", message)
+        self.assertNotIn("11539", message)
+        self.request.assert_not_called()
+        self.sync.assert_not_called()
+        self.launch.assert_not_called()
+        self.assertFalse((self.root / "agent-proxy-recovery.json").exists())
+
+    def test_inaccessible_proxy_core_still_reports_current_port_for_manual_fix(self):
+        with patch.object(nr, "_core_config", return_value=None):
+            with self.assertRaises(nr.AgentProxyUnavailable) as failure:
+                self.run_repair()
+        self.assertIn("当前 VPN 监听端口 **7890**", failure.exception.user_message)
+        self.assertIn("改成 **7897**", failure.exception.user_message)
+        self.request.assert_not_called()
+
+    def test_ambiguous_live_ports_report_unknown_and_keep_configured_target(self):
+        self.rows[1]["ListenPorts"] = [7890, 10808]
+        self.listening.side_effect = TimeoutError
+        with self.assertRaises(nr.AgentProxyUnavailable) as failure:
+            nr.ensure_agent_proxy(apply=True, expected="http://127.0.0.1:18080")
+        self.assertIn("当前 VPN 端口未能确认", failure.exception.user_message)
+        self.assertIn("设为 **18080**", failure.exception.user_message)
+        self.assertNotIn("7890", failure.exception.user_message)
 
     def run_repair(self, apply=True):
         return nr.ensure_agent_proxy(apply=apply, expected=self.EXPECTED)

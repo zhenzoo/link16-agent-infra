@@ -4316,15 +4316,18 @@ def _run_bot(bot_name=None):
                     if recovery:
                         blog(bname, recovery)
                 if row.get('attempts') == 1 and row.get('state') != 'done':
-                    detail = (('尚未送达终端。' + (recovery or getattr(exc, 'user_message', None)
-                                              or '准备步骤失败，原消息已保留，我会自动重试。'))
-                              if row.get('state') == 'processing' else
-                              '终端交接结果暂未确认，我会保留记录等待实际接收信号，不重复提交。')
+                    if row.get('state') == 'command':
+                        notice = '❌ 控制命令执行未完成，操作结果未确认。原命令已保留，不会自动重复执行；请检查桥日志中的失败原因。'
+                    elif row.get('state') == 'processing' and isinstance(exc, network_route.AgentProxyUnavailable):
+                        notice = (f'⚠️ **VPN 代理检查未通过**\n{exc.user_message}\n'
+                                  '原消息已保存，尚未送达终端。代理恢复后会自动重试。')
+                    elif row.get('state') == 'processing':
+                        detail = recovery or getattr(exc, 'user_message', None) or '准备步骤失败，我会自动重试。'
+                        notice = '⏳ 消息已收下并保存。尚未送达终端。' + detail
+                    else:
+                        notice = '⏳ 消息已收下并保存。终端交接结果暂未确认，我会保留记录等待实际接收信号，不重复提交。'
                     try:
-                        await card_send(ch, payload['message']['chat_id'],
-                                        ('❌ 控制命令执行未完成，操作结果未确认。原命令已保留，不会自动重复执行；请检查桥日志中的失败原因。'
-                                         if row.get('state') == 'command' else
-                                         '⏳ 消息已收下并保存。' + detail), bname)
+                        await card_send(ch, payload['message']['chat_id'], notice, bname)
                     except Exception:
                         pass  # diagnostics cannot consume or invalidate input
                 raise
