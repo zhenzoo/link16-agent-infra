@@ -5,7 +5,7 @@
 Why this tool exists:
   In OBSBOT's enterprise Feishu tenant, three domains have all core OpenAPI
   scopes classified as Level 4 (requiring IT admin approval):
-    1. ``attendance`` — 假勤 / 考勤打卡记录与假期余额 (``attendance:*``, ``corehr:leave*``)
+    1. ``attendance`` — 本人假期余额与休假记录；打卡明细单独报告覆盖状态
     2. ``mail``       — 飞书邮箱读列表/正文/搜索与发邮件 (``mail:user_mailbox.message:*``)
     3. ``okr``        — 飞书 OKR 周期/目标/KR 进展查看 (``okr:*``)
 
@@ -33,6 +33,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import send_as_user_web as web_send  # noqa: E402
@@ -41,14 +42,12 @@ DEFAULT_FEISHU_HOST = os.environ.get("LINK16_FEISHU_WEB_HOST", "n8r2cr07gk.feish
 
 DOMAIN_ROUTES: dict[str, dict[str, Any]] = {
     "attendance": {
-        "label": "假勤 / 考勤打卡与假期余额",
+        "label": "我的休假 / 假期余额与休假记录",
         "openapi_blocker": "attendance:* / corehr:leave* (Level 4)",
         "urls": [
-            "https://{host}/next/app/attendance",
-            "https://{host}/people/attendance",
-            "https://{host}/next/messenger/",
+            "https://{host}/people/workforce-employee/self/calendar",
         ],
-        "nav_keywords": ("假勤", "考勤", "Attendance", "Workplace", "工作台"),
+        "nav_keywords": ("假期余额", "休假记录", "Leave balance", "Leave records"),
         "read_only": True,
     },
     "mail": {
@@ -58,7 +57,7 @@ DOMAIN_ROUTES: dict[str, dict[str, Any]] = {
             "https://{host}/mail/",
             "https://{host}/next/mail/",
         ],
-        "nav_keywords": ("收件箱", "Inbox", "写邮件", "Compose", "Mail", "邮箱"),
+        "nav_keywords": ("收件箱", "Inbox", "写邮件", "Compose"),
         "read_only": False,
     },
     "okr": {
@@ -68,7 +67,7 @@ DOMAIN_ROUTES: dict[str, dict[str, Any]] = {
             "https://{host}/okr/",
             "https://{host}/next/okr/",
         ],
-        "nav_keywords": ("OKR", "我的 OKR", "My OKRs", "目标", "Objective"),
+        "nav_keywords": ("我的 OKR", "My OKRs", "暂无 OKR", "关键结果", "Key results"),
         "read_only": True,
     },
 }
@@ -86,6 +85,36 @@ def detect_login_wall(text: str, url: str = "") -> bool:
         return True
     wall_markers = ("扫码登录", "Scan QR code", "手机号登录", "Sign in to Feishu")
     return any(m in (text or "") for m in wall_markers)
+
+
+def read_coverage(domain: str, snap: dict[str, Any], urls: list[str]) -> dict[str, bool]:
+    """A recognized route and rendered business controls are both required."""
+    observed = urlsplit(snap.get("url") or "")
+    body = str(snap.get("text") or "")
+    routes = [urlsplit(url) for url in urls]
+    in_domain = observed.scheme == "https" and any(
+        observed.netloc == route.netloc and (
+            observed.path.rstrip("/") == route.path.rstrip("/")
+            or observed.path.startswith(route.path.rstrip("/") + "/")
+        ) for route in routes
+    )
+    if snap.get("login_required") or detect_login_wall(body, observed.geturl()) or not in_domain:
+        return {}
+    if len(body) < 500 and any(x in body for x in ("无法访问", "无权访问", "页面不存在", "Access denied", "Page not found")):
+        return {}
+    if domain == "attendance":
+        balance = any(x in body for x in ("假期余额", "Leave balance"))
+        history = any(x in body for x in ("休假记录", "Leave records"))
+        if balance and history:
+            return {"leave_balance": True, "leave_records": True, "punch_records": False}
+        return {}
+    if domain == "mail":
+        if any(x in body for x in ("收件箱", "Inbox")) and any(x in body for x in ("写邮件", "Compose")):
+            return {"inbox": True}
+        return {}
+    if domain == "okr" and any(x in body for x in DOMAIN_ROUTES["okr"]["nav_keywords"]):
+        return {"okr_view": True}
+    return {}
 
 
 def _open_web_session(
@@ -139,12 +168,14 @@ def _capture_hydrated_page(
             data = json.loads(out.strip().splitlines()[-1])
         except Exception:
             continue
-        if isinstance(data, dict) and data.get("len", 0) >= best.get("len", 0):
+        if not isinstance(data, dict):
+            continue
+        if data.get("len", 0) >= best.get("len", 0):
             best = data
         body = str(data.get("text") or "")
         if detect_login_wall(body, str(data.get("url") or "")):
             return {**data, "login_required": True}
-        if data.get("len", 0) > 250 and any(k in body for k in keywords):
+        if any(k in body for k in keywords):
             return {**data, "login_required": False}
     return {**best, "login_required": detect_login_wall(str(best.get("text") or ""), str(best.get("url") or ""))}
 
@@ -188,7 +219,7 @@ def read_web_domain(
         }
 
     ba = web_send.browser_act_bin()
-    session = f"link16-web-{domain}-{int(time.time())}"
+    session = f"link16-web-{domain}-{os.getpid()}-{time.time_ns()}"
     opened = False
     try:
         opened, err = _open_web_session(
@@ -214,13 +245,22 @@ def read_web_domain(
                 "observed_url": snap.get("url", ""),
                 "error": "Feishu Web session is not logged in; ask owner to log in once in Chrome.",
             }
+        coverage = read_coverage(domain, snap, urls)
+        if not coverage:
+            return {"ok": False, **base, "observed_url": snap.get("url", ""),
+                    "error": "未读到该业务页面的有效内容", "coverage": {}}
 
         # Optional search inside Feishu Mail
         if domain == "mail" and query:
-            web_send.run_cmd([ba, "--session", session, "input", "--selector", "input[type='text'], input[placeholder*='搜索'], input[placeholder*='Search']", "--text", query], timeout=20)
-            web_send.run_cmd([ba, "--session", session, "keys", "Enter"], timeout=15)
+            rc, _, _ = web_send.run_cmd([ba, "--session", session, "input", "--selector", "input[type='text'], input[placeholder*='搜索'], input[placeholder*='Search']", "--text", query], timeout=20)
+            if rc or web_send.run_cmd([ba, "--session", session, "keys", "Enter"], timeout=15)[0]:
+                return {"ok": False, **base, "error": "未完成邮箱检索", "coverage": coverage}
             time.sleep(2.5)
             snap = _capture_hydrated_page(session, keywords=(query, *spec["nav_keywords"]), max_polls=6, poll_interval=1.5)
+            coverage = read_coverage(domain, snap, urls)
+            if not coverage:
+                return {"ok": False, **base, "observed_url": snap.get("url", ""),
+                        "error": "邮箱检索后未能核实页面", "coverage": {}}
 
         text = str(snap.get("text") or "")
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -232,6 +272,7 @@ def read_web_domain(
             "chars": len(text),
             "line_count": len(lines),
             "excerpt": "\n".join(lines[:120]),
+            "coverage": coverage,
         }
     finally:
         if opened:
@@ -295,6 +336,8 @@ def send_mail_via_web(
         snap = _capture_hydrated_page(session, keywords=DOMAIN_ROUTES["mail"]["nav_keywords"])
         if snap.get("login_required"):
             return {"ok": False, **plan, "sent": False, "login_required": True, "error": "Feishu Web Mail requires login"}
+        if not read_coverage("mail", snap, resolve_domain_urls("mail", host)):
+            return {"ok": False, **plan, "sent": False, "error": "未核实飞书邮箱业务页面"}
 
         # Click Compose / 写邮件 button
         compose_js = r"""

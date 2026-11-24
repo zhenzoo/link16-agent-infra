@@ -20,6 +20,31 @@ class TestFeishuWebWorkbench(unittest.TestCase):
         self.assertTrue(wb.detect_login_wall("welcome", "https://accounts.feishu.cn/login"))
         self.assertFalse(wb.detect_login_wall("收件箱 Inbox 写邮件", "https://n8r2cr07gk.feishu.cn/mail/"))
 
+    def test_live_leave_page_requires_records_and_balance_and_does_not_verify_punches(self):
+        url = wb.resolve_domain_urls("attendance", "demo.feishu.cn")[0]
+        for snap, expected in [
+            ({"url": url, "text": "无法访问此页面，请联系管理员。"}, False),
+            ({"url": url, "text": "工作台\n审批\n自助服务"}, False),
+            ({"url": "https://demo.feishu.cn/next/messenger/", "text": "假期余额\n休假记录"}, False),
+            ({"url": url, "text": "休假记录\n申请休假\n假期余额\n年假"}, True),
+        ]:
+            with self.subTest(snap=snap), mock.patch.object(wb, "_open_web_session", return_value=(True, "")), \
+                 mock.patch.object(wb, "_capture_hydrated_page", return_value=snap), mock.patch.object(web_send, "run_cmd") as cmd:
+                result = wb.read_web_domain(domain="attendance", host="demo.feishu.cn", browser_id="fixture", apply=True)
+                self.assertEqual(result["ok"], expected)
+                if expected:
+                    self.assertEqual(result["coverage"], {"leave_balance": True, "leave_records": True, "punch_records": False})
+                cmd.assert_called_once()
+                self.assertIn("close", cmd.call_args.args[0])
+
+    def test_empty_okr_is_valid_but_login_and_error_pages_are_not_mail(self):
+        urls = wb.resolve_domain_urls("okr", "demo.feishu.cn")
+        self.assertEqual(wb.read_coverage("okr", {"url": urls[0]+"user/42", "text": "我的 OKR\n暂无 OKR"}, urls),
+                         {"okr_view": True})
+        mail = wb.resolve_domain_urls("mail", "demo.feishu.cn")
+        for text in ["扫码登录", "无法访问", "空白占位"]:
+            self.assertEqual(wb.read_coverage("mail", {"url": mail[0], "text": text}, mail), {})
+
     def test_attendance_and_okr_dry_run_never_launch_browser(self):
         with mock.patch.object(web_send, "discover_chrome_direct_browser", return_value={"ok": True, "browser_id": "direct_1"}):
             with mock.patch.object(web_send, "run_cmd") as m_run:
