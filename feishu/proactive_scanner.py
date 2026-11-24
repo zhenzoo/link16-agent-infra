@@ -839,6 +839,10 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     routes = "".join(f'<a href="#{key}"><span class="nav-label">{label}</span><span class="nav-count">{count}</span></a>'
                      for key, label, count in nav)
     stylesheet = Path(__file__).with_name("proactive_board.css").read_text(encoding="utf-8")
+    online_url = str(actions_pack.get("online_url") or "").strip()
+    cloud = ""
+    if re.fullmatch(r"https://[a-z0-9-]+\.feishuapp\.com/app/app_[A-Za-z0-9_-]+/?", online_url):
+        cloud = f'<a class="board-cloud" href="{esc(online_url)}" title="打开已登记的线上工作台" target="_blank" rel="noopener noreferrer">云</a>'
 
     empty = '<p class="empty">本轮尚无收录项</p>'
 
@@ -851,7 +855,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 <style>{stylesheet}</style>
 </head>
 <body><div class="workspace-shell">
-<aside class="rail"><h1 class="rail-title">{esc(payload.get("owner_name") or payload["bot"])}的工作台</h1>
+<aside class="rail"><div class="rail-heading"><h1 class="rail-title">{esc(payload.get("owner_name") or payload["bot"])}的工作台</h1>{cloud}</div>
 <nav class="section-nav" aria-label="分类导航">{routes}</nav>
 <div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
@@ -928,6 +932,8 @@ def main() -> int:
     parser.add_argument("--out-json", help="保存结构化 JSON 扫描结果路径")
     parser.add_argument("--from-scan", help="以同一本人应用的已存扫描重新渲染，保留上次读取时间")
     parser.add_argument("--out-html", help="输出本地验收工作台 HTML 路径")
+    parser.add_argument("--mobile-out-dir", type=Path, help="从本次 HTML 生成私有手机版目录及核验清单")
+    parser.add_argument("--mobile-asset-root", type=Path, action="append", default=[], help="允许随包的额外原件目录")
     args = parser.parse_args()
 
     if args.preflight_only:
@@ -950,6 +956,11 @@ def main() -> int:
 
     out_html = Path(args.out_html).resolve()
     _write_output(out_html, render_html(payload, actions_pack=actions_pack, output_dir=out_html.parent))
+    mobile = {}
+    if args.mobile_out_dir:
+        from proactive_mobile import pack
+        result = pack(out_html, args.mobile_out_dir, args.mobile_asset_root)
+        mobile = {"mobile_version": result["version"], "mobile_site": result["site"]}
 
     if args.out_json:
         out_json = Path(args.out_json).resolve()
@@ -966,6 +977,7 @@ def main() -> int:
         "scan_sources": source_notes,
         "out_html": str(out_html),
         "out_json": str(Path(args.out_json).resolve()) if args.out_json else None,
+        **mobile,
     }, ensure_ascii=False, indent=2))
     return 0 if scan_ok else 2
 

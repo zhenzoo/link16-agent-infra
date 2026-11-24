@@ -47,6 +47,8 @@ h1, h2, h3, h4, p, dl { margin: 0; }
 }
 .rail-title { margin: 0; padding-inline: .65rem; font-size: clamp(1.22rem, 1.6vw, 1.55rem); line-height: 1.45; font-weight: 720; letter-spacing: -.025em; }
 .rail-title h1 { font: inherit; }
+.rail-heading { display: flex; align-items: baseline; justify-content: space-between; gap: .25rem; }
+.board-cloud { padding-inline: .3rem; color: var(--action); font-size: .86rem; text-underline-offset: .15em; }
 .section-nav { display: grid; gap: .22rem; }
 .section-nav a {
   display: flex; align-items: center; justify-content: space-between; gap: .5rem;
@@ -207,7 +209,8 @@ a.context-label { color: var(--action); }
 @media (max-width: 800px) {
   .workspace-shell { display: block; }
   .rail { position: sticky; z-index: 5; height: auto; padding: .5rem 1rem .35rem; gap: .24rem; overflow: visible; border: 0; border-bottom: 1px solid var(--edge); }
-  .rail-title { padding: 0 0 0 .15rem; max-width: 60%; font-size: 1.05rem; }
+  .rail-heading { max-width: 60%; justify-content: start; }
+  .rail-title { padding: 0 0 0 .15rem; font-size: 1.05rem; }
   .section-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .2rem; }
   .section-nav a { justify-content: center; gap: .35rem; min-height: 2.6rem; padding: .25rem .15rem; font-size: .94rem; }
   .nav-count { font-size: .8rem; }
