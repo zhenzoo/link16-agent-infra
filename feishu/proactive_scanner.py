@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Link16 Proactive Preflight & Approval Workbench Generator.
-
-Implements ``docs/SOP-150-proactive-agent-loop.md``:
-  1. ``--preflight-only`` verifies all 5 self-serve/web capabilities before 24h
-     monitoring starts (chat read, wiki/minutes read, sheet/doc write, user
-     reaction, and local Chrome Feishu Web Messenger via ``send_as_user_web``).
-  2. Default scan filters out already-replied and broadcast noise, rendering a
-     clean, static-first (SSR) executive approval workbench HTML showing ONLY:
-       - Pending outbound Feishu message drafts (authentic bubble preview)
-       - 1:1 WYSIWYG spreadsheet preview (real columns A-I, existing vs new cells)
-       - Actionable Level-4 approval deep-links (sidebar one-click)
-"""
+"""Read-only Feishu source scan and review board for messages, files and approvals."""
 from __future__ import annotations
 
 import argparse
@@ -23,13 +12,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bridge_scope_audit as audit  # noqa: E402
 import docio_cli as docio  # noqa: E402
-import send_as_user_web as web_send  # noqa: E402
 
 TZ_SHANGHAI = dt.timezone(dt.timedelta(hours=8))
 
@@ -44,6 +34,12 @@ AUTO_AGENT_KEYWORDS = (
     "todo", "跟进项", "共享表格",
 )
 BROADCAST_PATTERNS = ("@_all", '<at user_id="all">')
+OAUTH_CHECKS = {
+    "chat_read": ("聊天读取授权", audit.CHAT_READ_USER_SCOPES),
+    "wiki_and_minutes": ("Wiki 与会议检索授权", ("wiki:node:read", "wiki:node:retrieve", "minutes:minutes.search:read", "vc:meeting.search:read")),
+    "doc_sheet_write": ("共享表、文档与评论写入授权", ("sheets:spreadsheet:write_only", "docx:document:write_only", "docs:document.comment:create")),
+    "reaction_as_user": ("本人表情回应授权", ("im:message.reactions:write_only",)),
+}
 
 
 def _lark_bin() -> str:
@@ -52,11 +48,16 @@ def _lark_bin() -> str:
 
 def run_lark_json(bot: str, args: list[str], *, timeout: int = 45) -> dict[str, Any]:
     cmd = [_lark_bin(), "--profile", bot, *args]
-    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
     try:
-        return json.loads(res.stdout)
-    except Exception:
-        return {"ok": False, "returncode": res.returncode, "raw": res.stdout[:400], "stderr": res.stderr[:400]}
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+        result = json.loads(res.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error_type": type(exc).__name__}
+    if isinstance(result, dict):
+        if res.returncode:
+            result["ok"] = False
+        return result
+    return {"ok": False, "error_type": "unexpected_response"}
 
 
 def clean_content(raw: str) -> str:
@@ -93,35 +94,22 @@ def run_preflight(bot: str) -> dict[str, Any]:
     st = audit.user_identity_status(bot)
     sc = set(st.get("scopes") or [])
     owner_ok = bool(st.get("owner_matches"))
-    web_info = web_send.discover_chrome_direct_browser()
+    identity_ready = owner_ok and st.get("status") == "ready" and st.get("verified") is True
+    try:
+        from send_as_user_web import discover_chrome_direct_browser
+    except ImportError as exc:
+        web_info = {"ok": False, "error": f"缺网页入口组件 {exc.name}"}
+    else:
+        web_info = discover_chrome_direct_browser()
 
-    checks = {
-        "chat_read": {
-            "ok": owner_ok and not bool(st.get("missing_chat_read_scopes")),
-            "label": "读私聊/群聊/@我/附件",
-            "missing": list(st.get("missing_chat_read_scopes") or []),
-        },
-        "wiki_and_minutes": {
-            "ok": owner_ok and ("wiki:node:read" in sc) and ("minutes:minutes.search:read" in sc),
-            "label": "读 Wiki / 共享表 / 会议妙记",
-            "missing": [k for k in ("wiki:node:read", "wiki:node:retrieve", "minutes:minutes.search:read", "vc:meeting.search:read") if k not in sc],
-        },
-        "doc_sheet_write": {
-            "ok": owner_ok and ("sheets:spreadsheet:write_only" in sc) and ("docx:document:write_only" in sc),
-            "label": "写共享表 / 文档 / 评论",
-            "missing": [k for k in ("sheets:spreadsheet:write_only", "docx:document:write_only", "docs:document.comment:create") if k not in sc],
-        },
-        "reaction_as_user": {
-            "ok": owner_ok and ("im:message.reactions:write_only" in sc),
-            "label": "以主人身份贴表情回应",
-            "missing": [] if "im:message.reactions:write_only" in sc else ["im:message.reactions:write_only"],
-        },
-        "web_send_as_user": {
-            "ok": bool(web_info.get("ok")),
-            "label": "以主人身份发/回消息（网页端）",
-            "browser_id": web_info.get("browser_id") or "",
-            "error": "" if web_info.get("ok") else str(web_info.get("error") or "not configured"),
-        },
+    checks = {}
+    for key, (label, scopes) in OAUTH_CHECKS.items():
+        missing = sorted(set(scopes) - sc)
+        checks[key] = {"ok": identity_ready and not missing, "label": label, "missing": missing}
+    checks["web_send_as_user"] = {
+        "ok": bool(web_info.get("ok")), "label": "本机飞书网页浏览器入口",
+        "browser_id": web_info.get("browser_id") or "",
+        "error": "" if web_info.get("ok") else str(web_info.get("error") or "not configured"),
     }
     passed = sum(1 for v in checks.values() if v["ok"])
     return {
@@ -133,15 +121,10 @@ def run_preflight(bot: str) -> dict[str, Any]:
         "app_id": st.get("app_id") or "",
         "user_name": st.get("user_name") or "",
         "owner_matches": owner_ok,
+        "identity_ready": identity_ready,
         "scope_count": len(sc),
         "checks": checks,
-        "excluded": [
-            {
-                "key": "approval_action",
-                "label": "飞书审批单代操作",
-                "reason": "approval:* 属企业 Level 4（需管理员审批），不自动申请，仅在工作台提供侧边栏直达链接",
-            }
-        ],
+        "excluded": [],
     }
 
 
@@ -162,12 +145,12 @@ def classify_message(
     sender_id = sender.get("id") or ""
     chat_name = msg.get("chat_name") or ("私聊" if msg.get("chat_type") == "p2p" else "群聊")
 
-    is_self = bool(owner_open_id and sender_id == owner_open_id) or (sender_name == owner_name)
-    is_card_approval = (not is_self) and ("审批" in clean or "采购申请" in clean or "签证办理" in clean or "待办提醒" in clean)
+    is_self = sender_id == owner_open_id if owner_open_id and sender_id else sender_name == owner_name
+    is_card_approval = not is_self and "<card" in raw and any(k in clean for k in ("审批", "采购申请", "签证办理", "待办提醒"))
 
     if is_card_approval:
         lane = "action_human"
-        action_hint = "审批本人办理环节：点击直达飞书侧边栏办理。"
+        action_hint = "核对原审批单和当前办理人。"
         category = "审批直达"
     elif is_self:
         lane = "fyi_closed"
@@ -178,20 +161,15 @@ def classify_message(
         action_hint = "主人已在原群回复，已过滤。"
         category = "已回复闭环"
     elif is_broadcast_only(raw, owner_name, owner_open_id):
-        if any(k in lower for k in ("专利", "交底书", "共享表格", "排期", "周会")):
-            lane = "action_auto"
-            action_hint = "项目资料/节点同步：Agent 自动解析入仓。"
-            category = "自动归档/同步"
-        else:
-            lane = "fyi_closed"
-            action_hint = "@所有人 通用通知，已过滤。"
-            category = "群广播"
+        lane = "fyi_closed"
+        action_hint = "@所有人 广播，尚无本人行动项。"
+        category = "群广播"
     else:
         hit_human = [k for k in HUMAN_DECISION_KEYWORDS if k in lower]
         hit_auto = [k for k in AUTO_AGENT_KEYWORDS if k in lower]
         if hit_human:
             lane = "action_human"
-            action_hint = "需主人最终拍板；Agent 已先拉上下文备好草稿。"
+            action_hint = "读取上下文，核对责任及需确认的决定。"
             category = "待拍板"
         elif hit_auto:
             lane = "action_auto"
@@ -225,28 +203,41 @@ def scan_feishu(bot: str, days: int = 7, check_replies: bool = True, max_reply_c
     start = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT00:00:00+08:00")
 
     preflight = run_preflight(bot)
-    owner_name = preflight.get("user_name") or "朱镇"
-    owner_open_id = audit.user_identity_status(bot).get("verified_owner_id") or docio.owner_open_id(bot)
+    if not preflight.get("identity_ready"):
+        raise RuntimeError("当前应用的本人身份尚未核实，已保留上次工作台")
+    owner_name = preflight["user_name"]
+    owner_open_id = docio.owner_open_id(bot)
+    scan_sources = []
 
-    at_res = run_lark_json(bot, [
+    def read_items(source, args, field="messages"):
+        result = run_lark_json(bot, args)
+        data = result.get("data") or {}
+        records = data.get(field)
+        if result.get("ok") is False or result.get("code") not in (None, 0) or not isinstance(records, list):
+            error = result.get("error") or {}
+            reason = (error.get("type") or error.get("code")) if isinstance(error, dict) else None
+            scan_sources.append({"title": source, "status": "读取失败", "detail": str(reason or result.get("error_type") or result.get("code") or "接口未返回列表")})
+            return []
+        if data.get("has_more"):
+            scan_sources.append({"title": source, "status": "部分读取", "detail": f"已取得 {len(records)} 条，来源仍有其他记录。"})
+        return records
+
+    raw_at = read_items("@我 消息", [
         "im", "+messages-search", "--is-at-me", "--exclude-sender-type", "bot",
-        "--start", start, "--as", "user", "--page-size", "50", "--no-reactions",
+        "--start", start, "--as", "user", "--page-size", "50", "--page-all", "--no-reactions",
     ])
-    raw_at = (at_res.get("data") or {}).get("messages") or []
-
-    app_res = run_lark_json(bot, [
+    raw_approvals = read_items("审批提醒", [
         "im", "+messages-search", "--query", "每日待办提醒",
         "--start", start, "--as", "user", "--page-size", "5", "--no-reactions",
     ])
-    raw_approvals = (app_res.get("data") or {}).get("messages") or []
 
     mids = [m.get("message_id") for m in raw_at if m.get("message_id")]
     read_map: dict[str, bool] = {}
-    if mids:
-        rs = run_lark_json(bot, ["im", "+messages-read-status", "--as", "user", "--message-ids", ",".join(mids[:50])])
-        for item in ((rs.get("data") or {}).get("items") or []):
-            if item.get("message_id"):
-                read_map[item["message_id"]] = bool(item.get("is_read"))
+    for start_index in range(0, len(mids), 50):
+        statuses = read_items("消息已读态", ["im", "+messages-read-status", "--as", "user", "--message-ids", ",".join(mids[start_index:start_index + 50])], field="items")
+        for item in statuses:
+            if item.get("message_id") and isinstance(item.get("is_read"), bool):
+                read_map[item["message_id"]] = item["is_read"]
 
     seen: set[str] = set()
     combined: list[dict[str, Any]] = []
@@ -277,22 +268,17 @@ def scan_feishu(bot: str, days: int = 7, check_replies: bool = True, max_reply_c
             cid = m.get("chat_id") or ""
             if cid not in chat_cache:
                 reply_checks += 1
-                cr = run_lark_json(bot, [
+                chat_cache[cid] = read_items(m.get("chat_name") or "原对话", [
                     "im", "+chat-messages-list", "--chat-id", cid,
                     "--as", "user", "--order", "desc", "--page-size", "15", "--no-reactions",
                 ])
-                chat_cache[cid] = (cr.get("data") or {}).get("messages") or []
-            ct = m.get("create_time") or ""
             mid = m.get("message_id") or ""
-            found = False
-            for cm in reversed(chat_cache[cid]):
-                if cm.get("message_id") == mid:
-                    found = True
-                    continue
-                if found or (ct and (cm.get("create_time") or "") > ct):
-                    if (cm.get("sender") or {}).get("id") == owner_open_id:
-                        replied = True
-                        break
+            # A later message in the same group need not answer this request.
+            replied = bool(mid and owner_open_id) and any(
+                (cm.get("sender") or {}).get("id") == owner_open_id and
+                mid in (cm.get("parent_id"), cm.get("root_id"))
+                for cm in chat_cache[cid]
+            )
         items.append(
             classify_message(
                 m,
@@ -307,12 +293,15 @@ def scan_feishu(bot: str, days: int = 7, check_replies: bool = True, max_reply_c
     for name, _, _ in audit.roster_bots():
         st = audit.user_identity_status(name)
         sc = set(st.get("scopes") or [])
+        identity_ready = st.get("owner_matches") and st.get("verified") is True and st.get("status") == "ready"
         fleet.append({
             "bot": name,
             "app_id": st.get("app_id") or "",
             "status": st.get("status") or "unknown",
             "owner_matches": bool(st.get("owner_matches")),
-            "chat_scopes_ok": not bool(st.get("missing_chat_read_scopes")),
+            "chat_scopes_ok": bool(identity_ready and set(audit.CHAT_READ_USER_SCOPES) <= sc),
+            "preflight_ready": bool(identity_ready and preflight["checks"]["web_send_as_user"]["ok"] and
+                                    all(set(scopes) <= sc for _, scopes in OAUTH_CHECKS.values())),
             "has_wiki_node": "wiki:node:read" in sc,
             "has_sheet_write": "sheets:spreadsheet:write_only" in sc,
             "has_minutes": "minutes:minutes.search:read" in sc,
@@ -326,14 +315,11 @@ def scan_feishu(bot: str, days: int = 7, check_replies: bool = True, max_reply_c
         "fyi_closed": sum(1 for x in items if x["lane"] == "fyi_closed"),
         "fleet_total": len(fleet),
         "fleet_chat_ok": sum(1 for f in fleet if f["chat_scopes_ok"] and f["owner_matches"]),
-        "fleet_full_proactive": sum(
-            1 for f in fleet
-            if f["chat_scopes_ok"] and f["owner_matches"] and f["has_wiki_node"] and f["has_sheet_write"] and f["has_minutes"]
-        ),
+        "fleet_full_proactive": sum(1 for f in fleet if f["preflight_ready"]),
     }
 
     return {
-        "schema": "link16-proactive-workbench-v3",
+        "schema": "link16-proactive-workbench-v4",
         "generated_at": now.strftime("%Y-%m-%d %H:%M"),
         "bot": bot,
         "owner_name": owner_name,
@@ -341,6 +327,7 @@ def scan_feishu(bot: str, days: int = 7, check_replies: bool = True, max_reply_c
         "preflight": preflight,
         "counts": counts,
         "items": items,
+        "scan_sources": scan_sources,
         "fleet": fleet,
     }
 
@@ -350,47 +337,93 @@ def _highlight_mentions(text: str) -> str:
     return re.sub(r"(@[\u4e00-\u9fa5A-Za-z0-9_-]{1,20})", r'<span class="mention">\1</span>', escaped)
 
 
-def _render_drafts_section(drafts: list[dict[str, Any]], owner_name: str) -> str:
+def _url(value, *, local=False, image=False) -> str:
+    """Only web destinations and reviewed local document/image paths are navigable."""
+    value = str(value or "").strip()
+    if not value or any(ch in unquote(value) for ch in ("\r", "\n", "\t", "\\", "\x00")):
+        return ""
+    try:
+        parts = urlsplit(value)
+        if parts.scheme == "https" and parts.hostname and not parts.username and not parts.password:
+            return "" if image else value
+    except ValueError:
+        return ""
+    if not local or parts.scheme or parts.netloc or unquote(value).startswith(("/", "\\")):
+        return ""
+    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    if not image:
+        allowed |= {".html", ".htm", ".pdf", ".xlsx", ".docx", ".md"}
+    return value if Path(unquote(parts.path)).suffix.lower() in allowed else ""
+
+
+def _link(label, value, *, local=False) -> str:
+    url = _url(value, local=local)
+    if not url:
+        return ""
+    return f'<a class="link-pill" href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">{html.escape(str(label))} ↗</a>'
+
+
+def _links(record, *, local=False) -> str:
+    return " ".join(_link(lk.get("label") or "原件", lk.get("url"), local=local) for lk in record.get("links", []))
+
+
+def _priority(record) -> str:
+    value = record.get("priority")
+    if value not in ("P0", "P1", "P2", "P3"):
+        return ""
+    return f'<span class="priority {value.lower()}">{value}</span>'
+
+
+def _priority_rank(record):
+    return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(record.get("priority"), 4)
+
+
+def _ordered(records):
+    return sorted(records, key=_priority_rank)
+
+
+def _render_drafts_section(drafts: list[dict[str, Any]], owner_name: str, *, state="drafts") -> str:
     esc = html.escape
     if not drafts:
         return ""
+    heading, badge = {
+        "sent": ("已发", "已发 · 已回读"),
+        "unverified": ("发送回执待核", "待核"),
+        "drafts": ("待发", "待确认发送"),
+    }[state]
     cards = []
-    for idx, d in enumerate(drafts, start=1):
-        did = esc(str(d.get("id") or f"#{idx}"))
+    for idx, d in enumerate(_ordered(drafts), start=1):
         group = esc(d.get("target_name") or d.get("group") or "")
-        badge = esc(d.get("status") or "待确认发送")
         basis = esc(d.get("basis") or "")
-        confirm_cmd = esc(d.get("confirm_hint") or f"发草稿 {did}")
+        confirm_cmd = esc(d.get("confirm_hint") or f'发草稿 {d.get("id") or idx}')
         body_html = _highlight_mentions(d.get("message") or "")
-        links_html = "".join(
-            f'<a class="link-pill" href="{esc(lk["url"])}" target="_blank" rel="noopener">{esc(lk["label"])} ↗</a>'
-            for lk in (d.get("links") or [])
-        )
+        links_html = _links(d)
+        action_html = _link("发送回执", d.get("receipt_url"))
+        if state == "drafts":
+            action_html = f'<button type="button" class="copy-btn" data-copy="{confirm_cmd}">复制确认指令</button>'
+        sender = f'{esc(owner_name)} · {esc(d.get("sent_at") or heading)}'
         cards.append(
             f'<article class="draft-card">'
             f'  <div class="draft-top">'
-            f'    <div class="draft-title"><span class="idx-badge">{did}</span><span class="group-name">{group}</span></div>'
-            f'    <span class="status-tag tag-amber">{badge}</span>'
+            f'    <div class="draft-title">{_priority(d)}<span class="group-name">{group}</span></div>'
+            f'    <span class="status-tag {"tag-green" if state == "sent" else "tag-amber"}">{badge}</span>'
             f'  </div>'
             f'  <div class="feishu-stage">'
-            f'    <div class="bubble-meta">{esc(owner_name)} · 本人身份发出</div>'
+            f'    <div class="bubble-meta">{sender}</div>'
             f'    <div class="feishu-bubble">{body_html}</div>'
             f'  </div>'
             f'  <div class="draft-foot">'
             f'    <div class="basis-line">{basis}</div>'
             f'    <div class="foot-actions">'
             f'      {links_html}'
-            f'      <button type="button" class="copy-btn" data-copy="{confirm_cmd}">复制指令：{confirm_cmd}</button>'
+            f'      {action_html}'
             f'    </div>'
             f'  </div>'
             f'</article>'
         )
     return (
-        f'<section class="block" id="drafts">'
-        f'  <div class="sec-head">'
-        f'    <h2>待你确认发送的消息</h2>'
-        f'    <span class="sec-sub">{len(drafts)} 条草稿 · 确认后走飞书网页端以你本人身份发出并回读验真</span>'
-        f'  </div>'
+        f'<section class="sub-block" id="{state}">'
+        f'<h3>{heading} <small>{len(drafts)}</small></h3>'
         f'  <div class="draft-grid">{"".join(cards)}</div>'
         f'</section>'
     )
@@ -405,10 +438,7 @@ def _render_sheet_previews(previews: list[dict[str, Any]]) -> str:
         title = esc(sp.get("title") or "飞书共享表格预览")
         sheet_name = esc(sp.get("sheet_name") or "Sheet1")
         status_note = esc(sp.get("status_note") or "")
-        links_html = "".join(
-            f'<a class="link-pill" href="{esc(lk["url"])}" target="_blank" rel="noopener">{esc(lk["label"])} ↗</a>'
-            for lk in (sp.get("links") or [])
-        )
+        links_html = _links(sp, local=True)
         cols = sp.get("columns") or ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
         col_letters_html = '<th class="gutter"></th>' + "".join(f'<th class="col-letter">{esc(c)}</th>' for c in cols)
 
@@ -429,15 +459,31 @@ def _render_sheet_previews(previews: list[dict[str, Any]]) -> str:
             )
         else:
             hdrs = sp.get("headers") or cols
-            header_rows = '<tr class="sh-h1"><th class="gutter">1</th>' + "".join(f'<th>{esc(h)}</th>' for h in hdrs) + '</tr>'
+            header_row = esc(str(sp.get("header_row", 1)))
+            header_rows = f'<tr class="sh-h1"><th class="gutter">{header_row}</th>' + "".join(f'<th>{esc(h)}</th>' for h in hdrs) + '</tr>'
 
         body_rows = []
         for row in (sp.get("rows") or []):
             rnum = esc(str(row.get("row") or ""))
+            row_url = _url(row.get("url"))
+            if row_url:
+                rnum = f'<a href="{esc(row_url)}" target="_blank" rel="noopener noreferrer">{rnum}</a>'
             cells = row.get("cells") or []
+            if isinstance(cells, dict):
+                cells = [cells.get(col) or {} for col in cols]
             tds = [f'<td class="gutter">{rnum}</td>']
             for cell in cells:
-                val = esc(str(cell.get("value") or ""))
+                value = cell.get("value")
+                val = esc(str(value)) if value is not None else ""
+                if cell.get("rich_text"):
+                    parts = []
+                    for run in cell["rich_text"]:
+                        label = esc(str(run.get("text") or ""))
+                        href = _url(run.get("link")) if run.get("type") == "link" else ""
+                        if href:
+                            label = f'<a href="{esc(href)}" target="_blank" rel="noopener noreferrer">{label}</a>'
+                        parts.append(label)
+                    val = "".join(parts)
                 kind = cell.get("kind") or "existing"
                 cls = "cell-new" if kind == "added" else "cell-existing" if val else "cell-empty"
                 tag = '<span class="diff-dot" title="本次填入内容"></span>' if kind == "added" else ""
@@ -445,10 +491,10 @@ def _render_sheet_previews(previews: list[dict[str, Any]]) -> str:
             body_rows.append(f'<tr>{"".join(tds)}</tr>')
 
         blocks.append(
-            f'<section class="block" id="sheets">'
+            f'<article class="block sheet-card">'
+            f'<div class="record-head">{_priority(sp)}<h3>{title}</h3><span class="status-tag">{esc(sp.get("status") or "原表预览")}</span></div>'
             f'  <div class="sec-head">'
             f'    <div>'
-            f'      <h2>飞书共享表原貌预览 · {title}</h2>'
             f'      <div class="sec-sub">{sheet_name} · {status_note}</div>'
             f'    </div>'
             f'    <div class="head-right">'
@@ -457,13 +503,13 @@ def _render_sheet_previews(previews: list[dict[str, Any]]) -> str:
             f'      {links_html}'
             f'    </div>'
             f'  </div>'
-            f'  <div class="sheet-wrap">'
+            f'  <div class="sheet-wrap" role="region" aria-label="{title}表格预览" tabindex="0">'
             f'    <table class="feishu-sheet">'
             f'      <thead><tr class="sh-letters">{col_letters_html}</tr>{header_rows}</thead>'
             f'      <tbody>{"".join(body_rows)}</tbody>'
             f'    </table>'
             f'  </div>'
-            f'</section>'
+            f'</article>'
         )
     return "\n".join(blocks)
 
@@ -473,37 +519,61 @@ def _render_approvals_section(approvals: list[dict[str, Any]]) -> str:
     if not approvals:
         return ""
     rows = []
-    for a in approvals:
-        rows.append(
-            f'<div class="ap-row">'
-            f'  <div class="ap-main"><span class="ap-title">{esc(a.get("title",""))}</span>'
-            f'  <span class="ap-meta">{esc(a.get("meta",""))}</span></div>'
-            f'  <a class="ap-btn" href="{esc(a.get("url",""))}" target="_blank" rel="noopener">飞书侧边栏办理 ↗</a>'
-            f'</div>'
+    for a in _ordered(approvals):
+        fields = a.get("fields") or []
+        form = "".join(
+            f'<div><dt>{esc(str(field.get("label", "")))}</dt><dd>{esc(str(field["value"])) if field.get("value") is not None else "待填"}</dd></div>'
+            for field in fields
         )
+        form_html = f'<dl class="form-preview">{form}</dl>' if fields else ''
+        missing = "、".join(esc(str(v)) for v in a.get("missing") or [])
+        missing_html = f'<p class="missing">待补 {missing}</p>' if missing else ""
+        image_html = _preview_image(a)
+        if not form_html and not image_html:
+            form_html = '<p class="sec-sub">本条尚无表单字段预览</p>'
+        rows.append(
+            f'<article class="review-card"><div class="record-head">{_priority(a)}'
+            f'<h3>{esc(a.get("title") or "审批单")}</h3><span class="status-tag">{esc(a.get("status") or "待核原单状态")}</span></div>'
+            f'<p class="ap-meta">{esc(a.get("meta") or "")}</p>{image_html}{form_html}{missing_html}'
+            f'<div class="record-links">{_link("打开飞书原单", a.get("url"))} {_links(a)}</div></article>'
+        )
+    return "".join(rows)
+
+
+def _preview_image(record) -> str:
+    image = _url(record.get("image"), local=True, image=True)
+    if not image:
+        return ""
+    return f'<img class="preview-image" loading="lazy" src="{html.escape(image)}" alt="{html.escape(record.get("title") or "原件")}预览">'
+
+
+def _render_file(record) -> str:
+    esc = html.escape
+    preview = esc(record.get("preview") or "")
     return (
-        f'<section class="block" id="approvals">'
-        f'  <div class="sec-head">'
-        f'    <h2>仅需你本人点一下（审批）</h2>'
-        f'    <span class="sec-sub">{len(approvals)} 条待办 · 飞书审批属 Level 4 不可代办，点右侧直达</span>'
-        f'  </div>'
-        f'  <div class="ap-list">{"".join(rows)}</div>'
-        f'</section>'
+        f'<article class="review-card"><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
+        f'<span class="status-tag">{esc(record.get("status") or "待核")}</span></div>'
+        f'<p class="preview-text">{preview}</p>{_preview_image(record)}'
+        f'<div class="record-links">{_link("打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div></article>'
+    )
+
+
+def _render_evidence(rows) -> str:
+    return "".join(
+        f'<li><strong>{html.escape(r.get("title") or "")}</strong> · {html.escape(r.get("status") or "")}'
+        f'<div>{html.escape(r.get("detail") or "")} {_link("查看依据", r.get("url"), local=True)}</div></li>' for r in rows
     )
 
 
 def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
-    """When no curated workbench.json is given, show ONLY unreplied actionable items."""
+    """Visible candidates still need an owner and task before they can be dispatched."""
     esc = html.escape
-    open_items = [it for it in items if it.get("lane") == "action_human" and not it.get("owner_replied_after")]
+    open_items = [it for it in items if it.get("lane") in ("action_human", "action_auto") and it.get("category") != "审批直达" and not it.get("owner_replied_after")]
     if not open_items:
         return ""
     rows = []
-    for it in open_items[:12]:
-        jump = (
-            f'<a class="link-pill" href="{esc(it["app_link"])}" target="_blank" rel="noopener">直达原消息 ↗</a>'
-            if it.get("app_link") else ""
-        )
+    for it in open_items:
+        jump = _link("原消息", it.get("app_link"))
         rows.append(
             f'<div class="ap-row">'
             f'  <div class="ap-main"><span class="ap-title">{esc(it.get("chat_name",""))} · {esc(it.get("sender_name",""))}</span>'
@@ -512,10 +582,9 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
             f'</div>'
         )
     return (
-        f'<section class="block">'
-        f'  <div class="sec-head"><h2>新增未回复高信号 @我</h2><span class="sec-sub">{len(open_items)} 条</span></div>'
+        f'<details class="candidates"><summary>待核提及 · {len(open_items)}</summary>'
         f'  <div class="ap-list">{"".join(rows)}</div>'
-        f'</section>'
+        f'</details>'
     )
 
 
@@ -527,45 +596,60 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     pf_passed = preflight.get("passed", 0)
     pf_total = preflight.get("total", 5)
 
-    drafts = actions_pack.get("drafts") or []
+    sent_records = list(actions_pack.get("sent_messages") or [])
+    input_drafts = []
+    for draft in actions_pack.get("drafts") or []:
+        if str(draft.get("status") or "").startswith(("已发", "已送", "发送待核", "发送回执待核")):
+            sent_records.append(draft)
+        else:
+            input_drafts.append(draft)
+    sent = [m for m in sent_records if m.get("verified") is True and m.get("message_id") and _url(m.get("receipt_url"))]
+
+    def message_key(record):
+        return (record.get("id"), record.get("target_name"), record.get("message"))
+
+    # The legacy #1/#2 labels are reused; an ID alone cannot close a new draft.
+    attempted_keys = {message_key(m) for m in sent_records if all(message_key(m))}
+    drafts = [d for d in input_drafts if message_key(d) not in attempted_keys]
     sheet_previews = actions_pack.get("sheet_previews") or []
     approvals = actions_pack.get("approvals") or []
+    files = actions_pack.get("files") or []
     system_note = actions_pack.get("system_note") or ""
-
     drafts_html = _render_drafts_section(drafts, owner_name)
-    sheets_html = _render_sheet_previews(sheet_previews)
+    sent_html = _render_drafts_section(sent, owner_name, state="sent")
+    pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], owner_name, state="unverified")
+    file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
+    files_html = "".join(
+        _render_sheet_previews([record]) if is_sheet else _render_file(record)
+        for record, is_sheet in sorted(file_records, key=lambda entry: _priority_rank(entry[0]))
+    )
     approvals_html = _render_approvals_section(approvals)
-    fallback_html = "" if (drafts or sheet_previews or approvals) else _fallback_open_mentions(payload.get("items") or [])
+    reviewed = set(actions_pack.get("reviewed_message_ids") or [])
+    covered_links = {link.get("url") for item in [*drafts, *sent, *files, *sheet_previews, *approvals] for link in item.get("links") or []}
+    candidates = [it for it in payload.get("items") or [] if it.get("message_id") not in reviewed and
+                  (not it.get("app_link") or it["app_link"] not in covered_links)]
+    fallback_html = _fallback_open_mentions(candidates)
+    source_problems = payload.get("scan_sources") or []
+    source_rows = _render_evidence([*source_problems, *(actions_pack.get("sources") or [])])
+    audit_rows = _render_evidence(actions_pack.get("audit") or [])
+    audit_link = _link("完整权限核验表", actions_pack.get("audit_url"), local=True)
 
     # Compact collapsed diagnostics footer (zero main-screen clutter)
     pf_rows = []
     for _, v in (preflight.get("checks") or {}).items():
-        pf_rows.append(f'<li>{"✅" if v.get("ok") else "❌"} {esc(v.get("label",""))}</li>')
-    for ex in (preflight.get("excluded") or []):
-        pf_rows.append(f'<li>⛔ {esc(ex.get("label",""))}（{esc(ex.get("reason",""))}）</li>')
+        detail = "、".join(v.get("missing") or []) or v.get("error", "")
+        pf_rows.append(f'<li>{"已就绪" if v.get("ok") else "待核"} · {esc(v.get("label",""))} {esc(detail)}</li>')
 
     fleet_compact = [
         f'<tr><td>{esc(f["bot"])}</td><td>{"✅" if f.get("chat_scopes_ok") else "❌"}</td>'
         f'<td>{"✅" if f.get("has_wiki_node") else "—"}</td>'
         f'<td>{"✅" if f.get("has_sheet_write") else "—"}</td>'
-        f'<td>{"✅" if f.get("has_minutes") else "—"}</td><td>{f.get("scope_count",0)}</td></tr>'
+        f'<td>{"✅" if f.get("has_minutes") else "—"}</td><td>{esc(str(f.get("scope_count",0)))}</td></tr>'
         for f in (payload.get("fleet") or [])
         if f.get("has_sheet_write") or f.get("bot") == payload.get("bot")
     ]
 
-    counts_bar = []
-    if drafts:
-        counts_bar.append(f'<span class="stat-pill pill-amber">{len(drafts)} 待发消息</span>')
-    if sheet_previews:
-        total_added = sum(
-            sum(1 for r in (sp.get("rows") or []) for c in (r.get("cells") or []) if c.get("kind") == "added")
-            for sp in sheet_previews
-        )
-        counts_bar.append(f'<span class="stat-pill pill-green">{total_added} 格共享表预览</span>')
-    if approvals:
-        counts_bar.append(f'<span class="stat-pill pill-slate">{len(approvals)} 条本人审批</span>')
-    pf_cls = "pill-green" if pf_passed == pf_total else "pill-amber"
-    counts_bar.append(f'<span class="stat-pill {pf_cls}">通道 {pf_passed}/{pf_total} 就绪</span>')
+    empty = '<p class="empty">本轮尚无收录项</p>'
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -575,12 +659,12 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 <title>Link16 Proactive · {esc(owner_name)}验收工作台</title>
 <style>
 :root {{
-  --bg: #f6f6f3;
+  --bg: #f6f8f6;
   --surface: #ffffff;
-  --ink: #161615;
+  --ink: #21352c;
   --ink-2: #4b4b47;
   --muted: #787771;
-  --line: #e6e5e0;
+  --line: #dce4de;
   --line-strong: #d4d3cc;
   --blue: #1456f0;
   --blue-bg: #eef4ff;
@@ -591,7 +675,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
   --amber: #b45309;
   --amber-bg: #fffbeb;
   --amber-line: #fde68a;
-  --radius: 12px;
+  --radius: 7px;
 }}
 * {{ box-sizing: border-box; }}
 body {{
@@ -605,7 +689,7 @@ a {{ color: var(--blue); text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 
 .topbar {{
-  position: sticky;
+  position: relative;
   top: 0;
   z-index: 20;
   background: rgba(255, 255, 255, 0.92);
@@ -613,7 +697,7 @@ a:hover {{ text-decoration: underline; }}
   border-bottom: 1px solid var(--line);
 }}
 .topbar-inner {{
-  max-width: 1480px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 13px 28px;
   display: flex;
@@ -629,7 +713,7 @@ a:hover {{ text-decoration: underline; }}
 }}
 .brand h1 {{
   margin: 0;
-  font-size: 16px;
+  font-size: clamp(21px, 3vw, 30px);
   font-weight: 700;
   letter-spacing: -0.01em;
 }}
@@ -657,7 +741,7 @@ a:hover {{ text-decoration: underline; }}
 .pill-slate {{ background: #f1f1ed; color: var(--ink-2); border-color: var(--line); }}
 
 main {{
-  max-width: 1480px;
+  max-width: 1200px;
   margin: 24px auto 64px;
   padding: 0 28px;
   display: flex;
@@ -697,7 +781,7 @@ main {{
 /* Draft Feishu Message Preview Cards */
 .draft-grid {{
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }}
 .draft-card {{
@@ -902,6 +986,7 @@ main {{
 }}
 .cell-txt {{
   word-break: break-word;
+  white-space: pre-line;
 }}
 
 /* Approvals Compact Strip */
@@ -961,7 +1046,7 @@ details.sys-foot summary::-webkit-details-marker {{ display: none; }}
   padding-top: 12px;
   border-top: 1px solid var(--line);
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 16px;
 }}
 .diag-list {{
@@ -980,32 +1065,67 @@ details.sys-foot summary::-webkit-details-marker {{ display: none; }}
   text-align: left;
 }}
 .mini-tbl th {{ background: #f6f6f3; font-weight: 600; }}
+.brand {{ align-items: start; flex-direction: column; gap: 0; }}
+.stats a {{ color: var(--ink); padding: 4px 7px; }}
+.major {{ min-width: 0; display: grid; gap: 12px; scroll-margin: 1rem; }}
+.major > h2 {{ margin: 0; padding-bottom: 5px; border-bottom: 2px solid #397157; font-size: 21px; }}
+h2 small,h3 small,summary small {{ font-size: 12px; font-weight: 500; color: var(--muted); margin-left: .5em; }}
+.sub-block h3 {{ font-size: 14px; margin: 0 0 7px; }}
+.review-card,.sheet-card {{ min-width: 0; background: white; border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 17px; }}
+.record-head,.record-links {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+.record-head h3 {{ font-size: 16px; margin: 0; }}
+.record-head .status-tag {{ margin-left: auto; }}
+.status-tag {{ color: var(--ink-2); background: #eef2ef; line-height: 1.5; }}
+.status-tag.tag-amber {{ background: var(--amber-bg); color: var(--amber); }}
+.tag-green {{ color: var(--green); }}
+.priority {{ font: 650 12px/1.6 monospace; background: #ebefec; color: #4a5d50; padding: 1px 5px; border-radius: 3px; }}
+.p0 {{ color: #952e26; background: #ffebe6; }} .p1 {{ color: #815609; background: #fff1d1; }}
+.preview-text,.ap-meta {{ white-space: pre-line; overflow-wrap: anywhere; }}
+.record-links:empty,.review-card p:empty {{ display: none; }}
+.preview-image {{ display: block; max-width: 100%; max-height: 190px; object-fit: contain; margin: 8px 0; }}
+.form-preview {{ margin: 8px 0; max-width: 740px; }}
+.form-preview div {{ display: grid; grid-template-columns: minmax(90px, 28%) 1fr; border-bottom: 1px solid var(--line); }}
+.form-preview dt,.form-preview dd {{ margin: 0; padding: 6px 8px; overflow-wrap: anywhere; white-space: pre-line; }}
+.form-preview dt {{ background: #f5f7f5; color: var(--ink-2); }}
+.missing,.empty {{ margin: 6px 0; color: var(--muted); font-size: 13px; }}
+.sheet-card {{ display: block; }} .sheet-card summary,.candidates summary {{ cursor: pointer; font-weight: 650; }}
+.sheet-card .sec-head,.sheet-card .sheet-wrap,.candidates .ap-list {{ margin-top: 10px; }}
+.sheet-card .sheet-wrap {{ max-height: 17rem; overflow: auto; }}
+.diag-list,.mini-tbl,.link-pill {{ overflow-wrap: anywhere; }} .link-pill {{ white-space: normal; }}
+@media(max-width:650px) {{
+ main {{ padding: 0 12px; margin-top: 15px; gap: 21px; }} .topbar-inner {{ padding: 12px; gap: 7px; }}
+ .topbar-inner,.ap-row {{ align-items: flex-start; flex-direction: column; }} .record-head .status-tag {{ margin-left: 0; }}
+ .review-card,.sheet-card {{ padding: 10px; }} .diag-grid {{ display: block; }} .mini-tbl td,.mini-tbl th {{ padding: 4px; }}
+}}
 </style>
 </head>
 <body>
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
-      <h1>Link16 Proactive · {esc(owner_name)}验收工作台</h1>
-      <span class="stamp">更新 {esc(payload['generated_at'])} · 仅展示待确认项</span>
+      <h1>{esc(owner_name)}的工作台</h1>
+      <span class="stamp">更新 {esc(payload['generated_at'])} · {esc(payload['bot'])}</span>
     </div>
-    <div class="stats">{"".join(counts_bar)}</div>
+    <nav class="stats" aria-label="快速跳转"><a href="#messages">消息</a><a href="#files">文件</a><a href="#approvals">审批</a><a href="#audit">核验</a></nav>
   </div>
 </header>
 <main>
-  {drafts_html}
-  {sheets_html}
-  {approvals_html}
-  {fallback_html}
-  <details class="sys-foot">
-    <summary>▸ 系统体检与权限状态（{pf_passed}/{pf_total} 项能力就绪 · {esc(system_note or '定时巡检已挂入')}）</summary>
+  <section id="messages" class="major"><h2>消息 <small>{len(drafts)} 待发 · {len(sent)} 已发</small></h2>
+    {drafts_html}{sent_html}{pending_verification}{fallback_html}{empty if not (drafts_html or sent_html or fallback_html or pending_verification) else ""}</section>
+  <section id="files" class="major"><h2>文件 <small>{len(file_records)} 项</small></h2>{files_html or empty}</section>
+  <section id="approvals" class="major"><h2>审批 <small>{len(approvals)} 项</small></h2>{approvals_html or empty}</section>
+  <details class="sys-foot" id="audit">
+    <summary>巡检来源与权限核验 · 预检 {esc(str(pf_passed))}/{esc(str(pf_total))}{f" · {len(source_problems)} 项来源读取提示" if source_problems else ""}</summary>
+    <p>{esc(system_note)}</p>
+    {f'<h3>工作来源</h3><ul class="diag-list">{source_rows}</ul>' if source_rows else ''}
+    {f'<h3>业务域权限</h3><ul class="diag-list">{audit_rows}</ul>' if audit_rows else ''}{audit_link}
     <div class="diag-grid">
       <div>
         <div style="font-weight:650;margin-bottom:6px">SOP-150 权限与通道预检（{esc(payload['bot'])}）</div>
         <ul class="diag-list">{"".join(pf_rows)}</ul>
       </div>
       <div>
-        <div style="font-weight:650;margin-bottom:6px">已开通全量 Proactive 能力的智能体</div>
+        <div style="font-weight:650;margin-bottom:6px">本机应用 OAuth 检查</div>
         <table class="mini-tbl">
           <thead><tr><th>Bot</th><th>读聊</th><th>Wiki</th><th>写表</th><th>妙记</th><th>Scopes</th></tr></thead>
           <tbody>{"".join(fleet_compact)}</tbody>
@@ -1034,14 +1154,27 @@ document.querySelectorAll(".copy-btn").forEach(btn => {{
 """
 
 
+def _write_output(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+        temp_path = Path(tmp.name)
+        try:
+            tmp.write(content)
+            tmp.close()
+            temp_path.replace(path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bot", default=os.environ.get("FEISHU_BRIDGE_SESSION") or "tb26-link16")
     parser.add_argument("--days", type=int, default=7, help="扫描近 N 天（默认 7 天）")
     parser.add_argument("--preflight-only", action="store_true", help="仅运行 SOP-150 Phase 0 权限与通道体检")
     parser.add_argument("--no-reply-check", action="store_true", help="跳过群内后续主人回复探测")
-    parser.add_argument("--actions-json", help="工作台预览数据 JSON（drafts / sheet_previews / approvals）")
+    parser.add_argument("--actions-json", help="工作台预览数据 JSON（drafts、sent_messages、files、sheet_previews、approvals、sources、audit）")
     parser.add_argument("--out-json", help="保存结构化 JSON 扫描结果路径")
+    parser.add_argument("--from-scan", help="以同一本人应用的已存扫描重新渲染，保留上次读取时间")
     parser.add_argument("--out-html", help="输出本地验收工作台 HTML 路径")
     args = parser.parse_args()
 
@@ -1053,30 +1186,36 @@ def main() -> int:
     if not args.out_html:
         parser.error("--out-html is required unless --preflight-only is used")
 
-    payload = scan_feishu(args.bot, days=args.days, check_replies=not args.no_reply_check)
     actions_pack = None
-    if args.actions_json and Path(args.actions_json).exists():
-        actions_pack = json.loads(Path(args.actions_json).read_text(encoding="utf-8"))
+    if args.actions_json:
+        actions_pack = json.loads(Path(args.actions_json).read_text(encoding="utf-8-sig"))
+    if args.from_scan:
+        payload = json.loads(Path(args.from_scan).read_text(encoding="utf-8-sig"))
+        if payload.get("bot") != args.bot:
+            parser.error("已存扫描所属应用与 --bot 不一致")
+    else:
+        payload = scan_feishu(args.bot, days=args.days, check_replies=not args.no_reply_check)
 
     out_html = Path(args.out_html).resolve()
-    out_html.parent.mkdir(parents=True, exist_ok=True)
-    out_html.write_text(render_html(payload, actions_pack=actions_pack), encoding="utf-8")
+    _write_output(out_html, render_html(payload, actions_pack=actions_pack))
 
     if args.out_json:
         out_json = Path(args.out_json).resolve()
-        out_json.parent.mkdir(parents=True, exist_ok=True)
-        out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_output(out_json, json.dumps(payload, ensure_ascii=False, indent=2))
 
+    source_notes = payload.get("scan_sources") or []
+    scan_ok = not any(r.get("status") == "读取失败" for r in source_notes)
     print(json.dumps({
-        "ok": True,
+        "ok": scan_ok, "html_written": True, "scan_reused": bool(args.from_scan),
         "bot": payload["bot"],
         "generated_at": payload["generated_at"],
         "preflight_ready": payload["preflight"]["all_ready"],
         "counts": payload["counts"],
+        "scan_sources": source_notes,
         "out_html": str(out_html),
         "out_json": str(Path(args.out_json).resolve()) if args.out_json else None,
     }, ensure_ascii=False, indent=2))
-    return 0
+    return 0 if scan_ok else 2
 
 
 if __name__ == "__main__":

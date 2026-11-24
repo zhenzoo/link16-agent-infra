@@ -1,12 +1,80 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "feishu"))
 import proactive_scanner as ps
 
 
 class ProactiveScannerTests(unittest.TestCase):
+    def test_partial_grants_and_unverified_identity_are_not_ready(self):
+        identity = {
+            "owner_matches": True, "verified": True, "status": "ready",
+            "scopes": ["minutes:minutes.search:read", "wiki:node:read", "sheets:spreadsheet:write_only", "docx:document:write_only"],
+        }
+        web = SimpleNamespace(discover_chrome_direct_browser=lambda: {"ok": True})
+        with patch.object(ps.audit, "user_identity_status", return_value=identity), patch.dict(sys.modules, {"send_as_user_web": web}):
+            result = ps.run_preflight("test")
+            identity["verified"] = False
+            stale = ps.run_preflight("test")
+        self.assertFalse(result["checks"]["wiki_and_minutes"]["ok"])
+        self.assertIn("docs:document.comment:create", result["checks"]["doc_sheet_write"]["missing"])
+        self.assertFalse(result["checks"]["doc_sheet_write"]["ok"])
+        self.assertFalse(stale["identity_ready"])
+
+    def test_failed_search_and_unrelated_group_reply_do_not_close_an_item(self):
+        messages = [
+            {"message_id": "question", "content": "请帮忙确认", "chat_type": "group", "chat_id": "team", "sender": {"id": "peer"}},
+        ]
+        def api(_bot, args):
+            if "--is-at-me" in args:
+                return {"data": {"messages": messages}}
+            if "--query" in args:
+                return {"ok": False, "error": {"type": "scope_missing"}}
+            if "+chat-messages-list" in args:
+                return {"data": {"messages": [
+                    {"message_id": "answer", "sender": {"id": "owner"}, "parent_id": "a-different-question"},
+                    *messages,
+                ]}}
+            return {"data": {"items": []}}
+
+        with (patch.object(ps, "run_preflight", return_value={"identity_ready": True, "user_name": "产品负责人"}),
+              patch.object(ps.docio, "owner_open_id", return_value="owner"),
+              patch.object(ps.audit, "roster_bots", return_value=[]), patch.object(ps, "run_lark_json", side_effect=api)):
+            scan = ps.scan_feishu("test")
+        self.assertFalse(scan["items"][0]["owner_replied_after"])
+        self.assertEqual(scan["scan_sources"][0]["status"], "读取失败")
+        self.assertEqual(scan["scan_sources"][0]["detail"], "scope_missing")
+
+    def test_proof_bound_messages_priority_and_safe_source_links(self):
+        payload = {"bot": "test", "generated_at": "2026-11-24", "preflight": {}}
+        sent = {"id": "#1", "target_name": "A", "message": "已确认的原话", "verified": True,
+                "message_id": "example", "receipt_url": "https://applink.feishu.cn/client/chat/open"}
+        pack = {
+            "drafts": [sent, dict(sent, target_name="另一个项目", message="同编号的新草稿")],
+            "sent_messages": [sent, dict(sent, target_name="乙", message="待核回执的原话", verified=False)],
+            "files": [{"title": "低优先级文件", "priority": "P2", "url": "draft.txt"},
+                      {"title": "优先评审件", "priority": "P0", "preview": "版本 <A> & B", "url": "reference.html"}],
+            "approvals": [{"title": "差旅", "fields": [{"label": "出差地点", "value": "目的地"}], "missing": ["票据"]}],
+            "sources": [{"title": "周会", "status": "全文可读", "detail": "已核对"}],
+        }
+        result = ps.render_html(payload, pack)
+        self.assertEqual(result.count("已确认的原话"), 1)
+        self.assertIn("1 待发 · 1 已发", result)
+        self.assertIn("发送回执待核", result)
+        self.assertIn(">乙</span>", result)
+        self.assertEqual(result.count('data-copy="'), 1)
+        self.assertIn("同编号的新草稿", result)
+        self.assertIn("版本 &lt;A&gt; &amp; B", result)
+        self.assertLess(result.index("优先评审件"), result.index("低优先级文件"))
+        self.assertIn('href="reference.html"', result)
+        self.assertNotIn('href="draft.txt"', result)
+        self.assertEqual(ps._url("file://server/share/private.html", local=True), "")
+        self.assertIn("<dt>出差地点</dt><dd>目的地</dd>", result)
+        self.assertIn("待补 票据", result)
+
     def test_audio_listen_request_routes_to_human_decision(self):
         msg = {
             "message_id": "om_1",
@@ -21,6 +89,21 @@ class ProactiveScannerTests(unittest.TestCase):
         item = ps.classify_message(msg, owner_name="朱镇", owner_open_id="ou_owner")
         self.assertEqual(item["lane"], "action_human")
         self.assertIn("position=1174", item["app_link"])
+
+    def test_weekly_sheet_preserves_header_origin_blank_column_zero_and_named_link(self):
+        preview = {"columns": ["A", "B", "C"], "headers": ["完成度", "提交人", "成果"], "header_row": 8,
+                   "rows": [{"row": 21, "url": "https://example.com/sheet?range=A21", "cells": {
+                       "A": {"value": 0}, "C": {"rich_text": [
+                           {"type": "text", "text": "版本 <一> "},
+                           {"type": "link", "link": "https://example.com/result", "text": "原稿"},
+                       ]},
+                   }}]}
+        html = ps._render_sheet_previews([preview])
+        self.assertIn('<th class="gutter">8</th>', html)
+        self.assertIn('rel="noopener noreferrer">21</a>', html)
+        self.assertIn('class="cell-txt">0</div></td><td class="cell-empty">', html)
+        self.assertIn('版本 &lt;一&gt; <a href="https://example.com/result"', html)
+        self.assertIn('rel="noopener noreferrer">原稿</a>', html)
 
     def test_prd_link_request_routes_to_auto_agent(self):
         msg = {
