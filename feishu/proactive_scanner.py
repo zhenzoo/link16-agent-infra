@@ -894,9 +894,12 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     for row in actions_pack.get("sources") or []:
         if _source_action(row):
             category = row.get("category")
+            if category in {"待办", "日程与待办"}:
+                category = "日程"
             action_groups[category if category in action_groups else "文件"].append(row)
     messages_actions, file_actions, calendar_actions, approval_actions = (_render_source_actions(rows) for rows in action_groups.values())
-    reminders = actions_pack.get("reminders") or []
+    reminders = [r for r in actions_pack.get("reminders") or []
+                 if not (r.get("kind") == "已约会议" and (r.get("id") or r.get("url")) in known)]
     calendar_label = "日程与待办" if "reminders" in actions_pack else "日程"
     calendar_count = f"{len(events)} 个日程 · {len(reminders)} 项待办" if "reminders" in actions_pack else f"{len(events)} 项"
     nav = (("messages", "消息", len(drafts) + len(sent)), ("files", "文件", len(file_records)),
