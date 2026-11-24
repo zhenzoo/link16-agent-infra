@@ -9,6 +9,21 @@ import proactive_scanner as ps
 
 
 class ProactiveScannerTests(unittest.TestCase):
+    def test_content_files_preview_the_original_media_demo_and_opted_in_text(self):
+        from bs4 import BeautifulSoup
+        pack = {"sections": ["files"], "files": [
+            {"url": "assets/final.mp4", "image": "assets/cover.png"},
+            {"url": "demo.html", "preview_kind": "demo"},
+            {"url": "article.txt", "preview_kind": "text", "preview": "稿件 <1>"}]}
+        soup = BeautifulSoup(ps.render_html({"bot": "desk"}, pack), "html.parser")
+        self.assertEqual([s["id"] for s in soup.select("main > section")], ["files"])
+        self.assertEqual(soup.video["src"], soup.select_one("article a")["href"])
+        self.assertEqual(soup.video["poster"], "assets/cover.png")
+        self.assertTrue(soup.video.has_attr("controls"))
+        self.assertEqual(soup.iframe["sandbox"], ["allow-scripts"])
+        self.assertEqual(soup.iframe["data-review-demo"], "demo.html")
+        self.assertEqual(soup.select_one('a[href="article.txt"]').find_parent("article").p.get_text(), "稿件 <1>")
+
     def test_cross_project_lanes_owners_and_closed_keys(self):
         file_record = {"title": "Spec", "assignment": {"agent": "editor", "machine": "node"}}
         draft = {"id": "q", "target_name": "Editor", "message": "请核对", "source_id": "same"}

@@ -333,7 +333,7 @@ def _highlight_mentions(text: str) -> str:
     return re.sub(r"(@[\u4e00-\u9fa5A-Za-z0-9_-]{1,20})", r'<span class="mention">\1</span>', escaped)
 
 
-def _url(value, *, local=False, image=False) -> str:
+def _url(value, *, local=False, image=False, text_file=False) -> str:
     """Only web destinations and reviewed local document/image paths are navigable."""
     value = str(value or "").strip()
     if not value or any(ch in unquote(value) for ch in ("\r", "\n", "\t", "\\", "\x00")):
@@ -348,19 +348,23 @@ def _url(value, *, local=False, image=False) -> str:
         return ""
     allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     if not image:
-        allowed |= {".html", ".htm", ".pdf", ".xlsx", ".docx", ".md"}
+        allowed |= {".html", ".htm", ".pdf", ".xlsx", ".docx", ".md", ".mp4"}
+        if text_file:
+            allowed.add(".txt")
     return value if Path(unquote(parts.path)).suffix.lower() in allowed else ""
 
 
-def _link(label, value, *, local=False) -> str:
-    url = _url(value, local=local)
+def _link(label, value, *, local=False, text_file=False) -> str:
+    url = _url(value, local=local, text_file=text_file)
     if not url:
         return ""
-    return f'<a class="link-pill" href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">{html.escape(str(label))} ↗</a>'
+    text_preview = ' data-review-text="true"' if text_file else ""
+    return f'<a class="link-pill"{text_preview} href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">{html.escape(str(label))} ↗</a>'
 
 
 def _links(record, *, local=False) -> str:
-    return " ".join(_link(lk.get("label") or "原件", lk.get("url"), local=local) for lk in record.get("links", []))
+    return " ".join(_link(lk.get("label") or "原件", lk.get("url"), local=local,
+                          text_file=local and lk.get("preview_kind") == "text") for lk in record.get("links", []))
 
 
 def _priority(record) -> str:
@@ -722,8 +726,19 @@ def _render_file(record) -> str:
     esc = html.escape
     preview = esc(record.get("preview") or "")
     frame = ""
-    original = _url(record.get("url"), local=True)
+    text_file = record.get("preview_kind") == "text"
+    original = _url(record.get("url"), local=True, text_file=text_file)
     section = record.get("preview_fragment") or ""
+    local_path = urlsplit(original)
+    suffix = Path(unquote(local_path.path)).suffix.lower() if not local_path.scheme else ""
+    if suffix == ".mp4":
+        poster = _url(record.get("image"), local=True, image=True)
+        poster_attr = f' poster="{esc(poster)}"' if poster else ""
+        frame = (f'<video class="file-video" aria-label="{esc(record.get("title") or "视频")}" '
+                 f'src="{esc(original)}"{poster_attr} controls playsinline preload="metadata"></video>')
+    elif record.get("preview_kind") == "demo" and suffix in {".htm", ".html"} and not section:
+        frame = (f'<iframe class="chapter-preview" data-review-demo="{esc(original)}" title="{esc(record.get("title") or "Demo")}" '
+                 f'src="{esc(original)}" loading="lazy" sandbox="allow-scripts"></iframe>')
     if original and re.fullmatch(r"[a-zA-Z][\w-]{0,64}", section):
         parts = urlsplit(original)
         if not parts.scheme and not parts.query and parts.path.endswith(".html") and parts.fragment == section:
@@ -734,7 +749,7 @@ def _render_file(record) -> str:
         f'<article class="review-card"><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
         f'<span class="status-tag">{esc(record.get("status") or "待核")}</span></div>'
         f'{frame or _preview_image(record)}<p class="preview-text">{preview}</p>'
-        f'<div class="record-links">{_link("打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div>'
+        f'<div class="record-links">{_link("打开原件", original, local=True, text_file=text_file)} {_links(record, local=True)}</div>'
         f'{_assignment_line(record, show_missing=False)}</article>'
     )
 
@@ -1044,6 +1059,7 @@ def main() -> int:
     parser.add_argument("--actions-json", help="工作包 JSON；sections 可选 messages、files、calendar、approvals 及次序，project 为事项的默认来源项目")
     parser.add_argument("--out-json", help="保存结构化 JSON 扫描结果路径")
     parser.add_argument("--from-scan", help="以同一本人应用的已存扫描重新渲染，保留上次读取时间")
+    parser.add_argument("--files-only", action="store_true", help="仅用本机文件工作包生成工作台，跳过飞书来源巡检")
     parser.add_argument("--out-html", help="输出本地验收工作台 HTML 路径")
     parser.add_argument("--mobile-out-dir", type=Path, help="从本次 HTML 生成私有手机版目录及核验清单")
     parser.add_argument("--mobile-asset-root", type=Path, action="append", default=[], help="允许随包的额外原件目录")
@@ -1060,7 +1076,13 @@ def main() -> int:
     actions_pack = None
     if args.actions_json:
         actions_pack = json.loads(Path(args.actions_json).read_text(encoding="utf-8-sig"))
-    if args.from_scan:
+    if args.files_only:
+        if args.from_scan or not actions_pack or actions_pack.get("sections") != ["files"]:
+            parser.error("--files-only 需要仅包含 files 栏目的 --actions-json，不能与 --from-scan 合用")
+        payload = {"bot": args.bot, "owner_name": actions_pack.get("board_name") or args.bot,
+                   "generated_at": dt.datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds"),
+                   "counts": {"files": len(actions_pack.get("files") or [])}, "preflight": {"all_ready": None}}
+    elif args.from_scan:
         payload = json.loads(Path(args.from_scan).read_text(encoding="utf-8-sig"))
         if (not isinstance(payload, dict) or not isinstance(payload.get("generated_at"), str)
                 or not isinstance(payload.get("counts"), dict) or not isinstance(payload.get("preflight"), dict)

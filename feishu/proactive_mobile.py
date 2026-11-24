@@ -12,6 +12,7 @@ import json
 import posixpath
 import re
 import tempfile
+from html import escape
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
@@ -158,6 +159,17 @@ class Bundle:
 
     def prepare_frames(self, soup, path):
         for frame in soup.find_all("iframe"):
+            if path == self.board and frame.has_attr("data-review-demo"):
+                ref = frame["data-review-demo"]
+                dest = relative_target(path, ref)
+                card = frame.find_parent("article")
+                if (not card or ref != frame.get("src") or dest == path or dest not in self.docs
+                        or not can_read(dest, self.roots, HTML) or not card.find("a", href=ref)):
+                    raise ValueError("Demo 预览须与本卡链接指向同一份获选 HTML")
+                frame.attrs = {"src": self.docs[dest], "title": frame.get("title", "Demo"),
+                               "class": "chapter-preview", "loading": "lazy", "sandbox": "allow-scripts",
+                               "referrerpolicy": "no-referrer"}
+                continue
             if path != self.board or not frame.has_attr("data-review-fragment"):
                 frame.decompose()
                 continue
@@ -224,10 +236,10 @@ class Bundle:
             offset = 1 if container.contents and isinstance(container.contents[0], Doctype) else 0
             container.insert(offset, soup.new_tag("head"))
         policy = POLICY
-        if self.copy_accessory_sources(soup, path):
+        if self.copy_accessory_sources(soup, path) or (path == self.board and soup.find("iframe")):
             policy += "; frame-src 'self'"
         if path == self.board and self.frame_ids:
-            policy = policy.replace("base-uri 'none'", "base-uri 'self'; frame-src 'self'")
+            policy = policy.replace("base-uri 'none'", "base-uri 'self'")
         policy = soup.new_tag("meta", attrs={"http-equiv": "Content-Security-Policy", "content": policy})
         soup.head.insert(0, policy)
         if not soup.select_one('meta[name="viewport"]'):
@@ -254,6 +266,20 @@ class Bundle:
                 continue
             dest = relative_target(path, ref)
             target = self.docs.get(dest)
+            if (path == self.board and a.get("data-review-text") == "true" and a.find_parent("article")
+                    and can_read(dest, self.roots, {".txt", ".md"})):
+                data = dest.read_bytes()
+                body = data.decode("utf-8-sig")
+                if PRIVATE.search(body) or LOCAL_ADDRESS.search(body):
+                    raise ValueError("原稿含私密数据或本机路径，请先核对：" + dest.name)
+                target = "assets/text-" + digest(data) + ".html"
+                (self.stage / target).write_text(
+                    '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>' + escape(dest.name) + '</title>'
+                    '<pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-width:75ch;margin:2rem auto;'
+                    'padding:0 1rem;font:17px/1.7 system-ui">' + escape(body) + '</pre></html>',
+                    encoding="utf8", newline="")
             if not target and can_read(dest, self.roots, IMAGES):
                 target = self.image(dest)
             if not target and can_read(dest, self.roots, VIDEO):

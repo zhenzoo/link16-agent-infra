@@ -82,6 +82,8 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
 1. 主号先找到已有正文与 writer，核基线提交或将本项干净存档。长的独立成果分派不同执行者，短的同类事务排同一队；CAD/渲染等按机器能力派，公共场景只给一名集成者。用 registry 和本应用共享群实际成员确认目标。A2A 委派给原始出处、业务背景、已定与待定、原文件/范本、可写边界、实物验收与回执对象；保存请求 mid。接收、执行、产物到手、实际验收各有凭证。网络结果不明先核对原请求及对端记录，再决定是否补投。
 
    本机派前运行 `python feishu/proactive_dispatch.py check --peer <worker> --size long`，核实际线程、当前模型、在途工作及服务端返回的窗口。仅已知冷启配置的注明冷启；共享账号的并发工作共用额度。通过后用 `send --bot <主号> --peer <worker> --task-id <稳定任务号> --size long --prompt-file <私有委派书> --artifact <成果相对路径>`。跟进用同一程序的 `status --bot <主号> --peer <worker> --task-id <任务号>`，历史单可直接传 `--request-mid <原请求>`。超出约定回执时间先查在途记录、错误和产物；由受权执行者保全恢复点，在允许继续时只接续未交部分。在另一台电脑的业务，先经已认证群会话让目标机的控制端做本机检查和派发。目标机没有控制授权时只收运行事实及已交成果，保留原限制。
+   主号与执行者同机且同群时，可用 `send_feishu_msg.py --bot <主号> --to-agent <执行者> --text "/help"` 核对控制入口，回信引用原请求。由主人指定的主号在收到本人私聊授权后运行 `agent_grant.py claim --caps close,account,model --target <执行者>`，多个执行者可重复给 `--target`。默认有效期 24 小时。随后同一发送入口可带 `/close`、`/account <profile>` 或 `/model`。接收桥从原消息核发信应用、群和指令正文，再按目标和命令验权。`/account` 的实际生效点看回执；`/model` 在已有会话中转给原生 CLI，打开选择器后还需核实所选模型。只有对应桥载入此版本，才能处理带收发方标头的命令。
+
 2. **先呈原貌预览，绝不先擅自外发**：
    - 准备更新共享表时按实际列字母、行号、命名链接、现值和拟填值预演，放入对应业务主号的 `feishu/_state/proactive/<bot>/workbench.json`。已获授权规整原文时只更新目标格，先复读比对原值，再写后逐格确认。
    - 凡准备以主人身份发往同事/群聊的回复，写成精准飞书气泡草稿放入 `workbench.json`（含目标群、`@对象`、完整正文、一句话依据、原消息 `applink` 跳转）。
@@ -99,6 +101,8 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
      --out-html <业务仓>/docs/proactive-triage-board.html `
      --out-json feishu/_state/proactive/<bot>/latest.json
    ```
+   只审本机文件时，工作包配置 `"sections": ["files"]`，以上命令加 `--files-only`，直接读取工作包。每张文件卡的 `url` 指向相对工作台的原件。MP4 直接使用播放器，`image` 可指定封面；独立 HTML Demo 用 `preview_kind: demo`，正文 TXT 用 `preview_kind: text`，`preview` 放要审的原文。手机版依实际资源允许清单打包。验收时播放并拖动每段视频，操作 Demo，再打开同卡原件。
+
    随后按交付规范调用 `$open-local` 在本机打开（若全局在线开关为 `on` 同步发飞书在线版并按 SPEC-210 三行回执）。
 
 ---
