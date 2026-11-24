@@ -571,7 +571,9 @@ def _group_check(bot, group):
         return {"status": "unknown", "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
     resolved_note = None
     expected_chat_id = None
-    if not group:
+    if group and group.startswith("oc_"):
+        expected_chat_id = group
+    elif not group:
         group, resolved_note, expected_chat_id = _resolve_group_hint(bot)
     else:
         resolved_group, _note, resolved_id = _resolve_group_hint(bot)
@@ -609,6 +611,7 @@ def _invite_registered_bot(state):
     """
     import tenant_probe
     import bridge_feishu_probe as probe
+    import feishu_rest
     job_id = state["job_id"]
     with bridge_injection.injection_lock(STATE_DIR, "registration-group", job_id):
         state = get_job(job_id)
@@ -639,9 +642,9 @@ def _invite_registered_bot(state):
             receipt = {"status": "outcome_unknown", "operator": operator, "chat_id": chat_id,
                        "app_id": current_id, "attempted_at": _now()}
             _mutate(job_id, lambda item: item.update(group_invitation=receipt))
-            response = probe._post(
-                f"{probe.BASE}/im/v1/chats/{chat_id}/members?member_id_type=app_id&succeed_type=2",
-                {"id_list": [current_id]}, {"Authorization": f"Bearer {token}"})
+            response = feishu_rest.api(
+                "POST", f"{probe.BASE}/im/v1/chats/{chat_id}/members?member_id_type=app_id&succeed_type=2",
+                token=token, body={"id_list": [current_id]})
             data = response.get("data") or {}
             receipt["code"] = response.get("code")
             if response.get("code") != 0:

@@ -437,6 +437,12 @@ class RegistrationPermissionBaselineTests(_MonitorCase):
 
 
 class GroupInvitationTests(_MonitorCase):
+    def test_exact_group_id_is_checked_before_tenant_is_discoverable(self):
+        probe = types.SimpleNamespace(bot_groups=lambda _: [{"name": "new group name", "chat_id": "oc_exact"}])
+        with mock.patch.dict(sys.modules, {"bridge_feishu_probe": probe}):
+            self.assertEqual(monitor._group_check("bot", "oc_exact")["status"], "ready")
+            self.assertEqual(monitor._group_check("bot", "oc_other")["status"], "missing")
+
     def test_registered_group_readback_uses_exact_chat_id_not_similar_name(self):
         probe = types.SimpleNamespace(bot_groups=lambda _bot: [{"name": "交流水吧备份", "chat_id": "oc_wrong"}])
         with mock.patch.dict(sys.modules, {"bridge_feishu_probe": probe}), \
@@ -454,13 +460,14 @@ class GroupInvitationTests(_MonitorCase):
              mock.patch.object(tenant_probe, "tenant_entry", return_value={"group_chat_id": "oc_exact", "group_name": "交流水吧"}), \
              mock.patch.object(monitor.bridge_scope_audit, "_env_val", return_value="cli_safe"), \
              mock.patch.object(probe, "tenant_token", return_value="private-token"), \
-             mock.patch.object(probe, "_post", return_value=response or {"code": 0}, side_effect=failure) as post:
+             mock.patch("feishu_rest.api", return_value=response or {"code": 0}, side_effect=failure) as post:
             result = monitor._invite_registered_bot(state)
             if not wrong_tenant:
                 again = monitor._invite_registered_bot(state)
                 self.assertEqual(post.call_count, 1)
-                self.assertIn("member_id_type=app_id", post.call_args.args[0])
-                self.assertEqual(post.call_args.args[1], {"id_list": ["cli_safe"]})
+                self.assertEqual(post.call_args.args[0], "POST")
+                self.assertIn("member_id_type=app_id", post.call_args.args[1])
+                self.assertEqual(post.call_args.kwargs["body"], {"id_list": ["cli_safe"]})
             else:
                 post.assert_not_called()
         self.assertNotIn("private-token", json.dumps(monitor.get_job(state["job_id"])))

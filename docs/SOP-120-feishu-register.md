@@ -19,7 +19,7 @@ does_not_own:
 read_when:
   - 要新建一个飞书 bot
   - bot 建好了但发不了文档 / 进不了群 / 回复发错人
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-25
 ---
 # SOP-120 · 飞书智能体（bot）注册 + 权限 + 名册 + 跨机 a2a 协作（SSOT）
 
@@ -232,7 +232,7 @@ python feishu/registry.py peers link16-agent-infra --exclude-machine tb25  # 某
 - 本机 D:（tb25 · machine-a · 19 bot · verified ✅）+ 另一台 E:（tb24 · machine-b · 8 bot · verified ✅）。**各机只改自己那半**（`machine` 字段 == 本机的记录）· git 同步 · 两机改不同记录天然不冲突（详见 `agent-registry.json` 的 `_README` + [`PROPOSAL-911`](PROPOSAL-911-repo-sync-notify.md)）。
 - **send_key**（=.env slug·`send_feishu_msg --to-agent` 认它·方案B 让你只用显示名喊）：tb25 段 == 显示名；tb24 段 = 旧 xhs slug（`link16`/`config`/…·plan B 已让它对用户隐身）；`tb24-xhs-autopilot` 已加别名 slug `TB24_XHS_AUTOPILOT`（2026-07-04·原裸 `FEISHU_BRIDGE_APP_ID`·旧「xhs总控桥」正名来）。
 
-> **机器人可通过官方API邀请入群。** 已在群的同企业发起bot调用`POST /im/v1/chats/<chat_id>/members?member_id_type=app_id&succeed_type=2`，`id_list`填新应用AppID。旧`open_id cross app`失败是ID类型错误，不能推出API不支持。Monitor先核两边真实租户、登记群的精确chat_id、邀请者已在内部群及当前AppID；仅发送一次，结果未知只读观察，不盲目重发。HTTP成功仍须目标bot群列表回读，待审批、角色拒绝、无合法邀请者或群限额均不算成功，不提交管理员申请。官方文档当前还列每次最多5个bot、群内最多15个bot，实际拒绝需如实交代；本轮无新建实例，不宣称现有大群已验证可再加bot。[官方入群接口](https://open.feishu.cn/document/server-docs/group/chat-member/create.md)。
+> **机器人可通过官方 API 邀请入群。** 同租户且已在目标内部群的发起 bot，以新应用的 App ID 调用 `POST /im/v1/chats/<chat_id>/members?member_id_type=app_id&succeed_type=2`。Monitor 核对两边的实际租户、登记群 ID 和应用身份，每单只提交一次。平台受理后用新 bot 身份回读该群 ID，成员列表传播期间继续轮询。群内再用真实 @ 和原请求回执验收协作。若平台要求审批、角色不足或成员数超限，记录实际结果。2026-11-25 个人租户实测中，目标群的机器人由 56 增至 57，新增机器人沿群内原单回信；其他群仍按各自实际回执判断。[官方入群接口](https://open.feishu.cn/document/server-docs/group/chat-member/create.md)
 > **维护铁律：以后每 ① 建/改/rename bot ② 开/关权限 ③ 拉进/移出群 ④ 在飞书改显示名 —— 都回来改 [`feishu/agent-registry.json`](../feishu/agent-registry.json)（自己那半）+ 跑 `registry.py` / `bridge_doctor.py --roster --live` 复核。** 名单 SSOT = `agent-registry.json`（本节已收口为它的指针·不再手抄）。
 
 ### § 2.2 · 查询一只应用实际开通了哪些权限
@@ -293,9 +293,9 @@ python feishu/send_feishu_msg.py --bot explore --to <群 oc_xxx> \
 **判定只认 `tenant_key`，不看 bot 名字前缀**（`tb26-` 不等于企业租户）：
 1. `/tenant/v2/tenant/query` —— 权威、还带租户显示名，但要 `tenant:tenant:readonly`（当前这批 bot 都没开，报 99991672）。
 2. `im/v1/chats` 每条 chat 自带的 `tenant_key` —— **免权限、零成本**，要求 bot 至少在一个群里。
-3. 仍拿不到或出现多个 key → `unknown`，要求显式 `--group` 或人工选择；绝不看机器上的其它 bot 猜。
+3. 群列表仍为空时，用新应用的凭据回读它自己发过的一条原始消息。消息 ID 和发件 App ID 都匹配时，取发件方的 `tenant_key`。新 bot 尚未回过私聊时等待首条回复；已有证据冲突时保留未核状态。
 
-**注册流程**：新 bot 入群前通常拿不到 tenant key，因此 `group-a2a` 注册机械要求显式 `--group`；人按 Device Grant 页面选择的组织填写对应共享群。注册器在运行时名册写入后尝试探测租户，Monitor 后续轮询（含入群后）继续补齐私有 agent registry 的 `tenant_key`。复用 `tenant_probe` 的官方接口／非外部群列表证据，刷新群缓存并读完分页；未知不猜，已有字段不覆盖。该补写不新增里程碑或改变原有 `ready` 条件；结果记在 job 的 `checks.tenant`，异常仍可按下列命令恢复。既有 bot 的自动体检仍用 `tenant_probe`，未显式指定群时按 registry 里的精确 chat ID 验收。
+**注册流程**：默认能力是 `core` 与 `group-a2a`。所选租户类型在私有名册中只有一个组织且登记了群 ID 时，注册器自动采用该 ID；未唯一登记时显式给 `--group`。目标按 Device Grant 实际选择的组织验真。个人租户的交流水吧、公司租户的企业协作群分别取自各自的名册。授权注册包含同租户群内发起者的自动邀请；群验收完成后，监督器把实测租户补入私有名册，结果记在 `checks.tenant`。明确只做私聊时使用 `--capability core`。
 
 旧 bot 缺字段，或已结束的 job 不再轮询时，在该 bot 所在机器运行 `python feishu/tenant_probe.py --bot <bot> --apply`，按实测结果只补缺失字段（不重新注册、不改权限）。普通查询不写名册。发送工具遇到缺字段会明确提示无法判定跨租户通道，并保留原有共享群路径。私有名册不随 Git 分发；其他机器若没有新 bot，应通过既有私有名册同步流程补充其非密钥身份信息，不能以拉取代码代替名册同步。
 

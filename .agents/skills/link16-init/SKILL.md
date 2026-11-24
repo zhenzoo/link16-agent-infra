@@ -71,9 +71,9 @@ python feishu/context_import.py --profile <名> --scan feishu/_state/context-sca
 出错或后悔：`python feishu/context_import.py --rollback --receipt <打印出来的 receipt 路径>`。
 
 ### 2.5 建用户选定的 bot（SOP-120）
-已有明确项目就使用该目录，未选上下文导入也可直接注册，不为凑数量多建 bot。只有私聊需求时显式选 `core`；选了群协作才加 `group-a2a` 与实际目标群。
+已有明确项目就使用该目录。新机和增量注册默认开通私聊及本组织登记的共享群。由同租户、已在群的发起者按 SOP-120 邀请并回读，收到群内原单回信后确认可派单。普通终端用 `--notify-bot` 指定已在群的发起者。明确只做私聊时显式选 `--capability core`。
 ```powershell
-python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <名> --cwd <真实项目目录> --tenant-kind <enterprise|personal> --capability core --background
+python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <名> --cwd <真实项目目录> --tenant-kind <enterprise|personal> --background
 # 已做盘点时可用 --from-scan ... --pick N 代替 name/bot/cwd
 python feishu/registration_monitor.py links --job <返回的job> --watch
 ```
