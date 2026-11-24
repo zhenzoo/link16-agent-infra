@@ -27,13 +27,26 @@ def owner_dm(bot):
     owner = binding.get("open_id") or ""
     if binding.get("provisional") or not owner.startswith("ou_"):
         raise ValueError("缺少已确认的本人绑定")
+    legacy = None
     for row in reversed(bridge_inbound.read_records(bridge.STATE_DIR, bot, strict=True)):
         sender = row.get("sender") or {}
         if (row.get("source") == bridge_inbound.NATIVE_SOURCE and row.get("bot") == bot
                 and row.get("chat_type") in {"p2p", "private"} and row.get("message_id")
-                and sender.get("type") == "user" and sender.get("is_bot") is False
+                and sender.get("is_bot") is False
                 and sender.get("open_id") == owner and str(row.get("chat_id")).startswith("oc_")):
-            return owner, row["chat_id"]
+            if sender.get("type") == "user":
+                return owner, row["chat_id"]
+            if legacy is None and not sender.get("type"):
+                legacy = row
+    if legacy:
+        # Older SDK records kept open_id but dropped the original sender_type.
+        token = bridge._tenant_token(*_bot_creds(bot))
+        msg = read_message(token, legacy["message_id"])
+        sender = msg.get("sender") or {}
+        if (not msg.get("deleted") and msg.get("chat_id") == legacy["chat_id"]
+                and sender.get("sender_type") == "user" and sender.get("id_type") == "open_id"
+                and sender.get("id") == owner):
+            return owner, legacy["chat_id"]
     raise ValueError("还未收到这位本人在此应用的私聊，无法核对收件会话")
 
 
