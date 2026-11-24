@@ -15,6 +15,7 @@ import proactive_scanner as scanner
 
 @pytest.mark.parametrize("prefix,manifest_id,keys", [
     ("link16", "link16-asset-sources", ["preview", "detail"]),
+    ("link16", "link16-accessory-sources", ["base", "shell", "cover", "port", "wheel", "handle"]),
     ("step0000", "step0000-accessory-sources", ["bag", "dock", "hub", "mount"]),
 ])
 def test_selected_model_preserves_declared_lazy_payloads_and_rejects_changed_file(tmp_path, prefix, manifest_id, keys):
