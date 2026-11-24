@@ -826,8 +826,9 @@ def _unmangle_slash(text):
 
 # ---------- 破坏性斜杠命令的授权闸（PLAN-930 · 2026-08-03 · 详见 feishu/agent_grant.py）----------
 # 受闸命令 = 会改变对方【会话/上下文/身份/位置】的那些。/screen /help 不闸（只读·不破坏）。
-_GATED_CAPS = {"close", "clear", "cd", "account", "acc", "账号", "new", "stop", "effort"}
-_CAP_ALIAS = {"acc": "account", "账号": "account"}       # /acc /账号 都归一到 account 这一项权限
+_GATED_CAPS = {"close", "clear", "cd", "account", "acc", "账号", "new", "stop", "effort",
+               "model", "handoff", "接手", "交接"}
+_CAP_ALIAS = {"acc": "account", "账号": "account", "接手": "handoff", "交接": "handoff"}
 
 
 # ---------- 飞书补发的过期控制命令（2026-09-26）----------
@@ -917,7 +918,58 @@ def _stale_slash_notice(cmd, created, lag):
             f"还要执行的话，请现在再发一次。")
 
 
-def _gate_verdict(bot, sender, cmd, text=None):
+def _peer_slash_request(text, target):
+    """Only a complete single-command request emitted by the normal peer transport."""
+    if text.startswith("/"):
+        legacy = re.fullmatch(r"(/[^\r\n]+) \[飞书_from_([\w-]+)_to_" + re.escape(target) + r"\]", text)
+        if legacy:
+            text = f"{legacy[2]} → {target}\n\n{text}"
+    header, sep, body = text.partition("\n\n")
+    if not sep or not body.startswith("/") or "\n" in body or "\r" in body:
+        return None
+    peer, arrow, recipient = header.partition(" → ")
+    if not arrow or recipient != target or not re.fullmatch(r"[\w-]+", peer):
+        return None
+    tail = f" [飞书_from_{peer}_to_{target}]"
+    if not body.endswith(tail):
+        return None
+    command = body[:-len(tail)]
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in command):
+        return None
+    return peer, command
+
+
+def _verify_peer_app(bot, peer, mid, chat, expected_text):
+    """Read the signed-in recipient's platform record and bind it to a local app."""
+    import feishu_rest
+    import tenant_probe
+    import bridge_scope_audit
+    if not re.fullmatch(r"om_[a-zA-Z0-9_-]+", mid or ""):
+        return False
+    spec = tenant_probe._bot_spec(peer)
+    if not spec:
+        return False
+    app = bridge_scope_audit._env_val(spec["app_id_env"])
+    if not app:
+        return False
+    token = _tenant_token(bot["app_id"], bot["app_secret"])
+    result = feishu_rest.api("GET", f"https://open.feishu.cn/open-apis/im/v1/messages/{mid}", token=token)
+    for row in (result.get("data") or {}).get("items", []):
+        author = row.get("sender") or {}
+        if (result.get("code") == 0 and row.get("message_id") == mid and row.get("chat_id") == chat
+                and row.get("msg_type") == "text" and not row.get("deleted")
+                and author.get("sender_type") == "app" and author.get("id") == app):
+            # Feishu may mark a message updated after a reaction. Check its current body.
+            body = json.loads(row["body"]["content"]).get("text", "").strip()
+            for mention in row.get("mentions") or []:
+                key = mention.get("key")
+                if key and body.startswith(key + " "):
+                    body = body[len(key):].lstrip()
+            return body == expected_text
+    return False
+
+
+def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None):
     """群内破坏性命令放不放行 → (bool, 原因)。三条放行路径，其余一律拒：
       ① 主人本人在群里下的（sender == 本 bot 的 owner）——他本来就是老大。
       ② agent 关自己（解析出来就是我）——自己关自己无风险，主人 2026-08-03 拍板永远放行。
@@ -927,10 +979,7 @@ def _gate_verdict(bot, sender, cmd, text=None):
     `agent-registry.json` 里存的是【某一个应用视角】下的 open_id，跟「它发消息到**我这个**应用时」
     的 open_id **根本不是同一个值**（实证：名册里 tb25-phd-taoci = ou_xxxxxxx3…，它发给我时是
     ou_xxxxxxx4…）。所以 `name_for_open_id` 对 peer 恒查不到 ⇒ 初版闸会把【持有授权的 peer 也拒掉】，
-    等于「谁都关不了」。⇒ 认人退回 a2a 戳 `[飞书_from_<X>_to_<Y>]`（`a2a_from_name` 一直用它，
-    信封上的 from= 能显示正确名字靠的就是它）。
-    诚实的边界：戳是发信方自己写的、可伪造 ⇒ 这道闸防的是**误操作**，不是恶意冒名；
-    真正的防线是「主人没私聊过就 claim 不到授权」+ 放行/拒绝全量写 receipts（谁冒名也留痕）。"""
+    等于「谁都关不了」。标准 peer 命令从飞书原消息核对发件 App ID；文字戳只用于关联。"""
     cap = cmd.lstrip("/")
     cap = _CAP_ALIAS.get(cap, cap)
     if sender and sender == load_owner(bot["name"]):
@@ -942,21 +991,17 @@ def _gate_verdict(bot, sender, cmd, text=None):
             from feishu.registry import name_for_open_id
         except ImportError:
             name_for_open_id = None
-    who = name_for_open_id(sender, default=None) if (name_for_open_id and sender) else None
-    src = "open_id"
-    if not who and text:                       # 名册按 open_id 查不到（per-app 必然）→ 退 a2a 戳
-        stamped = a2a_from_name(text, None)
-        if stamped and not str(stamped).startswith("ou_"):
-            who, src = stamped, "a2a戳"
+    who = verified_peer or (name_for_open_id(sender, default=None) if name_for_open_id and sender else None)
+    src = "飞书发件应用" if verified_peer else "open_id"
     if who and who == bot["name"]:
         return True, "自己关自己（永远放行）"
     if not who:
-        return False, f"认不出发信人是哪个 agent（open_id={sender}·消息里也没有 a2a 戳）·拒绝"
+        return False, "发信应用身份未核实"
     try:
         import agent_grant
     except ImportError:
         return False, "授权模块不可用·fail closed"
-    if agent_grant.has_cap(who, cap, STATE_DIR):
+    if agent_grant.has_cap(who, cap, STATE_DIR, target=bot["name"]):
         return True, f"{who} 持有 {cap} 授权（认人来源：{src}）"
     return False, f"{who} 没有 `{cap}` 授权（主人私聊它一句、它自己 claim 即可）"
 
@@ -3109,7 +3154,7 @@ def _run_bot(bot_name=None):
             # 所有短回复（斜杠命令应答 / 起会话提示 / 错误）走互动卡片（失败退 markdown→text）
             await card_send(channel, chat_id, md if md is not None else text, bot["name"])
 
-        async def _do_cd(chat_id, target_dir):
+        async def _do_cd(chat_id, target_dir, respond=reply):
             """【只选定目录·不起会话】(懒启动模型 2026-06-26)：关旧会话(若在) + 把目标目录暂存进注册表 `cwd`。
             真正起会话推迟到你发【下一条正式消息(提示词)】——那时 on_message→ensure_session 在这个目录(+ 当前账号)冷启。
             好处：`切目录`/`切账号` 可任意叠加、互不清除、也不会各自先抢起一个空会话。`/cd ..`/`/cd <名字>`/编号选中共用。"""
@@ -3119,12 +3164,15 @@ def _run_bot(bot_name=None):
                                          "pty": None, "workspace_id": None, "jsonl": None, "daemon_fp": None})
             session_work.clear(bot["name"], STATE_DIR)   # 换目录=换项目·旧工作行作废（下条消息起的会话自己再写）
             _acc = agent_runtime.current_account(bot)
-            await reply(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
+            await respond(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
         async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None, inbound_id=None,
-                               created=None):
+                               created=None, verified_peer=None, reply=reply):
             cmd = text.split()[0].lower()
             arg = text[len(cmd):].strip()
+            if verified_peer and cmd.lstrip("/") in _GATED_CAPS and not created:
+                await reply(chat_id, "无法核实原控制命令的发送时间，请重新发送。")
+                return
             # ⏰ 飞书补发的过期命令不执行（见 _stale_slash_lag）：先于授权闸与任何状态改动，也不 cancel 排队消息。
             _lag = _stale_slash_lag(cmd, created, arrived)
             if _lag is not None:
@@ -3136,8 +3184,8 @@ def _run_bot(bot_name=None):
             #   而任何 `/` 开头文本都会走到这里 ⇒ 同群任一 bot/真人本来就能对我下 6 个破坏性命令
             #   （close 关会话 / clear 抹光我上下文 / cd 改我工作目录 / account 换我账号 / new / stop）。
             #   这不是新开的口子，是**早就大敞、今天才装闸**。私聊(非群)不受影响：私聊已过 is_allowed=只有主人。
-            if from_group and cmd.lstrip("/") in _GATED_CAPS:
-                verdict, why = _gate_verdict(bot, sender, cmd, text)
+            if from_group and (cmd.lstrip("/") in _GATED_CAPS or (verified_peer and cmd == "/screen")):
+                verdict, why = _gate_verdict(bot, sender, cmd, text, verified_peer=verified_peer)
                 if not verdict:
                     blog(bot["name"], f"🚧 拒绝群内 {cmd}：{why}")
                     receipt(bot["name"], {"tid": "gate", "kind": "slash_denied", "cmd": cmd,
@@ -3150,7 +3198,7 @@ def _run_bot(bot_name=None):
                 receipt(bot["name"], {"tid": "gate", "kind": "slash_allowed", "cmd": cmd,
                                       "sender": sender, "reason": why, "delivered": True})
             close_card = None
-            if cmd == "/close":
+            if cmd == "/close" and not verified_peer:
                 close_card = await command_card(channel, chat_id,
                                                 "🔄 已收到 `/close`，正在关闭会话并释放占用……", bot["name"])
                 if close_card and inbound_id:
@@ -3288,6 +3336,9 @@ def _run_bot(bot_name=None):
                 await reply(chat_id, "✋ 已打断当前任务" + tail); return
             if cmd == "/close":
                 async def finish_close_card(result):
+                    if verified_peer:
+                        await reply(chat_id, result)
+                        return
                     if not close_card:
                         return
                     if inbound_id:
@@ -3521,12 +3572,12 @@ def _run_bot(bot_name=None):
                     # 上一级
                     up = str(Path(cur).parent).replace("\\", "/")
                     await asyncio.to_thread(clear_cd_pending, bot["name"])
-                    await _do_cd(chat_id, up); return
+                    await _do_cd(chat_id, up, reply); return
                 # 带参先看「当前目录的直接子目录」(相对优先·`/cd compass` 从 Yoach 直进 Yoach/compass)
                 cand = Path(cur) / arg
                 if cand.is_dir():
                     await asyncio.to_thread(clear_cd_pending, bot["name"])
-                    await _do_cd(chat_id, str(cand).replace("\\", "/")); return
+                    await _do_cd(chat_id, str(cand).replace("\\", "/"), reply); return
                 # 否则按书签 / 全局模糊搜 / 绝对路径解析（跳到别处）
                 status, payload = await asyncio.to_thread(resolve_cd_target, arg)
                 if status == "none":
@@ -3536,7 +3587,7 @@ def _run_bot(bot_name=None):
                     lines = "\n".join(f"`{i}` · {h}" for i, h in enumerate(payload, 1))
                     await reply(chat_id, md=f"🔀「{arg}」匹配到 {len(payload)} 个，直接回一个数字选：\n{lines}"); return
                 await asyncio.to_thread(clear_cd_pending, bot["name"])
-                await _do_cd(chat_id, payload); return
+                await _do_cd(chat_id, payload, reply); return
             if cmd == "/help":
                 cfg = load_cd_config()
                 bm = " / ".join((cfg.get("bookmarks") or {}).keys()) or "（无）"
@@ -3822,6 +3873,38 @@ def _run_bot(bot_name=None):
             async with msg_lock:
                 bot['_update_progress'] = _update_progress_callback(channel, msg.chat_id, bot['name'])
                 text = _unmangle_slash(text)      # 修 Git-Bash 把 /close 改写成 C:/Program Files/Git/close
+                peer_request = _peer_slash_request(text, bot["name"]) if is_group else None
+                if peer_request:
+                    peer, command = peer_request
+                    cmd = command.split()[0].lower()
+                    durable_inbox.boundary(msg.id)
+                    try:
+                        authenticated = (getattr(msg.sender, "is_bot", False) and not resources and
+                                         await asyncio.to_thread(_verify_peer_app, bot, peer, msg.id, msg.chat_id, text))
+                    except (OSError, ValueError, RuntimeError, KeyError, SystemExit):
+                        authenticated = False
+                    if not authenticated:
+                        receipt(bot["name"], {"tid": tid, "kind": "slash_denied", "cmd": cmd,
+                                              "reason": "应用身份未核实", "mid": msg.id, "delivered": False})
+                        await reply(msg.chat_id, "已拒绝控制请求，未核实发信应用。")
+                        return
+                    results = []
+
+                    async def collect_result(_chat_id, text=None, md=None):
+                        results.append(md if md is not None else text)
+
+                    if cmd.lstrip("/") in _GATED_CAPS or cmd in ("/help", "/screen"):
+                        await handle_slash(msg.chat_id, command, sender=sender, from_group=True,
+                                           arrived=time.time(), inbound_id=msg.id, verified_peer=peer,
+                                           created=bridge_inbound.event_ts(getattr(msg, "create_time", None), 0.0),
+                                           reply=collect_result)
+                    else:
+                        results.append(f"未登记的跨 bot 控制命令：{cmd}")
+                    route = {"kind": "a2a", "peer": peer, "mid": msg.id, "dest": msg.chat_id}
+                    fragment = {"fragment_id": f"peer-command:{bot['name']}:{msg.id}"}
+                    await _deliver_peer_result(bot["name"], results[-1] if results else "请在目标会话核对执行结果",
+                                               route, "answer", fragment)
+                    return
                 if text.startswith("/"):
                     durable_inbox.boundary(msg.id)
                     await handle_slash(msg.chat_id, text, sender=sender, from_group=is_group,

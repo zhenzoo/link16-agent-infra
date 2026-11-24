@@ -129,6 +129,21 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(cards), 2)
                 self.env["reply"].assert_not_awaited()
 
+    async def test_verified_peer_close_reports_result_only_after_freshness_and_permission(self):
+        handler = self.handler()
+        result = mock.AsyncMock()
+        now = time.time()
+        args = dict(sender="app_sender", from_group=True, verified_peer="lead", arrived=now, reply=result)
+        await handler("group", "/close", **args)
+        self.env["_gate_verdict"].assert_not_called()
+        self.env["clear_session"].assert_not_called()
+        await handler("group", "/close", created=now, **args)
+        self.env["_gate_verdict"].assert_called_once_with(
+            self.env["bot"], "app_sender", "/close", "/close", verified_peer="lead")
+        self.env["clear_session"].assert_called_once_with("unit")
+        self.assertIn("已关闭会话", result.call_args.args[1])
+        self.env["command_card"].assert_not_awaited()
+
     async def test_account_ack_precedes_profile_check_and_close(self):
         handler = self.handler()
         runtime = self.env["agent_runtime"]
@@ -350,6 +365,40 @@ class GateVerdictTest(unittest.TestCase):
             self.assertTrue(feishu_bridge._gate_verdict(self.BOT, "ou_peer", "/close")[0])
             self.assertFalse(feishu_bridge._gate_verdict(self.BOT, "ou_peer", "/clear")[0])
 
+    def test_target_scoped_grant_accepts_only_its_named_worker(self):
+        path = agent_grant.grant_path("peer", self._tmp.name)
+        path.write_text(json.dumps({"caps": ["model", "close"], "targets": ["victim"],
+                                    "expires_at": time.time() + 600}), encoding="utf8")
+        self.assertTrue(feishu_bridge._gate_verdict(self.BOT, None, "/model", verified_peer="peer")[0])
+        self.assertFalse(feishu_bridge._gate_verdict({"name": "other"}, None, "/close", verified_peer="peer")[0])
+
+    def test_peer_sender_wire_format_preserves_arguments_and_ignores_replies(self):
+        from send_feishu_msg import peer_text
+        parse = feishu_bridge._peer_slash_request
+        request = peer_text("lead", "worker", "/account  example")
+        self.assertEqual(parse(request, "worker"), ("lead", "/account  example"))
+        self.assertIsNone(parse(request, "other"))
+        self.assertIsNone(parse(peer_text("lead", "worker", "/close", reply_to="om_old"), "worker"))
+        self.assertIsNone(parse(peer_text("lead", "worker", "请解释 /model"), "worker"))
+
+    def test_control_verification_uses_message_body_author_and_chat(self):
+        bot = {"name": "worker", "app_id": "recipient", "app_secret": "example"}
+        from send_feishu_msg import peer_text
+        text = peer_text("lead", "worker", "/model")
+        row = {"message_id": "om_example", "chat_id": "oc_team", "msg_type": "text", "updated": True,
+               "sender": {"sender_type": "app", "id": "app_lead"}, "mentions": [{"key": "@_user_1"}],
+               "body": {"content": json.dumps({"text": "@_user_1 " + text})}}
+        with (mock.patch("tenant_probe._bot_spec", return_value={"app_id_env": "LEAD_ID"}),
+              mock.patch("bridge_scope_audit._env_val", return_value="app_lead"),
+              mock.patch.object(feishu_bridge, "_tenant_token", return_value="test"),
+              mock.patch("feishu_rest.api", return_value={"code": 0, "data": {"items": [row]}})):
+            verify = feishu_bridge._verify_peer_app
+            self.assertTrue(verify(bot, "lead", "om_example", "oc_team", text))
+            self.assertFalse(verify(bot, "lead", "om_example", "oc_other", text))
+            self.assertFalse(verify(bot, "lead", "om_example", "oc_team", "changed"))
+            row["sender"]["id"] = "different_app"
+            self.assertFalse(verify(bot, "lead", "om_example", "oc_team", text))
+
     def test_agent_closing_itself_always_allowed(self):
         with mock.patch.dict(sys.modules, {"registry": mock.MagicMock(
                 name_for_open_id=lambda *a, **k: "victim")}):
@@ -435,13 +484,15 @@ class GateIdentifiesPeerViaStampTest(unittest.TestCase):
         feishu_bridge.STATE_DIR = self._prev
         self._tmp.cleanup()
 
-    def test_peer_recognized_by_stamp_when_open_id_lookup_fails(self):
+    def test_grant_requires_verified_peer_when_open_id_lookup_fails(self):
         text = "/close [飞书_from_tb25-phd-taoci_to_victim]"
         with mock.patch.dict(sys.modules, {"registry": mock.MagicMock(
                 name_for_open_id=lambda *a, **k: None)}):   # 模拟 per-app 查不到
             ok, why = feishu_bridge._gate_verdict(self.BOT, "ou_unmatched", "/close", text)
-        self.assertTrue(ok, f"持授权的 peer 应放行，实际被拒：{why}")
-        self.assertIn("a2a戳", why)
+        self.assertFalse(ok)
+        ok, why = feishu_bridge._gate_verdict(self.BOT, None, "/close", verified_peer="tb25-phd-taoci")
+        self.assertTrue(ok)
+        self.assertIn("飞书发件应用", why)
 
     def test_still_denied_without_stamp_and_without_lookup(self):
         with mock.patch.dict(sys.modules, {"registry": mock.MagicMock(
