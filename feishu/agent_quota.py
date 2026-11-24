@@ -239,8 +239,8 @@ def _claude_quota(home: Path):
             sev = lim["severity"]
     return {
         "status": "ok",
-        "session_percent": float(five.get("utilization") or 0),
-        "weekly_percent": float(week.get("utilization") or 0),
+        "session_percent": float(five["utilization"]) if five.get("utilization") is not None else None,
+        "weekly_percent": float(week["utilization"]) if week.get("utilization") is not None else None,
         "session_reset": _fmt_reset(five.get("resets_at")),
         "session_reset_at": _reset_epoch(five.get("resets_at")),
         "weekly_reset": _fmt_reset(week.get("resets_at")),
@@ -272,22 +272,43 @@ def _codex_quota(home: Path):
     if data is None:
         return {"status": "unknown", "note": err}
 
+    return _codex_window_usage(data, route)
+
+
+def _codex_window_usage(data, route):
     rl = data.get("rate_limit") or {}
-    prim = rl.get("primary_window") or {}
-    sec = rl.get("secondary_window") or {}
-    # codex 的 primary/secondary 谁是「5h」谁是「周」由 limit_window_seconds 决定，别按名字猜。
-    short, long_ = {}, {}
-    for w in (prim, sec):
-        if not w:
+    windows = {}
+    for w in (rl.get("primary_window"), rl.get("secondary_window")):
+        if not isinstance(w, dict):
             continue
-        (long_ if (w.get("limit_window_seconds") or 0) >= 86400 else short).update(w)
+        duration = w.get("limit_window_seconds")
+        used = w.get("used_percent")
+        if (isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0
+                or isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used) or not 0 <= used <= 100):
+            continue
+        if duration < 86400:
+            key = "session"
+        elif duration == 7 * 86400:
+            key = "weekly"
+        elif duration in {28 * 86400, 29 * 86400, 30 * 86400, 31 * 86400}:
+            key = "monthly"
+        else:
+            continue
+        if key not in windows or used > windows[key]["used_percent"]:
+            windows[key] = w
+    short = windows.get("session", {})
+    long_ = windows.get("weekly", {})
+    monthly = windows.get("monthly", {})
     return {
-        "status": "ok",
-        "session_percent": float(short.get("used_percent") or 0),
-        "weekly_percent": float(long_.get("used_percent") or 0),
+        "status": "ok" if windows or rl.get("limit_reached") is True else "unknown",
+        "session_percent": short.get("used_percent"),
+        "weekly_percent": long_.get("used_percent"),
+        "monthly_percent": monthly.get("used_percent"),
+        "provider_allows": rl.get("allowed") if isinstance(rl.get("allowed"), bool) else None,
         "session_reset": _fmt_reset(short.get("reset_at")),
         "session_reset_at": _reset_epoch(short.get("reset_at")),
         "weekly_reset": _fmt_reset(long_.get("reset_at")),
+        "monthly_reset": _fmt_reset(monthly.get("reset_at")),
         "severity": "critical" if rl.get("limit_reached") else "normal",
         "route": route,
         "note": f"plan={data.get('plan_type') or '?'}·经{route}",
@@ -463,9 +484,14 @@ def _verdict(row):
     """够用 / 紧张 / 满 / 问不到 —— 唯一判定入口，别在别处再写一遍阈值。"""
     if row["status"] != "ok":
         return "问不到"
-    worst = max(value for value in (row["session_percent"], row["weekly_percent"],
-                                    row.get("monthly_percent")) if value is not None)
-    if row.get("severity") == "critical" or worst >= CRIT_PERCENT:
+    if row.get("severity") == "critical":
+        return "满"
+    known = [value for value in (row.get("session_percent"), row.get("weekly_percent"),
+                                 row.get("monthly_percent")) if value is not None]
+    if not known:
+        return "问不到"
+    worst = max(known)
+    if worst >= CRIT_PERCENT:
         return "满"
     if worst >= WARN_PERCENT:
         return "紧张"

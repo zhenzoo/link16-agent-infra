@@ -10,6 +10,8 @@ url: ""
 
 ## 🔵 feishu —— 飞书桥（`feishu/`）
 
+跨仓工作台入口是[主动工作流程](docs/SOP-150-proactive-agent-loop.md)和[调度 TASTE](docs/TASTE-010-proactive-dispatch.md)。`feishu/proactive_dispatch.py` 按目标机器检查、派单、查回执；`feishu/proactive_scanner.py` 从工作包生成审阅页；`feishu/proactive_report.py` 为额外的本人完工通知预览、发送和回读交互卡片。
+
 | 工具 | 职责 | 怎么调 |
 |---|---|---|
 | `feishu/project_cli.py` | 飞书项目迭代父子需求：现场读取、授权变更预演、精确新建/改名/字段/日期/节点/删除及逐项回读；业务配置留项目仓，认证只在已授权浏览器内存，未知写入不重发 | `inspect / preview / apply / verify --config <配置.json>`；`--help`；TC101S流程见baseball仓SOP-090及feishu skill专节 |

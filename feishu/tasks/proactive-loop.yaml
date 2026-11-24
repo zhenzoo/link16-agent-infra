@@ -1,0 +1,50 @@
+# Link16 Portable Task Template · Proactive 24h Closed-Loop
+# 归属 Link16 仓库（跨机器、跨平台通用），任何电脑启用 Proactive 均参照本文件与 docs/SOP-150-proactive-agent-loop.md。
+task_id: link16-proactive-loop
+version: 4
+sop: docs/SOP-150-proactive-agent-loop.md
+taste: docs/TASTE-010-proactive-dispatch.md
+owner_repo: link16-agent-infra
+
+# 各来源分别记录身份、授权及实读范围。
+preflight:
+  command: python feishu/proactive_scanner.py --bot <bot> --preflight-only
+  required_capabilities:
+    - chat_read          # im:message.p2p_msg/group_msg:get_as_user, search:message
+    - wiki_and_minutes   # wiki:space:retrieve/node:read/retrieve, minutes:minutes.search:read, vc:meeting.search:read
+    - doc_sheet_write    # sheets:spreadsheet:write_only, base:record:create/update, docx:document:write_only, docs:document.comment:create
+    - reaction_as_user   # im:message.reactions:write_only
+    # 本人网页外发在业务主机另行安装并获授权时启用。
+  optional_extended_capabilities:
+    - web_send_as_user   # 仅在已安装可验证的本人发送组件时启用
+    - native_approval    # 按目标应用验证定义、实例与审批任务权限
+    - miaoda_and_tasks   # spark:app:read/write/publish, task:task:read/readonly/tasklist:read
+    - web_level4_domains # feishu/feishu_web_workbench.py (假勤考勤 / 飞书邮箱 / 飞书 OKR 网页端通道)
+
+# 阶段 1：挂载到本机 feishu/cron-jobs/<bot>.yaml 的标准定时任务模板
+cron_template:
+  name: proactive-board-refresh
+  cron: "0 9 * * *"
+  tz: Asia/Shanghai
+  enabled: true
+  prompt: >
+    使用本人指定的主号。先读 Link16 的 docs/SOP-150-proactive-agent-loop.md 和 docs/TASTE-010-proactive-dispatch.md，再读各来源仓的岗位 TASTE。
+    按来源恢复上次成功时间窗，核周报最新手写行、本人私聊及定向群请求、已结束日历与临时会议、
+    纪要和逐字稿收尾、真实待办与审批以及已派 peer 的回执。核归属、产物与截止后按优先级执行，
+    分清机器能力与唯一 writer，保存基线；有同源在途任务先收结果。把新成果、缺件及回执合并进原工作台，
+    日历先核人、忙闲和房间。已订阅线上工作台的主号从本机私有登记核对原应用 ID、固定 URL、本人和上次验收的可部署版本。
+    比对本轮移动稿摘要；与已验收线上内容相同时复查原入口，跳过重复发布。候选页与附件先核本人访问、匿名拒绝、本人专属范围和手机阅读。
+    只向同一应用发布通过的版本；公开页面、脚本及匿名响应不得含企业或个人数据。候选验证失败保留上版，本地照常更新。
+    发布回执不明先查原回执；发布后复核固定入口、附件和版本，再登记为已验收。复核失败恢复上一可部署版本并回读，逐项记录实际结果。
+    用 proactive_dispatch.py overview 核本机状态，按近期派工回执更新 fleet_history 的机器、执行者与任务。空闲保留最近分工，远端以带时刻的回执区分执行与交付。
+    先对 owner_closed_keys 和主人新纠正去重。待资料的请求归消息；任务、项目、待约及已约会议收在日程与待办；可交付原件归文件。
+    工作台按实际业务选栏目，跨仓项标来源项目与负责人。执行者完工或遇阻沿原派单回主号。主号验收后即报，同批合成一张本人私聊交互卡，各项编号并空一行，附同版入口和待定项。按 SOP 核收件私聊、真实消息 ID 和卡片类型；每日巡检补漏。
+    未获授权的对外沟通和审批提交保留待审。定时运行后台，不弹窗。
+
+# 阶段 2 & 3：执行护栏
+guardrails:
+  retain_verified_sent_messages: true
+  preview_before_sheet_or_doc_write: true
+  require_owner_confirmation_before_send: true
+  optional_user_send_tool: feishu/send_as_user_web.py
+  verify_via_openapi_readback: true
