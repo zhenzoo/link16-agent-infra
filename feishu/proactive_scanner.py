@@ -16,7 +16,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bridge_scope_audit as audit  # noqa: E402
@@ -385,6 +385,70 @@ def _ordered(records):
     return sorted(records, key=_priority_rank)
 
 
+_ASSIGNMENT_STATES = {"已派", "活动", "卡住", "恢复", "成品待验", "已验", "待分派"}
+_PRIVATE_DETAIL = re.compile(
+    r"[\w.+-]+@[\w.-]+\.[\w-]+|\b(?:bearer\s+|sk-[\w-]{8,}|eyJ[\w.-]{16,})|"
+    r"\b(?:ou|oc|cli)_[\da-z]{16,}|(?<!\d)\d{13,19}(?!\d)|"
+    r"(?:token|secret|password|api[_ -]?key|authorization|密码|密钥|账号)\s*[:=：]|"
+    r"(?:https?://|[a-z]:[\\/]|traceback \(most recent|stack trace)", re.I)
+
+
+def _public_note(value, limit=160):
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    if _PRIVATE_DETAIL.search(value):
+        return "详细记录仅在目标机查看"
+    return html.escape(" ".join(value.split())[:limit])
+
+
+def _assignment_line(record, *, show_missing=True):
+    a = record.get("assignment")
+    if not isinstance(a, dict):
+        return '<p class="dispatch-none">暂无派工回执</p>' if show_missing else ""
+    machine = _public_note(a.get("machine"), 40)
+    agent = _public_note(a.get("agent"), 64)
+    state = str(a.get("state") or "")
+    if state not in _ASSIGNMENT_STATES:
+        state = ""
+    if state == "已验" and not (a.get("at") and (a.get("last_event") or a.get("receipt_url"))):
+        state = "验收回执待核"
+    handler = _public_note(a.get("handler"), 48)
+    reviewer = _public_note(a.get("verified_by"), 80)
+    parts = []
+    if agent or machine:
+        parts.append(f'<span>执行　<b>{machine or "机器待核"} / {agent or "智能体待核"}</b></span>')
+    if state:
+        tone = {"卡住": "blocked", "成品待验": "review", "已验": "verified"}.get(state, "current")
+        parts.append(f'<span class="dispatch-state {tone}">{state}</span>')
+    if handler:
+        parts.append(f'<span>办理　<b>{handler}</b></span>')
+    if reviewer:
+        parts.append(f'<span>核验　<b>{reviewer}</b></span>')
+    at = _public_note(a.get("at"), 45)
+    if at:
+        parts.append(f'<time>{at}</time>')
+    event = _public_note(a.get("last_event"))
+    if not parts and not event:
+        return '<p class="dispatch-none">暂无派工回执</p>' if show_missing else ""
+    details = []
+    for key, label in [("profile", "账号配置"), ("model", "模型"), ("quota", "额度")]:
+        verification = a.get(key+"_verification", a.get("verification"))
+        if not a.get(key) and key+"_verification" not in a:
+            continue
+        value = _public_note(a.get(key), 60)
+        details.append(f'{label} · {value}（已核）' if verification == "已核" and value else f'{label} · 待目标机核')
+    receipt = _url(a.get("receipt_url"), local=True)
+    if receipt:
+        destination = urlsplit(receipt)
+        params = parse_qsl(destination.query) + parse_qsl(destination.fragment)
+        if not any(re.search("token|secret|password|signature|credential|code|ticket", k, re.I) for k, _ in params):
+            details.append(_link("打开回执", receipt, local=True))
+    evidence = ('<details class="dispatch-proof"><summary>执行依据</summary><div>'
+                + "　".join(details) + '</div></details>') if details else ""
+    return ('<div class="dispatch"><div class="dispatch-line">' + "".join(parts) + '</div>'
+            + (f'<p>最新回执 · {event}</p>' if event else '') + evidence + '</div>')
+
+
 def _render_drafts_section(drafts: list[dict[str, Any]], owner_name: str, *, state="drafts") -> str:
     esc = html.escape
     if not drafts:
@@ -411,6 +475,7 @@ def _render_drafts_section(drafts: list[dict[str, Any]], owner_name: str, *, sta
             f'    <div class="draft-title">{_priority(d)}<span class="group-name">{group}</span></div>'
             f'    <span class="status-tag {"tag-green" if state == "sent" else "tag-amber"}">{badge}</span>'
             f'  </div>'
+            f'  {_assignment_line(d, show_missing=state != "sent")}'
             f'  <div class="feishu-stage">'
             f'    <div class="bubble-meta">{sender}</div>'
             f'    <div class="feishu-bubble">{body_html}</div>'
@@ -496,6 +561,7 @@ def _render_sheet_previews(previews: list[dict[str, Any]]) -> str:
         blocks.append(
             f'<article class="block sheet-card">'
             f'<div class="record-head">{_priority(sp)}<h3>{title}</h3><span class="status-tag">{esc(sp.get("status") or "原表预览")}</span></div>'
+            f'{_assignment_line(sp)}'
             f'  <div class="sec-head">'
             f'    <div>'
             f'      <div class="sec-sub">{sheet_name} · {status_note}</div>'
@@ -632,7 +698,7 @@ def _render_approvals_section(approvals: list[dict[str, Any]], output_dir=None) 
         rows.append(
             f'<article class="review-card"><div class="record-head">{_priority(a)}'
             f'<h3>{_approval_text(a.get("title") or "审批单")}</h3><span class="status-tag">{esc(a.get("status") or "待核原单状态")}</span></div>'
-            f'<p class="ap-meta">{_approval_text(a.get("meta") or "")}</p>{image_html}{form_html}{missing_html}'
+            f'{_assignment_line(a)}<p class="ap-meta">{_approval_text(a.get("meta") or "")}</p>{image_html}{form_html}{missing_html}'
             f'<p class="ap-meta">{_approval_text(a.get("historical_evidence") or "")}</p>'
             f'<div class="record-links">{_link("打开飞书空白模板" if local_draft else "打开飞书原单", a.get("url"))} '
             f'{_link("本次出差申请", a.get("trip_url"))} {_link("历史关联出差申请", a.get("history_trip_url"))} {_links(a)}</div></article>'
@@ -653,16 +719,43 @@ def _render_file(record) -> str:
     return (
         f'<article class="review-card"><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
         f'<span class="status-tag">{esc(record.get("status") or "待核")}</span></div>'
+        f'{_assignment_line(record)}'
         f'<p class="preview-text">{preview}</p>{_preview_image(record)}'
         f'<div class="record-links">{_link("打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div></article>'
     )
 
 
 def _render_evidence(rows) -> str:
-    return "".join(
-        f'<li><strong>{html.escape(r.get("title") or "")}</strong> · {html.escape(r.get("status") or "")}'
-        f'<div>{html.escape(r.get("detail") or "")} {_link("查看依据", r.get("url"), local=True)}</div></li>' for r in rows
-    )
+    items = []
+    for r in rows:
+        if isinstance(r, str):
+            items.append(f'<li>{_public_note(r)}</li>')
+        elif isinstance(r, dict):
+            items.append(f'<li><strong>{_public_note(r.get("title"))}</strong> · {_public_note(r.get("status"))}'
+                         f'<div>{_public_note(r.get("detail"), 500)} {_link("查看依据", r.get("url"), local=True)}</div>'
+                         f'{_assignment_line(r, show_missing=False)}</li>')
+    return "".join(items)
+
+
+def _source_action(row):
+    if not isinstance(row, dict):
+        return False
+    if "actionable" in row:
+        return row["actionable"] is True
+    a = row.get("assignment") or {}
+    return isinstance(a, dict) and a.get("state") != "已验" and any(a.get(k) for k in ("agent", "handler", "state"))
+
+
+def _render_source_actions(rows):
+    if not rows:
+        return ""
+    cards = []
+    for row in _ordered(rows):
+        cards.append(f'<article class="review-card"><div class="record-head">{_priority(row)}'
+                     f'<h3>{_public_note(row.get("title"))}</h3><span class="status-tag">{_public_note(row.get("status"))}</span></div>'
+                     f'{_assignment_line(row)}<p class="preview-text">{_public_note(row.get("detail"), 500)}</p>'
+                     f'{_link("查看来源", row.get("url"), local=True)}</article>')
+    return '<section class="source-actions"><h3>待跟进的行动</h3>' + "".join(cards) + '</section>'
 
 
 def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
@@ -677,7 +770,8 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
         rows.append(
             f'<div class="ap-row">'
             f'  <div class="ap-main"><span class="ap-title">{esc(it.get("chat_name",""))} · {esc(it.get("sender_name",""))}</span>'
-            f'  <span class="ap-meta">{esc(it.get("create_time",""))} — {esc(it.get("summary","")[:140])}</span></div>'
+            f'  <span class="ap-meta">{esc(it.get("create_time",""))} — {esc(it.get("summary","")[:140])}</span>'
+            f'{_assignment_line(it, show_missing=False)}</div>'
             f'  {jump}'
             f'</div>'
         )
@@ -730,7 +824,14 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
                   (not it.get("app_link") or it["app_link"] not in covered_links)]
     fallback_html = _fallback_open_mentions(candidates)
     source_problems = payload.get("scan_sources") or []
-    source_rows = _render_evidence([*source_problems, *(actions_pack.get("sources") or [])])
+    sources = actions_pack.get("sources") or []
+    source_rows = _render_evidence([*source_problems, *(r for r in sources if not _source_action(r))])
+    action_groups = {"消息": [], "文件": [], "审批": []}
+    for row in sources:
+        if _source_action(row):
+            category = row.get("category")
+            action_groups[category if category in action_groups else "文件"].append(row)
+    messages_actions, file_actions, approval_actions = (_render_source_actions(rows) for rows in action_groups.values())
     audit_rows = _render_evidence(actions_pack.get("audit") or [])
     audit_link = _link("完整权限核验表", actions_pack.get("audit_url"), local=True)
 
@@ -738,7 +839,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     pf_rows = []
     for _, v in (preflight.get("checks") or {}).items():
         detail = "、".join(v.get("missing") or []) or v.get("error", "")
-        pf_rows.append(f'<li>{"已就绪" if v.get("ok") else "待核"} · {esc(v.get("label",""))} {esc(detail)}</li>')
+        pf_rows.append(f'<li>{"已就绪" if v.get("ok") else "待核"} · {esc(v.get("label",""))} {_public_note(detail)}</li>')
 
     fleet_compact = [
         f'<tr><td>{esc(f["bot"])}</td><td>{"✅" if f.get("chat_scopes_ok") else "❌"}</td>'
@@ -1182,6 +1283,17 @@ h2 small,h3 small,summary small {{ font-size: 12px; font-weight: 500; color: var
 .p0 {{ color: #952e26; background: #ffebe6; }} .p1 {{ color: #815609; background: #fff1d1; }}
 .preview-text,.ap-meta {{ white-space: pre-line; overflow-wrap: anywhere; }}
 .record-links:empty,.review-card p:empty {{ display: none; }}
+.dispatch {{ margin: .45rem 0 .65rem; border-left: 2px solid #c4d5c9; padding: 2px 0 2px 9px; min-width: 0; color: #45564b; font-size: 12.5px; overflow-wrap: anywhere; }}
+.dispatch-line {{ display:flex; flex-wrap:wrap; gap: 3px 12px; align-items:baseline; }}
+.dispatch-line b {{ color:var(--ink); font-weight:600; }}
+.dispatch time,.dispatch-none {{ color:#5c6b62; font-size:12px; }}
+.dispatch p,.dispatch-none {{ margin:3px 0; }}
+.dispatch-state {{ font-weight:650; color:#355d47; }}
+.dispatch-state.blocked {{ color:#9f3029; }} .dispatch-state.review {{ color:#815609; }} .dispatch-state.verified {{ color:#096557; }}
+.dispatch-proof summary {{ cursor:pointer; width:fit-content; color:#4b6354; }}
+.dispatch-proof > div {{ padding:3px 0; }}
+.draft-card > .dispatch,.draft-card > .dispatch-none {{ margin-left:16px; margin-right:16px; }}
+.source-actions {{ display:grid; gap:8px; min-width:0; }} .source-actions > h3 {{ margin:4px 0 0; font-size:14px; }}
 .preview-image {{ display: block; max-width: 100%; max-height: 190px; object-fit: contain; margin: 8px 0; }}
 .form-preview {{ margin: 8px 0; max-width: 740px; }}
 .form-preview div {{ display: grid; grid-template-columns: minmax(90px, 28%) 1fr; border-bottom: 1px solid var(--line); }}
@@ -1220,9 +1332,9 @@ h2 small,h3 small,summary small {{ font-size: 12px; font-weight: 500; color: var
 </header>
 <main>
   <section id="messages" class="major"><h2>消息 <small>{len(drafts)} 待发 · {len(sent)} 已发</small></h2>
-    {drafts_html}{sent_html}{pending_verification}{fallback_html}{empty if not (drafts_html or sent_html or fallback_html or pending_verification) else ""}</section>
-  <section id="files" class="major"><h2>文件 <small>{len(file_records)} 项</small></h2>{files_html or empty}</section>
-  <section id="approvals" class="major"><h2>审批 <small>{len(approvals)} 项</small></h2>{approvals_html or empty}</section>
+    {drafts_html}{messages_actions}{sent_html}{pending_verification}{fallback_html}{empty if not (drafts_html or sent_html or fallback_html or pending_verification or messages_actions) else ""}</section>
+  <section id="files" class="major"><h2>文件 <small>{len(file_records)} 项</small></h2>{files_html}{file_actions}{empty if not (files_html or file_actions) else ""}</section>
+  <section id="approvals" class="major"><h2>审批 <small>{len(approvals)} 项</small></h2>{approvals_html}{approval_actions}{empty if not (approvals_html or approval_actions) else ""}</section>
   <details class="sys-foot" id="audit">
     <summary>巡检来源与权限核验 · 预检 {esc(str(pf_passed))}/{esc(str(pf_total))}{f" · {len(source_problems)} 项来源读取提示" if source_problems else ""}</summary>
     <p>{esc(system_note)}</p>

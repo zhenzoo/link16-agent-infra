@@ -9,6 +9,44 @@ import proactive_scanner as ps
 
 
 class ProactiveScannerTests(unittest.TestCase):
+    def test_assignment_shows_real_executor_separately_from_the_approval_handler(self):
+        dispatch = {"machine": "TX26", "agent": "baseball-2", "state": "恢复", "last_event": "收到重试回执",
+                    "at": "2026-11-24 13:40", "receipt_url": "https://example.com/review",
+                    "profile": "example-profile", "model": "confirmed-model", "verification": "已核",
+                    "quota": "未经核验的数值", "quota_verification": "待目标机核", "error": "PRIVATE_TRACE"}
+        pack = {
+            "drafts": [{"target_name": "评审群", "message": "请审阅", "assignment": dispatch}],
+            "files": [{"title": "收纳包", "assignment": dispatch}],
+            "sheet_previews": [{"title": "周报", "assignment": dispatch}],
+            "approvals": [{"title": "采购", "assignment": {"handler": "产品负责人", "verified_by": "主号核验",
+                          "at": "13:34", "last_event": "当前节点为交付确认"}}],
+            "sources": ["历史纯文本来源", {"title": "独立待跟进项", "detail": "周会上需补齐", "assignment": dispatch},
+                        {"title": "仅作依据", "actionable": False, "assignment": dispatch}],
+        }
+        result = ps.render_html({"bot": "test", "generated_at": "13:41"}, pack)
+        main, audit = result.split('<details class="sys-foot" id="audit">')
+        self.assertEqual(main.count("TX26 / baseball-2"), 4)
+        self.assertEqual(main.count("最新回执 · 收到重试回执"), 4)
+        self.assertIn("独立待跟进项", main)
+        self.assertNotIn("仅作依据", main)
+        self.assertIn("历史纯文本来源", audit)
+        self.assertIn('办理　<b>产品负责人</b>', main)
+        self.assertIn('核验　<b>主号核验</b>', main)
+        self.assertIn("模型 · confirmed-model（已核）", main)
+        self.assertIn("额度 · 待目标机核", main)
+        self.assertNotIn("未经核验的数值", result)
+        self.assertNotIn("PRIVATE_TRACE", result)
+
+    def test_raw_account_errors_temporary_links_and_unconfirmed_models_stay_off_board(self):
+        record = {"assignment": {"machine": "TB26", "agent": "baseball-3", "state": "卡住",
+                  "last_event": "auth error PRIVATE_ACCOUNT@example.com", "receipt_url": "https://example.com/?user_code=PRIVATE_CODE",
+                  "model": "PRIVATE_MODEL", "verification": "待目标机核"}}
+        result = ps._assignment_line(record)
+        self.assertIn("卡住", result)
+        self.assertIn("模型 · 待目标机核", result)
+        self.assertNotIn("PRIVATE_", result)
+        self.assertIn("验收回执待核", ps._assignment_line({"assignment": {"agent": "peer", "state": "已验"}}))
+
     def test_partial_grants_and_unverified_identity_are_not_ready(self):
         identity = {
             "owner_matches": True, "verified": True, "status": "ready",
