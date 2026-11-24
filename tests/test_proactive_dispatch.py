@@ -109,6 +109,37 @@ def test_only_sdk_sender_and_trailing_stamp_for_same_request_prove_remote_return
     assert "ready" not in d.remote_reply("manager", "worker", out)
 
 
+def test_read_only_receipt_for_addressed_handoff_separates_original_from_subsequent_reply(monkeypatch):
+    target = dict(peer="worker", machine=None, hostname=None, observed_on="THIS")
+    monkeypatch.setattr(d, "target_identity", lambda *_: (target, None, "待目标机核验"))
+    sent = outgoing(peer="ou_sdk", mid="handoff")
+    sent.update(target="group", ts=20)
+    sent["route"]["reply_to"] = "parent"
+    inbound = dict(source="feishu-ws", sender=dict(open_id="ou_sdk", is_bot=True), chat_id="group",
+                   ts=10, message_id="parent", raw_text="hello [飞书_from_worker_to_manager]")
+    records = [inbound]
+    monkeypatch.setattr(d.bridge_history, "_outbound_from_ledger", lambda *_: [sent])
+    monkeypatch.setattr(d.bridge_history.bridge_inbound, "read_records", lambda *_: records)
+    monkeypatch.setattr(d, "quota_view", lambda *_: pytest.fail("remote control cannot be enabled by this check"))
+    lookup = lambda **kw: d.progress("manager", "worker", "handoff", reconcile=True, **kw)
+    status = lookup()
+    assert status["state"] == "已向同群原收件人投递，待回" and status["last_signal_at"] == 20
+    assert status["in_reply_to"] == "parent" and "reply_mid" not in status and not status["remote_execution_verified"]
+    assert d.progress("manager", "worker", "handoff")["state"] == "未找到匹配派单"
+    assert lookup(peer_open_id="ou_another")["state"] == "未找到匹配派单"
+    records.append(dict(inbound, ts=25, message_id="other", raw_text="[飞书_from_worker_to_manager reply_to=parent]"))
+    assert "reply_mid" not in lookup()
+    records.append(dict(inbound, ts=29, message_id="reply", raw_text="[飞书_from_worker_to_manager reply_to=handoff]"))
+    assert lookup()["reply_mid"] == "reply" and lookup()["last_signal_at"] == 29
+    records[:] = [dict(inbound, chat_id="other")]
+    assert lookup(peer_open_id="ou_sdk")["state"] == "未找到匹配派单"
+    records.clear()
+    assert lookup()["state"] == "未找到匹配派单"
+    assert "显示名待核" in lookup(peer_open_id="ou_sdk")["delivery_evidence"]
+    sent["route"]["kind"] = "a2a-webhook"
+    assert lookup(peer_open_id="ou_sdk")["state"] == "未找到匹配派单"
+
+
 def test_concurrent_identifiers_one_target_single_send_and_cross_sender_lease(local, monkeypatch):
     _, ledger, root = local
     prompt = root / "prompt.txt"

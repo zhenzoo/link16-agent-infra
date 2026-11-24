@@ -2,7 +2,7 @@
 
 check --peer BOT --size long|short
 send --bot SENDER --peer BOT --task-id KEY --size long --prompt-file FILE --artifact docs/report.html
-status --bot SENDER --peer BOT --request-mid MID [--artifact docs/report.html]
+status --bot SENDER --peer BOT --request-mid MID [--peer-open-id ORIGINAL_AT] [--artifact docs/report.html]
 
 The ordinary A2A CLI retains responsibility for identity, route and delivery.
 Use status --request-mid to inspect an earlier dispatch; send --request-mid attaches it
@@ -211,26 +211,34 @@ def is_request(row, peer):
     return route.get("kind") in ("a2a", "a2a-webhook") and route.get("peer") == peer and not route.get("reply_to")
 
 
-def remote_reply(sender, peer, outgoing):
-    # Compare the SDK's sender and conversation against the original direct @.
-    # A quoted stamp, webhook relay or free-text machine report cannot authorize a dispatch.
-    route = outgoing.get("route") or {}
-    if route.get("kind") != "a2a" or not route.get("at") or not route.get("dest"):
+def sdk_stamp(sender, peer, route, item):
+    author = item.get("sender") or {}
+    if (route.get("kind") != "a2a" or not route.get("at") or not route.get("dest") or
+            item.get("source") != "feishu-ws" or author.get("is_bot") is not True or
+            author.get("open_id") != route["at"] or item.get("chat_id") != route["dest"]):
         return None
-    for item in reversed(bridge_history.bridge_inbound.read_records(STATE, sender)):
-        author = item.get("sender") or {}
-        if (item.get("source") != "feishu-ws" or not author.get("is_bot")
-                or author.get("open_id") != route["at"] or item.get("chat_id") != route["dest"]):
-            continue
-        raw = str(item.get("raw_text") or "").rstrip()
-        stamp = list(turn_delivery_guard.PEER_STAMP_RE.finditer(raw))
-        if stamp and stamp[-1].end() == len(raw) and stamp[-1].groups() == (peer, sender, outgoing.get("message_id")):
+    raw = str(item.get("raw_text") or "").rstrip()
+    stamps = list(turn_delivery_guard.PEER_STAMP_RE.finditer(raw))
+    if stamps and stamps[-1].end() == len(raw) and stamps[-1].groups()[:2] == (peer, sender):
+        return stamps[-1]
+    return None
+
+
+def remote_reply(sender, peer, outgoing, records=None):
+    # A direct SDK sender, its physical group and the trailing reply stamp must all agree.
+    route = outgoing.get("route") or {}
+    if records is None:
+        records = bridge_history.bridge_inbound.read_records(STATE, sender)
+    for item in reversed(records):
+        stamp = sdk_stamp(sender, peer, route, item)
+        if (stamp and outgoing.get("message_id") and stamp.group(3) == outgoing["message_id"] and
+                item.get("ts", 0) >= outgoing["ts"]):
             return {"reply_mid": item["message_id"], "last_signal_at": item["ts"],
                     "state": "原请求所@的机器人已从同群回信，远端产物待验"}
     return None
 
 
-def progress(sender, peer, mid, *, paths=(), saved=None):
+def progress(sender, peer, mid, *, paths=(), saved=None, reconcile=False, peer_open_id=None):
     saved = saved or {}
     target, bot, issue = target_identity(peer)
     peer = target["peer"]
@@ -246,15 +254,36 @@ def progress(sender, peer, mid, *, paths=(), saved=None):
     outgoing = outgoing or {}
     canonical = is_request(outgoing, peer)
     route = outgoing.get("route") or {}
-    # Legacy manual sends can record the intended SDK address as route.peer.
-    address_only = (not bot and route.get("peer") == route.get("at") and
-                    str(route.get("peer") or "").startswith("ou_") and not route.get("reply_to"))
-    returned = remote_reply(sender, peer, outgoing) if not bot and (canonical or address_only) else None
-    if mid and not canonical and not returned and not (acknowledged and not outgoing):
+    # Legacy manual sends recorded a per-app address in both peer and at. The
+    # linked incoming SDK envelope can bind the display name even before a reply.
+    address_route = (not bot and route.get("kind") == "a2a" and route.get("peer") == route.get("at") and
+                     str(route.get("at") or "").startswith("ou_") and route.get("dest") and
+                     outgoing.get("target") == route["dest"])
+    if peer_open_id is not None and not (reconcile and address_route and peer_open_id == route["at"]):
+        return dict(result, reason="显式收件地址与原消息直接 @ 的投递地址不一致")
+    # Looking up a reply-shaped handoff is deliberately exclusive to read-only status.
+    remote = not bot and (canonical or (address_route and (reconcile or not route.get("reply_to"))))
+    records = bridge_history.bridge_inbound.read_records(STATE, sender) if remote else []
+    returned = remote_reply(sender, peer, outgoing, records) if remote else None
+    anchored = False
+    if reconcile and address_route and route.get("reply_to"):
+        original = next((r for r in records if r.get("message_id") == route["reply_to"] and
+                         r.get("ts", 0) <= outgoing["ts"]), None)
+        anchored = bool(original and sdk_stamp(sender, peer, route, original))
+        # A conflicting known counterparty cannot be relabelled using a caller-supplied address.
+        if original and not anchored:
+            return dict(result, reason="原回址来信的 SDK 身份、群或末尾路由与指定目标不一致")
+    if mid and not any((canonical, returned, anchored, peer_open_id)) and not (acknowledged and not outgoing):
         return dict(result, reason="该请求的目标身份与本次查询未匹配")
     if outgoing:
         result.update(state="已向目标发送", last_signal_at=outgoing["ts"])
     if not bot:
+        if anchored or peer_open_id:
+            result["state"] = "已向同群原收件人投递，待回"
+            result["delivery_evidence"] = ("原回址来信、SDK 机器人身份、同群直接 @ 与路由名称相符" if anchored
+                                           else "调用者指定的地址与同群原投递 @ 相同，显示名待核")
+            if route.get("reply_to"):
+                result["in_reply_to"] = route["reply_to"]
         result.update(returned or {})
         return dict(result, reason=issue, remote_execution_verified=False)
     pin = read_object(STATE / f"bridge-turn-route-{peer}.json")
@@ -399,6 +428,8 @@ def main():
             cmd.add_argument("--prompt-file")
         if command != "check":
             cmd.add_argument("--request-mid")
+        if command == "status":
+            cmd.add_argument("--peer-open-id", help="只读核对原投递应用直接 @ 的 open_id")
     args = parser.parse_args()
     try:
         if args.command == "check":
@@ -413,7 +444,8 @@ def main():
             mid = recorded_mid(sender, args.peer, args.task_id, saved) if args.task_id else None
             if (saved and saved.get("peer") != args.peer) or (args.request_mid and mid and mid != args.request_mid):
                 raise ValueError("任务记录与目标或请求 mid 不一致")
-            result = progress(sender, args.peer, args.request_mid or mid, saved=saved, paths=args.artifact)
+            result = progress(sender, args.peer, args.request_mid or mid, saved=saved, paths=args.artifact,
+                              reconcile=True, peer_open_id=args.peer_open_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("ready") is False or result.get("state") == "未找到匹配派单" else 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as exc:
