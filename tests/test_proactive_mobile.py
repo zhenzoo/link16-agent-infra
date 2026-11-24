@@ -80,6 +80,42 @@ def test_signed_calendar_forward_is_replaced_with_navigation_to_native_event(tmp
     assert soup.select_one('article a[href="#calendar"]') and not soup.select('a[href*="token="]')
 
 
+def test_card_preview_uses_same_original_and_accepts_optional_reminders(tmp_path):
+    page = tmp_path / "board.html"
+    board(page, "prd.html#competition")
+    original = tmp_path / "prd.html"
+    original.write_text('<meta name="review-fragments" content="competition"><h3 id="competition">竞品</h3>',
+                        encoding="utf-8")
+    soup = BeautifulSoup(page.read_text(encoding="utf-8"), "html.parser")
+    soup.select_one("#calendar").insert_before(soup.new_tag("section", attrs={"id": "reminders", "class": "major"}))
+    card = soup.select_one("#files article")
+    frame = soup.new_tag("iframe", src="prd.html?preview=competition#competition",
+                         attrs={"data-review-fragment": "prd.html#competition", "title": "第三章"})
+    card.append(frame)
+    card.append(soup.new_tag("iframe", src="https://other.example/ref"))
+    video = soup.new_tag("video", attrs={"autoplay": ""})
+    video.append(soup.new_tag("source", src="movie.mp4"))
+    card.append(video)
+    (tmp_path / "movie.mp4").write_bytes(bytes.fromhex("0000001866747970") + b"isom" * 5)
+    page.write_text(str(soup), encoding="utf-8")
+    result = mobile.pack(page, tmp_path / "output")
+    entry = BeautifulSoup((Path(result["site"]) / "index.html").read_text(encoding="utf-8"), "html.parser")
+    assert entry.select_one("#reminders") and len(entry.find_all("iframe")) == 1
+    path = entry.select_one("#files a[href]")["href"].split("#")[0]
+    assert entry.iframe["src"] == path + "?preview=competition#competition"
+    assert entry.iframe["sandbox"] == ["allow-scripts"] and entry.iframe["loading"] == "lazy"
+    assert "frame-src 'self'" in entry.select_one('meta[http-equiv="Content-Security-Policy"]')["content"]
+    assert entry.video["preload"] == "none" and not entry.video.has_attr("autoplay")
+    assert (Path(result["site"]) / entry.video.source["src"]).read_bytes() == (tmp_path / "movie.mp4").read_bytes()
+    original.write_text('<h3 id="competition">未声明</h3>', encoding="utf-8")
+    with pytest.raises(ValueError, match="缺少声明"):
+        mobile.pack(page, tmp_path / "output")
+    frame["src"] = "other.html?preview=competition#competition"
+    page.write_text(str(soup), encoding="utf-8")
+    with pytest.raises(ValueError, match="同卡"):
+        mobile.pack(page, tmp_path / "output")
+
+
 def test_normal_scanner_cli_emits_package_from_just_rendered_snapshot(tmp_path, monkeypatch, capsys):
     payload = {"bot": "test-bot", "generated_at": "2026-11-24", "items": [], "counts": {},
                "preflight": {"all_ready": False, "entries": []}}

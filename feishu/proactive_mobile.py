@@ -13,7 +13,7 @@ import posixpath
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 from bs4 import BeautifulSoup, Comment, Doctype
 
@@ -22,6 +22,7 @@ import bridge_injection
 
 
 IMAGES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+VIDEO = {".mp4"}
 HTML = {".html", ".htm"}
 LOCAL_ADDRESS = re.compile(r"file:/+|(?:[A-Za-z]:[/\\](?:Users|Windows|[0-9]+_VibeCoding)[/\\])", re.I)
 PRIVATE = re.compile(r"-----BEGIN (?:OPENSSH |RSA |EC )?PRIVATE KEY-----|(?:sk-(?:proj-)?|ghp_)[A-Za-z0-9_-]{28,}|(?:Bearer\s+eyJ)[A-Za-z0-9_.-]{24,}")
@@ -83,7 +84,9 @@ class Bundle:
         self.board, self.stage, self.roots = board, stage, roots
         self.docs = {}
         self.images = {}
+        self.videos = {}
         self.originals = {}
+        self.frame_ids = {}
         self.unavailable = 0
         self.directory = stage / "assets"
         self.directory.mkdir()
@@ -102,11 +105,26 @@ class Bundle:
             self.images[path] = asset
         return self.images[path]
 
+    def video(self, path):
+        if path not in self.videos:
+            if path.stat().st_size > 100_000_000:
+                raise ValueError("单段视频超过妙搭 100 MB 限制：" + path.name)
+            data = path.read_bytes()
+            if len(data) < 16 or data[4:8] != b"ftyp":
+                raise ValueError("无法验证选中视频的 MP4 类型：" + path.name)
+            asset = "assets/video-" + digest(data) + ".mp4"
+            if not (self.stage / asset).exists():
+                (self.stage / asset).write_bytes(data)
+            self.videos[path] = asset
+        return self.videos[path]
+
     def build(self):
         source = self.board.read_bytes()
         board = BeautifulSoup(source.decode("utf-8-sig"), "html.parser")
-        if [n.get("id") for n in board.select("main > section.major")] != ["messages", "files", "calendar", "approvals"]:
-            raise ValueError("入口须为本次生成的四类 Link16 审阅工作台")
+        sections = [n.get("id") for n in board.select("main > section.major")]
+        if sections not in (["messages", "files", "calendar", "approvals"],
+                            ["messages", "files", "reminders", "calendar", "approvals"]):
+            raise ValueError("入口须为本次生成的 Link16 审阅工作台")
         self.docs[self.board] = "index.html"
         self.originals[self.board] = digest(source)
         for a in board.select("article a[href]"):
@@ -125,17 +143,49 @@ class Bundle:
                 if digest(data) != self.originals[path]:
                     raise ValueError("原件制作期间已更新，请重新生成：" + path.name)
                 soup = BeautifulSoup(data.decode("utf-8-sig"), "html.parser")
+                if path in self.frame_ids:
+                    meta = soup.find("meta", attrs={"name": "review-fragments"})
+                    declared = set(meta.get("content", "").split()) if meta else set()
+                    for fragment in self.frame_ids[path]:
+                        if fragment not in declared or len(soup.find_all(id=fragment)) != 1:
+                            raise ValueError(f"原稿缺少声明或唯一可预览锚点：{path.name}#{fragment}")
             self.format(soup, path, export)
             html = str(soup)
             if LOCAL_ADDRESS.search(html) or PRIVATE.search(html):
                 raise ValueError("页面仍含机器路径或私密凭据：" + path.name)
             (self.stage / export).write_text(html, encoding="utf-8", newline="\n")
 
+    def prepare_frames(self, soup, path):
+        for frame in soup.find_all("iframe"):
+            if path != self.board or not frame.has_attr("data-review-fragment"):
+                frame.decompose()
+                continue
+            ref = frame["data-review-fragment"]
+            link = urlsplit(ref)
+            src = frame.get("src", "")
+            embed = urlsplit(src)
+            dest = relative_target(path, ref)
+            fragment = unquote(link.fragment)
+            card = frame.find_parent("article")
+            same_card = card and any(
+                relative_target(path, a["href"]) == dest and unquote(urlsplit(a["href"]).fragment) == fragment
+                for a in card.select("a[href]"))
+            if (not same_card or dest not in self.docs or dest == path or link.query or not fragment or
+                    not can_read(dest, self.roots, HTML) or relative_target(path, src) != dest or
+                    unquote(embed.fragment) != fragment or parse_qsl(embed.query, keep_blank_values=True) != [("preview", fragment)]):
+                raise ValueError("嵌入预览须指向同卡原件、同章锚点与唯一 preview 参数")
+            self.frame_ids.setdefault(dest, set()).add(fragment)
+            ident = quote(fragment, safe="")
+            frame.attrs = {**{k: frame[k] for k in ("class", "title", "height", "width") if k in frame.attrs},
+                           "src": self.docs[dest] + "?preview=" + ident + "#" + ident,
+                           "loading": "lazy", "sandbox": "allow-scripts", "referrerpolicy": "no-referrer"}
+
     def format(self, soup, path, export):
         for node in soup.find_all(string=lambda s: isinstance(s, Comment)):
             node.extract()
-        for tag in soup.select("base, iframe, object, embed, form, link[rel~=preconnect], link[rel~=dns-prefetch], .board-cloud"):
+        for tag in soup.select("base, object, embed, form, link[rel~=preconnect], link[rel~=dns-prefetch], .board-cloud"):
             tag.decompose()
+        self.prepare_frames(soup, path)
         for meta in soup.select("meta[http-equiv]"):
             if meta.get("http-equiv", "").lower() in {"refresh", "content-security-policy"}:
                 meta.decompose()
@@ -143,7 +193,10 @@ class Bundle:
             container = soup.html or soup
             offset = 1 if container.contents and isinstance(container.contents[0], Doctype) else 0
             container.insert(offset, soup.new_tag("head"))
-        policy = soup.new_tag("meta", attrs={"http-equiv": "Content-Security-Policy", "content": POLICY})
+        policy = POLICY
+        if path == self.board and self.frame_ids:
+            policy = policy.replace("base-uri 'none'", "base-uri 'self'; frame-src 'self'")
+        policy = soup.new_tag("meta", attrs={"http-equiv": "Content-Security-Policy", "content": policy})
         soup.head.insert(0, policy)
         if not soup.select_one('meta[name="viewport"]'):
             soup.head.append(soup.new_tag("meta", attrs={"name": "viewport", "content": "width=device-width, initial-scale=1"}))
@@ -170,6 +223,8 @@ class Bundle:
             target = self.docs.get(dest)
             if not target and can_read(dest, self.roots, IMAGES):
                 target = self.image(dest)
+            if not target and can_read(dest, self.roots, VIDEO):
+                target = self.video(dest)
             if not target:
                 self.unavailable += 1
                 clean_unlinked(a)
@@ -178,7 +233,14 @@ class Bundle:
             a["href"] = posixpath.relpath(target, posixpath.dirname(export) or ".") + ("#" + fragment if fragment else "")
             if dest in self.originals and dest != self.board:
                 a["title"] = "本次随包原稿 · SHA-256 " + self.originals[dest][:12]
-        for tag in soup.select("[src], [srcset], [poster], link[href]"):
+        for tag in soup.select("video, [src], [srcset], [poster], link[href]"):
+            if tag.name == "iframe":
+                continue  # The card, URL, and owner-reviewed document contract are checked together above.
+            if tag.name == "video":
+                tag.attrs.pop("autoplay", None)
+                tag["preload"] = "none"
+                tag["controls"] = ""
+                tag["playsinline"] = ""
             tag.attrs.pop("srcset", None)
             for attr in ("src", "poster", "href"):
                 ref = tag.get(attr)
@@ -187,8 +249,11 @@ class Bundle:
                 if tag.name == "img" and re.fullmatch(r"data:image/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=\s]+", ref):
                     continue
                 dest = relative_target(path, ref)
-                if tag.name == "img" and can_read(dest, self.roots, IMAGES):
+                if (tag.name == "img" or (tag.name == "video" and attr == "poster")) and can_read(dest, self.roots, IMAGES):
                     tag[attr] = posixpath.relpath(self.image(dest), posixpath.dirname(export) or ".")
+                elif (attr == "src" and (tag.name == "video" or (tag.name == "source" and tag.parent.name == "video"))
+                      and can_read(dest, self.roots, VIDEO)):
+                    tag[attr] = posixpath.relpath(self.video(dest), posixpath.dirname(export) or ".")
                 else:
                     raise ValueError("选中原件有尚未纳入的显示依赖：" + path.name + " / " + tag.name)
         for value in soup.find_all(string=True):
