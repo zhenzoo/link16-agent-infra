@@ -26,7 +26,7 @@ class ProactiveScannerTests(unittest.TestCase):
         result = ps.render_html({"bot": "test", "generated_at": "13:41"}, pack)
         main = result
         self.assertEqual(main.count("TX26 / baseball-2"), 4)
-        self.assertEqual(main.count("最新回执 · 收到重试回执"), 4)
+        self.assertNotIn("最新回执", main)
         self.assertIn("独立待跟进项", main)
         self.assertNotIn("仅作依据", main)
         self.assertNotIn("历史纯文本来源", main)
@@ -38,6 +38,19 @@ class ProactiveScannerTests(unittest.TestCase):
         self.assertIn("额度 · 待目标机核", main)
         self.assertNotIn("未经核验的数值", result)
         self.assertNotIn("PRIVATE_TRACE", result)
+
+    def test_review_decision_removes_only_the_original_draft_and_keeps_sent_record(self):
+        draft = {"id": "#1", "target_name": "收件人", "message": "旧问题", "links": [{"url": "https://example.com/old"}]}
+        new = dict(draft, message="新问题", links=[{"url": "https://example.com/new"}])
+        sent = dict(draft, message="已发原话", verified=True, message_id="m1", receipt_url="https://example.com/sent")
+        sent_in_older_pack = dict(sent, message="旧格式已发消息", status="已发送", message_id="m2")
+        result = ps.render_html({"bot":"test"}, {"drafts":[draft, new, sent_in_older_pack], "sent_messages":[sent],
+                                "owner_closed_keys":[ps.review_key("drafts", draft)], "reminders": []})
+        self.assertNotIn("旧问题", result)
+        self.assertIn("新问题", result)
+        self.assertIn("已发原话", result)
+        self.assertIn("旧格式已发消息", result)
+        self.assertIn('href="#reminders"', result)
 
     def test_raw_account_errors_temporary_links_and_unconfirmed_models_stay_off_board(self):
         record = {"assignment": {"machine": "TB26", "agent": "baseball-3", "state": "卡住",

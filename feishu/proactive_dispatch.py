@@ -11,6 +11,8 @@ to a stable task ID without sending again. Artifact paths are relative to the ta
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -30,6 +32,7 @@ import bridge_env
 import bridge_history
 import bridge_injection
 import registry
+import session_work
 import turn_delivery_guard
 
 HERE = Path(__file__).resolve().parent
@@ -437,9 +440,37 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
                     evidence=saved.get("delivery") or saved.get("attempt"))
 
 
+def active_overview():
+    """Return this machine's active workers from the same evidence used before dispatch."""
+    data = registry.load_registry()
+    machine = next((name for name, info in data["machines"].items()
+                    if str(info.get("hostname") or "").casefold() == socket.gethostname().casefold()), None)
+    if not machine:
+        raise ValueError("本机未绑定已登记机器")
+    names = [r["name"] for r in data["agents"] if r.get("verified") and r.get("machine") == machine]
+
+    def sample(name):
+        try:
+            target, bot, reason = target_identity(name)
+            state = session_view(bot, target)["state"] if bot and not reason else "unknown"
+            if state == "active":
+                work = session_work.resolve(target["peer"])
+                return {"name": name, "state": state, "task": work.get("task") or work.get("project") or "事项待核"}
+            return {"name": name, "state": state}
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
+            return {"name": name, "state": "unknown"}
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = list(pool.map(sample, names))
+    return {"machine": machine.upper(), "at": datetime.now().astimezone().isoformat(timespec="minutes"),
+            "active": [row for row in rows if row["state"] == "active"],
+            "unverified": [row["name"] for row in rows if row["state"] == "unknown"]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("overview", help="只读核本机正在执行的智能体及当前工作")
     for command in ("check", "status", "send"):
         cmd = sub.add_parser(command)
         cmd.add_argument("--peer", required=True, type=identifier)
@@ -457,7 +488,9 @@ def main():
             cmd.add_argument("--peer-open-id", help="只读核对原投递应用直接 @ 的 open_id")
     args = parser.parse_args()
     try:
-        if args.command == "check":
+        if args.command == "overview":
+            result = active_overview()
+        elif args.command == "check":
             result = check(args.peer, args.size)
         elif args.command == "send":
             result = send(identifier(args.bot), args.peer, args.task_id, args.size, args.prompt_file, args.artifact, args.request_mid)
