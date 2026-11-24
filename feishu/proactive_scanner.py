@@ -385,7 +385,8 @@ def _ordered(records):
     return sorted(records, key=_priority_rank)
 
 
-_ASSIGNMENT_STATES = {"已派", "活动", "卡住", "恢复", "成品待验", "已验", "待分派"}
+_ASSIGNMENT_STATES = {"已派", "活动", "卡住", "恢复", "成品待验", "已验", "待分派",
+                      "排队", "待审", "待朱镇审阅", "待朱镇确认"}
 _PRIVATE_DETAIL = re.compile(
     r"[\w.+-]+@[\w.-]+\.[\w-]+|\b(?:bearer\s+|sk-[\w-]{8,}|eyJ[\w.-]{16,})|"
     r"\b(?:ou|oc|cli)_[\da-z]{16,}|(?<!\d)\d{13,19}(?!\d)|"
@@ -415,19 +416,24 @@ def _assignment_line(record, *, show_missing=True):
     handler = _public_note(a.get("handler"), 48)
     reviewer = _public_note(a.get("verified_by"), 80)
     parts = []
-    if agent or machine:
-        parts.append(f'<span>执行　<b>{machine or "机器待核"} / {agent or "智能体待核"}</b></span>')
+    if agent:
+        parts.append(f'<span>执行　<b>{machine or "机器待核"} / {agent}</b></span>')
+    elif machine and not reviewer:
+        parts.append(f'<span>机器　<b>{machine}</b></span>')
     if state:
         tone = {"卡住": "blocked", "成品待验": "review", "已验": "verified"}.get(state, "current")
         parts.append(f'<span class="dispatch-state {tone}">{state}</span>')
     if handler:
         parts.append(f'<span>办理　<b>{handler}</b></span>')
     if reviewer:
-        parts.append(f'<span>核验　<b>{reviewer}</b></span>')
+        origin = f"{machine} / " if machine and not agent else ""
+        parts.append(f'<span>核验　<b>{origin}{reviewer}</b></span>')
     at = _public_note(a.get("at"), 45)
     if at:
         parts.append(f'<time>{at}</time>')
     event = _public_note(a.get("last_event"))
+    if event and not at:
+        parts.append('<span class="dispatch-time-missing">回执时刻待核</span>')
     if not parts and not event:
         return '<p class="dispatch-none">暂无派工回执</p>' if show_missing else ""
     details = []

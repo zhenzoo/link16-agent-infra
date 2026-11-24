@@ -18,7 +18,7 @@ class ProactiveScannerTests(unittest.TestCase):
             "drafts": [{"target_name": "评审群", "message": "请审阅", "assignment": dispatch}],
             "files": [{"title": "收纳包", "assignment": dispatch}],
             "sheet_previews": [{"title": "周报", "assignment": dispatch}],
-            "approvals": [{"title": "采购", "assignment": {"handler": "产品负责人", "verified_by": "主号核验",
+            "approvals": [{"title": "采购", "assignment": {"machine": "TB26", "handler": "产品负责人", "verified_by": "主号核验",
                           "at": "13:34", "last_event": "当前节点为交付确认"}}],
             "sources": ["历史纯文本来源", {"title": "独立待跟进项", "detail": "周会上需补齐", "assignment": dispatch},
                         {"title": "仅作依据", "actionable": False, "assignment": dispatch}],
@@ -31,7 +31,8 @@ class ProactiveScannerTests(unittest.TestCase):
         self.assertNotIn("仅作依据", main)
         self.assertIn("历史纯文本来源", audit)
         self.assertIn('办理　<b>产品负责人</b>', main)
-        self.assertIn('核验　<b>主号核验</b>', main)
+        self.assertIn('核验　<b>TB26 / 主号核验</b>', main)
+        self.assertNotIn('TB26 / 智能体待核', main)
         self.assertIn("模型 · confirmed-model（已核）", main)
         self.assertIn("额度 · 待目标机核", main)
         self.assertNotIn("未经核验的数值", result)
