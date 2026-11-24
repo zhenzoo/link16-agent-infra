@@ -1,0 +1,41 @@
+# Link16 Portable Task Template · Proactive 24h Closed-Loop
+# 归属 Link16 仓库（跨机器、跨平台通用），任何电脑启用 Proactive 均参照本文件与 docs/SOP-150-proactive-agent-loop.md。
+task_id: link16-proactive-loop
+version: 1
+sop: docs/SOP-150-proactive-agent-loop.md
+owner_repo: link16-agent-infra
+
+# 阶段 0：每次新机/新 bot 启用前必须先过权限与通道预检（全绿才开跑）
+preflight:
+  command: python feishu/proactive_scanner.py --bot <bot> --preflight-only
+  required_capabilities:
+    - chat_read          # im:message.p2p_msg/group_msg:get_as_user, search:message
+    - wiki_and_minutes   # wiki:space:retrieve/node:read/retrieve, minutes:minutes.search:read, vc:meeting.search:read
+    - doc_sheet_write    # sheets:spreadsheet:write_only, base:record:create/update, docx:document:write_only, docs:document.comment:create
+    - reaction_as_user   # im:message.reactions:write_only
+    - web_send_as_user   # browser-act chrome-direct 已登录飞书网页端 (feishu/send_as_user_web.py --check)
+  optional_extended_capabilities:
+    - native_approval    # lark-approval 5项 Level 3 免审权限 (approval:approval:read, instance:read/write, task:read/write)
+    - miaoda_and_tasks   # spark:app:read/write/publish, task:task:read/readonly/tasklist:read
+    - web_level4_domains # feishu/feishu_web_workbench.py (假勤考勤 / 飞书邮箱 / 飞书 OKR 网页端通道)
+
+# 阶段 1：挂载到本机 feishu/cron-jobs/<bot>.yaml 的标准定时任务模板
+cron_template:
+  name: proactive-board-refresh
+  cron: "0 9,14,18 * * 1-5"
+  tz: Asia/Shanghai
+  enabled: true
+  prompt: >
+    按 docs/SOP-150-proactive-agent-loop.md 执行 Link16 Proactive 巡检：
+    1) 先跑 python feishu/proactive_scanner.py --bot <bot> --preflight-only 确认权限与网页通道全通；
+    2) 扫描新增未回复的高信号 @主人 消息与审批单，跳过已回复/已闭环/无关噪音；
+    3) 自主拉取附件/文档/会议纪要并更新 feishu/_state/proactive/workbench.json（表格变更须 1:1 原貌呈现，外发消息仅存草稿）；
+    4) 运行 proactive_scanner.py 刷新本地验收工作台 HTML，未经主人明确确认绝不调用 send_as_user_web.py --send 外发。
+
+# 阶段 2 & 3：执行护栏
+guardrails:
+  show_replied_or_noise_in_html: false
+  preview_before_sheet_or_doc_write: true
+  require_owner_confirmation_before_send: true
+  send_tool: feishu/send_as_user_web.py
+  verify_via_openapi_readback: true
