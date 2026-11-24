@@ -50,7 +50,19 @@ class ProactiveScannerTests(unittest.TestCase):
         self.assertIn("新问题", result)
         self.assertIn("已发原话", result)
         self.assertIn("旧格式已发消息", result)
-        self.assertIn('href="#reminders"', result)
+        self.assertIn('id="reminders"', result)
+        self.assertNotIn('href="#reminders"', result)
+
+    def test_idle_workers_keep_their_assignments_beside_active_workers(self):
+        view = ps._overview([{"machine":"TB26", "active":[{"name":"team","state":"active","task":"当前任务"}],
+                              "observed":[{"name":"team-2","state":"idle"}]}],
+                            [{"machine":"TB26","name":"team-2","task":"负责文档"},
+                             {"machine":"TX26","name":"cad","task":"负责模型"}])
+        self.assertIn("当前任务", view)
+        self.assertIn("空闲", view)
+        self.assertIn("负责文档", view)
+        self.assertIn("最近分工", view)
+        self.assertIn("负责模型", view)
 
     def test_raw_account_errors_temporary_links_and_unconfirmed_models_stay_off_board(self):
         record = {"assignment": {"machine": "TB26", "agent": "baseball-3", "state": "卡住",

@@ -464,6 +464,7 @@ def active_overview():
         rows = list(pool.map(sample, names))
     return {"machine": machine.upper(), "at": datetime.now().astimezone().isoformat(timespec="minutes"),
             "active": [row for row in rows if row["state"] == "active"],
+            "observed": [row for row in rows if row["state"] in {"idle", "cold"}],
             "unverified": [row["name"] for row in rows if row["state"] == "unknown"]}
 
 

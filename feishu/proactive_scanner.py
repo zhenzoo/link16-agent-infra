@@ -456,7 +456,7 @@ def _assignment_line(record, *, show_missing=True):
             + evidence + '</div>')
 
 
-def _render_drafts_section(drafts: list[dict[str, Any]], *, state="drafts") -> str:
+def _render_drafts_section(drafts: list[dict[str, Any]], *, state="drafts", coordinator="") -> str:
     if not drafts:
         return ""
     heading = {"sent": "已发", "unverified": "发送回执待核", "drafts": "待发"}[state]
@@ -487,7 +487,8 @@ def _render_drafts_section(drafts: list[dict[str, Any]], *, state="drafts") -> s
                         f'<div class="message-context">{lead}<span>{context}</span></div>' if context or source_links else "")
         cards.append(f'<article class="draft-card" data-item><div class="message-recipient"><span class="group-name">{recipient}</span></div>'
                      f'{context_html}<p class="message-body">{body}</p>{tools}</article>')
-    return (f'<section class="sub-block" id="{state}"><h3>{heading} <small>{len(cards)}</small></h3>'
+    author = f' · {_public_note(coordinator,64)}' if coordinator else ""
+    return (f'<section class="sub-block" id="{state}"><h3>{heading} <small>{len(cards)}{author}</small></h3>'
             f'<div class="draft-grid" data-expect-count="{len(drafts)}" data-expect-of="工作包 · {heading}">{"".join(cards)}</div></section>')
 
 
@@ -772,18 +773,34 @@ def _render_source_actions(rows, heading="待跟进的行动"):
     return '<section class="source-actions"><h3>' + html.escape(heading) + '</h3>' + "".join(cards) + '</section>'
 
 
-def _overview(machines):
+def _overview(machines, history=()):
     groups = []
-    for machine in sorted(machines, key=lambda m: m.get("machine", "").casefold()):
-        rows = sorted(machine.get("active") or [], key=lambda a: [
-            int(n) if n.isdigit() else n.casefold() for n in re.split(r"(\d+)", a.get("name", ""))])
+    snapshots = {m["machine"].upper(): m for m in machines if m.get("machine")}
+    previous = {}
+    for row in history:
+        if row.get("machine") and row.get("name") and row.get("task"):
+            previous.setdefault(row["machine"].upper(), {})[row["name"].casefold()] = row
+    for label in sorted(snapshots.keys() | previous.keys()):
+        machine = snapshots.get(label, {})
+        recent = previous.get(label, {})
+        active = {a["name"].casefold(): a for a in machine.get("active") or []
+                  if a.get("name") and a.get("state") == "active"}
+        states = {r["name"].casefold(): r.get("state") for r in machine.get("observed") or [] if r.get("name")}
+        entries = []
+        for key in sorted(recent.keys() | active.keys(), key=lambda s: [int(n) if n.isdigit() else n for n in re.split(r"(\d+)", s)]):
+            current, prior = active.get(key), recent.get(key)
+            who = current or prior
+            status = "执行中" if current else {"idle":"空闲", "cold":"未启动"}.get(states.get(key), "最近分工")
+            task = _public_note((current or prior).get("task"), 90)
+            history_line = ""
+            if current and prior and current.get("task") != prior.get("task"):
+                history_line = f'<span>最近 · {_public_note(prior["task"],90)}</span>'
+            entries.append(f'<li><div><b>{_public_note(who["name"],50)}</b> <small>{status}</small></div><span>{task}</span>{history_line}</li>')
         checked = _public_note(machine.get("at"), 30)
-        entries = "".join(f'<li><b>{_public_note(a.get("name"),50)}</b><span>{_public_note(a.get("task"),80)}</span></li>'
-                          for a in rows if a.get("name") and a.get("state") == "active")
         note = _public_note(machine.get("note"), 80)
-        groups.append(f'<div><h3>{_public_note(machine.get("machine"),15)} <time>{checked}</time></h3>'
-                      + (f'<ul>{entries}</ul>' if entries else "") + (f'<p>{note}</p>' if note else "") + '</div>')
-    return ('<details class="fleet-overview" open><summary>执行中</summary>'
+        groups.append(f'<div><h3>{_public_note(label,15)} <time>{checked}</time></h3>'
+                      + (f'<ul>{"".join(entries)}</ul>' if entries else "") + (f'<p>{note}</p>' if note else "") + '</div>')
+    return ('<details class="fleet-overview" open><summary>执行与分工</summary>'
             + "".join(groups) + '</details>') if groups else ""
 
 
@@ -859,7 +876,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         else:
             files.append(record)
     calendar_html = "".join(_render_calendar(event) for event in events)
-    drafts_html = _render_drafts_section(drafts)
+    drafts_html = _render_drafts_section(drafts, coordinator=actions_pack.get("draft_coordinator"))
     sent_html = _render_drafts_section(sent, state="sent")
     pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
@@ -879,18 +896,17 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
             category = row.get("category")
             action_groups[category if category in action_groups else "文件"].append(row)
     messages_actions, file_actions, calendar_actions, approval_actions = (_render_source_actions(rows) for rows in action_groups.values())
+    reminders = actions_pack.get("reminders") or []
+    calendar_label = "日程与待办" if "reminders" in actions_pack else "日程"
+    calendar_count = f"{len(events)} 个日程 · {len(reminders)} 项待办" if "reminders" in actions_pack else f"{len(events)} 项"
     nav = (("messages", "消息", len(drafts) + len(sent)), ("files", "文件", len(file_records)),
-           ("calendar", "日程", len(events)), ("approvals", "审批", len(approvals)))
+           ("calendar", calendar_label, len(events) + len(reminders)), ("approvals", "审批", len(approvals)))
     reminders_html = ""
     if "reminders" in actions_pack:
-        reminders = actions_pack.get("reminders") or []
-        nav = (*nav[:2], ("reminders", "待办", len(reminders)), *nav[2:])
         groups = dict.fromkeys(["待约会议", "飞书任务", "飞书项目", "其他"])
         items = "".join(_render_source_actions([r for r in reminders if
                          (r.get("kind") if r.get("kind") in groups else "其他") == kind], kind) for kind in groups)
-        calendar_link = '<a href="#calendar">查看已约会议</a>' if events else ""
-        reminders_html = (f'<section id="reminders" class="major"><h2>待办 <small>{len(reminders)} 项</small></h2>'
-                          f'{items}{calendar_link}</section>')
+        reminders_html = f'<div id="reminders">{items}</div>'
     routes = "".join(f'<a href="#{key}"><span class="nav-label">{label}</span><span class="nav-count">{count}</span></a>'
                      for key, label, count in nav)
     stylesheet = Path(__file__).with_name("proactive_board.css").read_text(encoding="utf-8")
@@ -912,13 +928,12 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 <body><div class="workspace-shell">
 <aside class="rail"><div class="rail-heading"><h1 class="rail-title">{esc(payload.get("owner_name") or payload["bot"])}的工作台</h1>{cloud}</div>
 <nav class="section-nav" aria-label="分类导航">{routes}</nav>
-{_overview(actions_pack.get("fleet_overview") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
+{_overview(actions_pack.get("fleet_overview") or [], actions_pack.get("fleet_history") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
   <section id="messages" class="major"><h2>消息 <small>{len(drafts)} 待发 · {len(sent)} 已发</small></h2>
     {drafts_html}{messages_actions}{sent_html}{pending_verification}{fallback_html}{empty if not (drafts_html or sent_html or fallback_html or pending_verification or messages_actions) else ""}</section>
   <section id="files" class="major"><h2>文件 <small>{len(file_records)} 项</small></h2>{files_html}{file_actions}{empty if not (files_html or file_actions) else ""}</section>
-  {reminders_html}
-  <section id="calendar" class="major"><h2>日程 <small>{len(events)} 项</small></h2>{calendar_html}{calendar_actions}{empty if not (calendar_html or calendar_actions) else ""}</section>
+  <section id="calendar" class="major"><h2>{calendar_label} <small>{calendar_count}</small></h2>{calendar_html}{reminders_html}{calendar_actions}{empty if not (events or reminders or calendar_actions) else ""}</section>
   <section id="approvals" class="major"><h2>审批 <small>{len(approvals)} 项</small></h2>{approvals_html}{approval_actions}{empty if not (approvals_html or approval_actions) else ""}</section>
 </main></div>
 <script>
