@@ -1,5 +1,7 @@
 """Offline release boundaries and same-version mobile links from the real board renderer."""
 from pathlib import Path
+import base64
+import gzip
 import json
 import sys
 
@@ -9,6 +11,33 @@ from bs4 import BeautifulSoup
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "feishu"))
 import proactive_mobile as mobile
 import proactive_scanner as scanner
+
+
+def test_selected_step_model_preserves_declared_lazy_payloads_and_rejects_changed_file(tmp_path):
+    page = tmp_path / "board.html"
+    original = tmp_path / "model.html"
+    board(page, "model.html#desktop-mount")
+    sources = {}
+    for key in ("bag", "dock", "hub", "mount"):
+        data = b'document.currentScript.payload="' + base64.b64encode(gzip.compress(key.encode(), mtime=0)) + b'";\n'
+        name = f"step0930-{key}-{mobile.digest(data)[:16]}.js"
+        (tmp_path / name).write_bytes(data)
+        sources[key] = name
+    original.write_text('<script type="application/json" id="step0930-accessory-sources">' +
+                        json.dumps(sources) + '</script><h1>整机</h1>', encoding="utf-8")
+    (tmp_path / "private.js").write_text("not a selected payload", encoding="utf-8")
+    out = tmp_path / "build"
+    result = mobile.pack(page, out)
+    site = Path(result["site"])
+    assert {p.name for p in site.rglob("*.js")} == set(sources.values())
+    for name in sources.values():
+        assert (site / "assets" / name).read_bytes() == (tmp_path / name).read_bytes()
+    model = BeautifulSoup((site / result["originals"][1]["entry"]).read_text("utf-8"), "html.parser")
+    assert "frame-src 'self'" in model.select_one('meta[http-equiv="Content-Security-Policy"]')["content"]
+    assert not model.select("script[src]") and json.loads(model.script.get_text()) == sources
+    (tmp_path / sources["dock"]).write_text('document.currentScript.payload="changed";', encoding="utf-8")
+    with pytest.raises(ValueError, match="指纹"):
+        mobile.pack(page, out)
 
 
 def board(path, original, online=""):

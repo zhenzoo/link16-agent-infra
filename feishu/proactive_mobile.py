@@ -180,6 +180,31 @@ class Bundle:
                            "src": self.docs[dest] + "?preview=" + ident + "#" + ident,
                            "loading": "lazy", "sandbox": "allow-scripts", "referrerpolicy": "no-referrer"}
 
+    def copy_accessory_sources(self, soup, path):
+        manifest = soup.find(id="step0930-accessory-sources")
+        if manifest is None:
+            return False
+        if (path == self.board or manifest.name != "script" or manifest.get("type") != "application/json"
+                or len(soup.find_all(id="step0930-accessory-sources")) != 1):
+            raise ValueError("STEP0930 配件清单须来自所选整机原页")
+        sources = json.loads(manifest.get_text())
+        if not isinstance(sources, dict) or set(sources) != {"dock", "bag", "hub", "mount"}:
+            raise ValueError("STEP0930 配件清单缺少同版模块")
+        for key, name in sources.items():
+            match = isinstance(name, str) and re.fullmatch(rf"step0930-{key}-([0-9a-f]{{16}})\.js", name)
+            source = (path.parent / name).resolve() if match else None
+            if not match or not can_read(source, [path.parent], {".js"}) or source.parent != path.parent:
+                raise ValueError(f"STEP0930 配件原页缺少同目录源文件：{key}")
+            data = source.read_bytes()
+            if (not digest(data).startswith(match[1]) or
+                    not re.fullmatch(rb'document\.currentScript\.payload="H4sI[A-Za-z0-9+/]*={0,2}";\s*', data)):
+                raise ValueError(f"STEP0930 配件文件名指纹或压缩数据不符：{key}")
+            target = self.directory / name
+            if target.exists() and target.read_bytes() != data:
+                raise ValueError(f"同名配件源文件版本冲突：{key}")
+            target.write_bytes(data)
+        return True
+
     def format(self, soup, path, export):
         for node in soup.find_all(string=lambda s: isinstance(s, Comment)):
             node.extract()
@@ -194,6 +219,8 @@ class Bundle:
             offset = 1 if container.contents and isinstance(container.contents[0], Doctype) else 0
             container.insert(offset, soup.new_tag("head"))
         policy = POLICY
+        if self.copy_accessory_sources(soup, path):
+            policy += "; frame-src 'self'"
         if path == self.board and self.frame_ids:
             policy = policy.replace("base-uri 'none'", "base-uri 'self'; frame-src 'self'")
         policy = soup.new_tag("meta", attrs={"http-equiv": "Content-Security-Policy", "content": policy})
