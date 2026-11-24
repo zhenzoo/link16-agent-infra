@@ -50,6 +50,94 @@ def test_restart_delivers_into_same_busy_session_once(scheduled):
     s.fb._close_session_unlocked.assert_not_called()
 
 
+@pytest.fixture
+def fresh_session(scheduled):
+    s = scheduled
+    s.job.update(name='daily-fresh', fresh_session=True)
+    s.row = s.inbox.due_register(s.job, s.job['_scheduled_stamp'], 'test', cron._marker(s.job))
+    s.fb.load_session = Mock(side_effect=lambda name: json.loads(s.path.read_text()) if s.path.exists() else {})
+    s.fb.wmux_session.workspaces = Mock(side_effect=lambda: [
+        {'id': 'old', 'name': 'bot-target', 'ptyIds': ['pty']}] if s.path.exists() else [])
+    s.fb.bridge_outbox.picker_load = Mock(return_value=None)
+    s.fb._codex_startup_record = Mock(return_value={'thread_id': 'old-thread', 'worker_pid': 1})
+    s.fb.kimi_process = SimpleNamespace(inventory=Mock(return_value=[]), descendants=lambda rows, seeds: seeds)
+    s.fb._close_session_unlocked.side_effect = lambda *args: s.events.append('close')
+    s.fb._merge_session = Mock(side_effect=lambda *args: s.path.unlink(missing_ok=True))
+    return s
+
+
+@pytest.mark.parametrize('runtime', ['claude', 'codex', 'kimi', 'agy'])
+def test_fresh_due_closes_before_opening_and_submitting_once(fresh_session, monkeypatch, runtime):
+    s = fresh_session
+    s.bot['agent'] = runtime
+    if runtime == 'codex':
+        def submit(fb, bot, job, pty, ws, marker):
+            assert s.events == ['close', 'create']
+            assert (ws, pty) == ('new', 'new-pty')
+            s.inbox.track_scheduled(job['_due_id'], marker, 'new-thread', {'job': job['name']})
+            assert s.inbox.scheduled_attempt(job['_due_id'])
+            return s.inbox.confirm(marker, 'new-thread')
+        monkeypatch.setattr(cron, '_deliver', submit)
+    s.process()
+    s.process()
+    row = s.inbox.get(s.row['id'])
+    assert row['state'] == 'done'
+    assert row['attempts'] == 1
+    assert s.events == ['close', 'create']
+    assert json.loads(row['schedule'])['session_reset'] is True
+    s.fb.clear_codex_thread.assert_called_once_with(s.bot['name'])
+    s.fb.session_work.clear.assert_called_once()
+
+
+@pytest.mark.parametrize('state', ['active', 'waiting', 'unknown'])
+def test_fresh_due_waits_for_idle_without_spending_attempt(fresh_session, state):
+    s = fresh_session
+    s.fb.bridge_activity.read_activity.return_value = {'state': state}
+    s.process()
+    assert not s.events
+    assert json.loads(s.inbox.get(s.row['id'])['schedule'])['starts'] == 0
+    s.fb.bridge_activity.read_activity.return_value = {'state': 'idle'}
+    s.resume()
+    s.process()
+    assert s.events == ['close', 'create']
+
+
+def test_fresh_due_holds_work_during_unconfirmed_close(fresh_session):
+    s = fresh_session
+    s.fb._close_session_unlocked.side_effect = RuntimeError('workspace still present')
+    s.process()
+    assert s.inbox.get(s.row['id'])['state'] == 'scheduled'
+    assert s.path.exists()
+    assert not s.events
+    s.fb.clear_codex_thread.assert_not_called()
+    s.fb._inject.assert_not_called()
+
+
+def test_fresh_due_failed_launch_does_not_close_twice(fresh_session):
+    s = fresh_session
+    ensure = s.fb._ensure_session_unlocked.side_effect
+    s.fb._ensure_session_unlocked.side_effect = RuntimeError('first launch failed')
+    s.process()
+    assert s.events == ['close']
+    s.fb._ensure_session_unlocked.side_effect = ensure
+    s.resume()
+    s.process()
+    assert s.events == ['close', 'create']
+    assert s.inbox.get(s.row['id'])['state'] == 'done'
+
+
+def test_fresh_due_keeps_a_different_session_after_failed_launch(fresh_session):
+    s = fresh_session
+    s.fb._ensure_session_unlocked.side_effect = RuntimeError('first launch failed')
+    s.process()
+    s.path.write_text(json.dumps({'workspace_id': 'owner-session', 'pty': 'owner-pty', 'profile': 'test'}))
+    s.resume()
+    s.process()
+    assert s.events == ['close']
+    assert s.inbox.get(s.row['id'])['state'] == 'scheduled'
+    s.fb._inject.assert_not_called()
+
+
 def test_delayed_cron_alert_is_read_free_once_and_does_not_stop_recovery(scheduled):
     import time
     s = scheduled

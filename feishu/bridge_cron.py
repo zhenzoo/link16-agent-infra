@@ -411,9 +411,7 @@ def fire(job, dry_run=False):
         if job.get('_due_id'):
             with fb.bridge_injection.injection_lock(fb.STATE_DIR, 'ensure-session', bot_name, timeout=1):
                 turn_recovery.require_open(fb, bot)
-                cron_due.resume(fb, bot, job)  # Reject a changed pending-launch identity.
-                cron_due.start(fb, bot, job)
-                ws, pty, created, _ = cron_due.ensure(fb, bot, job)
+                ws, pty, created, _ = cron_due.start_session(fb, bot, job, log)
         else:
             ws, pty, created, _ = fb.ensure_session(bot)
     except Exception as e:                             # noqa: BLE001
