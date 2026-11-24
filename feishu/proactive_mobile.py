@@ -194,7 +194,7 @@ class Bundle:
                            "loading": "lazy", "sandbox": "allow-scripts", "referrerpolicy": "no-referrer"}
 
     def copy_accessory_sources(self, soup, path):
-        manifests = soup.find_all(id=re.compile(r"^(?:step\d{4}-accessory|link16-asset)-sources$"))
+        manifests = soup.find_all(id=re.compile(r"^(?:step\d{4}-accessory|link16-(?:asset|accessory))-sources$"))
         if not manifests:
             return False
         manifest = manifests[0]
