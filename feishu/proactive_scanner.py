@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -369,6 +370,8 @@ def _links(record, *, local=False) -> str:
 
 def _priority(record) -> str:
     value = record.get("priority")
+    if value in ("今天", "明天", "两天内", "本周", "下周"):
+        return f'<span class="priority">{value}</span>'
     if value not in ("P0", "P1", "P2", "P3"):
         return ""
     return f'<span class="priority {value.lower()}">{value}</span>'
@@ -514,28 +517,125 @@ def _render_sheet_previews(previews: list[dict[str, Any]]) -> str:
     return "\n".join(blocks)
 
 
-def _render_approvals_section(approvals: list[dict[str, Any]]) -> str:
+_PAYMENT_FIELDS = re.compile(
+    r"银行卡|卡号|账号|帐号|账户|开户|联行号|收款|付款|支付账户|身份证|税号|银行流水|"
+    r"bank\s*(account|card)|account\s*(number|holder)|routing\s*number|iban|swift",
+    re.IGNORECASE,
+)
+
+
+def _approval_text(value) -> str:
+    """Keep raw personal/payment identifiers out of the generated HTML source."""
+    text = str(value)
+    if re.search(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)", text) or re.search(r"(?:账号|卡号|开户行|收款人|付款人|身份证)[：:=]", text):
+        return "仅在飞书原单查看"
+    return html.escape(text)
+
+
+def _approval_value(label, value) -> str:
+    if _PAYMENT_FIELDS.search(label):
+        return "仅在飞书原单查看"
+    if isinstance(value, (dict, list)):
+        return "查看原单明细"
+    if value is None or value == "":
+        return "待填"
+    safe_value = _approval_text(value)
+    if _url(value) and safe_value == html.escape(str(value)):
+        return _link("打开链接", value)
+    return safe_value
+
+
+def _approval_pairs(fields):
+    pairs = []
+    for field in fields or []:
+        name = field.get("key") or field.get("label") or field.get("name")
+        if name:
+            pairs.append((str(name), field.get("value")))
+    return pairs
+
+
+def _approval_names(fields):
+    for field in fields:
+        if isinstance(field, str):
+            yield field
+        else:
+            yield str(field.get("name") or "")
+            yield from _approval_names(field.get("children") or [])
+
+
+def _approval_controls(fields, values):
+    controls = []
+    for field in fields:
+        if isinstance(field, str):
+            field = {"name": field}
+        name = str(field.get("name") or "")
+        label = html.escape(name)
+        required = ' <span class="required" title="必填">*</span>' if field.get("required") else ""
+        conditional = ' <small>按条件显示</small>' if field.get("conditional") else ""
+        caption = f'{label}{required}{conditional}'
+        children = field.get("children") or []
+        rows = field.get("rows") or []
+        if _PAYMENT_FIELDS.search(name):
+            body = "仅在飞书原单查看"
+        elif rows or children:
+            if rows:
+                groups = []
+                for number, row in enumerate(rows, 1):
+                    row_values = dict(_approval_pairs(row))
+                    row_fields = children or list(row_values)
+                    groups.append(f'<div class="detail-no">第 {number} 项</div>{_approval_controls(row_fields, row_values)}')
+                inner = "".join(groups)
+            else:
+                inner = _approval_controls(children, values)
+            controls.append(f'<details class="form-group"><summary>{caption}</summary><div>{inner}</div></details>')
+            continue
+        elif "value" in field or name in values:
+            body = _approval_value(name, field.get("value", values.get(name)))
+        else:
+            kind = {"formula": "自动计算", "attachmentV2": "附件", "radioV2": "单选", "department": "部门",
+                    "contact": "人员", "date": "日期", "amount": "金额"}.get(field.get("type"), "填写项")
+            body = f'<span class="control-placeholder">{kind}</span>'
+        controls.append(f'<div class="control-row"><span>{caption}</span><div>{body}</div></div>')
+    return "".join(controls)
+
+
+def _render_approvals_section(approvals: list[dict[str, Any]], output_dir=None) -> str:
     esc = html.escape
     if not approvals:
         return ""
     rows = []
     for a in _ordered(approvals):
-        fields = a.get("fields") or []
-        form = "".join(
-            f'<div><dt>{esc(str(field.get("label", "")))}</dt><dd>{esc(str(field["value"])) if field.get("value") is not None else "待填"}</dd></div>'
-            for field in fields
-        )
-        form_html = f'<dl class="form-preview">{form}</dl>' if fields else ''
+        pairs = _approval_pairs(a.get("preview") or a.get("fields"))
+        form = "".join(f'<div><dt>{esc(label)}</dt><dd>{_approval_value(label, value)}</dd></div>' for label, value in pairs)
+        form_html = f'<dl class="form-preview">{form}</dl>' if form else ""
+        definition = a.get("form_fields") or []
+        local_draft = a.get("local_draft") is True or str(a.get("meta") or "").startswith("本地预填")
+        if definition:
+            names = Counter(_approval_names(definition))
+            pair_names = Counter(label for label, _ in pairs)
+            values = {label: value for label, value in pairs if names[label] == 1 and pair_names[label] == 1}
+            controls = _approval_controls(definition, values)
+            native = f'<div class="native-form" tabindex="0" aria-label="原生表单字段">{controls}</div>'
+            if local_draft:
+                form_html += f'<details class="form-definition"><summary>查看飞书报销模板的原字段和条件明细</summary>{native}</details>'
+            else:
+                form_html = native
         missing = "、".join(esc(str(v)) for v in a.get("missing") or [])
         missing_html = f'<p class="missing">待补 {missing}</p>' if missing else ""
-        image_html = _preview_image(a)
+        image_html = ""
+        image_path = _url(a.get("image"), local=True, image=True)
+        if (output_dir and image_path and a.get("image_verified") is True and a.get("image_redacted") is True
+                and (Path(output_dir) / unquote(urlsplit(image_path).path)).is_file()):
+            image_html = _preview_image(a)
         if not form_html and not image_html:
             form_html = '<p class="sec-sub">本条尚无表单字段预览</p>'
         rows.append(
             f'<article class="review-card"><div class="record-head">{_priority(a)}'
-            f'<h3>{esc(a.get("title") or "审批单")}</h3><span class="status-tag">{esc(a.get("status") or "待核原单状态")}</span></div>'
-            f'<p class="ap-meta">{esc(a.get("meta") or "")}</p>{image_html}{form_html}{missing_html}'
-            f'<div class="record-links">{_link("打开飞书原单", a.get("url"))} {_links(a)}</div></article>'
+            f'<h3>{_approval_text(a.get("title") or "审批单")}</h3><span class="status-tag">{esc(a.get("status") or "待核原单状态")}</span></div>'
+            f'<p class="ap-meta">{_approval_text(a.get("meta") or "")}</p>{image_html}{form_html}{missing_html}'
+            f'<p class="ap-meta">{_approval_text(a.get("historical_evidence") or "")}</p>'
+            f'<div class="record-links">{_link("打开飞书空白模板" if local_draft else "打开飞书原单", a.get("url"))} '
+            f'{_link("本次出差申请", a.get("trip_url"))} {_link("历史关联出差申请", a.get("history_trip_url"))} {_links(a)}</div></article>'
         )
     return "".join(rows)
 
@@ -588,7 +688,7 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
     )
 
 
-def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None) -> str:
+def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     esc = html.escape
     actions_pack = actions_pack or {}
     owner_name = payload.get("owner_name") or "朱镇"
@@ -623,7 +723,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         _render_sheet_previews([record]) if is_sheet else _render_file(record)
         for record, is_sheet in sorted(file_records, key=lambda entry: _priority_rank(entry[0]))
     )
-    approvals_html = _render_approvals_section(approvals)
+    approvals_html = _render_approvals_section(approvals, output_dir)
     reviewed = set(actions_pack.get("reviewed_message_ids") or [])
     covered_links = {link.get("url") for item in [*drafts, *sent, *files, *sheet_previews, *approvals] for link in item.get("links") or []}
     candidates = [it for it in payload.get("items") or [] if it.get("message_id") not in reviewed and
@@ -1087,6 +1187,15 @@ h2 small,h3 small,summary small {{ font-size: 12px; font-weight: 500; color: var
 .form-preview div {{ display: grid; grid-template-columns: minmax(90px, 28%) 1fr; border-bottom: 1px solid var(--line); }}
 .form-preview dt,.form-preview dd {{ margin: 0; padding: 6px 8px; overflow-wrap: anywhere; white-space: pre-line; }}
 .form-preview dt {{ background: #f5f7f5; color: var(--ink-2); }}
+.native-form {{ border: 1px solid var(--line); border-radius: 6px; margin: 8px 0; max-height: 21rem; overflow: auto; }}
+.control-row {{ display: grid; grid-template-columns: minmax(100px,32%) 1fr; border-bottom: 1px solid var(--line); }}
+.control-row > * {{ padding: 6px 10px; overflow-wrap: anywhere; white-space: pre-line; }}
+.control-row > span {{ background: #f7f9f8; }} .required {{ color: #9d3427; }}
+.control-placeholder,.control-row small,.form-group small,.detail-no {{ color: var(--muted); font-size: 12px; }}
+.form-group {{ padding: 7px 10px; border-bottom: 1px solid var(--line); background: #fafbf9; }}
+.form-group > div {{ margin: 5px 0 0 5px; border-left: 2px solid #c4d6ca; background: white; }}
+.form-group summary,.form-definition summary {{ cursor: pointer; }}
+.detail-no {{ padding: 5px 9px; }} .form-definition {{ margin: 8px 0; font-size: 13px; }}
 .missing,.empty {{ margin: 6px 0; color: var(--muted); font-size: 13px; }}
 .sheet-card {{ display: block; }} .sheet-card summary,.candidates summary {{ cursor: pointer; font-weight: 650; }}
 .sheet-card .sec-head,.sheet-card .sheet-wrap,.candidates .ap-list {{ margin-top: 10px; }}
@@ -1197,7 +1306,7 @@ def main() -> int:
         payload = scan_feishu(args.bot, days=args.days, check_replies=not args.no_reply_check)
 
     out_html = Path(args.out_html).resolve()
-    _write_output(out_html, render_html(payload, actions_pack=actions_pack))
+    _write_output(out_html, render_html(payload, actions_pack=actions_pack, output_dir=out_html.parent))
 
     if args.out_json:
         out_json = Path(args.out_json).resolve()

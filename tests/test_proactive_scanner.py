@@ -105,6 +105,36 @@ class ProactiveScannerTests(unittest.TestCase):
         self.assertIn('版本 &lt;一&gt; <a href="https://example.com/result"', html)
         self.assertIn('rel="noopener noreferrer">原稿</a>', html)
 
+    def test_native_approval_order_detail_rows_draft_links_and_payment_privacy(self):
+        template = [
+            {"name": "用途", "type": "input", "required": True, "value": "评审样品"},
+            {"name": "采购明细", "children": ["名称", "数量"], "rows": [
+                [{"key": "名称", "value": "样品 A"}, {"key": "数量", "value": 0}],
+                [{"key": "名称", "value": "样品 B"}, {"key": "数量", "value": 2}],
+            ]},
+            {"name": "报销分支", "conditional": True, "children": [{"name": "收款人", "value": "PRIVATE_HOLDER"}]},
+            {"name": "账号", "type": "input", "value": "PRIVATE_ACCOUNT"},
+        ]
+        cards = [
+            {"title": "采购", "form_fields": template, "preview": [{"key": "金额", "value": "旧摘要"}]},
+            {"title": "费用报销", "local_draft": True, "url": "https://example.com/new", "preview": [
+                {"key": "附件", "value": "待发票"}, {"key": "总金额", "value": "待票据核算"},
+                {"key": "银行卡号", "value": "PRIVATE_CARD"}, {"key": "备注", "value": "卡号：PRIVATE_NOTE"},
+            ], "form_fields": [{"name": "附件", "type": "attachmentV2"}, {"name": "差旅明细", "conditional": True, "children": ["日期", "金额"]}],
+             "trip_url": "https://example.com/trip", "history_trip_url": "https://example.com/history"},
+        ]
+        result = ps._render_approvals_section(cards)
+        self.assertLess(result.index("评审样品"), result.index("采购明细"))
+        self.assertLess(result.index("样品 A"), result.index("样品 B"))
+        self.assertIn("第 2 项", result)
+        self.assertIn("<div>0</div>", result)
+        self.assertIn("按条件显示", result)
+        self.assertIn("待发票", result)
+        self.assertIn("打开飞书空白模板", result)
+        self.assertIn('href="https://example.com/history"', result)
+        self.assertNotIn("旧摘要", result)
+        self.assertNotIn("PRIVATE_", result)
+
     def test_prd_link_request_routes_to_auto_agent(self):
         msg = {
             "message_id": "om_2",
