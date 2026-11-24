@@ -122,8 +122,9 @@ class Bundle:
         source = self.board.read_bytes()
         board = BeautifulSoup(source.decode("utf-8-sig"), "html.parser")
         sections = [n.get("id") for n in board.select("main > section.major")]
-        if sections not in (["messages", "files", "calendar", "approvals"],
-                            ["messages", "files", "reminders", "calendar", "approvals"]):
+        allowed = {"messages", "files", "calendar", "approvals"}
+        legacy = sections == ["messages", "files", "reminders", "calendar", "approvals"]
+        if not legacy and (not sections or len(sections) != len(set(sections)) or not set(sections) <= allowed):
             raise ValueError("入口须为本次生成的 Link16 审阅工作台")
         self.docs[self.board] = "index.html"
         self.originals[self.board] = digest(source)
@@ -181,24 +182,28 @@ class Bundle:
                            "loading": "lazy", "sandbox": "allow-scripts", "referrerpolicy": "no-referrer"}
 
     def copy_accessory_sources(self, soup, path):
-        manifest = soup.find(id="step0930-accessory-sources")
-        if manifest is None:
+        manifests = soup.find_all(id=re.compile(r"^(?:step\d{4}-accessory|link16-asset)-sources$"))
+        if not manifests:
             return False
+        manifest = manifests[0]
         if (path == self.board or manifest.name != "script" or manifest.get("type") != "application/json"
-                or len(soup.find_all(id="step0930-accessory-sources")) != 1):
-            raise ValueError("STEP0930 配件清单须来自所选整机原页")
+                or len(manifests) != 1):
+            raise ValueError("资源清单须来自所选原页且唯一")
         sources = json.loads(manifest.get_text())
-        if not isinstance(sources, dict) or set(sources) != {"dock", "bag", "hub", "mount"}:
-            raise ValueError("STEP0930 配件清单缺少同版模块")
+        prefix = manifest["id"].split("-", 1)[0]
+        if not isinstance(sources, dict) or not sources or any(not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", k) for k in sources):
+            raise ValueError("资源清单缺少有效的同版模块")
+        if prefix != "link16" and set(sources) != {"dock", "bag", "hub", "mount"}:
+            raise ValueError("旧版配件清单须保留全部四个模块")
         for key, name in sources.items():
-            match = isinstance(name, str) and re.fullmatch(rf"step0930-{key}-([0-9a-f]{{16}})\.js", name)
+            match = isinstance(name, str) and re.fullmatch(rf"{prefix}-{key}-([0-9a-f]{{16}})\.js", name)
             source = (path.parent / name).resolve() if match else None
             if not match or not can_read(source, [path.parent], {".js"}) or source.parent != path.parent:
-                raise ValueError(f"STEP0930 配件原页缺少同目录源文件：{key}")
+                raise ValueError(f"原页缺少同目录源文件：{key}")
             data = source.read_bytes()
             if (not digest(data).startswith(match[1]) or
                     not re.fullmatch(rb'document\.currentScript\.payload="H4sI[A-Za-z0-9+/]*={0,2}";\s*', data)):
-                raise ValueError(f"STEP0930 配件文件名指纹或压缩数据不符：{key}")
+                raise ValueError(f"原页文件名指纹或压缩数据不符：{key}")
             target = self.directory / name
             if target.exists() and target.read_bytes() != data:
                 raise ValueError(f"同名配件源文件版本冲突：{key}")
@@ -236,7 +241,8 @@ class Bundle:
                 parsed = urlsplit(ref)
                 params = parse_qsl(parsed.query) + parse_qsl(parsed.fragment)
                 if any(ACCESS_PARAMETER.search(k) for k, _ in params):
-                    if path == self.board and parsed.hostname == "www.feishu.cn" and parsed.path == "/calendar/share":
+                    if (path == self.board and soup.select_one("main > section#calendar") and
+                            parsed.hostname == "www.feishu.cn" and parsed.path == "/calendar/share"):
                         a.attrs = {"href": "#calendar", "title": "从本页日程进入飞书原事件"}
                         a.string = "查看工作台日程"
                     else:

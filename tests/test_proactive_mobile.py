@@ -13,17 +13,21 @@ import proactive_mobile as mobile
 import proactive_scanner as scanner
 
 
-def test_selected_step_model_preserves_declared_lazy_payloads_and_rejects_changed_file(tmp_path):
+@pytest.mark.parametrize("prefix,manifest_id,keys", [
+    ("link16", "link16-asset-sources", ["preview", "detail"]),
+    ("step0000", "step0000-accessory-sources", ["bag", "dock", "hub", "mount"]),
+])
+def test_selected_model_preserves_declared_lazy_payloads_and_rejects_changed_file(tmp_path, prefix, manifest_id, keys):
     page = tmp_path / "board.html"
     original = tmp_path / "model.html"
-    board(page, "model.html#desktop-mount")
+    board(page, "model.html#preview")
     sources = {}
-    for key in ("bag", "dock", "hub", "mount"):
+    for key in keys:
         data = b'document.currentScript.payload="' + base64.b64encode(gzip.compress(key.encode(), mtime=0)) + b'";\n'
-        name = f"step0930-{key}-{mobile.digest(data)[:16]}.js"
+        name = f"{prefix}-{key}-{mobile.digest(data)[:16]}.js"
         (tmp_path / name).write_bytes(data)
         sources[key] = name
-    original.write_text('<script type="application/json" id="step0930-accessory-sources">' +
+    original.write_text(f'<script type="application/json" id="{manifest_id}">' +
                         json.dumps(sources) + '</script><h1>整机</h1>', encoding="utf-8")
     (tmp_path / "private.js").write_text("not a selected payload", encoding="utf-8")
     out = tmp_path / "build"
@@ -35,9 +39,22 @@ def test_selected_step_model_preserves_declared_lazy_payloads_and_rejects_change
     model = BeautifulSoup((site / result["originals"][1]["entry"]).read_text("utf-8"), "html.parser")
     assert "frame-src 'self'" in model.select_one('meta[http-equiv="Content-Security-Policy"]')["content"]
     assert not model.select("script[src]") and json.loads(model.script.get_text()) == sources
-    (tmp_path / sources["dock"]).write_text('document.currentScript.payload="changed";', encoding="utf-8")
+    (tmp_path / sources[keys[0]]).write_text('document.currentScript.payload="changed";', encoding="utf-8")
     with pytest.raises(ValueError, match="指纹"):
         mobile.pack(page, out)
+
+
+def test_file_only_review_stays_file_only_on_mobile(tmp_path):
+    board_path = tmp_path / "board.html"
+    board_path.write_text(scanner.render_html({"bot": "demo"}, {
+        "project": "Example", "sections": ["files"],
+        "files": [{"title": "Requirements", "assignment": {"agent": "editor"}}],
+    }), encoding="utf8")
+    result = mobile.pack(board_path, tmp_path / "build")
+    page = BeautifulSoup((Path(result["site"]) / "index.html").read_text(encoding="utf8"), "html.parser")
+    assert [section["id"] for section in page.select("main > section.major")] == ["files"]
+    assert [a["href"] for a in page.select(".section-nav a")] == ["#files"]
+    assert "Example" in page.article.get_text() and "editor" in page.article.get_text()
 
 
 def board(path, original, online=""):

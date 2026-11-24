@@ -361,10 +361,15 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
     bridge_env.assert_sender_identity(sender)
     marker = f"[Proactive {identifier(task_id)}]"
     path = task_path(sender, task_id)
-    prompt = Path(prompt_file).read_text("utf-8-sig").strip() if prompt_file else ""
-    if not prompt and not prior_mid:
+    prompt = ""
+    if prompt_file:
+        with Path(prompt_file).open(encoding="utf-8-sig", newline="") as source:
+            prompt = source.read()
+    if not prompt.strip() and not prior_mid:
         raise ValueError("委派说明为空")
-    fingerprint = hashlib.sha256(prompt.encode()).hexdigest() if prompt else None
+    # Retain the historical fingerprint so resuming a recorded job never resends it.
+    canonical = prompt.replace("\r\n", "\n").replace("\r", "\n").strip()
+    fingerprint = hashlib.sha256(canonical.encode()).hexdigest() if canonical else None
     target, _, issue = target_identity(peer)
     peer = target["peer"]
     lock_id = hashlib.sha256(f"{sender}/{task_id}".encode()).hexdigest()
@@ -414,9 +419,14 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
                      checked=checked, prompt_sha256=fingerprint)
         bridge_injection.atomic_write_json(path, saved)
         bridge_injection.atomic_write_json(claim_path, dict(sender=sender, peer=peer, task_id=task_id))
+        return_instruction = (
+            f"主号补充 · 回执：成果就绪或遇到阻塞时，在本派单直接答复 {sender}。"
+            "写明产物入口、已验结果、仍缺什么。桥会自动关联原请求；同一回执只交一次。"
+        )
         try:
             sent = subprocess.run([sys.executable, str(HERE / "send_feishu_msg.py"), "--bot", sender, "--to-agent", peer,
-                                   "--text", marker + "\n" + prompt, "--json"], capture_output=True, text=True, encoding="utf-8")
+                                   "--text", marker + "\n" + prompt + "\n\n" + return_instruction, "--json"],
+                                  capture_output=True, text=True, encoding="utf-8")
         except OSError as exc:
             saved["attempt"] = {"state": "本地投递程序启动失败", "error_type": type(exc).__name__}
             bridge_injection.atomic_write_json(path, saved)

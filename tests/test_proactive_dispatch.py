@@ -51,10 +51,10 @@ def test_remote_identity_stops_before_local_quota_or_native_session(monkeypatch)
 
 @pytest.fixture
 def case_roster(monkeypatch, tmp_path):
-    registered = [dict(name="tx26-3D-model", machine="tx26", verified=True),
-                  dict(name="tx26-3D-model-2", machine="tx26", verified=True, open_id="ou_example")]
-    local = [dict(name="tx26-3d-model", profile="first"), dict(name="tx26-3d-model-2", profile="second")]
-    machine_registry = {"machines": {"tx26": {"hostname": "TARGET"}}, "agents": registered}
+    registered = [dict(name="nodeb-3D-model", machine="nodeb", verified=True),
+                  dict(name="nodeb-3D-model-2", machine="nodeb", verified=True, open_id="ou_example")]
+    local = [dict(name="nodeb-3d-model", profile="first"), dict(name="nodeb-3d-model-2", profile="second")]
+    machine_registry = {"machines": {"nodeb": {"hostname": "TARGET"}}, "agents": registered}
     monkeypatch.setattr(d.registry, "load_registry", lambda: machine_registry)
     monkeypatch.setattr(d.socket, "gethostname", lambda: "TARGET")
     roster_path = tmp_path / "bridge-bots.local.json"
@@ -67,7 +67,7 @@ def case_roster(monkeypatch, tmp_path):
     return registered, local, write_roster
 
 
-@pytest.mark.parametrize("supplied,index", [("tx26-3d-model", 0), ("TX26-3D-MODEL-2", 1)])
+@pytest.mark.parametrize("supplied,index", [("nodeb-3d-model", 0), ("NODEB-3D-MODEL-2", 1)])
 def test_unique_case_variant_uses_original_local_worker_for_state_profile_and_process(case_roster, monkeypatch, tmp_path, supplied, index):
     import wmux_session
     registered, runtime, _ = case_roster
@@ -102,21 +102,21 @@ def test_unique_case_variant_uses_original_local_worker_for_state_profile_and_pr
 def test_case_matching_refuses_ambiguous_similar_and_conflicting_identities(case_roster, conflict):
     registered, local, write = case_roster
     if conflict == "local-case":
-        local.append(dict(name="TX26-3D-MODEL-2", profile="unrelated"))
+        local.append(dict(name="NODEB-3D-MODEL-2", profile="unrelated"))
     elif conflict == "local-alias":
-        local.append(dict(name="different", aliases=["TX26-3D-MODEL-2"]))
+        local.append(dict(name="different", aliases=["NODEB-3D-MODEL-2"]))
     elif conflict == "separator":
-        local[1]["name"] = "tx26_3d_model_2"
+        local[1]["name"] = "nodeb_3d_model_2"
     elif conflict == "alias-only":
-        local[1].update(name="other-account", aliases=["tx26-3d-model-2"])
+        local[1].update(name="other-account", aliases=["nodeb-3d-model-2"])
     elif conflict == "identity":
         local[1].update(open_id="ou_other")
     elif conflict == "machine":
         local[1].update(machine="OTHER")
     else:
-        registered.append(dict(registered[1], name="tx26-3d-model-2"))
+        registered.append(dict(registered[1], name="nodeb-3d-model-2"))
     write()
-    target, bot, issue = d.target_identity("tx26-3d-model-2")
+    target, bot, issue = d.target_identity("nodeb-3d-model-2")
     assert issue and bot is None and "profile" not in target
 
 
@@ -215,12 +215,15 @@ def test_read_only_receipt_for_addressed_handoff_separates_original_from_subsequ
 def test_concurrent_identifiers_one_target_single_send_and_cross_sender_lease(local, monkeypatch):
     _, ledger, root = local
     prompt = root / "prompt.txt"
-    prompt.write_text("review sample", encoding="utf-8")
+    original = "  review sample\r\n\r\nkeep the example and its spacing  \r\n"
+    prompt.write_bytes(original.encode("utf-8"))
     calls = []
     def transport(args, **kw):
         assert "--proactive" not in args and "--reply-to" not in args
         sender = args[args.index("--bot") + 1]
         text = args[args.index("--text") + 1]
+        assert text.startswith(f"[Proactive {sender}]\n" + original + "\n\n主号补充")
+        assert f"在本派单直接答复 {sender}" in text
         calls.append(sender)
         ledger[sender] = [dict(outgoing(), text=text)]
         return SimpleNamespace(stdout=json.dumps({"ok": True, "message_id": "original"}))

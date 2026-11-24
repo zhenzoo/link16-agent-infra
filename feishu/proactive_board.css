@@ -142,6 +142,8 @@ a.context-label { color: var(--action); }
 .dispatch { margin-block: .45rem; font-size: .89rem; color: var(--secondary); overflow-wrap: anywhere; }
 .dispatch-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: .12rem .85rem; }
 .dispatch-line b { color: var(--secondary); font-weight: 590; }
+.project-line { display: block; font-size: .89rem; color: var(--secondary); overflow-wrap: anywhere; }
+.project-line b { font-weight: 590; }
 .dispatch time, .dispatch-time-missing, .dispatch-proof { color: var(--muted); }
 .dispatch p, .dispatch-proof { margin-top: .18rem; }
 .dispatch-state { font-weight: 630; color: #355a43; }

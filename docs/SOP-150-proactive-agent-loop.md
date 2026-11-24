@@ -18,26 +18,26 @@ read_when:
   - 在任何电脑上为某只 Link16 智能体开启 24h Proactive 主动模式
   - 定时任务触发 Proactive 巡检与工作台刷新
   - 主人确认工作台中的表格拟填项或待发草稿，准备执行落表或以主人身份外发
-last_reviewed: 2026-11-24
+last_reviewed: 2026-11-25
 ---
 
 # SOP-150 · Link16 Proactive Agent 24h 主动闭环
 
-> **定位**：这是 Link16 仓库级共享流程与任务合同（配套可移植任务模板 [`feishu/tasks/proactive-loop.yaml`](../feishu/tasks/proactive-loop.yaml)），适用于全部 4 个受支持平台（Claude Code / Codex / Kimi Code / Antigravity CLI），任何新机或新 bot 均可直接复用，不走弯路。
+> 本流程由四种受支持的平台共用。判断优先级、原话交接及完工汇报先读[跨仓分派 TASTE](TASTE-010-proactive-dispatch.md)，巡检使用[可移植任务模板](../feishu/tasks/proactive-loop.yaml)。
 
 ---
 
-## 0. 能力全景与双通道分工（OpenAPI 免审 + 网页端补齐）
+## 0. 按业务选择来源与执行通道
 
-| # | 能力 | 确定性入口 | 通道与权限状态 |
+| # | 能力 | 可用入口与本机核验要求 |
 |---|---|---|---|
-| 1 | 读私聊、群聊、`@我`、已读态、附件原件 | `lark-cli --profile <bot> im +messages-search / +chat-messages-list --as user` | ✅ 企业免审 UAT（`im:message.p2p_msg/group_msg:get_as_user`, `search:message`） |
-| 2 | 读公司知识库（Wiki）、共享表格、在线文档、会议妙记 | `feishu/docio_cli.py read <URL> --as-user`；`lark-cli wiki spaces list / minutes +search --as user` | ✅ 企业免审 UAT（`wiki:space:retrieve/node:read/retrieve`, `minutes:*`, `vc:*`） |
-| 3 | 写入/修改飞书共享表格、多维表格、文档与评论、妙搭与任务 | `lark-cli sheets +cells-set --allow-overwrite=false --as user`；`docio_cli.py`；`lark-apps`；`lark-task` | ✅ 企业免审 UAT（`sheets:*`, `base:*`, `docx:*`, `spark:app:*`, `task:task*`） |
-| 4 | 原生飞书审批（查历史报销/采购单、填单发起、待办审批） | `lark-cli --profile <bot> approval ... --as user`（配合 `lark-approval` Skill） | ✅ 细粒度 5 项权限均为 **Level 3 免审**（`approval:approval:read`, `instance:read/write`, `task:read/write`）；提单与审批操作须主人确认 |
-| 5 | 以主人本人身份发消息、回消息 | `python feishu/send_as_user_web.py --bot <bot> --target-name "<人/群>" --target-type dm\|group --chat-id <oc_xxx> --text "..." [--send]` | ✅ 已登录本地 Chrome 飞书网页端（`browser-act`）+ OpenAPI 回读验真（绕开 Level 4 `im:message.send_as_user`） |
-| 6 | 以主人身份贴表情回应 | `lark-cli --profile <bot> im reactions create --as user ...` | ✅ 企业免审 UAT（`im:message.reactions:write_only`） |
-| 7 | **假勤/考勤打卡与假期余额、飞书邮箱、飞书 OKR** | `python feishu/feishu_web_workbench.py check \| attendance \| mail \| okr ...` | ✅ OpenAPI 属 Level 4，统一走已登录本地 Chrome 飞书网页端（`browser-act`）；发邮件默认 `--dry-run`，须主人确认后才 `--send` |
+| 1 | 私聊、定向群消息与附件 | 使用当前主号已授权的消息读取入口，按实际资源回读。 |
+| 2 | 知识库、表格、文档及妙记 | 云文档沿 `feishu/docio_cli.py read` 确认身份与可读范围，结合已授权的会议产物核实责任。 |
+| 3 | 文档、表格、任务及应用 | 各用已登记的原生入口。写入与发布按实际权限、原有读者和同一版本验收。 |
+| 4 | 原生审批 | 按本租户实际开放的定义、实例和任务权限逐项验证；准备材料与正式提交分开。 |
+| 5 | 以本人身份发消息 | 有可用的本人发送工具才启用此项；先核收件人和授权正文，发后回读。 |
+| 6 | 表情回复 | 本人授权且应用实际具备 reactions 写权限时启用。 |
+| 7 | 假勤、邮箱、OKR | 按本机已安装组件及本人网页会话核验，终端可用不代表业务页已读通。 |
 
 ---
 
@@ -51,21 +51,21 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
 
 首次接入核对当前应用与主人。某个域缺权，单列受影响的来源、时间窗、动作和恢复条件，其余能读的来源继续处理。企业目录、用户授权、具体资源或业务表单可能分别收窄实际能力。
 
-1. **缺聊天 / Wiki / 表格写 / 妙记 / 表情等免审 UAT**
-   - 仅请求本应用在企业后台已开通的 Level 3 免审 scope（绝不申请 Level 4 管理员审批权限，不跨 bot 借 token）：
+1. **缺聊天 / Wiki / 表格写 / 妙记 / 表情权限**
+   - 查询本租户已批准的应用范围和本人的实际授权。
      ```powershell
      python feishu/personnel_authorization.py --bot <bot> --capability chat-read --check
      python feishu/bridge_scope_audit.py --bot <bot> --baseline --user-identity
      ```
    - 按 SOP-120 §2.0.1 通过已登录本地 Chrome（`browser-act` `chrome-direct`）逐页核对应用名、企业与当前主人后代办原生 OAuth 确认，再回读 `lark-cli --profile <bot> auth status --json --verify`。
 2. **缺本人身份网页外发通道**
-   - 运行 `python feishu/send_as_user_web.py --check`，确认本机存在已登录飞书网页端的 `chrome-direct` 浏览器。若未登录或登录失效，仅此时请主人登录一次即可。
+   - 若本机安装了 `feishu/send_as_user_web.py`，用其 `--check` 核实本人网页发送通道。该插件或登录态缺失时，消息仍留在工作台待审；给本人的主号交付卡走应用身份。
 
 ---
 
 ## 2. 从时间和原始记录找到责任人
 
-1. 同一工作台绑定一个业务主号、一条定时任务和一个写入者。共享机制由 Link16 维护。工作时间、岗位和成品范本取业务仓的 TASTE。巡检从本机 `feishu/cron-jobs/<bot>.yaml` 热加载，`bridge_cron.py status` 验证守护进程和下次触发。四个平台的入口相同，收到定时回合的 runtime 按绑定身份运行。
+1. 同一工作台绑定本人指定的主号、一条定时巡检和一个写入者。主号先读 Link16 [跨仓分派 TASTE](TASTE-010-proactive-dispatch.md)，再读各来源仓的岗位 TASTE 和成品范例。跨仓条目归入同一工作台。巡检从本机 `feishu/cron-jobs/<bot>.yaml` 热加载，`bridge_cron.py status` 核下次触发。
 2. 以实际上海时间和该来源上次成功读到的位置取窗口。首轮从本周周报及当天会议开始；日界或停机后跨天补查，保留原 ID 去重。已关会未出纪要的条目留在待追列表。每次复读当期周报本人行及手写/链接单元格，Sheet 可能在会议结束后继续改。每个来源单独留扫描起止、读回时间与失败原因，只有成功分页读完才推进该来源的恢复点。
 3. 日历抓已结束日程、另查会议历史里的临时通话；核真实参会、会议 ID、纪要助手机器人或分享原链。用 docio 读纪要，再沿纪要中的逐字稿/妙记核最终负责人、原话和时间戳。日历的原生 `calendars primary`、`events instance_view` 和 `freebusys list` 可在当前应用查询验证，快捷命令缺细权限时先查同身份受支持的业务入口。
 4. 查本人私聊、群内定向请求、任务列表与审批的「待我处理 / 我已发起」。把源 ID、原链接、周报行、会议时刻或审批实例与已存在的产物、原任务和发送回执对账。相同责任、对象和结果只派一次。群里出现另一条本人消息不足以关闭前一件事，须有对应答复或产物。新手写要求重开受影响事项；查询失败、材料未出和真实空结果分别记录。
@@ -85,12 +85,14 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
 2. **先呈原貌预览，绝不先擅自外发**：
    - 准备更新共享表时按实际列字母、行号、命名链接、现值和拟填值预演，放入对应业务主号的 `feishu/_state/proactive/<bot>/workbench.json`。已获授权规整原文时只更新目标格，先复读比对原值，再写后逐格确认。
    - 凡准备以主人身份发往同事/群聊的回复，写成精准飞书气泡草稿放入 `workbench.json`（含目标群、`@对象`、完整正文、一句话依据、原消息 `applink` 跳转）。
-3. 侧栏同时列业务分类及各机器分工，右侧展开对应原件和实际办理人。用目标机的 `python feishu/proactive_dispatch.py overview` 读实际绑定且活动的会话，配同一会话工作标题和采样时间，按机器及名称数字顺序显示。维护工作包的机名、执行者及最近任务（`fleet_history`）。活动状态按现场更新，空闲或未启动仍保留最近分工；远端缺现场时按最近交付标示。任务已收件、桥在线、过去负责过，都不足以判为正在执行。
+3. 左侧列本业务启用的类别和各机器分工，右侧列原件、来源项目与实际办理人。工作包可用 `sections` 选择 `messages`、`files`、`calendar`、`approvals`，省略时沿用四类；`project` 设默认来源，跨仓条目在各自 `project` 标原项目，负责人记在 `assignment`。`python feishu/proactive_dispatch.py overview` 提供本机在做的事，`fleet_history` 保留最近有证据的分工。远端按目标机回执标记当前或最近状态。
    - 消息卡呈收件人、原话或有出处的背景及拟回全文。人名和称呼依岗位 TASTE；发前核收件身份，人员状态按已有证据和业务主人的范围处理。缺状态不推出已离职，主人明确已离职立即退出拟发。本人审稿期间只更新工作台；明确授权具体消息后方可发送并回读。已发保留。
    - 文件给同版文档的核心章节、在线表原行列或真实模型。原章节有稳定锚点时，预览和“打开原件”共用同一个文件。索要资料或进展仍归消息。飞书任务、项目办理节点、待约及已约会议合在「日程与待办」，任务保留原办理人，已约会议回读本人、人员、房间和时段；审批只收原生办理节点。
    - 主人宣布结束的事项即时退出当前队列。只留匹配该来源和事项的去重键，用 `owner_closed_keys` 阻止原提醒在下一轮重新变成草稿；新事项独立识别。原始扫描继续，普通群消息、旧任务状态与权限核验各留在对应来源，避免替代业务判断。
 
-   各业务主号使用独立私有目录存原始记录、恢复点和预览 JSON。历史数据只迁给已核主人。主号合并 worker 的实际回执。重复执行复用来源 ID、实例 ID、消息 mid 或文件 commit。检查原链接与关键交互后，按约定在主人私聊逐类编号汇报。涉及本人私聊或审批的工作台按原有受众交付。
+   主号用私有目录存原始记录、恢复点和预览。执行者完工或遇阻，用当前派单的正常终答回主号，报告成品入口、实测结果、剩余限制或卡点。主号按原请求 ID 核对回执并验收成品，再更新对应条目。跨租户中转也保存目标机实际收到的请求 ID，与回信及同一任务标识关联。
+
+   **向本人交付。** 同批已验成果合成一张私聊交互卡。正文逐项编号，点间留一空行，附原件与待定项。本人直接私聊提问时正常回答。收到执行者回执或后台完工，使用 `python feishu/proactive_report.py --bot <主号> --batch <稳定批次> --file <私有汇报正文>` 预览，同一命令加 `--send` 才投递。此命令使用绑定本人，核对私聊、真实消息 ID 和卡片类型。同一批次恢复时复用已有记录，失败保留实际状态；不要把群内回执当成本人已收到。迟到结果补进原条目，每日巡检补漏。详见[出站交付合同](SPEC-210-outbound-delivery.md)。
    ```powershell
    python feishu/proactive_scanner.py --bot <bot> --days 7 `
      --actions-json feishu/_state/proactive/<bot>/workbench.json `
@@ -106,7 +108,7 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
 收到主人明确拍板（例如“表格填进去”“发草稿 #1”“两条都发”）后：
 
 1. **共享表写入**：执行对应脚本加 `--apply`（强制 `--allow-overwrite=false`），写完回读目标单元格确认 100% 落盘且零覆盖。
-2. **以主人本人身份发消息**：调用 `feishu/send_as_user_web.py`：
+2. **以主人本人身份发消息**：以下是本机已安装网页发送插件时的用法。缺少插件时保留待发草稿。
    ```powershell
    # 先 dry-run 核对参数
    python feishu/send_as_user_web.py --bot <bot> --target-name "<群名或人名>" --target-type group --chat-id <oc_xxx> --text "<确认正文>"

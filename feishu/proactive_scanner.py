@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,16 +43,11 @@ OAUTH_CHECKS = {
 }
 
 
-def _lark_bin() -> str:
-    return shutil.which("lark-cli") or "lark-cli"
-
-
 def run_lark_json(bot: str, args: list[str], *, timeout: int = 45) -> dict[str, Any]:
-    cmd = [_lark_bin(), "--profile", bot, *args]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+        res = docio.run_lark(args, profile=bot, timeout=timeout)
         result = json.loads(res.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError, SystemExit, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error_type": type(exc).__name__}
     if isinstance(result, dict):
         if res.returncode:
@@ -387,7 +381,7 @@ def _ordered(records):
 
 
 _ASSIGNMENT_STATES = {"已派", "活动", "卡住", "恢复", "成品待验", "已验", "待分派",
-                      "排队", "待审", "待朱镇审阅", "待朱镇确认"}
+                      "排队", "待审", "待本人审阅", "待本人确认"}
 _PRIVATE_DETAIL = re.compile(
     r"[\w.+-]+@[\w.-]+\.[\w-]+|\b(?:bearer\s+|sk-[\w-]{8,}|eyJ[\w.-]{16,})|"
     r"\b(?:ou|oc|cli)_[\da-z]{16,}|(?<!\d)\d{13,19}(?!\d)|"
@@ -403,20 +397,35 @@ def _public_note(value, limit=160):
     return html.escape(" ".join(value.split())[:limit])
 
 
-def _assignment_line(record, *, show_missing=True):
+def _project_line(record, *, coordinator=""):
+    project = _public_note(record.get("project") or record.get("_board_project"), 64)
+    if not project:
+        return ""
+    assignment = record.get("assignment")
+    if not isinstance(assignment, dict):
+        assignment = {}
+    responsible = _public_note(assignment.get("agent") or assignment.get("handler") or coordinator, 64)
+    return f'<span class="project-line">项目　<b>{project}</b> · 负责人　<b>{responsible or "待分派"}</b></span>'
+
+
+def _assignment_line(record, *, show_missing=True, include_project=True):
+    project = _project_line(record) if include_project else ""
     a = record.get("assignment")
     if not isinstance(a, dict):
-        return '<p class="dispatch-none">暂无派工回执</p>' if show_missing else ""
+        return project or ('<p class="dispatch-none">暂无派工回执</p>' if show_missing else "")
     machine = _public_note(a.get("machine"), 40)
     agent = _public_note(a.get("agent"), 64)
     state = str(a.get("state") or "")
+    # Preserve legacy owner-specific review labels using generic display text.
+    if re.fullmatch(r"待[\u3400-\u9fff]{2,4}(确认|审阅)", state):
+        state = "待本人" + state[-2:]
     if state not in _ASSIGNMENT_STATES:
         state = ""
     if state == "已验" and not (a.get("at") and (a.get("last_event") or a.get("receipt_url"))):
         state = "验收回执待核"
     handler = _public_note(a.get("handler"), 48)
     reviewer = _public_note(a.get("verified_by"), 80)
-    parts = []
+    parts = [project] if project else []
     if agent:
         parts.append(f'<span>执行　<b>{machine or "机器待核"} / {agent}</b></span>')
     elif machine and not reviewer:
@@ -470,7 +479,8 @@ def _render_drafts_section(drafts: list[dict[str, Any]], *, state="drafts", coor
         if state == "drafts":
             command = html.escape(record.get("confirm_hint") or f'发草稿 {record.get("id") or idx}')
             action = f'<button type="button" class="copy-btn" data-copy="{command}">复制确认指令</button>'
-        proof = _assignment_line(record, show_missing=False)
+        project = _project_line(record, coordinator=coordinator)
+        proof = _assignment_line(record, show_missing=False, include_project=False)
         tools = (f'<details class="message-tools"><summary aria-label="{recipient}的来源与操作" title="来源与操作">…</summary>'
                  f'<div class="message-details">{proof}{source_links}{action}</div></details>') if proof or source_links or action else ""
         lead = '<span class="context-label">背景</span>'
@@ -486,7 +496,7 @@ def _render_drafts_section(drafts: list[dict[str, Any]], *, state="drafts", coor
         context_html = ("<div class=\"message-context quotes\">" + "".join(quotes) + "</div>" if quotes else
                         f'<div class="message-context">{lead}<span>{context}</span></div>' if context or source_links else "")
         cards.append(f'<article class="draft-card" data-item><div class="message-recipient"><span class="group-name">{recipient}</span></div>'
-                     f'{context_html}<p class="message-body">{body}</p>{tools}</article>')
+                     f'{project}{context_html}<p class="message-body">{body}</p>{tools}</article>')
     author = f' · {_public_note(coordinator,64)}' if coordinator else ""
     return (f'<section class="sub-block" id="{state}"><h3>{heading} <small>{len(cards)}{author}</small></h3>'
             f'<div class="draft-grid" data-expect-count="{len(drafts)}" data-expect-of="工作包 · {heading}">{"".join(cards)}</div></section>')
@@ -833,12 +843,25 @@ def review_key(kind, record):
     links = record.get("links") or [{}]
     topic = record.get("id") or record.get("title") or record.get("target_name") or ""
     identity = record.get("source_id") or record.get("url") or links[0].get("url") or ""
-    return hashlib.sha256(json.dumps([kind, topic, identity], ensure_ascii=False).encode()).hexdigest()
+    parts = [kind, topic, identity]
+    if record.get("project"):
+        parts.append(record["project"])
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     esc = html.escape
     actions_pack = actions_pack or {}
+    if actions_pack.get("project"):
+        # A project's display label must not change legacy closed-item keys.
+        default_project = actions_pack["project"]
+        actions_pack = dict(actions_pack)
+        for key in ("drafts", "sent_messages", "files", "sheet_previews", "approvals", "calendar", "sources", "reminders"):
+            if key in actions_pack:
+                actions_pack[key] = [
+                    dict(row, _board_project=default_project) if isinstance(row, dict) else row
+                    for row in actions_pack[key] or []
+                ]
     closed = set(actions_pack.get("owner_closed_keys") or [])
     if closed:
         actions_pack = dict(actions_pack)
@@ -860,8 +883,8 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         return (record.get("id"), record.get("target_name"), record.get("message"))
 
     # The legacy #1/#2 labels are reused; an ID alone cannot close a new draft.
-    attempted_keys = {message_key(m) for m in sent_records if all(message_key(m))}
-    drafts = [d for d in input_drafts if message_key(d) not in attempted_keys]
+    attempted_keys = {(m.get("project"), message_key(m)) for m in sent_records if all(message_key(m))}
+    drafts = [d for d in input_drafts if (d.get("project"), message_key(d)) not in attempted_keys]
     sheet_previews = actions_pack.get("sheet_previews") or []
     approvals = actions_pack.get("approvals") or []
     files = []
@@ -902,16 +925,20 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
                  if not (r.get("kind") == "已约会议" and (r.get("id") or r.get("url")) in known)]
     calendar_label = "日程与待办" if "reminders" in actions_pack else "日程"
     calendar_count = f"{len(events)} 个日程 · {len(reminders)} 项待办" if "reminders" in actions_pack else f"{len(events)} 项"
-    nav = (("messages", "消息", len(drafts) + len(sent)), ("files", "文件", len(file_records)),
-           ("calendar", calendar_label, len(events) + len(reminders)), ("approvals", "审批", len(approvals)))
+    categories = {"messages": ("消息", len(drafts) + len(sent)), "files": ("文件", len(file_records)),
+                  "calendar": (calendar_label, len(events) + len(reminders)), "approvals": ("审批", len(approvals))}
+    sections = actions_pack.get("sections", list(categories))
+    if (not isinstance(sections, list) or not sections or
+            any(not isinstance(k, str) or k not in categories for k in sections) or len(set(sections)) != len(sections)):
+        raise ValueError("sections 须包含一个或多个不同的栏目：messages、files、calendar、approvals")
     reminders_html = ""
     if "reminders" in actions_pack:
         groups = dict.fromkeys(["待约会议", "飞书任务", "飞书项目", "其他"])
         items = "".join(_render_source_actions([r for r in reminders if
                          (r.get("kind") if r.get("kind") in groups else "其他") == kind], kind) for kind in groups)
         reminders_html = f'<div id="reminders">{items}</div>'
-    routes = "".join(f'<a href="#{key}"><span class="nav-label">{label}</span><span class="nav-count">{count}</span></a>'
-                     for key, label, count in nav)
+    routes = "".join(f'<a href="#{key}"><span class="nav-label">{categories[key][0]}</span>'
+                     f'<span class="nav-count">{categories[key][1]}</span></a>' for key in sections)
     stylesheet = Path(__file__).with_name("proactive_board.css").read_text(encoding="utf-8")
     online_url = str(actions_pack.get("online_url") or "").strip()
     cloud = ""
@@ -919,6 +946,16 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         cloud = f'<a class="board-cloud" href="{esc(online_url)}" title="打开已登记的线上工作台" target="_blank" rel="noopener noreferrer">云</a>'
 
     empty = '<p class="empty">本轮尚无收录项</p>'
+    sections_html = {
+        "messages": (f'<h2>消息 <small>{len(drafts)} 待发 · {len(sent)} 已发</small></h2>',
+                     drafts_html + messages_actions + sent_html + pending_verification + fallback_html),
+        "files": (f'<h2>文件 <small>{len(file_records)} 项</small></h2>', files_html + file_actions),
+        "calendar": (f'<h2>{calendar_label} <small>{calendar_count}</small></h2>',
+                     calendar_html + reminders_html + calendar_actions),
+        "approvals": (f'<h2>审批 <small>{len(approvals)} 项</small></h2>', approvals_html + approval_actions),
+    }
+    main_html = "".join(f'<section id="{k}" class="major">{sections_html[k][0]}{sections_html[k][1] or empty}</section>'
+                        for k in sections)
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -933,11 +970,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 <nav class="section-nav" aria-label="分类导航">{routes}</nav>
 {_overview(actions_pack.get("fleet_overview") or [], actions_pack.get("fleet_history") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
-  <section id="messages" class="major"><h2>消息 <small>{len(drafts)} 待发 · {len(sent)} 已发</small></h2>
-    {drafts_html}{messages_actions}{sent_html}{pending_verification}{fallback_html}{empty if not (drafts_html or sent_html or fallback_html or pending_verification or messages_actions) else ""}</section>
-  <section id="files" class="major"><h2>文件 <small>{len(file_records)} 项</small></h2>{files_html}{file_actions}{empty if not (files_html or file_actions) else ""}</section>
-  <section id="calendar" class="major"><h2>{calendar_label} <small>{calendar_count}</small></h2>{calendar_html}{reminders_html}{calendar_actions}{empty if not (events or reminders or calendar_actions) else ""}</section>
-  <section id="approvals" class="major"><h2>审批 <small>{len(approvals)} 项</small></h2>{approvals_html}{approval_actions}{empty if not (approvals_html or approval_actions) else ""}</section>
+  {main_html}
 </main></div>
 <script>
 const sections = [...document.querySelectorAll("main > .major")];
@@ -1003,11 +1036,12 @@ def _write_output(path, content):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bot", default=os.environ.get("FEISHU_BRIDGE_SESSION") or "tb26-link16")
+    parser.add_argument("--bot", default=os.environ.get("FEISHU_BRIDGE_SESSION"),
+                        required=not os.environ.get("FEISHU_BRIDGE_SESSION"))
     parser.add_argument("--days", type=int, default=7, help="扫描近 N 天（默认 7 天）")
     parser.add_argument("--preflight-only", action="store_true", help="仅运行 SOP-150 Phase 0 权限与通道体检")
     parser.add_argument("--no-reply-check", action="store_true", help="跳过群内后续主人回复探测")
-    parser.add_argument("--actions-json", help="工作台预览数据 JSON（drafts、sent_messages、files、sheet_previews、approvals、sources、audit）")
+    parser.add_argument("--actions-json", help="工作包 JSON；sections 可选 messages、files、calendar、approvals 及次序，project 为事项的默认来源项目")
     parser.add_argument("--out-json", help="保存结构化 JSON 扫描结果路径")
     parser.add_argument("--from-scan", help="以同一本人应用的已存扫描重新渲染，保留上次读取时间")
     parser.add_argument("--out-html", help="输出本地验收工作台 HTML 路径")
@@ -1028,6 +1062,10 @@ def main() -> int:
         actions_pack = json.loads(Path(args.actions_json).read_text(encoding="utf-8-sig"))
     if args.from_scan:
         payload = json.loads(Path(args.from_scan).read_text(encoding="utf-8-sig"))
+        if (not isinstance(payload, dict) or not isinstance(payload.get("generated_at"), str)
+                or not isinstance(payload.get("counts"), dict) or not isinstance(payload.get("preflight"), dict)
+                or not isinstance(payload["preflight"].get("all_ready"), bool)):
+            parser.error("已存扫描缺少生成时间、统计或权限预检结果")
         if payload.get("bot") != args.bot:
             parser.error("已存扫描所属应用与 --bot 不一致")
     else:
