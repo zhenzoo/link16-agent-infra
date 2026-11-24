@@ -908,7 +908,7 @@ document.querySelectorAll(".copy-btn").forEach(btn => {{
 
 def _write_output(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False) as tmp:
         temp_path = Path(tmp.name)
         try:
             tmp.write(content)
