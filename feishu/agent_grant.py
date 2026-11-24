@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # 受闸的破坏性命令（与 feishu_bridge.handle_slash 里的命令名一一对应）
-DESTRUCTIVE_CAPS = ("close", "clear", "cd", "account", "new", "stop", "effort")
+DESTRUCTIVE_CAPS = ("close", "clear", "cd", "account", "new", "stop", "effort", "model", "handoff", "screen")
 DEFAULT_WINDOW_SEC = 1800          # 主人私聊后 30 分钟内可 claim
 GRANT_TTL_SEC = 24 * 3600          # 授权默认 24h 过期（别让权限无限期挂着）
 
@@ -61,12 +61,17 @@ def load_grant(bot_name, state_dir=None):
     return rec
 
 
-def has_cap(grantee, cap, state_dir=None):
+def has_cap(grantee, cap, state_dir=None, *, target=None):
     """grantee 这个 agent 现在有没有 cap 权限。cap 形如 'close'（不带斜杠）。"""
     if not grantee:
         return False
-    caps = load_grant(grantee, state_dir).get("caps") or []
-    return cap in caps or "*" in caps
+    grant = load_grant(grantee, state_dir)
+    if "targets" in grant:
+        targets = grant["targets"]
+        if not isinstance(targets, list) or not target or target not in targets:
+            return False
+    caps = grant.get("caps") or []
+    return isinstance(caps, list) and (cap in caps or "*" in caps)
 
 
 def owner_dm_evidence(bot_name, window_sec=DEFAULT_WINDOW_SEC, state_dir=None):
@@ -116,9 +121,13 @@ def cmd_claim(args):
         "evidence": detail,
         "note": (args.note or "")[:300],
     }
+    if args.target:
+        from bot_names import local_name
+        rec["targets"] = sorted({local_name(name, required=True) for name in args.target})
     p = grant_path(bot, args.state_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    from bridge_injection import atomic_write_json
+    atomic_write_json(p, rec)
     print(f"✅ {bot} 已获授权 caps={caps}（{int((rec['expires_at']-time.time())/3600)}h 后过期）\n"
           f"   凭据：{detail}\n   文件：{p}")
     return 0
@@ -161,6 +170,7 @@ def main():
     c.add_argument("--window", type=int, default=DEFAULT_WINDOW_SEC, help="主人私聊凭据的时间窗（秒）")
     c.add_argument("--ttl", type=int, default=GRANT_TTL_SEC, help="授权多久过期（秒）")
     c.add_argument("--note", default=None, help="主人原话/用途，写进审计")
+    c.add_argument("--target", action="append", help="限制到指定本机执行者，可重复")
     c.add_argument("--state-dir", default=None)
     c.set_defaults(func=cmd_claim)
     r = sub.add_parser("revoke", help="撤销某 agent 的授权")
