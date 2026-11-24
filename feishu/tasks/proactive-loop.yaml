@@ -1,11 +1,11 @@
 # Link16 Portable Task Template · Proactive 24h Closed-Loop
 # 归属 Link16 仓库（跨机器、跨平台通用），任何电脑启用 Proactive 均参照本文件与 docs/SOP-150-proactive-agent-loop.md。
 task_id: link16-proactive-loop
-version: 1
+version: 2
 sop: docs/SOP-150-proactive-agent-loop.md
 owner_repo: link16-agent-infra
 
-# 阶段 0：每次新机/新 bot 启用前必须先过权限与通道预检（全绿才开跑）
+# 各来源分别记录身份、授权及实读范围。
 preflight:
   command: python feishu/proactive_scanner.py --bot <bot> --preflight-only
   required_capabilities:
@@ -22,19 +22,20 @@ preflight:
 # 阶段 1：挂载到本机 feishu/cron-jobs/<bot>.yaml 的标准定时任务模板
 cron_template:
   name: proactive-board-refresh
-  cron: "0 9,14,18 * * 1-5"
+  cron: "0 9 * * *"
   tz: Asia/Shanghai
   enabled: true
   prompt: >
-    按 docs/SOP-150-proactive-agent-loop.md 执行 Link16 Proactive 巡检：
-    1) 先跑 python feishu/proactive_scanner.py --bot <bot> --preflight-only 确认权限与网页通道全通；
-    2) 扫描新增未回复的高信号 @主人 消息与审批单，跳过已回复/已闭环/无关噪音；
-    3) 自主拉取附件/文档/会议纪要并更新 feishu/_state/proactive/workbench.json（表格变更须 1:1 原貌呈现，外发消息仅存草稿）；
-    4) 运行 proactive_scanner.py 刷新本地验收工作台 HTML，未经主人明确确认绝不调用 send_as_user_web.py --send 外发。
+    使用本业务主号、Link16 的 docs/SOP-150-proactive-agent-loop.md 与当前业务仓的岗位 TASTE。
+    按来源恢复上次成功时间窗，核周报最新手写行、本人私聊及定向群请求、已结束日历与临时会议、
+    纪要和逐字稿收尾、真实待办与审批以及已派 peer 的回执。核归属、产物与截止后按优先级执行，
+    分清机器能力与唯一 writer，保存基线；有同源在途任务先收结果。把新成果、缺件及回执合并进原工作台，
+    完成后按消息、文件、日程、审批在主人私聊编号汇报，附原工作台。日历先核人、忙闲和房间。
+    未获授权的对外沟通和审批提交保留待审。定时运行后台，不弹窗。
 
 # 阶段 2 & 3：执行护栏
 guardrails:
-  show_replied_or_noise_in_html: false
+  retain_verified_sent_messages: true
   preview_before_sheet_or_doc_write: true
   require_owner_confirmation_before_send: true
   send_tool: feishu/send_as_user_web.py

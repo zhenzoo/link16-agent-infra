@@ -24,12 +24,13 @@ class ProactiveScannerTests(unittest.TestCase):
                         {"title": "仅作依据", "actionable": False, "assignment": dispatch}],
         }
         result = ps.render_html({"bot": "test", "generated_at": "13:41"}, pack)
-        main, audit = result.split('<details class="sys-foot" id="audit">')
+        main = result
         self.assertEqual(main.count("TX26 / baseball-2"), 4)
         self.assertEqual(main.count("最新回执 · 收到重试回执"), 4)
         self.assertIn("独立待跟进项", main)
         self.assertNotIn("仅作依据", main)
-        self.assertIn("历史纯文本来源", audit)
+        self.assertNotIn("历史纯文本来源", main)
+        self.assertNotIn('id="audit"', main)
         self.assertIn('办理　<b>产品负责人</b>', main)
         self.assertIn('核验　<b>TB26 / 主号核验</b>', main)
         self.assertNotIn('TB26 / 智能体待核', main)
@@ -249,7 +250,7 @@ class ProactiveScannerTests(unittest.TestCase):
         }
         html_text = ps.render_html(payload, actions_pack=workbench)
         self.assertIn("https://applink.feishu.cn/client/chat/open?openChatId=oc_d273&amp;position=1181", html_text)
-        self.assertIn("feishu-bubble", html_text)
+        self.assertIn('class="message-body"', html_text)
         self.assertIn("feishu-sheet", html_text)
         self.assertIn("cell-new", html_text)
         self.assertNotIn("已回复的旧消息不应出现在工作台", html_text)

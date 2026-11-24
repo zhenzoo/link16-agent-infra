@@ -108,7 +108,7 @@ def approvals(bot, owner, since, until, *, pending):
                "status": row.get("instance_status"), "url": row.get("link")}
 
 
-def collect(bot, since, until):
+def collect(bot, since, until, previous=None):
     identity = bridge_scope_audit.user_identity_status(bot)
     owner = identity.get("verified_owner_id")
     result = {"bot": bot, "since": since.isoformat(), "until": until.isoformat(),
@@ -116,24 +116,37 @@ def collect(bot, since, until):
     if not owner or not identity.get("owner_matches") or identity.get("status") != "ready":
         result["error"] = "未核实本应用的主人 OAuth，未读取业务数据"
         return result
+    result["owner_id"] = owner
+    previous = previous or {}
+    if previous and (previous.get("bot") != bot or previous.get("owner_id") != owner):
+        raise ValueError("恢复记录须来自同一应用与本人")
+    if previous and until <= time_arg(previous["until"]):
+        raise ValueError("新窗口结束时间须晚于此前记录")
     sources = result["sources"]
-    for name, rows in (
-        ("calendar", calendar(bot, since, until)),
-        ("meetings", meetings(bot, owner, since, until, "vc")),
-        ("minutes", meetings(bot, owner, since, until, "minutes")),
-        ("open_tasks", tasks(bot)),
-        ("pending_approvals", approvals(bot, owner, since, until, pending=True)),
-        ("initiated_approvals", approvals(bot, owner, since, until, pending=False)),
+    for name, fetch in (
+        ("calendar", lambda start: calendar(bot, start, until)),
+        ("meetings", lambda start: meetings(bot, owner, start, until, "vc")),
+        ("minutes", lambda start: meetings(bot, owner, start, until, "minutes")),
+        ("open_tasks", lambda start: tasks(bot)),
+        ("pending_approvals", lambda start: approvals(bot, owner, start, until, pending=True)),
+        ("initiated_approvals", lambda start: approvals(bot, owner, start, until, pending=False)),
     ):
+        last = previous.get("sources", {}).get(name, {})
+        if last.get("status") in {"ok", "empty"}:
+            start = time_arg(previous["until"])
+        elif last.get("since"):
+            start = time_arg(last["since"])
+        else:
+            start = since
         items = {}
         try:
-            for row in rows:
+            for row in fetch(start):
                 items[row["id"]] = row
         except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
             source = {"status": "partial" if items else "error", "error": str(exc)[:500]}
         else:
             source = {"status": "ok" if items else "empty"}
-        source["items"] = list(items.values())
+        source.update(since=start.isoformat(), items=list(items.values()))
         sources[name] = source
     result["ok"] = all(src["status"] in {"ok", "empty"} for src in sources.values())
     return result
@@ -145,6 +158,7 @@ def main():
     parser.add_argument("--since", required=True, type=time_arg)
     parser.add_argument("--until", required=True, type=time_arg)
     parser.add_argument("--out", required=True, type=Path, help="JSON within feishu/_state")
+    parser.add_argument("--resume-from", type=Path, help="previous private snapshot; retry partially read windows")
     args = parser.parse_args()
     if args.since >= args.until:
         parser.error("--since must precede --until")
@@ -152,8 +166,14 @@ def main():
     if out.suffix.lower() != ".json" or not out.is_relative_to(Path(__file__).resolve().parent / "_state"):
         parser.error("--out must be a private .json file under feishu/_state")
     try:
-        data = collect(docio_cli.resolve_bot(args.bot), args.since, args.until)
-    except ValueError as exc:
+        previous = None
+        if args.resume_from:
+            path = args.resume_from.resolve()
+            if path == out or not path.is_relative_to(Path(__file__).resolve().parent / "_state"):
+                parser.error("输入与输出须为不同的私有快照文件")
+            previous = json.loads(path.read_text(encoding="utf-8-sig"))
+        data = collect(docio_cli.resolve_bot(args.bot), args.since, args.until, previous)
+    except (ValueError, OSError, KeyError) as exc:
         parser.exit(1, f"{exc}\n")
     atomic_write_json(out, data)
     if data.get("error"):

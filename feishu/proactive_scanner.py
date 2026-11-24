@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Read-only Feishu source scan and review board for messages, files and approvals."""
+"""Read-only Feishu source scan and review board for messages, files, calendar and approvals."""
 from __future__ import annotations
 
 import argparse
@@ -455,52 +455,33 @@ def _assignment_line(record, *, show_missing=True):
             + (f'<p>最新回执 · {event}</p>' if event else '') + evidence + '</div>')
 
 
-def _render_drafts_section(drafts: list[dict[str, Any]], owner_name: str, *, state="drafts") -> str:
-    esc = html.escape
+def _render_drafts_section(drafts: list[dict[str, Any]], *, state="drafts") -> str:
     if not drafts:
         return ""
-    heading, badge = {
-        "sent": ("已发", "已发 · 已回读"),
-        "unverified": ("发送回执待核", "待核"),
-        "drafts": ("待发", "待确认发送"),
-    }[state]
+    heading = {"sent": "已发", "unverified": "发送回执待核", "drafts": "待发"}[state]
     cards = []
-    for idx, d in enumerate(_ordered(drafts), start=1):
-        group = esc(d.get("target_name") or d.get("group") or "")
-        basis = esc(d.get("basis") or "")
-        confirm_cmd = esc(d.get("confirm_hint") or f'发草稿 {d.get("id") or idx}')
-        body_html = _highlight_mentions(d.get("message") or "")
-        links_html = _links(d)
-        action_html = _link("发送回执", d.get("receipt_url"))
+    for idx, record in enumerate(_ordered(drafts), start=1):
+        recipient = html.escape(record.get("target_name") or record.get("group") or "收件人待定")
+        context = html.escape(record.get("context") or record.get("basis") or "")
+        source_links = _links(record)
+        body = _highlight_mentions(record.get("message") or "")
+        action = _link("发送回执", record.get("receipt_url"))
         if state == "drafts":
-            action_html = f'<button type="button" class="copy-btn" data-copy="{confirm_cmd}">复制确认指令</button>'
-        sender = f'{esc(owner_name)} · {esc(d.get("sent_at") or heading)}'
-        cards.append(
-            f'<article class="draft-card">'
-            f'  <div class="draft-top">'
-            f'    <div class="draft-title">{_priority(d)}<span class="group-name">{group}</span></div>'
-            f'    <span class="status-tag {"tag-green" if state == "sent" else "tag-amber"}">{badge}</span>'
-            f'  </div>'
-            f'  {_assignment_line(d, show_missing=state != "sent")}'
-            f'  <div class="feishu-stage">'
-            f'    <div class="bubble-meta">{sender}</div>'
-            f'    <div class="feishu-bubble">{body_html}</div>'
-            f'  </div>'
-            f'  <div class="draft-foot">'
-            f'    <div class="basis-line">{basis}</div>'
-            f'    <div class="foot-actions">'
-            f'      {links_html}'
-            f'      {action_html}'
-            f'    </div>'
-            f'  </div>'
-            f'</article>'
-        )
-    return (
-        f'<section class="sub-block" id="{state}">'
-        f'<h3>{heading} <small>{len(drafts)}</small></h3>'
-        f'  <div class="draft-grid">{"".join(cards)}</div>'
-        f'</section>'
-    )
+            command = html.escape(record.get("confirm_hint") or f'发草稿 {record.get("id") or idx}')
+            action = f'<button type="button" class="copy-btn" data-copy="{command}">复制确认指令</button>'
+        proof = _assignment_line(record, show_missing=False)
+        tools = (f'<details class="message-tools"><summary aria-label="{recipient}的来源与操作" title="来源与操作">…</summary>'
+                 f'<div class="message-details">{proof}{source_links}{action}</div></details>') if proof or source_links or action else ""
+        lead = '<span class="context-label">背景</span>'
+        if source_links and record.get("links"):
+            href = _url(record["links"][0].get("url"))
+            if href:
+                lead = f'<a class="context-label" href="{html.escape(href)}" target="_blank" rel="noopener noreferrer">来源 ↗</a>'
+        context_html = f'<div class="message-context">{lead}<span>{context}</span></div>' if context or source_links else ""
+        cards.append(f'<article class="draft-card" data-item><div class="message-recipient"><span class="group-name">{recipient}</span></div>'
+                     f'{context_html}<p class="message-body">{body}</p>{tools}</article>')
+    return (f'<section class="sub-block" id="{state}"><h3>{heading} <small>{len(cards)}</small></h3>'
+            f'<div class="draft-grid" data-expect-count="{len(drafts)}" data-expect-of="工作包 · {heading}">{"".join(cards)}</div></section>')
 
 
 def _render_sheet_previews(previews: list[dict[str, Any]]) -> str:
@@ -731,16 +712,27 @@ def _render_file(record) -> str:
     )
 
 
-def _render_evidence(rows) -> str:
-    items = []
-    for r in rows:
-        if isinstance(r, str):
-            items.append(f'<li>{_public_note(r)}</li>')
-        elif isinstance(r, dict):
-            items.append(f'<li><strong>{_public_note(r.get("title"))}</strong> · {_public_note(r.get("status"))}'
-                         f'<div>{_public_note(r.get("detail"), 500)} {_link("查看依据", r.get("url"), local=True)}</div>'
-                         f'{_assignment_line(r, show_missing=False)}</li>')
-    return "".join(items)
+def _is_calendar_record(record):
+    if record.get("category") in {"日程", "会议邀请"}:
+        return True
+    try:
+        url = urlsplit(record.get("url") or "")
+        return url.hostname in {"feishu.cn", "www.feishu.cn", "applink.feishu.cn"} and url.path.startswith(("/calendar/share", "/client/calendar/"))
+    except ValueError:
+        return False
+
+
+def _render_calendar(event):
+    esc = html.escape
+    day = esc(event.get("day") or "")
+    clock = esc(event.get("clock") or "")
+    places = " · ".join(esc(v) for v in (event.get("participants"), event.get("room")) if v)
+    preview = esc(event.get("preview") or "")
+    return (f'<article class="calendar-entry"><div class="event-when"><strong class="event-day">{day}</strong>'
+            f'<span class="event-clock">{clock}</span></div><div class="event-main"><div class="record-head">'
+            f'<h3>{esc(event.get("title") or "日程")}</h3><span class="status-tag">{esc(event.get("status") or "")}</span></div>'
+            f'<p>{places}</p><p>{preview}</p><div class="record-links">{_link("打开飞书日程", event.get("url"))} '
+            f'{_links(event)}</div>{_assignment_line(event, show_missing=False)}</div></article>')
 
 
 def _source_action(row):
@@ -791,10 +783,7 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     esc = html.escape
     actions_pack = actions_pack or {}
-    owner_name = payload.get("owner_name") or "朱镇"
-    preflight = payload.get("preflight") or {}
-    pf_passed = preflight.get("passed", 0)
-    pf_total = preflight.get("total", 5)
+    board_time = dt.datetime.now(TZ_SHANGHAI).strftime("%m/%d %H:%M")
 
     sent_records = list(actions_pack.get("sent_messages") or [])
     input_drafts = []
@@ -813,11 +802,21 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     drafts = [d for d in input_drafts if message_key(d) not in attempted_keys]
     sheet_previews = actions_pack.get("sheet_previews") or []
     approvals = actions_pack.get("approvals") or []
-    files = actions_pack.get("files") or []
-    system_note = actions_pack.get("system_note") or ""
-    drafts_html = _render_drafts_section(drafts, owner_name)
-    sent_html = _render_drafts_section(sent, owner_name, state="sent")
-    pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], owner_name, state="unverified")
+    files = []
+    events = list(actions_pack.get("calendar") or [])
+    known = {event.get("id") or event.get("url") for event in events}
+    for record in actions_pack.get("files") or []:
+        if _is_calendar_record(record):
+            key = record.get("id") or record.get("url")
+            if key not in known:
+                events.append(record)
+                known.add(key)
+        else:
+            files.append(record)
+    calendar_html = "".join(_render_calendar(event) for event in events)
+    drafts_html = _render_drafts_section(drafts)
+    sent_html = _render_drafts_section(sent, state="sent")
+    pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
     files_html = "".join(
         _render_sheet_previews([record]) if is_sheet else _render_file(record)
@@ -829,32 +828,17 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     candidates = [it for it in payload.get("items") or [] if it.get("message_id") not in reviewed and
                   (not it.get("app_link") or it["app_link"] not in covered_links)]
     fallback_html = _fallback_open_mentions(candidates)
-    source_problems = payload.get("scan_sources") or []
-    sources = actions_pack.get("sources") or []
-    source_rows = _render_evidence([*source_problems, *(r for r in sources if not _source_action(r))])
-    action_groups = {"消息": [], "文件": [], "审批": []}
-    for row in sources:
+    action_groups = {"消息": [], "文件": [], "日程": [], "审批": []}
+    for row in actions_pack.get("sources") or []:
         if _source_action(row):
             category = row.get("category")
             action_groups[category if category in action_groups else "文件"].append(row)
-    messages_actions, file_actions, approval_actions = (_render_source_actions(rows) for rows in action_groups.values())
-    audit_rows = _render_evidence(actions_pack.get("audit") or [])
-    audit_link = _link("完整权限核验表", actions_pack.get("audit_url"), local=True)
-
-    # Compact collapsed diagnostics footer (zero main-screen clutter)
-    pf_rows = []
-    for _, v in (preflight.get("checks") or {}).items():
-        detail = "、".join(v.get("missing") or []) or v.get("error", "")
-        pf_rows.append(f'<li>{"已就绪" if v.get("ok") else "待核"} · {esc(v.get("label",""))} {_public_note(detail)}</li>')
-
-    fleet_compact = [
-        f'<tr><td>{esc(f["bot"])}</td><td>{"✅" if f.get("chat_scopes_ok") else "❌"}</td>'
-        f'<td>{"✅" if f.get("has_wiki_node") else "—"}</td>'
-        f'<td>{"✅" if f.get("has_sheet_write") else "—"}</td>'
-        f'<td>{"✅" if f.get("has_minutes") else "—"}</td><td>{esc(str(f.get("scope_count",0)))}</td></tr>'
-        for f in (payload.get("fleet") or [])
-        if f.get("has_sheet_write") or f.get("bot") == payload.get("bot")
-    ]
+    messages_actions, file_actions, calendar_actions, approval_actions = (_render_source_actions(rows) for rows in action_groups.values())
+    nav = (("messages", "消息", len(drafts) + len(sent)), ("files", "文件", len(file_records)),
+           ("calendar", "日程", len(events)), ("approvals", "审批", len(approvals)))
+    routes = "".join(f'<a href="#{key}"><span class="nav-label">{label}</span><span class="nav-count">{count}</span></a>'
+                     for key, label, count in nav)
+    stylesheet = Path(__file__).with_name("proactive_board.css").read_text(encoding="utf-8")
 
     empty = '<p class="empty">本轮尚无收录项</p>'
 
@@ -863,505 +847,44 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Link16 Proactive · {esc(owner_name)}验收工作台</title>
-<style>
-:root {{
-  --bg: #f6f8f6;
-  --surface: #ffffff;
-  --ink: #21352c;
-  --ink-2: #4b4b47;
-  --muted: #787771;
-  --line: #dce4de;
-  --line-strong: #d4d3cc;
-  --blue: #1456f0;
-  --blue-bg: #eef4ff;
-  --blue-line: #d4e2ff;
-  --green: #0f766e;
-  --green-bg: #ecfdf5;
-  --green-line: #a7f3d0;
-  --amber: #b45309;
-  --amber-bg: #fffbeb;
-  --amber-line: #fde68a;
-  --radius: 7px;
-}}
-* {{ box-sizing: border-box; }}
-body {{
-  margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
-  -webkit-font-smoothing: antialiased;
-}}
-a {{ color: var(--blue); text-decoration: none; }}
-a:hover {{ text-decoration: underline; }}
-
-.topbar {{
-  position: relative;
-  top: 0;
-  z-index: 20;
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--line);
-}}
-.topbar-inner {{
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 13px 28px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}}
-.brand {{
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}}
-.brand h1 {{
-  margin: 0;
-  font-size: clamp(21px, 3vw, 30px);
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}}
-.brand .stamp {{
-  font-size: 12px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}}
-.stats {{
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
-}}
-.stat-pill {{
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  font-variant-numeric: tabular-nums;
-}}
-.pill-amber {{ background: var(--amber-bg); color: var(--amber); border-color: var(--amber-line); }}
-.pill-green {{ background: var(--green-bg); color: var(--green); border-color: var(--green-line); }}
-.pill-slate {{ background: #f1f1ed; color: var(--ink-2); border-color: var(--line); }}
-
-main {{
-  max-width: 1200px;
-  margin: 24px auto 64px;
-  padding: 0 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}}
-.block {{
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}}
-.sec-head {{
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 0 2px;
-}}
-.sec-head h2 {{
-  margin: 0;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}}
-.sec-sub {{
-  font-size: 12.5px;
-  color: var(--muted);
-}}
-.head-right {{
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}}
-
-/* Draft Feishu Message Preview Cards */
-.draft-grid {{
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
-}}
-.draft-card {{
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 1px 2px rgba(22, 22, 21, 0.03);
-}}
-.draft-top {{
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}}
-.draft-title {{
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 650;
-}}
-.idx-badge {{
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  background: var(--ink);
-  color: #fff;
-  padding: 2px 7px;
-  border-radius: 6px;
-}}
-.group-name {{
-  font-size: 14px;
-}}
-.status-tag {{
-  font-size: 11.5px;
-  font-weight: 600;
-  padding: 2px 9px;
-  border-radius: 999px;
-}}
-.tag-amber {{ background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line); }}
-
-.feishu-stage {{
-  padding: 16px 18px;
-  background: #fafaf8;
-  flex: 1;
-}}
-.bubble-meta {{
-  font-size: 11.5px;
-  color: var(--muted);
-  margin-bottom: 6px;
-}}
-.feishu-bubble {{
-  background: var(--blue-bg);
-  border: 1px solid var(--blue-line);
-  border-radius: 12px 12px 12px 3px;
-  padding: 12px 15px;
-  font-size: 13.5px;
-  line-height: 1.65;
-  color: #1f2329;
-  white-space: pre-wrap;
-}}
-.mention {{
-  color: var(--blue);
-  font-weight: 600;
-}}
-.draft-foot {{
-  padding: 11px 16px;
-  border-top: 1px solid var(--line);
-  background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}}
-.basis-line {{
-  font-size: 12px;
-  color: var(--ink-2);
-}}
-.foot-actions {{
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}}
-.link-pill {{
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 7px;
-  border: 1px solid var(--blue-line);
-  background: var(--blue-bg);
-  color: var(--blue);
-  white-space: nowrap;
-}}
-.link-pill:hover {{ background: #dfeaff; text-decoration: none; }}
-.copy-btn {{
-  margin-left: auto;
-  font: 600 12px/1 inherit;
-  padding: 6px 11px;
-  border-radius: 7px;
-  border: 1px solid var(--line-strong);
-  background: var(--surface);
-  color: var(--ink);
-  cursor: pointer;
-}}
-.copy-btn:hover {{ background: #f3f3ef; }}
-.copy-btn.copied {{ background: var(--green-bg); border-color: var(--green-line); color: var(--green); }}
-
-/* 1:1 Feishu Spreadsheet Mirror */
-.legend {{
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--ink-2);
-}}
-.lg-box {{
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  border-radius: 3px;
-  border: 1px solid var(--line-strong);
-}}
-.lg-old {{ background: #ffffff; }}
-.lg-new {{ background: var(--green-bg); border-color: #10b981; }}
-
-.sheet-wrap {{
-  background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  overflow-x: auto;
-  box-shadow: 0 1px 3px rgba(22, 22, 21, 0.04);
-}}
-.feishu-sheet {{
-  width: 100%;
-  min-width: 1160px;
-  border-collapse: collapse;
-  font-size: 12.5px;
-  line-height: 1.55;
-}}
-.feishu-sheet th, .feishu-sheet td {{
-  border: 1px solid #e1e3e6;
-  padding: 8px 10px;
-  vertical-align: top;
-  text-align: left;
-}}
-.feishu-sheet .gutter {{
-  width: 34px;
-  min-width: 34px;
-  text-align: center;
-  background: #f5f6f7;
-  color: #8f959e;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11.5px;
-  font-weight: 600;
-  user-select: none;
-}}
-.feishu-sheet .col-letter {{
-  text-align: center;
-  background: #f5f6f7;
-  color: #8f959e;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 4px 6px;
-}}
-.feishu-sheet .sh-h1 th:not(.gutter),
-.feishu-sheet .sh-h2 th:not(.gutter) {{
-  background: #eef2f8;
-  color: #1f2329;
-  font-weight: 700;
-  font-size: 12px;
-  white-space: nowrap;
-}}
-.w-cat {{ width: 120px; }}
-.w-seq {{ width: 42px; text-align: center !important; }}
-.w-prob {{ width: 220px; }}
-.w-sol {{ width: 340px; }}
-.w-ppl {{ width: 115px; }}
-.w-pm {{ width: 78px; }}
-.w-prog {{ width: 155px; }}
-.w-out {{ width: 64px; }}
-.w-note {{ width: 165px; }}
-
-.cell-existing {{
-  background: #ffffff;
-  color: var(--ink-2);
-}}
-.cell-empty {{
-  background: #fcfcfb;
-  color: #c4c4be;
-}}
-.cell-new {{
-  background: var(--green-bg);
-  color: #102a24;
-  position: relative;
-  box-shadow: inset 3px 0 0 #10b981;
-}}
-.cell-txt {{
-  word-break: break-word;
-  white-space: pre-line;
-}}
-
-/* Approvals Compact Strip */
-.ap-list {{
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  overflow: hidden;
-}}
-.ap-row {{
-  padding: 11px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid var(--line);
-}}
-.ap-row:last-child {{ border-bottom: none; }}
-.ap-main {{
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-}}
-.ap-title {{ font-weight: 600; font-size: 13.5px; }}
-.ap-meta {{ font-size: 12px; color: var(--muted); }}
-.ap-btn {{
-  font-size: 12px;
-  font-weight: 600;
-  padding: 5px 11px;
-  border-radius: 7px;
-  border: 1px solid var(--line-strong);
-  background: #fafaf8;
-  color: var(--ink);
-  white-space: nowrap;
-}}
-.ap-btn:hover {{ background: #efefea; text-decoration: none; }}
-
-/* Collapsed Diagnostics Footer */
-details.sys-foot {{
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 11px 16px;
-  font-size: 12.5px;
-  color: var(--ink-2);
-}}
-details.sys-foot summary {{
-  cursor: pointer;
-  font-weight: 600;
-  color: var(--muted);
-  list-style: none;
-}}
-details.sys-foot summary::-webkit-details-marker {{ display: none; }}
-.diag-grid {{
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
-  gap: 16px;
-}}
-.diag-list {{
-  margin: 0;
-  padding-left: 16px;
-  line-height: 1.8;
-}}
-.mini-tbl {{
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}}
-.mini-tbl th, .mini-tbl td {{
-  border: 1px solid var(--line);
-  padding: 5px 8px;
-  text-align: left;
-}}
-.mini-tbl th {{ background: #f6f6f3; font-weight: 600; }}
-.brand {{ align-items: start; flex-direction: column; gap: 0; }}
-.stats a {{ color: var(--ink); padding: 4px 7px; }}
-.major {{ min-width: 0; display: grid; gap: 12px; scroll-margin: 1rem; }}
-.major > h2 {{ margin: 0; padding-bottom: 5px; border-bottom: 2px solid #397157; font-size: 21px; }}
-h2 small,h3 small,summary small {{ font-size: 12px; font-weight: 500; color: var(--muted); margin-left: .5em; }}
-.sub-block h3 {{ font-size: 14px; margin: 0 0 7px; }}
-.review-card,.sheet-card {{ min-width: 0; background: white; border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 17px; }}
-.record-head,.record-links {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
-.record-head h3 {{ font-size: 16px; margin: 0; }}
-.record-head .status-tag {{ margin-left: auto; }}
-.status-tag {{ color: var(--ink-2); background: #eef2ef; line-height: 1.5; }}
-.status-tag.tag-amber {{ background: var(--amber-bg); color: var(--amber); }}
-.tag-green {{ color: var(--green); }}
-.priority {{ font: 650 12px/1.6 monospace; background: #ebefec; color: #4a5d50; padding: 1px 5px; border-radius: 3px; }}
-.p0 {{ color: #952e26; background: #ffebe6; }} .p1 {{ color: #815609; background: #fff1d1; }}
-.preview-text,.ap-meta {{ white-space: pre-line; overflow-wrap: anywhere; }}
-.record-links:empty,.review-card p:empty {{ display: none; }}
-.dispatch {{ margin: .45rem 0 .65rem; border-left: 2px solid #c4d5c9; padding: 2px 0 2px 9px; min-width: 0; color: #45564b; font-size: 12.5px; overflow-wrap: anywhere; }}
-.dispatch-line {{ display:flex; flex-wrap:wrap; gap: 3px 12px; align-items:baseline; }}
-.dispatch-line b {{ color:var(--ink); font-weight:600; }}
-.dispatch time,.dispatch-none {{ color:#5c6b62; font-size:12px; }}
-.dispatch p,.dispatch-none {{ margin:3px 0; }}
-.dispatch-state {{ font-weight:650; color:#355d47; }}
-.dispatch-state.blocked {{ color:#9f3029; }} .dispatch-state.review {{ color:#815609; }} .dispatch-state.verified {{ color:#096557; }}
-.dispatch-proof summary {{ cursor:pointer; width:fit-content; color:#4b6354; }}
-.dispatch-proof > div {{ padding:3px 0; }}
-.draft-card > .dispatch,.draft-card > .dispatch-none {{ margin-left:16px; margin-right:16px; }}
-.source-actions {{ display:grid; gap:8px; min-width:0; }} .source-actions > h3 {{ margin:4px 0 0; font-size:14px; }}
-.preview-image {{ display: block; max-width: 100%; max-height: 190px; object-fit: contain; margin: 8px 0; }}
-.form-preview {{ margin: 8px 0; max-width: 740px; }}
-.form-preview div {{ display: grid; grid-template-columns: minmax(90px, 28%) 1fr; border-bottom: 1px solid var(--line); }}
-.form-preview dt,.form-preview dd {{ margin: 0; padding: 6px 8px; overflow-wrap: anywhere; white-space: pre-line; }}
-.form-preview dt {{ background: #f5f7f5; color: var(--ink-2); }}
-.native-form {{ border: 1px solid var(--line); border-radius: 6px; margin: 8px 0; max-height: 21rem; overflow: auto; }}
-.control-row {{ display: grid; grid-template-columns: minmax(100px,32%) 1fr; border-bottom: 1px solid var(--line); }}
-.control-row > * {{ padding: 6px 10px; overflow-wrap: anywhere; white-space: pre-line; }}
-.control-row > span {{ background: #f7f9f8; }} .required {{ color: #9d3427; }}
-.control-placeholder,.control-row small,.form-group small,.detail-no {{ color: var(--muted); font-size: 12px; }}
-.form-group {{ padding: 7px 10px; border-bottom: 1px solid var(--line); background: #fafbf9; }}
-.form-group > div {{ margin: 5px 0 0 5px; border-left: 2px solid #c4d6ca; background: white; }}
-.form-group summary,.form-definition summary {{ cursor: pointer; }}
-.detail-no {{ padding: 5px 9px; }} .form-definition {{ margin: 8px 0; font-size: 13px; }}
-.missing,.empty {{ margin: 6px 0; color: var(--muted); font-size: 13px; }}
-.sheet-card {{ display: block; }} .sheet-card summary,.candidates summary {{ cursor: pointer; font-weight: 650; }}
-.sheet-card .sec-head,.sheet-card .sheet-wrap,.candidates .ap-list {{ margin-top: 10px; }}
-.sheet-card .sheet-wrap {{ max-height: 17rem; overflow: auto; }}
-.diag-list,.mini-tbl,.link-pill {{ overflow-wrap: anywhere; }} .link-pill {{ white-space: normal; }}
-@media(max-width:650px) {{
- main {{ padding: 0 12px; margin-top: 15px; gap: 21px; }} .topbar-inner {{ padding: 12px; gap: 7px; }}
- .topbar-inner,.ap-row {{ align-items: flex-start; flex-direction: column; }} .record-head .status-tag {{ margin-left: 0; }}
- .review-card,.sheet-card {{ padding: 10px; }} .diag-grid {{ display: block; }} .mini-tbl td,.mini-tbl th {{ padding: 4px; }}
-}}
-</style>
+<title>工作台 · {esc(payload.get('owner_name') or payload['bot'])}</title>
+<style>{stylesheet}</style>
 </head>
-<body>
-<header class="topbar">
-  <div class="topbar-inner">
-    <div class="brand">
-      <h1>{esc(owner_name)}的工作台</h1>
-      <span class="stamp">更新 {esc(payload['generated_at'])} · {esc(payload['bot'])}</span>
-    </div>
-    <nav class="stats" aria-label="快速跳转"><a href="#messages">消息</a><a href="#files">文件</a><a href="#approvals">审批</a><a href="#audit">核验</a></nav>
-  </div>
-</header>
-<main>
+<body><div class="workspace-shell">
+<aside class="rail"><h1 class="rail-title">{esc(payload.get("owner_name") or payload["bot"])}的工作台</h1>
+<nav class="section-nav" aria-label="分类导航">{routes}</nav>
+<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
+<main id="workspace">
   <section id="messages" class="major"><h2>消息 <small>{len(drafts)} 待发 · {len(sent)} 已发</small></h2>
     {drafts_html}{messages_actions}{sent_html}{pending_verification}{fallback_html}{empty if not (drafts_html or sent_html or fallback_html or pending_verification or messages_actions) else ""}</section>
   <section id="files" class="major"><h2>文件 <small>{len(file_records)} 项</small></h2>{files_html}{file_actions}{empty if not (files_html or file_actions) else ""}</section>
+  <section id="calendar" class="major"><h2>日程 <small>{len(events)} 项</small></h2>{calendar_html}{calendar_actions}{empty if not (calendar_html or calendar_actions) else ""}</section>
   <section id="approvals" class="major"><h2>审批 <small>{len(approvals)} 项</small></h2>{approvals_html}{approval_actions}{empty if not (approvals_html or approval_actions) else ""}</section>
-  <details class="sys-foot" id="audit">
-    <summary>巡检来源与权限核验 · 预检 {esc(str(pf_passed))}/{esc(str(pf_total))}{f" · {len(source_problems)} 项来源读取提示" if source_problems else ""}</summary>
-    <p>{esc(system_note)}</p>
-    {f'<h3>工作来源</h3><ul class="diag-list">{source_rows}</ul>' if source_rows else ''}
-    {f'<h3>业务域权限</h3><ul class="diag-list">{audit_rows}</ul>' if audit_rows else ''}{audit_link}
-    <div class="diag-grid">
-      <div>
-        <div style="font-weight:650;margin-bottom:6px">SOP-150 权限与通道预检（{esc(payload['bot'])}）</div>
-        <ul class="diag-list">{"".join(pf_rows)}</ul>
-      </div>
-      <div>
-        <div style="font-weight:650;margin-bottom:6px">本机应用 OAuth 检查</div>
-        <table class="mini-tbl">
-          <thead><tr><th>Bot</th><th>读聊</th><th>Wiki</th><th>写表</th><th>妙记</th><th>Scopes</th></tr></thead>
-          <tbody>{"".join(fleet_compact)}</tbody>
-        </table>
-      </div>
-    </div>
-  </details>
-</main>
+</main></div>
 <script>
+const sections = [...document.querySelectorAll("main > .major")];
+const navigation = [...document.querySelectorAll(".section-nav a")];
+function markSection(id) {{
+  for (const link of navigation) {{
+    if (link.hash === "#" + id) link.setAttribute("aria-current", "location");
+    else link.removeAttribute("aria-current");
+  }}
+}}
+function currentSection() {{
+  const top = parseFloat(getComputedStyle(sections[0]).scrollMarginTop) || 0;
+  let id = sections[0].id;
+  for (const section of sections) {{
+    if (section.getBoundingClientRect().top > top + 24) break;
+    id = section.id;
+  }}
+  if (window.scrollY > 0 && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2)
+    id = sections[sections.length - 1].id;
+  markSection(id);
+}}
+window.addEventListener("scroll", currentSection, {{passive: true}});
+window.addEventListener("resize", currentSection);
+window.addEventListener("load", currentSection);
+currentSection();
 document.querySelectorAll(".copy-btn").forEach(btn => {{
   btn.addEventListener("click", () => {{
     const txt = btn.getAttribute("data-copy") || "";
@@ -1371,7 +894,9 @@ document.querySelectorAll(".copy-btn").forEach(btn => {{
         btn.textContent = "已复制 ✓";
         btn.classList.add("copied");
         setTimeout(() => {{ btn.textContent = orig; btn.classList.remove("copied"); }}, 1500);
-      }});
+      }}).catch(() => {{ btn.textContent = txt; }});
+    }} else if (txt) {{
+      btn.textContent = txt;
     }}
   }});
 }});
