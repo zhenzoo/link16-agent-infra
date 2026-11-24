@@ -49,12 +49,25 @@ def identifier(value):
     return value
 
 
+def same_bot_name(a, b):
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+        return False
+    if a == b:
+        return True
+    return (a.isascii() and b.isascii() and not a.lower().startswith("ou_")
+            and not b.lower().startswith("ou_") and a.casefold() == b.casefold())
+
+
 def target_identity(peer):
-    row = registry.find(identifier(peer)) or {}
+    peer = identifier(peer)
     registry_data = registry.load_registry()
+    local_host = socket.gethostname()
+    try:
+        row = registry.find_entry(registry_data.get("agents", []), peer) or {}
+    except ValueError:
+        return dict(peer=peer, observed_on=local_host), None, "跨机登记名称或别名不唯一，无法核实目标"
     machine = row.get("machine")
     hostname = (registry_data.get("machines", {}).get(machine) or {}).get("hostname")
-    local_host = socket.gethostname()
     target = dict(peer=row.get("name") or peer, machine=machine, hostname=hostname, observed_on=local_host)
     if not row.get("verified") or not hostname:
         return target, None, "目标 bot 或机器的登记身份尚未核实"
@@ -62,10 +75,21 @@ def target_identity(peer):
         return target, None, "待目标机核验；本机没有该机器的实时额度与会话证据"
     from feishu_bridge import _apply_roster_defaults, _expand_cd_path
     config = read_object(bridge_env.bots_config_path(HERE.parent))
-    matches = [r for r in config.get("bots", []) if r.get("name") == target["peer"]]
-    if len(matches) != 1:
+    try:
+        local = registry.find_entry(config.get("bots", []), target["peer"])
+    except ValueError:
         return target, None, "本机运行名册没有唯一匹配的 bot"
-    bot = _apply_roster_defaults(matches[0], config.get("defaults") or {})
+    # The registry and runtime roster may differ only in case. A display alias,
+    # normalized separator or similar bot alone cannot bind a local control target.
+    if not local or not same_bot_name(local.get("name"), target["peer"]):
+        return target, None, "本机运行代号与跨机登记名称不一致"
+    if (local.get("machine") and str(local["machine"]).casefold() != str(machine).casefold()) or any(
+            row.get(key) and local.get(key) and row[key] != local[key] for key in ("app_id", "open_id", "tenant_key")):
+        return target, None, "本机运行名册与跨机登记的机器或应用身份不一致"
+    if local["name"] != target["peer"]:
+        target["registered_peer"] = target["peer"]
+        target["peer"] = local["name"]
+    bot = _apply_roster_defaults(local, config.get("defaults") or {})
     bot["cwd"] = _expand_cd_path(bot["cwd"]) if bot.get("cwd") else str(HERE.parent)
     profile = agent_runtime.resolve_profile(bot, required=True)
     target.update(profile=profile.name, runtime=profile.runtime, cwd=bot["cwd"])
@@ -195,20 +219,21 @@ def task_path(bot, task_id):
     return STATE / "proactive" / identifier(bot) / "dispatch" / (hashlib.sha256(identifier(task_id).encode()).hexdigest() + ".json")
 
 
-def requests(sender, peer):
-    return [r for r in bridge_history._outbound_from_ledger(sender) if is_request(r, peer)]
+def requests(sender, peer, registered_peer=None):
+    return [r for r in bridge_history._outbound_from_ledger(sender) if is_request(r, peer, registered_peer)]
 
 
-def recorded_mid(sender, peer, task_id, saved):
+def recorded_mid(sender, peer, task_id, saved, registered_peer=None):
     if saved.get("request_mid"):
         return saved["request_mid"]
     marker = f"[Proactive {identifier(task_id)}]\n"
-    return next((r["message_id"] for r in requests(sender, peer) if r["text"].startswith(marker)), None)
+    return next((r["message_id"] for r in requests(sender, peer, registered_peer) if r["text"].startswith(marker)), None)
 
 
-def is_request(row, peer):
+def is_request(row, peer, registered_peer=None):
     route = row.get("route") or {}
-    return route.get("kind") in ("a2a", "a2a-webhook") and route.get("peer") == peer and not route.get("reply_to")
+    return (route.get("kind") in ("a2a", "a2a-webhook") and route.get("peer") in {peer, registered_peer}
+            and bool(route.get("peer")) and not route.get("reply_to"))
 
 
 def sdk_stamp(sender, peer, route, item):
@@ -252,7 +277,7 @@ def progress(sender, peer, mid, *, paths=(), saved=None, reconcile=False, peer_o
     elif not mid or not outgoing:
         return dict(result, reason="发送方交付账本无该 mid 与目标的匹配记录")
     outgoing = outgoing or {}
-    canonical = is_request(outgoing, peer)
+    canonical = is_request(outgoing, peer, target.get("registered_peer"))
     route = outgoing.get("route") or {}
     # Legacy manual sends recorded a per-app address in both peer and at. The
     # linked incoming SDK envelope can bind the display name even before a reply.
@@ -343,11 +368,11 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
     with (bridge_injection.injection_lock(STATE, "proactive-task", lock_id),
           bridge_injection.injection_lock(STATE, "proactive-peer", peer)):
         saved = read_object(path)
-        if saved and saved.get("peer") != peer:
+        if saved and (not saved.get("peer") or saved["peer"] not in {peer, target.get("registered_peer")}):
             return dict(ready=False, reason="同一任务已有目标；核其原回执", peer=saved.get("peer"), request_mid=saved.get("request_mid"))
         if saved.get("prompt_sha256") and fingerprint and saved["prompt_sha256"] != fingerprint:
             return dict(ready=False, reason="任务 ID 已用于另一份委派说明", request_mid=saved.get("request_mid"))
-        mid = recorded_mid(sender, peer, task_id, saved)
+        mid = recorded_mid(sender, peer, task_id, saved, target.get("registered_peer"))
         if prior_mid and mid and prior_mid != mid:
             return dict(ready=False, reason="任务与原始请求 mid 不符", request_mid=mid)
         mid = mid or prior_mid
@@ -442,7 +467,7 @@ def main():
                 parser.error("status 需要 --request-mid 或 --task-id")
             saved = read_object(task_path(sender, args.task_id)) if args.task_id else {}
             mid = recorded_mid(sender, args.peer, args.task_id, saved) if args.task_id else None
-            if (saved and saved.get("peer") != args.peer) or (args.request_mid and mid and mid != args.request_mid):
+            if (saved and not same_bot_name(saved.get("peer"), args.peer)) or (args.request_mid and mid and mid != args.request_mid):
                 raise ValueError("任务记录与目标或请求 mid 不一致")
             result = progress(sender, args.peer, args.request_mid or mid, saved=saved, paths=args.artifact,
                               reconcile=True, peer_open_id=args.peer_open_id)

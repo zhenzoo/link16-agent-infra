@@ -39,13 +39,85 @@ def test_no_observed_windows_cannot_receive_sufficient_verdict(window):
 
 
 def test_remote_identity_stops_before_local_quota_or_native_session(monkeypatch):
-    monkeypatch.setattr(d.registry, "find", lambda _: {"verified": True, "machine": "remote", "name": "worker"})
-    monkeypatch.setattr(d.registry, "load_registry", lambda: {"machines": {"remote": {"hostname": "OTHER"}}})
+    monkeypatch.setattr(d.registry, "load_registry", lambda: {
+        "agents": [{"verified": True, "machine": "remote", "name": "worker"}],
+        "machines": {"remote": {"hostname": "OTHER"}}})
     monkeypatch.setattr(d.socket, "gethostname", lambda: "THIS")
     monkeypatch.setattr(d, "quota_view", lambda *_: pytest.fail("wrong-machine quota call"))
     monkeypatch.setattr(d, "session_view", lambda *_: pytest.fail("wrong-machine native probe"))
     result = d.check("worker", "long")
     assert not result["ready"] and result["target"]["hostname"] == "OTHER" and "quota" not in result
+
+
+@pytest.fixture
+def case_roster(monkeypatch, tmp_path):
+    registered = [dict(name="tx26-3D-model", machine="tx26", verified=True),
+                  dict(name="tx26-3D-model-2", machine="tx26", verified=True, open_id="ou_example")]
+    local = [dict(name="tx26-3d-model", profile="first"), dict(name="tx26-3d-model-2", profile="second")]
+    machine_registry = {"machines": {"tx26": {"hostname": "TARGET"}}, "agents": registered}
+    monkeypatch.setattr(d.registry, "load_registry", lambda: machine_registry)
+    monkeypatch.setattr(d.socket, "gethostname", lambda: "TARGET")
+    roster_path = tmp_path / "bridge-bots.local.json"
+    monkeypatch.setattr(d.bridge_env, "bots_config_path", lambda *_: roster_path)
+    def write_roster():
+        roster_path.write_text(json.dumps(dict(bots=local)), encoding="utf-8")
+    write_roster()
+    monkeypatch.setattr(d.agent_runtime, "resolve_profile",
+                        lambda bot, **_: SimpleNamespace(name=bot["profile"], runtime="codex"))
+    return registered, local, write_roster
+
+
+@pytest.mark.parametrize("supplied,index", [("tx26-3d-model", 0), ("TX26-3D-MODEL-2", 1)])
+def test_unique_case_variant_uses_original_local_worker_for_state_profile_and_process(case_roster, monkeypatch, tmp_path, supplied, index):
+    import wmux_session
+    registered, runtime, _ = case_roster
+    peer = runtime[index]["name"]
+    config = tmp_path / "profile"
+    config.mkdir()
+    (config / "config.toml").write_text('model="test-model"', encoding="utf-8")
+    monkeypatch.setattr(d.agent_runtime, "profile_spec", lambda _: SimpleNamespace(home_path=config))
+    monkeypatch.setattr(d, "STATE", tmp_path)
+    monkeypatch.setattr(wmux_session, "workspaces", lambda: [])
+    original_read = d.read_object
+    seen = []
+    def record(path):
+        seen.append(path.name)
+        return original_read(path)
+    monkeypatch.setattr(d, "read_object", record)
+    monkeypatch.setattr(q, "collect", lambda names: [dict(profile=names[0], runtime="codex", status="ok", verdict="够用",
+                                                           session_percent=12, weekly_percent=41)])
+    def require_local_process(script, bot):
+        assert bot == peer
+        return [123]
+    monkeypatch.setattr(bridge_process, "service_pids", require_local_process)
+    result = d.check(supplied, "long")
+    assert result["ready"] and result["target"]["peer"] == peer
+    assert result["target"]["registered_peer"] == registered[index]["name"]
+    assert result["target"]["profile"] == runtime[index]["profile"]
+    assert f"bridge-session-{peer}.json" in seen and f"bridge-codex-app-ready-{peer}.json" in seen
+    assert f"bridge-session-{registered[index]['name']}.json" not in seen
+
+
+@pytest.mark.parametrize("conflict", ["local-case", "local-alias", "separator", "alias-only", "identity", "machine", "registry-case"])
+def test_case_matching_refuses_ambiguous_similar_and_conflicting_identities(case_roster, conflict):
+    registered, local, write = case_roster
+    if conflict == "local-case":
+        local.append(dict(name="TX26-3D-MODEL-2", profile="unrelated"))
+    elif conflict == "local-alias":
+        local.append(dict(name="different", aliases=["TX26-3D-MODEL-2"]))
+    elif conflict == "separator":
+        local[1]["name"] = "tx26_3d_model_2"
+    elif conflict == "alias-only":
+        local[1].update(name="other-account", aliases=["tx26-3d-model-2"])
+    elif conflict == "identity":
+        local[1].update(open_id="ou_other")
+    elif conflict == "machine":
+        local[1].update(machine="OTHER")
+    else:
+        registered.append(dict(registered[1], name="tx26-3d-model-2"))
+    write()
+    target, bot, issue = d.target_identity("tx26-3d-model-2")
+    assert issue and bot is None and "profile" not in target
 
 
 @pytest.fixture
