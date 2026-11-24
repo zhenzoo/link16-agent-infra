@@ -80,6 +80,25 @@ def test_signed_calendar_forward_is_replaced_with_navigation_to_native_event(tmp
     assert soup.select_one('article a[href="#calendar"]') and not soup.select('a[href*="token="]')
 
 
+def test_combined_schedule_keeps_nested_tasks_and_sidebar_roles(tmp_path):
+    source = tmp_path / "board.html"
+    source.write_text(
+        '<aside class="rail"><details class="fleet-overview"><summary>执行与分工</summary>'
+        '<div><h3>主机</h3><ul><li><b>A</b><small>执行中</small><span>校对周报</span></li>'
+        '<li><b>B</b><small>闲置</small><span>最近分工：配件评审</span></li></ul></div></details></aside>'
+        '<main><section class="major" id="messages"></section><section class="major" id="files"></section>'
+        '<section class="major" id="calendar"><h2>日程与待办</h2><article>周会</article>'
+        '<section id="reminders"><article>补齐测量数据<a href="https://example.feishu.cn/task/item">任务来源</a>'
+        '</article></section></section><section class="major" id="approvals"></section></main>',
+        encoding="utf-8")
+    receipt = mobile.pack(source, tmp_path / "builds")
+    html = BeautifulSoup((Path(receipt["site"]) / "index.html").read_text(encoding="utf-8"), "html.parser")
+    assert [s["id"] for s in html.select("main > .major")] == ["messages", "files", "calendar", "approvals"]
+    assert [s.get_text() for s in html.select(".fleet-overview li small")] == ["执行中", "闲置"]
+    assert "最近分工：配件评审" in html.select_one(".fleet-overview").get_text()
+    assert html.select_one("#calendar #reminders article a")["href"] == "https://example.feishu.cn/task/item"
+
+
 def test_card_preview_uses_same_original_and_accepts_optional_reminders(tmp_path):
     page = tmp_path / "board.html"
     board(page, "prd.html#competition")
