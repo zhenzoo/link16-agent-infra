@@ -41,6 +41,50 @@ def addressed_reply(bot, peer, mid):
     return next(iter(addressed_replies(bot, peer, mid)), None)
 
 
+def native_app_routes(bot, mids, chat):
+    """Resolve sender and sole mentioned application for exactly these group messages."""
+    import docio_cli
+    data = docio_cli._data(docio_cli.run_lark(
+        ["im", "+messages-mget", "--as", "bot", "--message-ids", ",".join(mids), "--no-reactions"],
+        profile=bot, timeout=15))
+    rows = data.get("messages") or []
+    if len(rows) != len(mids) or {row.get("message_id") for row in rows} != set(mids):
+        return {}
+    identities = {}
+    for row in rows:
+        sender, mentions = row.get("sender") or {}, row.get("mentions") or []
+        if (row.get("chat_id") != chat or row.get("deleted") is not False or len(mentions) != 1 or
+                sender.get("sender_type") != "app" or sender.get("id_type") != "app_id" or
+                not str(sender.get("id") or "").startswith("cli_") or not sender.get("tenant_key") or
+                not str(mentions[0].get("id") or "").startswith("cli_")):
+            return {}
+        identities[row["message_id"]] = (sender["tenant_key"], sender["id"], mentions[0]["id"])
+    return identities
+
+
+def verified_mention_alias(bot, original, extra):
+    """Compare native app mentions on two outgoing requests with different addresses."""
+    import send_feishu_msg
+    first, second = original.get("route") or {}, extra.get("route") or {}
+    chat = first.get("dest")
+    mids = [row.get("message_id") for row in (original, extra)]
+    if (not all(mids) or mids[0] == mids[1] or not chat or
+            any(route.get("kind") != "a2a" or route.get("dest") != chat or route.get("reply_to")
+                for route in (first, second)) or
+            any(row.get("target") != chat for row in (original, extra)) or
+            any(not str(route.get("at") or "").startswith("ou_") for route in (first, second)) or
+            any(first.get(k) and second.get(k) and first[k] != second[k] for k in ("item", "task_id")) or
+            first["at"] == second["at"]):
+        return None
+    identities = native_app_routes(bot,mids,chat)
+    if not identities or identities[mids[0]] != identities[mids[1]]:
+        return None
+    tenant, sender_app, recipient_app = identities[mids[0]]
+    if sender_app != send_feishu_msg.resolve_app_id(bot):
+        return None
+    return dict(chat=chat, tenant=tenant, sender_app=sender_app, recipient_app=recipient_app, address=second["at"])
+
+
 def verified_local_turn(bot, worker, mid, chat=None):
     name = worker["name"]
     pin = dispatch.read_object(dispatch.STATE / f"bridge-turn-route-{name}.json")
@@ -158,6 +202,8 @@ class Followup:
         if row["request_mid"]:
             peer = row["peer"]
             mid = (row.get("updates") or [row["request_mid"]])[-1]
+            alias = row.get("mention_aliases", {}).get(mid) or {}
+            peer = alias.get("address") or peer
             earlier = [row["request_mid"], *(row.get("updates") or [])][:-1]
             newest_out = next((r for r in dispatch.bridge_history._outbound_from_ledger(self.bot)
                                if r.get("message_id") == mid), {}) if earlier else {}
@@ -170,7 +216,11 @@ class Followup:
                 if receipts:
                     report.update(receipts[0], reason="同一 SDK 收件人、群及原请求")
                 else:
-                    report.update(local_addressed_receipt(self.bot, mid) or {})
+                    proof = local_addressed_receipt(self.bot, mid)
+                    if proof:
+                        report.update(proof)
+                    elif alias and not report.get("reply_mid"):
+                        report.update(state="同群同一收件应用已投递，待回", reason="已从两条原生请求核实收件应用")
             elif report.get("state") == "未找到匹配派单" and row.get("updates"):
                 proof = local_receipt(self.bot, peer, mid, chat)
                 if proof:
@@ -183,14 +233,16 @@ class Followup:
                                   reason="发送方与回执原单、群及收件主号一致")
             other_replies = []
             eligible_late = []
-            if earlier and peer.startswith("ou_"):
+            earlier_peer = row["peer"]
+            if earlier and earlier_peer.startswith("ou_"):
                 for previous in earlier:
-                    for result in addressed_replies(self.bot, peer, previous):
+                    address = (row.get("mention_aliases", {}).get(previous) or {}).get("address") or earlier_peer
+                    for result in addressed_replies(self.bot, address, previous):
                         other_replies.append([previous, result["reply_mid"]])
                         if newest_out and result["last_signal_at"] >= newest_out["ts"]:
                             eligible_late.append(result["reply_mid"])
             elif earlier:
-                for r in dispatch.bridge_history._outbound_from_ledger(peer):
+                for r in dispatch.bridge_history._outbound_from_ledger(earlier_peer):
                     route = r.get("route") or {}
                     if chat and route.get("reply_to") in earlier and route.get("peer") == self.bot and route.get("dest") == chat:
                         other_replies.append([route["reply_to"], r["message_id"]])
@@ -345,13 +397,28 @@ class Followup:
 
     def link(self, key, mid):
         """Attach an actual follow-up sent to the same peer. Only its later receipt can close the task."""
+        before = self.read()["tasks"][key]
+        outgoing = {r.get("message_id"): r for r in dispatch.bridge_history._outbound_from_ledger(self.bot)}
+        extra = outgoing.get(mid, {})
+        original = outgoing.get(before["request_mid"], {})
+        alias = None
+        local_proof = None
+        if not before["closed"] and not before.get("retired_to") and mid not in (before.get("updates") or []):
+            first, second = original.get("route") or {}, extra.get("route") or {}
+            if (first.get("dest") and first.get("dest") == second.get("dest") and first.get("kind") == second.get("kind")
+                    and (first.get("peer"), first.get("at")) != (second.get("peer"), second.get("at"))):
+                local_proof = local_receipt(self.bot, before["peer"], mid, second["dest"])
+                if not local_proof:
+                    alias = verified_mention_alias(self.bot, original, extra)
         with self.lock():
             data = self.read()
             row = data["tasks"][key]
             if row["closed"] or row.get("retired_to") or (not row["request_mid"] and not row["dependency"]):
                 raise ValueError("需要未结单的桥派单")
-            outgoing = {r.get("message_id"): r for r in dispatch.bridge_history._outbound_from_ledger(self.bot)}
-            extra = outgoing.get(mid, {})
+            if before["request_mid"] != row["request_mid"]:
+                raise ValueError("核验期间原请求变化，请重新关联")
+            if mid in (row.get("updates") or []):
+                return
             if not row["request_mid"]:
                 route = extra.get("route") or {}
                 if route.get("kind") not in ("a2a", "a2a-webhook") or not route.get("peer") or route.get("reply_to"):
@@ -364,7 +431,7 @@ class Followup:
             same_physical = first.get("peer") == second.get("peer") and first.get("at") == second.get("at")
             if (not mid or not first.get("peer") or not first.get("dest") or
                     any(first.get(k) != second.get(k) for k in ("kind", "dest")) or
-                    (not same_physical and not local_receipt(self.bot, row["peer"], mid, second.get("dest"))) or
+                    (not same_physical and not alias and not local_proof) or
                     extra.get("ts", 0) < original.get("ts", 0)):
                 raise ValueError("补单与原请求的发送账本、接收者或群组不符")
             updates = row.setdefault("updates", [])
@@ -372,6 +439,8 @@ class Followup:
                 if updates and extra["ts"] < outgoing[updates[-1]]["ts"]:
                     raise ValueError("旧补单不能取代新补单")
                 updates.append(mid)
+                if alias:
+                    row.setdefault("mention_aliases", {})[mid] = alias
                 row["dispatch_chat"] = second.get("dest")
                 if row.get("evidence"):
                     row.setdefault("prior_evidence", []).append(row.pop("evidence"))
@@ -402,11 +471,44 @@ class Followup:
             target.setdefault("inherited_work", []).append({"id":key, "title":row["title"], "handoff":row["handoff"]})
             self.save(data)
 
-    def close(self, key, result, preview, receipt):
+    def requested_parent_reply(self, row, parent, receipt):
+        """A receipt-only query explicitly directing the author to answer a historical request."""
+        import send_feishu_msg
+        query_mid = (row.get("updates") or [row.get("request_mid")])[-1]
+        parent_mid = parent.get("request_mid")
+        outgoing = {r.get("message_id"):r for r in dispatch.bridge_history._outbound_from_ledger(self.bot)}
+        query, original = outgoing.get(query_mid, {}), outgoing.get(parent_mid, {})
+        route = query.get("route") or {}
+        chat = route.get("dest")
+        if (not parent.get("closed") or not parent_mid or query_mid == parent_mid or not chat or
+                route.get("kind") != "a2a" or route.get("coordination") != "receipt" or
+                (original.get("route") or {}).get("kind") != "a2a" or
+                not all(record.get("target") == chat for record in (query, original)) or
+                parent_mid not in (query.get("text") or "")):
+            raise ValueError("收件查询没有指向这份已存的原派单")
+        author_replies = dispatch.bridge_history._outbound_from_ledger(parent["peer"])
+        reply = next((r for r in author_replies if r.get("message_id") == receipt), {})
+        reply_route = reply.get("route") or {}
+        if (reply_route.get("kind") != "a2a" or reply_route.get("dest") != chat or reply_route.get("peer") != self.bot or
+                reply_route.get("reply_to") != parent_mid or reply.get("ts", 0) < query["ts"]):
+            raise ValueError("缺作者在本次查据之后对指定原派单的真实回信")
+        routes = native_app_routes(self.bot, [parent_mid,query_mid,receipt], chat)
+        if not routes or routes[parent_mid] != routes[query_mid]:
+            raise ValueError("原单与查询的原生收件应用不一致")
+        tenant, sender_app, author_app = routes[parent_mid]
+        if routes[receipt] != (tenant,author_app,sender_app) or sender_app != send_feishu_msg.resolve_app_id(self.bot):
+            raise ValueError("原回执的发送、接收应用与查据原件不符")
+        return dict(query_mid=query_mid, parent_mid=parent_mid, receipt=receipt, chat=chat, author_app=author_app)
+
+    def close(self, key, result, preview, receipt, parent_key=None):
         if not all(str(x).strip() for x in (result, preview, receipt)):
             raise ValueError("缺验收结论、同版原件或执行者的验收回执")
         if not (urlsplit(preview).scheme == "https" and urlsplit(preview).netloc or Path(preview).is_file()):
             raise ValueError("预览需要已有本机文件或作者验证的 HTTPS 原件")
+        historic = None
+        if parent_key:
+            rows = self.read()["tasks"]
+            historic = self.requested_parent_reply(rows[key], rows[parent_key], receipt)
         with self.lock():
             data = self.read()
             row = data["tasks"][key]
@@ -416,7 +518,10 @@ class Followup:
             if row["dependency"] and not all(self.delivered(data["tasks"], k) for k in row["dependency"]):
                 raise ValueError("前置事项尚未验收")
             if row["request_mid"]:
-                if (receipt not in [evidence.get("reply_mid"), *(evidence.get("reply_mids") or []),
+                if historic and (historic["query_mid"] != (row.get("updates") or [row["request_mid"]])[-1]
+                                 or historic["parent_mid"] != data["tasks"][parent_key]["request_mid"]):
+                    raise ValueError("归属在回读期间发生变化")
+                if not historic and (receipt not in [evidence.get("reply_mid"), *(evidence.get("reply_mids") or []),
                                     *(evidence.get("late_original_replies") or [])] or
                         (row.get("updates") and evidence.get("request_mid") != row["updates"][-1])):
                     raise ValueError("请提交对应本次派单的作者回执，先执行到点核查")
@@ -429,6 +534,10 @@ class Followup:
                     raise ValueError("原生执行者尚无对应结束回执")
             row.update(closed=True, state="已验收交付", conclusion=result, preview=preview,
                        acceptance_receipt=receipt, closed_at=time.time(), next_check=None)
+            if historic:
+                row.update(state="已签收原单查据回报", parent_task=parent_key, parent_evidence=historic)
+                data["tasks"][parent_key].setdefault("supplemental_receipts", {})[key] = {
+                    **historic, "conclusion":result, "preview":preview}
             self.save(data)
 
 
@@ -449,6 +558,7 @@ def main():
     link.add_argument("--request-mid", required=True)
     close = actions.add_parser("close")
     close.add_argument("id")
+    close.add_argument("--parent-task", help="仅限明确要求作者回复历史原单的查据请求")
     for key in ("conclusion", "preview", "receipt"):
         close.add_argument("--" + key, required=True)
     retire = actions.add_parser("retire")
@@ -472,7 +582,7 @@ def main():
     elif args.action == "check":
         result = tracker.check(args.id)
     elif args.action == "close":
-        result = tracker.close(args.id, args.conclusion, args.preview, args.receipt)
+        result = tracker.close(args.id, args.conclusion, args.preview, args.receipt, args.parent_task)
     elif args.action == "retire":
         result = tracker.retire(args.id, args.to, args.receipt, args.handoff)
     elif args.action == "link":

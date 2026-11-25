@@ -1,10 +1,78 @@
 import sys
+import copy
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "feishu"))
 import proactive_followup as follow
+
+
+def native_addresses_fixture(monkeypatch):
+    import docio_cli
+    import send_feishu_msg
+    def msg(mid, sender, target):
+        return dict(message_id=mid, chat_id="oc_group", deleted=False, mentions=[{"id":target}],
+                    sender=dict(id=sender, sender_type="app", id_type="app_id", tenant_key="tenant"))
+    rows = {"orig":msg("orig","cli_desk","cli_worker"), "query":msg("query","cli_desk","cli_worker"),
+            "receipt":msg("receipt","cli_worker","cli_desk")}
+    def fetch(args, *, profile, timeout):
+        assert profile=="desk" and args[:4]==["im","+messages-mget","--as","bot"]
+        return dict(messages=[rows[k] for k in args[args.index("--message-ids")+1].split(",")])
+    monkeypatch.setattr(docio_cli,"run_lark",fetch)
+    monkeypatch.setattr(docio_cli,"_data",lambda response:response)
+    monkeypatch.setattr(send_feishu_msg,"resolve_app_id",lambda bot:"cli_desk")
+    route = dict(kind="a2a", dest="oc_group", at="ou_first", peer="worker")
+    original = dict(message_id="orig", ts=1, target="oc_group",route=route,text="original")
+    query = dict(message_id="query", ts=2, target="oc_group",
+                 route={**route,"peer":"ou_second","at":"ou_second","coordination":"receipt"},text="respond to orig")
+    reply = dict(message_id="receipt",ts=3,route=dict(kind="a2a", dest="oc_group", peer="desk", reply_to="orig"))
+    monkeypatch.setattr(follow.dispatch.bridge_history,"_outbound_from_ledger",
+                        lambda bot:[original,query] if bot=="desk" else [reply])
+    monkeypatch.setattr(follow,"local_receipt",lambda *args:None)
+    return rows, original, query, reply
+
+
+@pytest.mark.parametrize("error", ["wrong-app","wrong-sender","wrong-group","extra-mention","deleted","wrong-task"])
+def test_sdk_address_alias_is_not_a_wildcard(monkeypatch, error):
+    rows, original, query, _ = native_addresses_fixture(monkeypatch)
+    assert follow.verified_mention_alias("desk",original,query)["recipient_app"]=="cli_worker"
+    raw=rows["query"]
+    if error=="wrong-app": raw["mentions"][0]["id"]="cli_else"
+    elif error=="wrong-sender": raw["sender"]["id"]="cli_else"
+    elif error=="wrong-group": raw["chat_id"]="oc_else"
+    elif error=="extra-mention": raw["mentions"].append({"id":"cli_third"})
+    elif error=="deleted": raw["deleted"]=True
+    else: original["route"]["task_id"], query["route"]["task_id"] = "first","second"
+    assert follow.verified_mention_alias("desk",original,query) is None
+
+
+def test_only_a_verified_receipt_query_can_attach_an_answer_to_a_closed_parent(tmp_path, monkeypatch):
+    rows, original, query, reply = native_addresses_fixture(monkeypatch)
+    board = follow.Followup("desk",tmp_path)
+    board.register([dict(id="parent",peer="worker",request_mid="orig",next_check="2020-01-01T00:00:00+00:00"),
+                    dict(id="clock",peer="ou_second",request_mid="query",next_check="2020-01-01T00:00:00+00:00")])
+    state=board.read()
+    parent=state["tasks"]["parent"]
+    parent.update(closed=True,acceptance_receipt="old-receipt",conclusion="prior scope")
+    board.save(state)
+    def finish():
+        board.close("clock","alias and remaining evidence only","https://example.org/preview","receipt","parent")
+    original_query=copy.deepcopy(query)
+    query["text"]="another question"
+    with pytest.raises(ValueError): finish()
+    query.update(original_query)
+    reply["ts"]=1
+    with pytest.raises(ValueError): finish()
+    reply["ts"]=3
+    rows["receipt"]["sender"]["id"]="cli_else"
+    with pytest.raises(ValueError): finish()
+    rows["receipt"]["sender"]["id"]="cli_worker"
+    finish()
+    tasks=board.read()["tasks"]
+    assert tasks["clock"]["next_check"] is None and tasks["clock"]["parent_task"]=="parent"
+    assert tasks["parent"]["conclusion"]=="prior scope" and tasks["parent"]["acceptance_receipt"]=="old-receipt"
+    assert tasks["parent"]["supplemental_receipts"]["clock"]["receipt"]=="receipt"
 
 
 def record(key="sample"):
