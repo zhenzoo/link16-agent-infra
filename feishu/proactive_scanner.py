@@ -971,7 +971,7 @@ def _task_messages(tasks, *, delivered=False):
             f'<h3>{heading}</h3>' + "".join(rows) + '</section>') if rows else ""
 
 
-def _project_timeline(config, closed, tasks, output_dir):
+def _project_timeline(config, closed, tasks, output_dir, *, daily=False):
     if not config:
         return ""
     esc = html.escape
@@ -985,7 +985,7 @@ def _project_timeline(config, closed, tasks, output_dir):
     lanes = list(config["tracks"])
     schedule = list(config.get("schedule") or [])
     def month_of(entry):
-        return str(entry.get("month") or entry.get("at") or "")[:7]
+        return str(entry.get("month") or entry.get("date") or entry.get("at") or entry.get("start_date") or "")[:7]
     def track_of(entry):
         return entry.get("track") or ""
     usable = []
@@ -1030,6 +1030,9 @@ def _project_timeline(config, closed, tasks, output_dir):
                 f'<summary><span>{"文件" if is_file else "会议"}</span>{esc(str(entry.get("title") or entry["topic"]))}</summary>'
                 f'<dl>{content}</dl><div class="archive-links">{" ".join(links)}</div>'
                 f'{_local_document_path(entry, output_dir)}</details>')
+    if daily:
+        from proactive_business import day_timeline
+        return day_timeline(months, lanes, usable, schedule, node)
     def schedule_chip(entry):
         owner, title = (esc(str(entry.get(k) or "")) for k in ("owner", "title"))
         return f'<div class="schedule-chip"><b>{title}</b><small>{owner}</small></div>'
@@ -1055,6 +1058,20 @@ def _project_timeline(config, closed, tasks, output_dir):
 
 
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
+    from proactive_business import render, migrate_registered_rows
+    pack = actions_pack or {}
+    timeline = _project_timeline(pack.get("project_timeline"), pack.get("closed_items") or {}, pack.get("work_items") or [], output_dir, daily=True)
+    decisions = "".join('<article class="owner-decision"><h3>'+html.escape(a["title"])+'</h3><ol type="A">'
+                        + "".join("<li>"+html.escape(choice)+"</li>" for choice in a["choices"])
+                        +"</ol>"+_link(a.get("source_label") or "原文",a.get("source"))+"</article>"
+                        for a in pack.get("owner_decisions") or [] if not a.get("decided"))
+    return render(payload.get("owner_name") or payload.get("bot") or "本人", dt.datetime.now(TZ_SHANGHAI),
+                  pack["business_rows"] if "business_rows" in pack else migrate_registered_rows(pack),
+                  decisions + _render_approvals_section(pack.get("approvals") or [], output_dir),
+                  timeline, pack.get("online_url") or "")
+
+
+def render_archived_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     esc = html.escape
     actions_pack = actions_pack or {}
     owner_entries = actions_pack.get("owner_entries") or {}
@@ -1310,7 +1327,7 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=7, help="扫描近 N 天（默认 7 天）")
     parser.add_argument("--preflight-only", action="store_true", help="仅运行 SOP-150 Phase 0 权限与通道体检")
     parser.add_argument("--no-reply-check", action="store_true", help="跳过群内后续主人回复探测")
-    parser.add_argument("--actions-json", help="工作包 JSON；sections 可选 messages、files、calendar、approvals 及次序，project 为事项的默认来源项目")
+    parser.add_argument("--actions-json", help="含 business_rows、approvals、project_timeline 的工作包；旧包按实际业务迁移")
     parser.add_argument("--out-json", help="保存结构化 JSON 扫描结果路径")
     parser.add_argument("--from-scan", help="以同一本人应用的已存扫描重新渲染，保留上次读取时间")
     parser.add_argument("--out-html", help="输出本地验收工作台 HTML 路径")

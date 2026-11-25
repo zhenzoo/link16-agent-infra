@@ -11,13 +11,13 @@ import proactive_scanner as ps
 class ProactiveScannerTests(unittest.TestCase):
     def test_archive_uses_dated_results_and_leaves_message_lanes_intact(self):
         pack = {"sections": ["messages"], "owner_closed_keys": ["suppressed-draft"]}
-        page = ps.render_html({"bot": "demo"}, pack)
+        page = ps.render_archived_html({"bot": "demo"}, pack)
         self.assertNotIn('id="closed"', page)
         pack["closed_items"] = {
             "a": {"at": "2026-11-24 12:00", "person": "甲", "topic": "日期", "result": "周五"},
             "b": {"at": "2026-11-25 12:00", "person": "乙", "topic": "尺寸", "result": "<5 mm"},
         }
-        page = ps.render_html({"bot": "demo"}, pack)
+        page = ps.render_archived_html({"bot": "demo"}, pack)
         self.assertLess(page.index('<section id="messages"'), page.index('<section id="closed"'))
         self.assertLess(page.index("&lt;5 mm"), page.index("周五"))
         self.assertNotIn("suppressed-draft", page)
@@ -30,7 +30,7 @@ class ProactiveScannerTests(unittest.TestCase):
         pack = {"project": "Default", "sections": ["files", "messages"], "files": [file_record],
                 "drafts": [alpha, beta], "owner_closed_keys": [ps.review_key("drafts", alpha)],
                 "draft_coordinator": "manager", "approvals": [{"title": "Excluded approval"}]}
-        page = ps.render_html({"bot": "demo"}, pack)
+        page = ps.render_archived_html({"bot": "demo"}, pack)
         self.assertLess(page.index('<section id="files"'), page.index('<section id="messages"'))
         self.assertNotIn('href="#approvals"', page)
         self.assertNotIn("Excluded approval", page)
@@ -52,7 +52,7 @@ class ProactiveScannerTests(unittest.TestCase):
             "sources": ["历史纯文本来源", {"title": "独立待跟进项", "detail": "周会上需补齐", "assignment": dispatch},
                         {"title": "仅作依据", "actionable": False, "assignment": dispatch}],
         }
-        result = ps.render_html({"bot": "test", "generated_at": "13:41"}, pack)
+        result = ps.render_archived_html({"bot": "test", "generated_at": "13:41"}, pack)
         main = result
         self.assertEqual(main.count("NODE-B / docs-2"), 4)
         self.assertNotIn("最新回执", main)
@@ -73,7 +73,7 @@ class ProactiveScannerTests(unittest.TestCase):
         new = dict(draft, message="新问题", links=[{"url": "https://example.com/new"}])
         sent = dict(draft, message="已发原话", verified=True, message_id="m1", receipt_url="https://example.com/sent")
         sent_in_older_pack = dict(sent, message="旧格式已发消息", status="已发送", message_id="m2")
-        result = ps.render_html({"bot":"test"}, {"drafts":[draft, new, sent_in_older_pack], "sent_messages":[sent],
+        result = ps.render_archived_html({"bot":"test"}, {"drafts":[draft, new, sent_in_older_pack], "sent_messages":[sent],
                                 "owner_closed_keys":[ps.review_key("drafts", draft)], "reminders": []})
         self.assertNotIn("旧问题", result)
         self.assertIn("新问题", result)
@@ -154,7 +154,7 @@ class ProactiveScannerTests(unittest.TestCase):
             "approvals": [{"title": "差旅", "fields": [{"label": "出差地点", "value": "目的地"}], "missing": ["票据"]}],
             "sources": [{"title": "周会", "status": "全文可读", "detail": "已核对"}],
         }
-        result = ps.render_html(payload, pack)
+        result = ps.render_archived_html(payload, pack)
         self.assertEqual(result.count("已确认的原话"), 1)
         self.assertIn("1 待发 · 1 已发", result)
         self.assertIn("发送回执待核", result)
@@ -302,7 +302,7 @@ class ProactiveScannerTests(unittest.TestCase):
                 "rows": [{"row": 5, "cells": [{"value": "产品结构", "kind": "existing"}, {"value": "1", "kind": "existing"}, {"value": "示例转接方案", "kind": "added"}]}],
             }],
         }
-        html_text = ps.render_html(payload, actions_pack=workbench)
+        html_text = ps.render_archived_html(payload, actions_pack=workbench)
         self.assertIn("https://applink.feishu.cn/client/chat/open?openChatId=oc_demo&amp;position=21", html_text)
         self.assertIn('class="message-body"', html_text)
         self.assertIn("feishu-sheet", html_text)

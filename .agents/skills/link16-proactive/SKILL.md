@@ -31,7 +31,7 @@ description: Link16 主动工作台。按本人职责分派和追单，收执行
 |---|---|---|
 | **Phase 0 预检** | 按当前应用身份分别检查授权与可读资源，各域保存成功、缺权或部分读取的证据 | `python feishu/proactive_scanner.py --bot <bot> --preflight-only` |
 | **Phase 1 巡检** | 主号派执行者核实本人消息、会议逐字稿、周报、任务和审批。关联原任务与执行回执，同一工作台一个 writer | `python feishu/bridge_cron.py board`，SOP-150 §2 |
-| **Phase 2 审阅与委派** | 先核目标机和在途任务。主号直接向能触达的登记执行者发原单。工作区只呈现消息、文件、审批，已闭环的会议与文件按月份归入项目轨 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
+| **Phase 2 审阅与委派** | 主号核登记与分工后直接派原单。工作台按 TASTE-010 的业务四列、审批、项目日轴生成；实发原文和已选设计媒体随业务行，月或时间范围按区间展示 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
 | **Phase 3 确认执行** | 按具体授权分派原表更新与审批办理，执行者回读并报结果；主号统一发送获授权的消息 | `docs/SOP-150-proactive-agent-loop.md` §4、当前业务仓原件 |
 
 ## 2. 不可违背的四条护栏

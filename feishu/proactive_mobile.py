@@ -11,6 +11,7 @@ import csv
 import io
 import ipaddress
 import json
+import os
 import posixpath
 import re
 import tempfile
@@ -148,7 +149,23 @@ class Bundle:
         sections = [n.get("id") for n in board.select("main > section.major")]
         allowed = {"messages", "files", "calendar", "approvals"}
         legacy = sections == ["messages", "files", "reminders", "calendar", "approvals"]
-        if not legacy and (not sections or len(sections) != len(set(sections)) or not set(sections) <= allowed):
+        business = sections == ["business", "approvals", "closed"]
+        if business:
+            from proactive_business import result
+            for status in board.select("#business .result-status"):
+                result({"type":"status","text":status.get_text()})
+            for metric in board.select("#business .facts span"):
+                value,unit = metric.get("data-value"),metric.get("data-unit")
+                if value is None or not unit:
+                    raise ValueError("业务指标缺少数值或单位")
+                result({"type":"metrics","items":[{"label":"指标","value":float(value),"unit":unit}]})
+            for medium in board.select("#business .attachments img, #business .attachments video"):
+                original = relative_target(self.board,medium["src"])
+                if not can_read(original,self.roots,VIDEO if medium.name=="video" else IMAGES) or digest(original.read_bytes()) != medium.get("data-sha256"):
+                    raise ValueError("业务配图和登记的源指纹不符")
+            if any(len(row.find_all(["td","th"],recursive=False))!=4 for row in board.select("#business tr[data-business-id]")):
+                raise ValueError("业务行应为四列")
+        if not legacy and not business and (not sections or len(sections) != len(set(sections)) or not set(sections) <= allowed):
             raise ValueError("入口须为本次生成的 Link16 审阅工作台")
         self.docs[self.board] = "index.html"
         self.originals[self.board] = digest(source)
@@ -174,7 +191,7 @@ class Bundle:
             self.archived[path, sha] = original
             if path not in self.current_archive_exports and digest(path.read_bytes()) == sha:
                 self.current_archive_exports[path] = export
-        for a in board.select("article a[href], #closed .archive-links a[href]"):
+        for a in board.select("article a[href], #business tr[data-business-id] a[href], #closed .archive-links a[href]"):
             if a.has_attr("data-archive-version"):
                 continue
             dest = relative_target(self.board, a["href"])
@@ -188,6 +205,7 @@ class Bundle:
             self.originals[dest] = sha
         for path, export in self.docs.items():
             if path == self.board:
+                from proactive_business import DOCUMENT_TYPES
                 soup = board
             else:
                 data = path.read_bytes()
@@ -203,6 +221,21 @@ class Bundle:
             # Machine paths are private by default. The owner can opt in to the path
             # of an archived original that is itself selected in the very same row.
             archive_labels = []
+            if path == self.board:
+                for code in soup.select("#business tr[data-business-id] code[data-local-original]"):
+                    selected = Path(code.get_text())
+                    summary = code.parent.find("summary")
+                    roots = [self.board.parent]
+                    if os.environ.get("LINK16_AGENT_INFRA_ROOT"):
+                        roots.append(Path(os.environ["LINK16_AGENT_INFRA_ROOT"])/"docs")
+                    if (not self.archive_paths or not selected.is_absolute() or not summary
+                            or selected.name != summary.get_text()
+                            or selected.suffix.lower() not in DOCUMENT_TYPES or not selected.is_file()
+                            or not any(selected.resolve().is_relative_to(r.resolve()) for r in roots)):
+                        code.parent.decompose()
+                        continue
+                    code.clear()
+                    archive_labels.append((code,selected))
             for code in soup.select("#closed code[data-archive-document], .review-topic code[data-archive-document]") if path == self.board else []:
                 ref = code.attrs.pop("data-archive-document")
                 selected = relative_target(path, ref)
@@ -274,7 +307,7 @@ class Bundle:
             embed = urlsplit(src)
             dest = relative_target(path, ref)
             fragment = unquote(link.fragment)
-            card = frame.find_parent("article")
+            card = frame.find_parent("article") or frame.find_parent("tr",attrs={"data-business-id":True})
             same_card = card and any(
                 relative_target(path, a["href"]) == dest and unquote(urlsplit(a["href"]).fragment) == fragment
                 for a in card.select("a[href]"))
