@@ -47,6 +47,53 @@ def test_sdk_address_alias_is_not_a_wildcard(monkeypatch, error):
     assert follow.verified_mention_alias("desk",original,query) is None
 
 
+def test_reused_named_address_links_existing_request_once_and_verifies_actual_reply(tmp_path, monkeypatch):
+    native, original, alternate, _ = native_addresses_fixture(monkeypatch)
+    current = dict(original, message_id="current", ts=3)
+    native["current"] = dict(native["orig"], message_id="current")
+    inbound = []
+    monkeypatch.setattr(follow.dispatch.bridge_history, "_outbound_from_ledger",
+                        lambda bot: [original, alternate, current] if bot == "desk" else [])
+    monkeypatch.setattr(follow.dispatch.bridge_history.bridge_inbound, "read_records", lambda *args: inbound)
+    monkeypatch.setattr(follow.dispatch, "progress", lambda *args, **kwargs: {"state":"未找到匹配派单"})
+    monkeypatch.setattr(follow, "local_addressed_receipt", lambda *args: None)
+    tracker = follow.Followup("desk", tmp_path)
+    tracker.register([dict(record(), request_mid="orig")])
+    tracker.link("sample", "query")
+    # Old releases stored a named continuation without its native app identity.
+    state = tracker.read()
+    state["tasks"]["sample"]["updates"].append("current")
+    tracker.save(state)
+    native["current"]["mentions"] = [{"id":"cli_other"}]
+    with pytest.raises(ValueError, match="同一收件应用"):
+        tracker.link("sample", "current")
+    native["orig"]["mentions"] = [{"id":"cli_other"}]
+    with pytest.raises(ValueError, match="同一收件应用"):
+        tracker.link("sample", "current")
+    native["orig"]["mentions"] = [{"id":"cli_worker"}]
+    native["current"]["mentions"] = [{"id":"cli_worker"}]
+    tracker.link("sample", "current")
+    tracker.link("sample", "current")
+    row = tracker.read()["tasks"]["sample"]
+    assert row["updates"] == ["query", "current"]
+    assert row["mention_aliases"]["current"]["address"] == "ou_first"
+    assert tracker.check("sample")["state"] == "同群同一收件应用已投递，待回"
+    inbound.append(dict(message_id="receipt", source="feishu-ws", ts=4, chat_id="oc_group",
+                        sender=dict(is_bot=True, open_id="ou_second"),
+                        raw_text="结论 [飞书_from_Worker_to_desk reply_to=current]"))
+    native["receipt"]["sender"]["id"] = "cli_other"
+    assert not tracker.check("sample")["reply_mid"]
+    native["receipt"]["sender"]["id"] = "cli_worker"
+    native["receipt"]["mentions"] = [{"id":"cli_other"}]
+    assert not tracker.check("sample")["reply_mid"]
+    native["receipt"]["mentions"] = [{"id":"cli_desk"}]
+    assert tracker.check("sample")["reply_mid"] == "receipt"
+    inbound[0]["raw_text"] = "结论 [飞书_from_Worker_to_desk reply_to=orig]"
+    checked = tracker.check("sample")
+    assert not checked["reply_mid"] and checked["late_original_replies"] == ["receipt"]
+    assert not tracker.read()["tasks"]["sample"]["closed"]
+
+
 def test_only_a_verified_receipt_query_can_attach_an_answer_to_a_closed_parent(tmp_path, monkeypatch):
     rows, original, query, reply = native_addresses_fixture(monkeypatch)
     board = follow.Followup("desk",tmp_path)

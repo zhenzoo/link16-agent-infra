@@ -15,7 +15,7 @@ import bridge_injection
 import proactive_dispatch as dispatch
 
 
-def addressed_replies(bot, peer, mid):
+def addressed_replies(bot, peer, mid, identity=None):
     """Match per-app addresses using the actual group, SDK sender and original request."""
     outgoing = next((r for r in dispatch.bridge_history._outbound_from_ledger(bot)
                      if r.get("message_id") == mid), {})
@@ -26,14 +26,24 @@ def addressed_replies(bot, peer, mid):
     for item in reversed(dispatch.bridge_history.bridge_inbound.read_records(dispatch.STATE, bot)):
         author = item.get("sender") or {}
         if (item.get("source") != "feishu-ws" or author.get("is_bot") is not True or
-                author.get("open_id") != peer or item.get("chat_id") != route.get("dest") or
+                not author.get("open_id") or item.get("chat_id") != route.get("dest") or
                 item.get("ts", 0) < outgoing.get("ts", 0)):
             continue
         raw = str(item.get("raw_text") or "").rstrip()
         stamps = list(dispatch.turn_delivery_guard.PEER_STAMP_RE.finditer(raw))
-        if stamps and stamps[-1].end() == len(raw) and stamps[-1].group(3) == mid:
-            replies.append({"reply_mid": item["message_id"], "last_signal_at": item["ts"],
-                            "state": "原收件人回执待审阅"})
+        if not stamps or stamps[-1].end() != len(raw) or stamps[-1].group(3) != mid:
+            continue
+        if author["open_id"] != peer:
+            if not identity or identity["chat"] != route["dest"]:
+                continue
+            reply_id = item["message_id"]
+            # An application may answer under a different open_id. Verify the
+            # actual author and sole recipient of this exact reverse message.
+            expected = (identity["tenant"], identity["recipient_app"], identity["sender_app"])
+            if native_app_routes(bot, [reply_id], identity["chat"]).get(reply_id) != expected:
+                continue
+        replies.append({"reply_mid": item["message_id"], "last_signal_at": item["ts"],
+                        "state": "原收件人回执待审阅"})
     return replies
 
 
@@ -63,7 +73,7 @@ def native_app_routes(bot, mids, chat):
 
 
 def verified_mention_alias(bot, original, extra):
-    """Compare native app mentions on two outgoing requests with different addresses."""
+    """Compare native app mentions on two outgoing requests in the same group."""
     import send_feishu_msg
     first, second = original.get("route") or {}, extra.get("route") or {}
     chat = first.get("dest")
@@ -73,8 +83,7 @@ def verified_mention_alias(bot, original, extra):
                 for route in (first, second)) or
             any(row.get("target") != chat for row in (original, extra)) or
             any(not str(route.get("at") or "").startswith("ou_") for route in (first, second)) or
-            any(first.get(k) and second.get(k) and first[k] != second[k] for k in ("item", "task_id")) or
-            first["at"] == second["at"]):
+            any(first.get(k) and second.get(k) and first[k] != second[k] for k in ("item", "task_id"))):
         return None
     identities = native_app_routes(bot,mids,chat)
     if not identities or identities[mids[0]] != identities[mids[1]]:
@@ -82,7 +91,8 @@ def verified_mention_alias(bot, original, extra):
     tenant, sender_app, recipient_app = identities[mids[0]]
     if sender_app != send_feishu_msg.resolve_app_id(bot):
         return None
-    return dict(chat=chat, tenant=tenant, sender_app=sender_app, recipient_app=recipient_app, address=second["at"])
+    return dict(chat=chat, tenant=tenant, sender_app=sender_app, recipient_app=recipient_app,
+                address=second["at"], original_address=first["at"])
 
 
 def verified_local_turn(bot, worker, mid, chat=None):
@@ -212,7 +222,7 @@ class Followup:
                 peer_open_id=peer if peer.startswith("ou_") else None)
             receipts = []
             if peer.startswith("ou_"):
-                receipts = addressed_replies(self.bot, peer, mid)
+                receipts = addressed_replies(self.bot, peer, mid, alias)
                 if receipts:
                     report.update(receipts[0], reason="同一 SDK 收件人、群及原请求")
                 else:
@@ -220,7 +230,8 @@ class Followup:
                     if proof:
                         report.update(proof)
                     elif alias and not report.get("reply_mid"):
-                        report.update(state="同群同一收件应用已投递，待回", reason="已从两条原生请求核实收件应用")
+                        report.update(state="同群同一收件应用已投递，待回", reason="已从两条原生请求核实收件应用",
+                                      last_signal_at=newest_out.get("ts") or report.get("last_signal_at"))
             elif report.get("state") == "未找到匹配派单" and row.get("updates"):
                 proof = local_receipt(self.bot, peer, mid, chat)
                 if proof:
@@ -234,17 +245,26 @@ class Followup:
             other_replies = []
             eligible_late = []
             earlier_peer = row["peer"]
-            if earlier and earlier_peer.startswith("ou_"):
+            aliases = row.get("mention_aliases") or {}
+            if earlier and (aliases or earlier_peer.startswith("ou_")):
+                original_proof = next((p for p in aliases.values() if p.get("original_address")), {})
                 for previous in earlier:
-                    address = (row.get("mention_aliases", {}).get(previous) or {}).get("address") or earlier_peer
-                    for result in addressed_replies(self.bot, address, previous):
+                    identity = aliases.get(previous) or {}
+                    address = identity.get("address") or earlier_peer
+                    if previous == row["request_mid"] and original_proof:
+                        identity, address = original_proof, original_proof["original_address"]
+                    if not address.startswith("ou_"):
+                        continue
+                    for result in addressed_replies(self.bot, address, previous, identity):
                         other_replies.append([previous, result["reply_mid"]])
                         if newest_out and result["last_signal_at"] >= newest_out["ts"]:
                             eligible_late.append(result["reply_mid"])
-            elif earlier:
+            if earlier and not earlier_peer.startswith("ou_"):
                 for r in dispatch.bridge_history._outbound_from_ledger(earlier_peer):
                     route = r.get("route") or {}
-                    if chat and route.get("reply_to") in earlier and route.get("peer") == self.bot and route.get("dest") == chat:
+                    pair = [route.get("reply_to"), r["message_id"]]
+                    if (chat and route.get("reply_to") in earlier and route.get("peer") == self.bot and
+                            route.get("dest") == chat and pair not in other_replies):
                         other_replies.append([route["reply_to"], r["message_id"]])
                         if newest_out and r["ts"] >= newest_out["ts"]:
                             eligible_late.append(r["message_id"])
@@ -403,13 +423,21 @@ class Followup:
         original = outgoing.get(before["request_mid"], {})
         alias = None
         local_proof = None
-        if not before["closed"] and not before.get("retired_to") and mid not in (before.get("updates") or []):
+        known_aliases = before.get("mention_aliases") or {}
+        if (not before["closed"] and not before.get("retired_to") and mid != before["request_mid"]
+                and mid not in known_aliases):
             first, second = original.get("route") or {}, extra.get("route") or {}
+            changed_address = (first.get("peer"), first.get("at")) != (second.get("peer"), second.get("at"))
             if (first.get("dest") and first.get("dest") == second.get("dest") and first.get("kind") == second.get("kind")
-                    and (first.get("peer"), first.get("at")) != (second.get("peer"), second.get("at"))):
-                local_proof = local_receipt(self.bot, before["peer"], mid, second["dest"])
+                    and (changed_address or known_aliases)):
+                if not known_aliases:
+                    local_proof = local_receipt(self.bot, before["peer"], mid, second["dest"])
                 if not local_proof:
                     alias = verified_mention_alias(self.bot, original, extra)
+                    for previous in known_aliases.values():
+                        fields = ("chat", "tenant", "sender_app", "recipient_app")
+                        if not alias or any(previous.get(k) != alias[k] for k in fields):
+                            raise ValueError("该单已存在收件地址别名，本次补单未核实为同一收件应用")
         with self.lock():
             data = self.read()
             row = data["tasks"][key]
@@ -418,6 +446,9 @@ class Followup:
             if before["request_mid"] != row["request_mid"]:
                 raise ValueError("核验期间原请求变化，请重新关联")
             if mid in (row.get("updates") or []):
+                if alias and mid not in row.get("mention_aliases", {}):
+                    row.setdefault("mention_aliases", {})[mid] = alias
+                    self.save(data)
                 return
             if not row["request_mid"]:
                 route = extra.get("route") or {}
