@@ -195,7 +195,7 @@ def day_timeline(months, tracks, entries, schedule, render_node):
         days.extend(date(year, month, i).isoformat() for i in range(1,count+1))
         cursor=date(year+int(month==12),month%12+1,1)
     pos = {d:i+2 for i,d in enumerate(days)}
-    month_heads = ''.join(f'<div class="month-name" style="grid-column:{s}/span {n}"><span>{m[:4]} 年 {int(m[5:])} 月</span></div>' for m,(s,n) in spans.items())
+    month_heads = ''.join(f'<div class="month-name" style="grid-column:{s}/span {n}">{m[:4]} 年 {int(m[5:])} 月</div>' for m,(s,n) in spans.items())
     heads = ''.join(f'<span class="day" data-day="{d}" style="grid-column:{p}">{int(d[-2:])}</span>' for d,p in pos.items())
     groups = {}
     for track in tracks:
