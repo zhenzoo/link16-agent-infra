@@ -26,9 +26,23 @@ def parse_xml(value):
 
 def xml_contract(value):
     tree = parse_xml(value)
-    aliases = {'b': 'strong', 'i': 'em'}
+    aliases = {'b': 'strong', 'i': 'em', 'del': 's'}
     def tag(node):
         return aliases.get(node.tag, node.tag)
+    # Editing part of a native run can split one decoration into adjacent
+    # text-only runs. Merge these only within the very same parent. Marks
+    # containing a cite, comment or other inline node retain their boundaries.
+    for parent in tree.iter():
+        previous = None
+        for node in list(parent):
+            if (previous is not None and not previous.tail and not len(previous)
+                    and not len(node) and tag(node) in ('strong', 'em', 's', 'u', 'code')
+                    and tag(previous) == tag(node) and not previous.attrib and not node.attrib):
+                previous.text = (previous.text or '') + (node.text or '')
+                previous.tail = node.tail
+                parent.remove(node)
+            else:
+                previous = node
     # Feishu adds colgroup/col width metadata to otherwise identical tables.
     counts = Counter(tag(n) for n in tree.iter() if n is not tree and n.tag not in ('colgroup', 'col')
                      and not (n.tag == 'span' and not n.attrib))
@@ -36,7 +50,7 @@ def xml_contract(value):
     links = [n.get('href') for n in tree.iter('a')]
     # Keep resource identities, not mutable display sizes or generated block IDs.
     resources = [(tag(n), tuple(sorted((k, v) for k, v in n.attrib.items()
-                    if 'token' in k or k in ('src', 'url', 'href', 'node-id', 'view-id'))))
+                    if 'token' in k or k in ('src', 'url', 'href', 'node-id', 'view-id', 'user-id', 'doc-id'))))
                  for n in tree.iter() if n.tag in ('image', 'img', 'file', 'video', 'whiteboard',
                      'iframe', 'source', 'cite', 'sheet', 'bitable', 'synced_reference')]
     styled = [(tag(n), re.sub(r'\s+', '', ''.join(n.itertext())))

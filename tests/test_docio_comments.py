@@ -187,6 +187,48 @@ class CommentTests(unittest.TestCase):
         self.assertEqual(content.find(".//a").get("href"), "https://example.test")
 
 
+class InlineReadbackTests(unittest.TestCase):
+    def test_native_strike_split_preserves_text_and_mention(self):
+        same_user = '<del><cite type="user" user-id="one"/></del>'
+        expected = '<p><del>before 6 m/s after</del>' + same_user + '</p>'
+        split = '<p><del>before </del><s>6 m/s</s><del> after</del>' + same_user + '</p>'
+        self.assertTrue(verify_xml(expected, split)['structure_verified'])
+        for modified in (split.replace('<s>6 m/s</s>', '6 m/s'),
+                         split.replace('user-id="one"', 'user-id="two"'),
+                         split.replace('6 m/s</s>', '6 m/s!</s>')):
+            with self.subTest(modified=modified), self.assertRaises(DocStructureError):
+                verify_xml(expected, modified)
+
+
+class SyncedCommentTests(unittest.TestCase):
+    def setUp(self):
+        engine = Engine()
+        self.doc = {'document_id': 'T', 'revision_id': 1, 'content':
+                    '<synced-source id="src"><p id="selected">source text</p></synced-source>'
+                    '<synced_reference id="ref" src-block-id="src" src-token="T"/>'
+                    '<synced_reference id="other-ref" src-block-id="src" src-token="T"/>'
+                    '<p id="free">unrelated wording</p>'}
+        self.row = dict(engine.rows[0], parent_type='SYNCED_REFERENCE_BLOCK', parent_token='ref',
+                        extra={'content_anchor_id':'ref'}, quote='source text', relation=None)
+        self.blocks = {'ref': {'reference_synced': {'source_block_id':'src', 'source_document_id':'T'},
+                               'comment_ids':['C']}, 'selected':{'comment_ids':['C']}}
+
+    def test_protects_source_and_both_references(self):
+        records = snapshot(self.doc, [self.row], self.blocks)
+        self.assertEqual(set(records['C']['blocks']), {'src','selected','ref','other-ref'})
+        preflight(self.doc, records, {'command':'block_replace','block_id':'free'})
+        with self.assertRaises(DocStructureError):
+            preflight(self.doc, records, text_patch(self.doc, {'block_id':'selected','old':'source','new':'new'}))
+        with self.assertRaises(DocStructureError):
+            preflight(self.doc, records, {'command':'block_replace','block_id':'other-ref'})
+
+    def test_rejects_missing_or_unrelated_native_anchor(self):
+        for blocks in ({'ref':self.blocks['ref']},
+                       {**self.blocks,'unrelated':{'comment_ids':['C']}}):
+            with self.subTest(blocks=blocks), self.assertRaises(DocStructureError):
+                snapshot(self.doc,[self.row],blocks)
+
+
 class CrossBlockCommentTests(unittest.TestCase):
     """A range has one relation anchor; every selected block remains protected."""
 

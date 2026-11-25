@@ -132,7 +132,40 @@ def _resolved_selection_blocks(doc, cid, selection, anchors):
     return sorted(set(anchors) | set(selected_ids))
 
 
-def snapshot(doc, rows):
+def synced_comment(row):
+    return row.get("parent_type") == "SYNCED_REFERENCE_BLOCK" and not row.get("relation")
+
+
+def synced_evidence(doc, row, native, selection):
+    """Bind a synced comment to both ends, and protect the entire source subtree."""
+    cid, ref = row["comment_id"], row.get("parent_token")
+    if not ref or ref != (row.get("extra") or {}).get("content_anchor_id"):
+        raise DocStructureError(f"同步评论{cid}缺唯一引用块")
+    native_ref = native.get(ref, {})
+    link = native_ref.get("reference_synced") or {}
+    src = link.get("source_block_id")
+    if not src or link.get("source_document_id") != doc.get("document_id"):
+        raise DocStructureError(f"同步评论{cid}缺同文档原块")
+    tree = _tree(doc)
+    nodes = {n.get("id"): n for n in tree.iter() if n.get("id")}
+    source, reference = nodes.get(src), nodes.get(ref)
+    if (source is None or source.tag != "synced-source" or reference is None
+            or reference.tag != "synced_reference" or reference.get("src-block-id") != src
+            or reference.get("src-token") != doc["document_id"]):
+        raise DocStructureError(f"同步评论{cid}的原块与正文不一致")
+    source_ids = {n.get("id") for n in source.iter() if n.get("id")}
+    attached = {bid for bid, block in native.items() if cid in block.get("comment_ids", [])}
+    if ref not in attached or not attached & source_ids or attached - source_ids - {ref}:
+        raise DocStructureError(f"同步评论{cid}的两端挂载不完整")
+    protected = source_ids | {bid for bid, n in nodes.items() if n.tag == "synced_reference"
+                              and n.get("src-token") == doc["document_id"] and n.get("src-block-id") == src}
+    if any(bid not in protected for bid, _ in selection):
+        raise DocStructureError(f"同步评论{cid}选区越出原块")
+    return sorted(protected), {"ref": ref, "source": src, "attached": sorted(attached),
+                               "quote": row.get("quote"), "source_xml": ET.tostring(source, encoding="unicode")}
+
+
+def snapshot(doc, rows, native=None):
     selected = selections(doc)
     records = {}
     for row in rows:
@@ -144,13 +177,16 @@ def snapshot(doc, rows):
         relation = row.get("relation") or {}
         whole = row.get("is_whole") is True
         deleted = relation.get("content_deleted")
-        if not whole and not isinstance(deleted, bool):
+        embedded = synced_comment(row)
+        if not whole and not isinstance(deleted, bool) and not embedded:
             raise DocStructureError(f"评论{cid}缺失关联状态")
         blocks = sorted(_relation_blocks(relation.get("relation", {})))
         selection = selected.get(cid, [])
-        if not whole and not deleted and not blocks:
+        if embedded:
+            blocks, bound = synced_evidence(doc, row, native or {}, selection)
+        elif not whole and not deleted and not blocks:
             raise DocStructureError(f"评论{cid}尚有原文但无法定位；禁止猜测")
-        if selection:
+        if selection and not embedded:
             blocks = _resolved_selection_blocks(doc, cid, selection, blocks)
         replies = row.get("reply_list", {}).get("replies")
         if not isinstance(replies, list) or not replies:
@@ -168,6 +204,8 @@ def snapshot(doc, rows):
             "replies": [{k: r.get(k) for k in
                          ("reply_id", "user_id", "create_time", "content")} for r in replies],
         }
+        if embedded:
+            records[cid]["synced"] = bound
     if set(selected) - set(records):
         raise DocStructureError("正文引用的评论未全部读到")
     return records
@@ -211,7 +249,7 @@ def preflight(doc, records, body):
         if len(slots) != 1 or getattr(slots[0][0], slots[0][1]).count(pattern) != 1:
             raise DocStructureError("替换旧文须唯一且位于同一文字片段；跨格式/跨块匹配不猜测")
         _, _, bid, marked = slots[0]
-        if marked or bid in unknown_selections:
+        if marked or bid in unknown_selections or any(bid in r["blocks"] for r in records.values() if "synced" in r):
             raise DocStructureError(f"替换覆盖评论选区（块{bid}）；保留原句首尾也不保证评论语义，禁止自动重建评论")
     elif command == "block_replace":
         ids = [x for x in str(body.get("block_id", "")).split(",") if x]
@@ -257,7 +295,7 @@ def text_patch(doc, change):
     context = node if attr == "text" else parents[node]
     inline = []
     while context is not root and context.get("id") != bid:
-        if context.tag not in ("b", "strong", "i", "em", "s", "u", "code", "a", "span"):
+        if context.tag not in ("b", "strong", "i", "em", "s", "del", "u", "code", "a", "span"):
             raise DocStructureError("文字位于资源或未知行内结构；使用经审阅的局部XML补丁")
         inline.append(context)
         context = parents[context]

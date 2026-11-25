@@ -2,6 +2,7 @@
 import hashlib
 import json
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 from bridge_injection import ProcessFileLock
 from doc_structure import DocStructureError
 from doc_xml_structure import verify_xml, xml_contract
-from docio_comments import preflight, read_comments, snapshot, text_patch, verify_comments
+from docio_comments import preflight, read_comments, snapshot, synced_comment, text_patch, verify_comments
 
 
 def save(path, value):
@@ -34,9 +35,21 @@ def fetch(api, token, bot):
     return doc
 
 
+def comment_snapshot(api, doc, token, url, bot):
+    rows = read_comments(api.run_lark, url, bot)
+    if not any(synced_comment(row) for row in rows):
+        return snapshot(doc, rows)
+    manifest = {"missing": []}
+    with tempfile.TemporaryDirectory() as folder:
+        blocks = api._docx_inventory(token, doc["revision_id"], bot, Path(folder), manifest)
+    if not manifest["inventory"]["complete"]:
+        raise DocStructureError("同步评论的同版原生块清单不完整")
+    return snapshot(doc, rows, {block["block_id"]: block for block in blocks})
+
+
 def observe(api, token, url, bot):
     doc = fetch(api, token, bot)
-    records = snapshot(doc, read_comments(api.run_lark, url, bot))
+    records = comment_snapshot(api, doc, token, url, bot)
     # Comments are not covered by the document revision alone. Read them independently.
     return doc, records
 
@@ -111,7 +124,7 @@ def _write_docx(api, args, bot, info, patch):
         revision = doc["revision_id"]
         if body.get("revision_id") is not None and str(body["revision_id"]) != str(revision):
             raise DocStructureError("文档版本已变化，请重读并合并用户改动")
-        comments = snapshot(doc, read_comments(api.run_lark, args.url, bot))
+        comments = comment_snapshot(api, doc, token, args.url, bot)
         if command == "str_replace" and not body.get("pattern"):
             raise DocStructureError("str_replace必须提供非空pattern")
         expected = (content if command == "overwrite" else
