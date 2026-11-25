@@ -59,8 +59,7 @@ def read_comments(run, url, bot):
     return rows
 
 
-def selections(doc):
-    """Resolve transient c1 aliases to actual comment IDs and exact selected text."""
+def comment_aliases(doc):
     aliases = {}
     for key, value in (doc.get("reference_map", {}).get("comments") or {}).items():
         try:
@@ -68,6 +67,12 @@ def selections(doc):
             aliases[key] = element.attrib["comment-id"]
         except (KeyError, TypeError, ET.ParseError) as exc:
             raise DocStructureError(f"评论引用{key}无法解析") from exc
+    return aliases
+
+
+def selections(doc):
+    """Resolve transient c1 aliases to actual comment IDs and exact selected text."""
+    aliases = comment_aliases(doc)
     found = {}
 
     def walk(node, block=None):
@@ -261,6 +266,18 @@ def preflight(doc, records, body):
                 indexes = {c.get("id"): i for i, c in enumerate(children) if c.get("id")}
                 if start in indexes and end in indexes and indexes[start] <= indexes[end]:
                     matches = children[indexes[start]:indexes[end] + 1]
+                    break
+                # The XML exporter groups consecutive native bullet/numbered
+                # blocks under anonymous list containers. These wrappers are
+                # not Feishu parent blocks; an adjacent heading and a list item
+                # can belong to the same native parent.
+                if parent.tag not in ("document","doc","td","th","li","blockquote","callout"):
+                    continue
+                siblings = [child for node in children
+                            for child in (list(node) if node.tag in ("ul","ol") and not node.get("id") else [node])]
+                order = {child.get("id"): i for i,child in enumerate(siblings) if child.get("id")}
+                if start in order and end in order and order[start] <= order[end]:
+                    matches = siblings[order[start]:order[end]+1]
                     break
             if not matches:
                 raise DocStructureError("替换范围必须是可定位、同父且正向的块")

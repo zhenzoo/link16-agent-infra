@@ -1178,7 +1178,7 @@ def _matches_cell(want, got):
     return value == actual
 
 
-DOCX_COMMANDS = ("append", "overwrite", "str_replace", "block_insert_after", "block_replace")
+DOCX_COMMANDS = ("append", "overwrite", "str_replace", "block_insert_after", "block_replace", "block_move_after")
 
 
 def _write_docx(args, bot, info, patch):

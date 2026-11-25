@@ -11,6 +11,8 @@ from bridge_injection import ProcessFileLock
 from doc_structure import DocStructureError
 from doc_xml_structure import verify_xml, xml_contract
 from docio_comments import preflight, read_comments, snapshot, synced_comment, text_patch, verify_comments
+from docio_move import check_comment_ranges, move_blocks, normalized_selection_ids, verify_moved_ids
+from docio_image_readback import image_source_hashes, verify_published_images
 
 
 def save(path, value):
@@ -59,7 +61,18 @@ def binding(api, bot, token):
 
 
 def _verified(api, args, bot, token, journal, doc, comments):
-    verified = verify_xml(journal["expected"], doc["content"])
+    if "move" in journal:
+        move = journal["move"]
+        verify_moved_ids(journal["expected"], doc["content"], move["sources"], move["anchor"])
+        verified = verify_xml(normalized_selection_ids(journal["before"], journal["expected"]),
+                              normalized_selection_ids(doc, doc["content"]))
+        verified["moved_ids_verified"] = True
+    elif "image_sha256" in journal:
+        actual, evidence = verify_published_images(api, bot, journal["expected"], doc["content"], journal["image_sha256"])
+        verified = verify_xml(journal["expected"], actual)
+        verified["verified_image_copies"] = evidence
+    else:
+        verified = verify_xml(journal["expected"], doc["content"])
     verified.update(verify_comments(journal["comments"], comments))
     if int(doc["revision_id"]) <= int(journal["before"]["revision_id"]):
         raise DocStructureError("回读版本未前进，不能证明此次修改生效")
@@ -117,9 +130,18 @@ def _write_docx(api, args, bot, info, patch):
         command, content = body.get("command"), body.get("content")
         if command not in api.DOCX_COMMANDS or body.get("format") != "xml":
             raise DocStructureError("须使用受支持的docx命令与原生XML")
-        if not isinstance(content, str) or not content.strip():
+        moving = command == "block_move_after"
+        if moving and (content is not None or any(key in body for key in
+                                                  ("start_block_id", "end_block_id", "pattern", "expected_document"))):
+            raise DocStructureError("移动原块只接受原块列表和目标块，不接受新正文或替换范围")
+        if not moving and (not isinstance(content, str) or not content.strip()):
             raise DocStructureError("补丁缺非空content")
-        xml_contract(content)
+        if not moving:
+            xml_contract(content)
+        if "image_sha256" in body:
+            if moving:
+                raise DocStructureError("移动原块不接受替代图片")
+            image_source_hashes(body["image_sha256"], content)
         doc = fetch(api, token, bot)
         revision = doc["revision_id"]
         if body.get("revision_id") is not None and str(body["revision_id"]) != str(revision):
@@ -127,12 +149,24 @@ def _write_docx(api, args, bot, info, patch):
         comments = comment_snapshot(api, doc, token, args.url, bot)
         if command == "str_replace" and not body.get("pattern"):
             raise DocStructureError("str_replace必须提供非空pattern")
-        expected = (content if command == "overwrite" else
-                    doc["content"] + content if command == "append" else body.get("expected_document"))
+        if moving:
+            sources = body.get("src_block_ids")
+            anchor = body.get("block_id")
+            if not isinstance(sources, list) or not all(isinstance(k, str) and k for k in sources):
+                raise DocStructureError("移动原块ID须为非空字符串列表")
+            expected = move_blocks(doc, sources, anchor)
+            check_comment_ranges(doc, comments, sources, anchor)
+        else:
+            expected = (content if command == "overwrite" else
+                        doc["content"] + content if command == "append" else body.get("expected_document"))
         xml_contract(expected or "")
         preflight(doc, comments, body)
         journal = {"state": "prepared", "signature": signature, "binding": current_binding,
                    "before": doc, "comments": comments, "expected": expected}
+        if moving:
+            journal["move"] = {"sources": sources, "anchor": anchor}
+        if "image_sha256" in body:
+            journal["image_sha256"] = body["image_sha256"]
         save(state_path, journal)
         if not args.apply:
             print(f"预演通过：{command}，版本{revision}，检查{len(comments)}条评论；零在线写入")
@@ -142,10 +176,14 @@ def _write_docx(api, args, bot, info, patch):
         if latest["revision_id"] != revision or latest["content"] != doc["content"]:
             raise DocStructureError("写前正文版本变化，零写入")
         verify_comments(comments, latest_comments)
-        content_path = path.with_name(path.stem + ".content.xml")
-        content_path.write_text(content, encoding="utf-8")
-        cmd = ["docs", "+update", "--doc", token, "--command", command, "--doc-format", "xml",
-               "--content", "@" + str(content_path), "--revision-id", str(revision), "--as", "bot"]
+        cmd = ["docs", "+update", "--doc", token, "--command", command,
+               "--revision-id", str(revision), "--as", "bot"]
+        if moving:
+            cmd.extend(["--src-block-ids", ",".join(sources)])
+        else:
+            content_path = path.with_name(path.stem + ".content.xml")
+            content_path.write_text(content, encoding="utf-8")
+            cmd.extend(["--doc-format", "xml", "--content", "@" + str(content_path)])
         for key in ("pattern", "block_id", "start_block_id", "end_block_id"):
             if body.get(key):
                 cmd.extend(["--" + key.replace("_", "-"), str(body[key])])
