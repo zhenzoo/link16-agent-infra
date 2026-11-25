@@ -229,7 +229,7 @@ def test_concurrent_identifiers_one_target_single_send_and_cross_sender_lease(lo
         return SimpleNamespace(stdout=json.dumps({"ok": True, "message_id": "original"}))
     monkeypatch.setattr(d.subprocess, "run", transport)
     def attempt(sender):
-        return d.send(sender, "worker", sender, "long", prompt, ["report.html"])
+        return d.send(sender, "worker", sender, "long", prompt, ["report.html"], item=sender)
     with ThreadPoolExecutor(2) as pool:
         results = list(pool.map(attempt, ["one", "two"]))
     assert len(calls) == 1 and sum(r["ready"] for r in results) == 1
@@ -260,8 +260,8 @@ def test_dispatch_without_transport_receipt_is_never_automatically_retried(local
         calls.append(1)
         return SimpleNamespace(stdout="", returncode=1)
     monkeypatch.setattr(d.subprocess, "run", unknown)
-    assert not d.send("manager", "worker", "stable", "short", prompt, [])["ready"]
-    assert not d.send("manager", "worker", "stable", "short", prompt, [])["ready"]
+    assert not d.send("manager", "worker", "stable", "short", prompt, [], item="item-a")["ready"]
+    assert not d.send("manager", "worker", "stable", "short", prompt, [], item="item-a")["ready"]
     ledger["manager"] = [dict(outgoing(), text="[Proactive stable]\ntask")]
     assert d.send("manager", "worker", "stable", "short", prompt, [])["request_mid"] == "original"
     assert d.read_object(d.task_path("manager", "stable"))["request_mid"] == "original"

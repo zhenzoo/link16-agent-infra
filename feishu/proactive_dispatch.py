@@ -1,7 +1,7 @@
 """Check a business worker before assigning work, and trace that exact A2A request.
 
 check --peer BOT --size long|short
-send --bot SENDER --peer BOT --task-id KEY --size long --prompt-file FILE --artifact docs/report.html
+send --bot SENDER --peer BOT --item PRODUCT --task-id KEY --size long --prompt-file FILE --artifact docs/report.html
 status --bot SENDER --peer BOT --request-mid MID [--peer-open-id ORIGINAL_AT] [--artifact docs/report.html]
 
 The ordinary A2A CLI retains responsibility for identity, route and delivery.
@@ -34,6 +34,7 @@ import bridge_injection
 import registry
 import session_work
 import turn_delivery_guard
+from proactive_ownership import ItemOwners, product_brief
 
 HERE = Path(__file__).resolve().parent
 STATE = bridge_history.STATE_DIR
@@ -357,10 +358,19 @@ def pending_peer_claim(peer, sender, task_id):
     return claim_path, dict(ready=False, reason="目标已有在途派单，先查原请求回执", request_mid=mid, **claim)
 
 
-def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
+def dispatch_prompt(sender, task_id, prompt, artifacts):
+    instruction = (f"主号补充 · 回执：成果就绪或遇到阻塞时，在本派单直接答复 {sender}。"
+                   "写明产物入口、已验结果、仍缺什么。桥会自动关联原请求；同一回执只交一次。")
+    return product_brief(f"[Proactive {identifier(task_id)}]\n" + prompt + "\n\n" + instruction, artifacts)
+
+
+def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *, item=None):
     bridge_env.assert_sender_identity(sender)
-    marker = f"[Proactive {identifier(task_id)}]"
     path = task_path(sender, task_id)
+    if not item:
+        item = read_object(path).get("item")
+    if not item and not prior_mid:
+        return dict(ready=False, reason="新派单必须绑定物品或事项 --item；沿同一物品分配唯一责任人")
     prompt = ""
     if prompt_file:
         with Path(prompt_file).open(encoding="utf-8-sig", newline="") as source:
@@ -378,6 +388,8 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
         saved = read_object(path)
         if saved and (not saved.get("peer") or saved["peer"] not in {peer, target.get("registered_peer")}):
             return dict(ready=False, reason="同一任务已有目标；核其原回执", peer=saved.get("peer"), request_mid=saved.get("request_mid"))
+        if saved.get("item") and item != saved["item"]:
+            return dict(ready=False, reason="同一任务已绑定其他物品")
         if saved.get("prompt_sha256") and fingerprint and saved["prompt_sha256"] != fingerprint:
             return dict(ready=False, reason="任务 ID 已用于另一份委派说明", request_mid=saved.get("request_mid"))
         mid = recorded_mid(sender, peer, task_id, saved, target.get("registered_peer"))
@@ -387,6 +399,9 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
         if mid:
             report = progress(sender, peer, mid, saved=saved, paths=artifacts)
             if report["state"] != "未找到匹配派单" and not saved.get("request_mid"):
+                if item:
+                    with ItemOwners(STATE).author(sender, item, peer, task_id):
+                        saved["item"] = item
                 saved.update(request_mid=mid, sender=sender, peer=peer, task_id=task_id, artifacts=artifacts)
                 if not saved.get("cwd") and target.get("cwd"):
                     saved["cwd"] = (report.get("session") or {}).get("cwd") or target["cwd"]
@@ -415,17 +430,19 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None):
         if (now_session["state"] not in {"cold", "idle"} or
                 any(now_session.get(k) != checked["session"].get(k) for k in ("binding", "cwd", "thread"))):
             return dict(ready=False, target=now_target, session=now_session, reason="核验期间目标会话已变化")
-        saved = dict(task_id=task_id, peer=peer, sender=sender, at=time.time(), baseline=baseline, cwd=str(cwd),
+        try:
+            with ItemOwners(STATE).author(sender, item, peer, task_id):
+                pass
+        except ValueError as exc:
+            return dict(ready=False, reason=str(exc))
+        saved = dict(task_id=task_id, item=item, peer=peer, sender=sender, at=time.time(), baseline=baseline, cwd=str(cwd),
                      checked=checked, prompt_sha256=fingerprint)
         bridge_injection.atomic_write_json(path, saved)
         bridge_injection.atomic_write_json(claim_path, dict(sender=sender, peer=peer, task_id=task_id))
-        return_instruction = (
-            f"主号补充 · 回执：成果就绪或遇到阻塞时，在本派单直接答复 {sender}。"
-            "写明产物入口、已验结果、仍缺什么。桥会自动关联原请求；同一回执只交一次。"
-        )
         try:
             sent = subprocess.run([sys.executable, str(HERE / "send_feishu_msg.py"), "--bot", sender, "--to-agent", peer,
-                                   "--text", marker + "\n" + prompt + "\n\n" + return_instruction, "--json"],
+                                   "--item", item, "--task-id", task_id,
+                                   "--text", dispatch_prompt(sender, task_id, prompt, artifacts), "--json"],
                                   capture_output=True, text=True, encoding="utf-8")
         except OSError as exc:
             saved["attempt"] = {"state": "本地投递程序启动失败", "error_type": type(exc).__name__}
@@ -482,6 +499,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("overview", help="只读核本机正在执行的智能体及当前工作")
+    preview = sub.add_parser("preview", help="只读预览与实际生产派单相同的原文和验收要求")
+    preview.add_argument("--bot", required=True, type=identifier)
+    preview.add_argument("--task-id", required=True, type=identifier)
+    preview.add_argument("--item", required=True, type=identifier)
+    preview.add_argument("--prompt-file", required=True, type=Path)
+    preview.add_argument("--artifact", action="append", default=[])
     for command in ("check", "status", "send"):
         cmd = sub.add_parser(command)
         cmd.add_argument("--peer", required=True, type=identifier)
@@ -492,6 +515,7 @@ def main():
             cmd.add_argument("--task-id", required=command == "send", type=identifier)
             cmd.add_argument("--artifact", action="append", default=[])
         if command == "send":
+            cmd.add_argument("--item", type=identifier, help="同一物品或业务事项的稳定标识，新派单必填")
             cmd.add_argument("--prompt-file")
             cmd.add_argument("--next-check", help="首次追踪时刻，含时区；省略时短单10分钟、长单30分钟查一次")
         if command != "check":
@@ -500,7 +524,10 @@ def main():
             cmd.add_argument("--peer-open-id", help="只读核对原投递应用直接 @ 的 open_id")
     args = parser.parse_args()
     try:
-        if args.command == "overview":
+        if args.command == "preview":
+            with args.prompt_file.open(encoding="utf-8-sig", newline="") as source:
+                result = {"item":args.item,"would_send":False,"text":dispatch_prompt(args.bot,args.task_id,source.read(),args.artifact)}
+        elif args.command == "overview":
             result = active_overview()
         elif args.command == "check":
             result = check(args.peer, args.size)
@@ -509,7 +536,7 @@ def main():
             sender = identifier(args.bot)
             interval = 600 if args.size == "short" else 1800
             due = timestamp(args.next_check) if args.next_check else time.time() + interval
-            result = send(sender, args.peer, args.task_id, args.size, args.prompt_file, args.artifact, args.request_mid)
+            result = send(sender, args.peer, args.task_id, args.size, args.prompt_file, args.artifact, args.request_mid, item=args.item)
             saved = read_object(task_path(sender, args.task_id))
             if saved.get("request_mid") and result.get("request_mid") == saved["request_mid"] and result.get("ready") is not False:
                 tracker = Followup(sender)

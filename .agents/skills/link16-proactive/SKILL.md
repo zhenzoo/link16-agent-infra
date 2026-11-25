@@ -14,12 +14,18 @@ description: Link16 主动工作台。按本人职责分派和追单，收执行
 
 ### 派单后必须登记和追踪
 
-1. `proactive_dispatch.py send --next-check <带时区的时间>` 在取得派单回执后自动登记；首次检查用原派单预计完成时间。同租户直发、历史派单及原生委派用 `python feishu/proactive_followup.py --bot <主号> register --file <私有JSON>`，每项给 `id`、`title`、`next_check`、`interval_seconds`，以及实际 `peer` 和 `request_mid`，或独立原生线程的 `native_log`，或前置任务 ID 列表 `dependency`。无回音、已收但空闲的提前查，重复登记同一单保留已定提醒。
+在主派单机用 `python feishu/proactive_ownership.py list` 核现有物品及原作者。Tenant 直派和同人同单补充都用 `send_feishu_msg.py --to-agent <原执行者> --item <同一物品> --task-id <原任务> ...`；补充取得 MID 后照下方 `link` 关联。独立复核只读，发布只原样上架。换责任人先给旧作者停笔指令，用 `proactive_ownership.py stop --item <物品> --owner <旧作者> --stop-mid <原请求>` 冻结生产派单。收齐旧作者停止写入或外发的原回执、封存文件与未完要求后，执行 `proactive_ownership.py transfer --item <物品> --owner <旧作者> --next-owner <新作者> --bot <主号> --stop-mid <原请求> --receipt <停笔回执> --handoff <交接文件>`。已发的重复子单用 `proactive_followup.py --bot <主号> retire <旧单> --to <唯一责任单> --receipt <停笔回执> --handoff <交接文件>`，由新作者对接收的全部要求自验。
+
+1. 同一物品或业务事项沿用稳定的 `--item` 和唯一作者，模型、原文档、图/GIF、回填验收、获准的消息均在该作者原单完成，不同物品可并行。`proactive_dispatch.py send --item <物品> --next-check <带时区的时间>` 在取得派单回执后自动登记；首次检查用原派单预计完成时间。同租户直发、历史派单及原生委派用 `python feishu/proactive_followup.py --bot <主号> register --file <私有JSON>`，每项给 `id`、`title`、`next_check`、`interval_seconds`，以及实际 `peer` 和 `request_mid`，或独立原生线程的 `native_log`，或前置任务 ID 列表 `dependency`。无回音、已收但空闲的提前查，重复登记同一单保留已定提醒。
 2. 在 Windows 派单机运行 `feishu/install_proactive_followup.ps1 -Bot <主号>`；其他主机使用当地已有调度每分钟执行同一 `tick`。主号第一次和恢复时实际运行 `python feishu/proactive_followup.py --bot <主号> tick`，用 `list` 查原单、执行证据、下一次检查与唤醒回执。此定时器独立于整台工作台巡检开关。
 3. 工具按期查原派单、桥接收/运行状态及关联回信。进行中的单自动续约；执行者给出更准时间就用 `defer <id> --next-check <带时区的时间>` 修订。无进展、缺回执、检查失败和收到结果时，工具合并唤醒主号，主号查原单处理。重启从私有账本续查。
 4. 给同一执行者发补单后用 `link <id> --request-mid <新请求>` 关联同群同收件人的实际原单。用 `check <id>` 立即回读证据。验收须覆盖最新补充；作者在补充后回原单的终报也可采用。一个派单交多件时，每件分别绑定自己的作者回执和同版预览。执行者明确验收通过，已满足本人要求的确认后，用 `close <id> --conclusion <结论> --preview <原件> --receipt <作者回执>` 登记交付与剩余限制。
 
 ## 1. 四步确定性调用地图（直接调，不摸索）
+
+已登记物品的主号通过 Tenant 发普通协调消息时按实际职责标记 `--coordination handoff|receipt|publish|compute|control`，分别用于停笔交接、收回执、原样上架、依确定输入跑计算、原生平台控制。产品判断及文件改动均走物品作者派单。作者对原单的业务回执仍使用原自动回址。
+
+模型和规格文档任务用 `proactive_dispatch.py preview --bot <主号> --item <物品> --task-id <原单> --prompt-file <原话> --artifact <原文档>` 核正常派单的全文。实际派发自动带上已验模型、HTML/PRD、点名改动、表格行列和指标口径，以及新增功能、对应视角 GIF 与过程记录的归属。
 
 | 阶段 | 要做什么 | 唯一确定性入口 |
 |---|---|---|

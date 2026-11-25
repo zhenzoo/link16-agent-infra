@@ -59,6 +59,17 @@ def verified_local_turn(bot, worker, mid, chat=None):
                         sent.get("ts", 0) >= item.get("ts", 0)):
                     return {"state":"执行者原单已回", "reply_mid":sent["message_id"],
                             "last_signal_at":sent["ts"], "reason":"接收方 SDK 原件与该执行者原单发件回执一致"}
+            source = dispatch.STATE / f"bridge-outbox-{name}.jsonl"
+            if source.is_file():
+                for _, answer in reversed(bridge_activity._tail_records(source)):
+                    route = answer.get("route") or {}
+                    if (answer.get("kind") == "answer" and answer.get("turn_key") and answer.get("session") and
+                            answer.get("anchor") and answer.get("text") and answer.get("ts", 0) >= item.get("ts", 0)
+                            and route.get("mid") == mid and route.get("peer") == bot and
+                            route.get("dest") == pin["dest"] and route.get("at") == sender["open_id"]):
+                        return {"state":"原生作者已答，外发待核", "last_signal_at":answer["ts"],
+                                "handoff_receipt":f"native:{answer['session']}:{answer['anchor']}",
+                                "reason":"原生作者终答与直接提及的收件、原请求和对方账号一致"}
             if pin.get("mid") != mid:
                 return None
             work = dispatch.read_object(dispatch.STATE / f"bridge-progress-state-{name}.json")
@@ -107,6 +118,17 @@ class Followup:
 
     def save(self, data):
         bridge_injection.atomic_write_json(self.path, data)
+
+    @staticmethod
+    def delivered(tasks, key):
+        visited = set()
+        while key in tasks and key not in visited:
+            visited.add(key)
+            row = tasks[key]
+            if not row.get("retired_to"):
+                return bool(row.get("closed"))
+            key = row["retired_to"]
+        return False
 
     def register(self, records):
         with self.lock():
@@ -174,7 +196,7 @@ class Followup:
                         other_replies.append([route["reply_to"], r["message_id"]])
                         if newest_out and r["ts"] >= newest_out["ts"]:
                             eligible_late.append(r["message_id"])
-            return {k: report.get(k) for k in ("state", "reply_mid", "progress", "last_signal_at", "reason")} | {
+            return {k: report.get(k) for k in ("state", "reply_mid", "handoff_receipt", "progress", "last_signal_at", "reason")} | {
                 "session": (report.get("session") or {}).get("state"), "request_mid": mid,
                 "other_replies": other_replies, "reply_mids": [r["reply_mid"] for r in receipts],
                 "late_original_replies": eligible_late}
@@ -199,7 +221,7 @@ class Followup:
         with self.lock("tick"):
             now = time.time()
             snapshot = self.read()
-            due = [r for r in snapshot["tasks"].values() if not r["closed"] and r["next_check"] <= now]
+            due = [r for r in snapshot["tasks"].values() if not r["closed"] and not r.get("retired_to") and r["next_check"] <= now]
             with ThreadPoolExecutor(max_workers=4) as pool:
                 results = list(pool.map(self.sample, due))
             with self.lock():
@@ -207,7 +229,7 @@ class Followup:
                 notice = []
                 for prior, observation in results:
                     row = data["tasks"][prior["id"]]
-                    if row["closed"] or row["next_check"] != prior["next_check"] or row.get("updates") != prior.get("updates"):
+                    if row["closed"] or row.get("retired_to") or row["next_check"] != prior["next_check"] or row.get("updates") != prior.get("updates"):
                         continue
                     state = observation["state"]
                     running = ((state == "目标回合已接手" and observation.get("session") == "active")
@@ -224,7 +246,7 @@ class Followup:
                     row.update(state=state, evidence=observation, checked_at=now,
                                next_check=now + row["interval"])
                     if not running and (state != "等待前置验收" or
-                            all(data["tasks"].get(i, {}).get("closed") for i in (row["dependency"] or []))):
+                            all(self.delivered(data["tasks"], i) for i in (row["dependency"] or []))):
                         if row.get("alert_state") != state or now >= row.get("remind_after", 0):
                             notice.append(row["id"])
                             row.update(alert_state=state, remind_after=now + max(900, row["interval"] * 2))
@@ -249,8 +271,8 @@ class Followup:
         if not pending:
             return
         key, alarm = pending[0]
-        active_ids = [task_id for task_id in alarm["ids"] if not data["tasks"][task_id]["closed"]]
-        if not active_ids and not alarm.get("attempts"):
+        active_ids = [task_id for task_id in alarm["ids"] if not data["tasks"][task_id]["closed"] and not data["tasks"][task_id].get("retired_to")]
+        if not active_ids:
             with self.lock():
                 current = self.read()
                 current["alarms"].pop(key, None)
@@ -262,7 +284,7 @@ class Followup:
         job = dict(name=name, bot=self.bot, tz="Asia/Shanghai", enabled=True,
             _scheduled_stamp=stamp,
             prompt="Proactive 主号核原单。先运行 python feishu/proactive_followup.py --bot "
-                   + self.bot + " list（在 Link16 仓）；本次需跟进 " + "、".join(alarm["ids"])
+                   + self.bot + " list（在 Link16 仓）；本次需跟进 " + "、".join(active_ids)
                    + "。先看执行者原回执；无回信查阻塞并续派；只在验收通过且预览可交付时结单。")
         # Existing bridge inbox owns native queue/receipt recovery. Retry the same occurrence.
         inbox = Inbox(dispatch.STATE, self.bot)
@@ -301,14 +323,14 @@ class Followup:
         with self.lock():
             data = self.read()
             row = data["tasks"][key]
-            if row["closed"]:
+            if row["closed"] or row.get("retired_to"):
                 raise ValueError("任务已结单")
             row["next_check"] = timestamp(value)
             self.save(data)
 
     def check(self, key):
         before = self.read()["tasks"][key]
-        if before["closed"]:
+        if before["closed"] or before.get("retired_to"):
             return before.get("evidence", {})
         _, result = self.sample(before)
         with self.lock():
@@ -316,7 +338,7 @@ class Followup:
             row = data["tasks"][key]
             if row["request_mid"] != before["request_mid"] or row.get("updates") != before.get("updates"):
                 raise ValueError("核实期间派单归属变化，请查最新版")
-            if not row["closed"]:
+            if not row["closed"] and not row.get("retired_to"):
                 row.update(evidence=result, checked_at=time.time())
                 self.save(data)
         return result
@@ -326,7 +348,7 @@ class Followup:
         with self.lock():
             data = self.read()
             row = data["tasks"][key]
-            if row["closed"] or (not row["request_mid"] and not row["dependency"]):
+            if row["closed"] or row.get("retired_to") or (not row["request_mid"] and not row["dependency"]):
                 raise ValueError("需要未结单的桥派单")
             outgoing = {r.get("message_id"): r for r in dispatch.bridge_history._outbound_from_ledger(self.bot)}
             extra = outgoing.get(mid, {})
@@ -357,6 +379,29 @@ class Followup:
                 row.pop("alert_state", None)
                 self.save(data)
 
+    def retire(self, key, successor, receipt, handoff):
+        if not Path(handoff).is_file():
+            raise ValueError("缺可读取的停笔交接原件")
+        with self.lock():
+            data = self.read()
+            row = data["tasks"][key]
+            target = data["tasks"][successor]
+            if key == successor or target.get("retired_to") or target["closed"] or row["closed"]:
+                raise ValueError("转交需另一个仍在途的唯一责任单")
+            if row.get("retired_to"):
+                if row["retired_to"] == successor and row["handoff_receipt"] == receipt:
+                    return
+                raise ValueError("原任务已移交")
+            evidence = row.get("evidence") or {}
+            if (not receipt or receipt not in [evidence.get("reply_mid"), evidence.get("handoff_receipt"), *(evidence.get("reply_mids") or []),
+                                                *(evidence.get("late_original_replies") or [])] or
+                    evidence.get("request_mid") != (row.get("updates") or [row.get("request_mid")])[-1]):
+                raise ValueError("缺旧作者停笔交接原回执，先 check")
+            row.update(retired_to=successor, next_check=None, handoff_receipt=receipt, state="已停写并移交",
+                       handoff=str(Path(handoff).resolve()), retired_at=time.time())
+            target.setdefault("inherited_work", []).append({"id":key, "title":row["title"], "handoff":row["handoff"]})
+            self.save(data)
+
     def close(self, key, result, preview, receipt):
         if not all(str(x).strip() for x in (result, preview, receipt)):
             raise ValueError("缺验收结论、同版原件或执行者的验收回执")
@@ -366,7 +411,9 @@ class Followup:
             data = self.read()
             row = data["tasks"][key]
             evidence = row.get("evidence") or {}
-            if row["dependency"] and not all(data["tasks"].get(k, {}).get("closed") for k in row["dependency"]):
+            if row.get("retired_to"):
+                raise ValueError("此项已移交，结单应记在现责任单")
+            if row["dependency"] and not all(self.delivered(data["tasks"], k) for k in row["dependency"]):
                 raise ValueError("前置事项尚未验收")
             if row["request_mid"]:
                 if (receipt not in [evidence.get("reply_mid"), *(evidence.get("reply_mids") or []),
@@ -404,6 +451,11 @@ def main():
     close.add_argument("id")
     for key in ("conclusion", "preview", "receipt"):
         close.add_argument("--" + key, required=True)
+    retire = actions.add_parser("retire")
+    retire.add_argument("id")
+    retire.add_argument("--to", required=True)
+    retire.add_argument("--receipt", required=True)
+    retire.add_argument("--handoff", required=True)
     args = parser.parse_args()
     tracker = Followup(args.bot)
     if args.action == "register":
@@ -421,6 +473,8 @@ def main():
         result = tracker.check(args.id)
     elif args.action == "close":
         result = tracker.close(args.id, args.conclusion, args.preview, args.receipt)
+    elif args.action == "retire":
+        result = tracker.retire(args.id, args.to, args.receipt, args.handoff)
     elif args.action == "link":
         result = tracker.link(args.id, args.request_mid)
     else:

@@ -444,6 +444,10 @@ def main():
     ap.add_argument("--proactive", action="store_true",
                     help="明确这是本轮自动回复之外的额外通知；允许发到相同回址并记入历史")
     ap.add_argument("--reply-to", help="显式回信所关联的原消息 mid；收到回信不自动反射回复")
+    ap.add_argument("--item", help="Proactive 生产派单的物品或业务事项；同一成品沿用一个标识")
+    ap.add_argument("--task-id", help="同一事项的原任务或续单标识")
+    ap.add_argument("--coordination", choices=["handoff","receipt","publish","compute","control"],
+                    help="只做停笔交接、收回执、发布已验版本、运行既定计算或平台控制")
     a = ap.parse_args()
 
     if a.list_agents:
@@ -462,8 +466,23 @@ def main():
         raise SystemExit("❌ 需要 --text <正文>")
     if a.reply_to and not a.to_agent:
         raise SystemExit("❌ --reply-to 必须配 --to-agent")
+    if a.coordination and (not a.to_agent or a.item or a.task_id or a.reply_to):
+        raise SystemExit("--coordination 仅用于独立的非生产联络")
+    marker = re.match(r"^\s*\[Proactive\s+([^\]\s]+)\]", a.text, re.I)
+    if (a.item or a.task_id or (marker and a.to_agent and not a.reply_to)):
+        if not a.to_agent or a.reply_to or not a.item or not (a.task_id or marker):
+            raise SystemExit("Proactive 生产派单需 --to-agent、--item 和 --task-id")
+        if marker and a.task_id and a.task_id != marker[1]:
+            raise SystemExit("正文原单 ID 与 --task-id 不一致")
+        a.task_id = a.task_id or marker[1]
     a.bot = local_name(a.bot)
     assert_sender_identity(a.bot)   # 身份闸：桥会话不得冒用别的 bot 发（PLAN-920）
+    from proactive_ownership import ItemOwners, product_brief
+    ownership_registry = ItemOwners(STATE_DIR)
+    if a.item:
+        a.text = product_brief(a.text)
+    if a.to_agent and not (a.item or a.coordination or a.reply_to) and ownership_registry.manages(a.bot):
+        raise SystemExit("此主号的生产派单须给 --item 和 --task-id。交接、询证、上架、既定计算或平台控制请标 --coordination。")
 
     ats = list(a.at) + [resolve_open_id(nm) for nm in a.at_agent]
     target = a.to
@@ -494,8 +513,15 @@ def main():
     # 发完即返回：a2a 回信由【桥自动投进发起方会话】(见 ARCH-140 新模型)，不再守望/轮询/--wait。
     mirror = None
     if a.to_agent:
-        sent = send_agent_message(a.bot, a.to_agent, a.text, reply_to=a.reply_to,
-                                 resolved={"target": target, "ats": ats, "xt": xt})
+        from contextlib import nullcontext
+        ownership = (ownership_registry.author(a.bot, a.item, a.to_agent, a.task_id, ats[-1])
+                     if a.item else nullcontext())
+        try:
+            with ownership:
+                sent = send_agent_message(a.bot, a.to_agent, a.text, reply_to=a.reply_to,
+                                          resolved={"target": target, "ats": ats, "xt": xt})
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         ok, info, mirror = sent["ok"], sent["message_id"] or sent["err"], sent["mirror"]
     else:
         ok, info = send_msg(a.bot, target, send_text, ats)
@@ -508,6 +534,10 @@ def main():
         route = {"kind": "direct", "dest": target}
     if a.to_agent:
         route.update({"peer": a.to_agent})
+        if a.item:
+            route.update(item=a.item, task_id=a.task_id)
+        if a.coordination:
+            route["coordination"] = a.coordination
         if a.reply_to:
             route["reply_to"] = a.reply_to
     history_recorded = False
