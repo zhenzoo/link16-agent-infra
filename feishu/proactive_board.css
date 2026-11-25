@@ -254,6 +254,13 @@ a.context-label { color: var(--action); }
   .control-row > *, .form-preview :is(dt,dd) { padding: .38rem .48rem; }
   .ap-row { flex-wrap: wrap; }
 }
+#closed { margin-block: 2rem; scroll-margin-block-start: 1rem; }
+#closed table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+#closed th, #closed td { border-bottom: 1px solid #d7dce0; padding: .6rem .4rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+#closed th:first-child { width: 25%; }
+#closed th:nth-child(2) { width: 16%; }
+#closed th:nth-child(3) { width: 27%; }
+#closed td:first-child { font-variant-numeric: tabular-nums; }
 @media print {
   .workspace-shell { display: block; }
   .rail { position: static; height: auto; padding: 0; border: 0; background: none; }
