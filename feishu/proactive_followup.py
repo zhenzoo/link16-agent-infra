@@ -415,7 +415,7 @@ class Followup:
                 self.save(data)
         return result
 
-    def link(self, key, mid):
+    def link(self, key, mid, *, verify_app=False):
         """Attach an actual follow-up sent to the same peer. Only its later receipt can close the task."""
         before = self.read()["tasks"][key]
         outgoing = {r.get("message_id"): r for r in dispatch.bridge_history._outbound_from_ledger(self.bot)}
@@ -429,8 +429,8 @@ class Followup:
             first, second = original.get("route") or {}, extra.get("route") or {}
             changed_address = (first.get("peer"), first.get("at")) != (second.get("peer"), second.get("at"))
             if (first.get("dest") and first.get("dest") == second.get("dest") and first.get("kind") == second.get("kind")
-                    and (changed_address or known_aliases)):
-                if not known_aliases:
+                    and (changed_address or known_aliases or verify_app)):
+                if not known_aliases and not verify_app:
                     local_proof = local_receipt(self.bot, before["peer"], mid, second["dest"])
                 if not local_proof:
                     alias = verified_mention_alias(self.bot, original, extra)
@@ -438,6 +438,8 @@ class Followup:
                         fields = ("chat", "tenant", "sender_app", "recipient_app")
                         if not alias or any(previous.get(k) != alias[k] for k in fields):
                             raise ValueError("该单已存在收件地址别名，本次补单未核实为同一收件应用")
+        if verify_app and not (alias or known_aliases.get(mid)):
+            raise ValueError("两条同群飞书原件未能核实为同一收件应用")
         with self.lock():
             data = self.read()
             row = data["tasks"][key]
@@ -587,6 +589,7 @@ def main():
     link = actions.add_parser("link")
     link.add_argument("id")
     link.add_argument("--request-mid", required=True)
+    link.add_argument("--verify-app", action="store_true", help="回读原单和补单的实际收发应用，供跨地址的直接回执核验")
     close = actions.add_parser("close")
     close.add_argument("id")
     close.add_argument("--parent-task", help="仅限明确要求作者回复历史原单的查据请求")
@@ -617,7 +620,7 @@ def main():
     elif args.action == "retire":
         result = tracker.retire(args.id, args.to, args.receipt, args.handoff)
     elif args.action == "link":
-        result = tracker.link(args.id, args.request_mid)
+        result = tracker.link(args.id, args.request_mid, verify_app=args.verify_app)
     else:
         result = tracker.read()
     print(json.dumps(result, ensure_ascii=False, indent=2))

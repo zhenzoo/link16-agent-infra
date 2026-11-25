@@ -122,6 +122,28 @@ def test_only_a_verified_receipt_query_can_attach_an_answer_to_a_closed_parent(t
     assert tasks["parent"]["supplemental_receipts"]["clock"]["receipt"]=="receipt"
 
 
+def test_verify_named_control_reply_across_addresses_without_earlier_alias(tmp_path, monkeypatch):
+    native, original, query, _ = native_addresses_fixture(monkeypatch)
+    query["route"] = {**original["route"], "coordination":"control"}
+    tracker = follow.Followup("desk", tmp_path)
+    tracker.register([dict(record(), request_mid="orig")])
+    tracker.link("sample", "query")
+    assert not tracker.read()["tasks"]["sample"].get("mention_aliases")
+    native["query"]["mentions"] = [{"id":"cli_else"}]
+    with pytest.raises(ValueError, match="同一收件应用"):
+        tracker.link("sample", "query", verify_app=True)
+    native["query"]["mentions"] = [{"id":"cli_worker"}]
+    tracker.link("sample", "query", verify_app=True)
+    evidence = dict(message_id="receipt", source="feishu-ws", ts=4, chat_id="oc_group",
+                    sender=dict(is_bot=True, open_id="ou_second"),
+                    raw_text="恢复 [飞书_from_Worker_to_desk reply_to=query]")
+    monkeypatch.setattr(follow.dispatch.bridge_history.bridge_inbound, "read_records", lambda *a: [evidence])
+    monkeypatch.setattr(follow.dispatch, "progress", lambda *a, **kw: {"state":"已向目标发送"})
+    assert tracker.check("sample")["reply_mid"] == "receipt"
+    tracker.close("sample", "原生恢复", "https://example.org/readback", "receipt")
+    assert tracker.read()["tasks"]["sample"]["next_check"] is None
+
+
 def record(key="sample"):
     return dict(id=key, peer="worker", request_mid="om_a", next_check="2020-01-01T00:00:00+00:00",
                 interval_seconds=60)
