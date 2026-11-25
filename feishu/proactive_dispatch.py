@@ -493,6 +493,7 @@ def main():
             cmd.add_argument("--artifact", action="append", default=[])
         if command == "send":
             cmd.add_argument("--prompt-file")
+            cmd.add_argument("--next-check", help="首次追踪时刻，含时区；省略时短单10分钟、长单30分钟查一次")
         if command != "check":
             cmd.add_argument("--request-mid")
         if command == "status":
@@ -504,7 +505,18 @@ def main():
         elif args.command == "check":
             result = check(args.peer, args.size)
         elif args.command == "send":
-            result = send(identifier(args.bot), args.peer, args.task_id, args.size, args.prompt_file, args.artifact, args.request_mid)
+            from proactive_followup import Followup, timestamp
+            sender = identifier(args.bot)
+            interval = 600 if args.size == "short" else 1800
+            due = timestamp(args.next_check) if args.next_check else time.time() + interval
+            result = send(sender, args.peer, args.task_id, args.size, args.prompt_file, args.artifact, args.request_mid)
+            saved = read_object(task_path(sender, args.task_id))
+            if saved.get("request_mid") and result.get("request_mid") == saved["request_mid"] and result.get("ready") is not False:
+                tracker = Followup(sender)
+                tracker.register([dict(id=args.task_id, peer=saved["peer"], request_mid=saved["request_mid"],
+                                       next_check=datetime.fromtimestamp(due).astimezone().isoformat(),
+                                       interval_seconds=interval)])
+                result["next_check"] = tracker.read()["tasks"][args.task_id]["next_check"]
         else:
             sender = identifier(args.bot)
             if not args.request_mid and not args.task_id:
