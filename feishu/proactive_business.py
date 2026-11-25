@@ -104,6 +104,12 @@ def business_rows(rows):
         if not ID.fullmatch(key) or key in seen:
             raise ValueError("业务 ID 重复或无效")
         seen.add(key)
+        aliases=[]
+        for alias in [f"task-{key}",*row.get("aliases",[])]:
+            if not ID.fullmatch(alias) or alias in seen:
+                raise ValueError("旧工作台锚点无效或重复")
+            seen.add(alias)
+            aliases.append(f'<span id="{alias}" aria-hidden="true"></span>')
         results = ''.join(result(r) for r in row.get("results", []))
         images = []
         for media in row.get("media", []):
@@ -124,7 +130,7 @@ def business_rows(rows):
         if agent and not re.fullmatch(r"[A-Za-z0-9_-]{2,32}", agent):
             raise ValueError("执行者须为登记短名")
         topics = ''.join('<small class="business-topic">'+(link(t["label"],t["url"]) if t.get("url") else text(t["label"]))+'</small>' for t in row.get("topics",[]))
-        out.append(f'<tr id="business-{key}" data-business-id="{key}" data-item><td class="identity"><b>{index}</b><small>{escape(agent)}</small></td>'
+        out.append(f'<tr id="business-{key}" data-business-id="{key}" data-item><td class="identity">{"".join(aliases)}<b>{index}</b><small>{escape(agent)}</small></td>'
                    f'<th scope="row"><span>{text(row["name"])}</span>{topics}</th><td class="outcomes">{results}</td><td class="attachments">{"".join(images)}</td></tr>')
     return ''.join(out)
 
@@ -170,11 +176,24 @@ def migrate_registered_rows(pack):
 def day_timeline(months, tracks, entries, schedule, render_node):
     days = []
     spans = {}
-    for m in months:
+    calendar_months = set(months)
+    for item in [*entries,*schedule]:
+        for attr in ("date","at","start_date","end_date"):
+            first_seven=str(item.get(attr) or "")[:7]
+            if re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])",first_seven):
+                calendar_months.add(first_seven)
+    if not calendar_months:
+        return ""
+    first = date.fromisoformat(min(calendar_months)+"-01")
+    last = date.fromisoformat(max(calendar_months)+"-01")
+    cursor=first
+    while cursor<=last:
+        m=cursor.strftime("%Y-%m")
         year, month = map(int, m.split("-"))
         count = calendar.monthrange(year, month)[1]
         spans[m] = (len(days)+2, count)
         days.extend(date(year, month, i).isoformat() for i in range(1,count+1))
+        cursor=date(year+int(month==12),month%12+1,1)
     pos = {d:i+2 for i,d in enumerate(days)}
     month_heads = ''.join(f'<div class="month-name" style="grid-column:{s}/span {n}">{m[:4]} 年 {int(m[5:])} 月</div>' for m,(s,n) in spans.items())
     heads = ''.join(f'<span class="day" data-day="{d}" style="grid-column:{p}">{int(d[-2:])}</span>' for d,p in pos.items())
@@ -187,7 +206,7 @@ def day_timeline(months, tracks, entries, schedule, render_node):
             for e in stream:
                 if e.get("track") != track:
                     continue
-                value = str(e.get("date") or e.get("at") or e.get("month") or "")
+                value = str(e.get("date") or e.get("at") or e.get("start_date") or e.get("month") or "")
                 m = str(e.get("month") or value)[:7]
                 if m not in spans:
                     continue

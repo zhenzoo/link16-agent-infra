@@ -109,3 +109,12 @@ def test_video_renders_controls_and_png_cannot_claim_mp4():
     item["media"][0].update({"url":"photo.png","mime":"video/mp4"})
     with pytest.raises(ValueError):
         business.business_rows([item])
+
+
+def test_cross_month_range_preserves_actual_days_and_existing_bookmarks():
+    sample={"track":"Model","owner":"作者","title":"联调","start_date":"2028-02-27","end_date":"2028-03-02"}
+    axis=BeautifulSoup(business.day_timeline(["2028-02"],["Model"],[],[sample],str),"html.parser")
+    assert axis.select_one('[data-precision=range]')["style"].startswith("grid-column:28/span 5;")
+    row={"id":"testing","name":"原有业务","aliases":["original-evidence"]}
+    rendered=BeautifulSoup(business.business_rows([row]),"html.parser")
+    assert rendered.select_one("#original-evidence").find_parent("tr")["data-business-id"]=="testing"
