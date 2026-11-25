@@ -259,6 +259,19 @@ def test_verified_message_pair_has_one_card_and_scopes_receipt_links(tmp_path):
     assert "动画与说明" in BeautifulSoup(source.read_text("utf8"), "html.parser").select_one("aside").get_text()
 
 
+def test_selected_card_csv_preserves_bytes_and_rejects_broken_rows(tmp_path):
+    source = tmp_path / "board.html"
+    diff = tmp_path / "changes.csv"
+    diff.write_bytes("项目,前值,后值\r\n质量,5,4\r\n".encode("utf-8-sig"))
+    board(source, "changes.csv")
+    site = Path(mobile.pack(source, tmp_path / "versions")["site"])
+    link = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser").select_one('article a[href$=".csv"]')
+    assert link and (site / link["href"]).read_bytes() == diff.read_bytes()
+    diff.write_bytes(b"old,new\nshows,extra,field")
+    with pytest.raises(ValueError, match="CSV"):
+        mobile.pack(source, tmp_path / "versions")
+
+
 def test_combined_schedule_keeps_nested_tasks_and_sidebar_roles(tmp_path):
     source = tmp_path / "board.html"
     source.write_text(

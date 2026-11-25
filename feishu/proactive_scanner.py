@@ -348,7 +348,7 @@ def _url(value, *, local=False, image=False) -> str:
         return ""
     allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     if not image:
-        allowed |= {".html", ".htm", ".pdf", ".xlsx", ".docx", ".md"}
+        allowed |= {".html", ".htm", ".pdf", ".xlsx", ".docx", ".md", ".csv"}
     return value if Path(unquote(parts.path)).suffix.lower() in allowed else ""
 
 

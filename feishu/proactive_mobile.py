@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import csv
+import io
 import ipaddress
 import json
 import posixpath
@@ -380,6 +382,16 @@ class Bundle:
                 target = self.image(dest)
             if not target and can_read(dest, self.roots, VIDEO):
                 target = self.video(dest)
+            if not target and path == self.board and a.find_parent("article") and can_read(dest, self.roots, {".csv"}):
+                data = dest.read_bytes()
+                text = data.decode("utf-8-sig")
+                rows = csv.reader(io.StringIO(text), strict=True)
+                header = next(rows, [])
+                if ("\x00" in text or PRIVATE.search(text) or LOCAL_ADDRESS.search(text)
+                        or len(header) < 2 or any(len(row) != len(header) for row in rows)):
+                    raise ValueError("所选 CSV 缺少一致的列或含有私密字段：" + dest.name)
+                target = "assets/table-" + digest(data) + ".csv"
+                (self.stage / target).write_bytes(data)
             if not target:
                 self.unavailable += 1
                 clean_unlinked(a)
