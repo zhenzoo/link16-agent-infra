@@ -52,14 +52,14 @@ def verified_local_turn(bot, worker, mid, chat=None):
         if (item.get("message_id") == mid and item.get("source") == "feishu-ws" and
                 item.get("bot") == name and item.get("chat_id") == pin["dest"] and item.get("mentioned_bot") and
                 sender.get("is_bot") is True and sender.get("open_id") and sender.get("open_id") == pin.get("at")):
+            for sent in reversed(dispatch.bridge_history._outbound_from_ledger(name)):
+                route = sent.get("route") or {}
+                if (route.get("kind") == "a2a" and route.get("reply_to") == mid and
+                        route.get("peer") == bot and route.get("dest") == pin["dest"] and
+                        sent.get("ts", 0) >= item.get("ts", 0)):
+                    return {"state":"执行者原单已回", "reply_mid":sent["message_id"],
+                            "last_signal_at":sent["ts"], "reason":"接收方 SDK 原件与该执行者原单发件回执一致"}
             if pin.get("mid") != mid:
-                for sent in reversed(dispatch.bridge_history._outbound_from_ledger(name)):
-                    route = sent.get("route") or {}
-                    if (route.get("kind") == "a2a" and route.get("reply_to") == mid and
-                            route.get("peer") == bot and route.get("dest") == pin["dest"] and
-                            sent.get("ts", 0) >= item.get("ts", 0)):
-                        return {"state":"执行者原单已回", "reply_mid":sent["message_id"],
-                                "last_signal_at":sent["ts"], "reason":"接收方 SDK 原件与该执行者原单发件回执一致"}
                 return None
             work = dispatch.read_object(dispatch.STATE / f"bridge-progress-state-{name}.json")
             return {"state": "目标回合已接手" if pin.get("active") else "该回合已结束",

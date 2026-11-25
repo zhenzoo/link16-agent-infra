@@ -120,6 +120,7 @@ def test_local_named_worker_only_accepts_changed_address_with_authenticated_turn
     monkeypatch.setattr(follow.dispatch, "target_identity", lambda peer: ({"peer":peer}, {"name":peer}, None))
     monkeypatch.setattr(follow.dispatch, "read_object", lambda path: original if "turn-route" in path.name else {})
     monkeypatch.setattr(follow.dispatch.bridge_history.bridge_inbound, "read_records", lambda *a:[inbound])
+    monkeypatch.setattr(follow.dispatch.bridge_history, "_outbound_from_ledger", lambda name:[])
     monkeypatch.setattr(follow.bridge_activity, "read_activity", lambda *a:{"state":"active"})
     assert follow.local_receipt("owner", "worker", "new", "chat")["session"]["state"] == "active"
     assert follow.local_receipt("other-owner", "worker", "new", "chat") is None
@@ -127,6 +128,9 @@ def test_local_named_worker_only_accepts_changed_address_with_authenticated_turn
     sent = {"message_id":"signed", "ts":2, "route":{"kind":"a2a", "peer":"owner", "dest":"chat", "reply_to":"new"}}
     monkeypatch.setattr(follow.dispatch.bridge_history, "_outbound_from_ledger", lambda name:[sent])
     assert follow.local_receipt("owner", "worker", "new", "chat")["reply_mid"] == "signed"
+    original["mid"] = "new"
+    assert follow.local_receipt("owner", "worker", "new", "chat")["reply_mid"] == "signed"
+    original["mid"] = "another-turn"
     sent["route"]["dest"] = "other-chat"
     assert follow.local_receipt("owner", "worker", "new", "chat") is None
     original["mid"] = "new"
