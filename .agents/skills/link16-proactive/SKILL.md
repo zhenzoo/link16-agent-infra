@@ -17,7 +17,7 @@ description: Link16 主动工作台。按本人职责分派和追单，收执行
 1. `proactive_dispatch.py send --next-check <带时区的时间>` 在取得派单回执后自动登记；首次检查用原派单预计完成时间。同租户直发、历史派单及原生委派用 `python feishu/proactive_followup.py --bot <主号> register --file <私有JSON>`，每项给 `id`、`title`、`next_check`、`interval_seconds`，以及实际 `peer` 和 `request_mid`，或独立原生线程的 `native_log`，或前置任务 ID 列表 `dependency`。无回音、已收但空闲的提前查，重复登记同一单保留已定提醒。
 2. 在 Windows 派单机运行 `feishu/install_proactive_followup.ps1 -Bot <主号>`；其他主机使用当地已有调度每分钟执行同一 `tick`。主号第一次和恢复时实际运行 `python feishu/proactive_followup.py --bot <主号> tick`，用 `list` 查原单、执行证据、下一次检查与唤醒回执。此定时器独立于整台工作台巡检开关。
 3. 工具按期查原派单、桥接收/运行状态及关联回信。进行中的单自动续约；执行者给出更准时间就用 `defer <id> --next-check <带时区的时间>` 修订。无进展、缺回执、检查失败和收到结果时，工具合并唤醒主号，主号查原单处理。重启从私有账本续查。
-4. 给同一执行者发补单后用 `link <id> --request-mid <新请求>` 关联同群同收件人的实际原单。此前进展保留，新的验收要覆盖最新补充。执行者明确验收通过，有结论、可呈现的同版预览、原单验收回执，且已满足本人要求的确认后，才使用 `close <id> --conclusion <结论> --preview <原件> --receipt <作者回执>`。进展和剩余限制留在原单，工具不会因会话结束而结单。
+4. 给同一执行者发补单后用 `link <id> --request-mid <新请求>` 关联同群同收件人的实际原单。用 `check <id>` 立即回读证据。验收须覆盖最新补充；作者在补充后回原单的终报也可采用。一个派单交多件时，每件分别绑定自己的作者回执和同版预览。执行者明确验收通过，已满足本人要求的确认后，用 `close <id> --conclusion <结论> --preview <原件> --receipt <作者回执>` 登记交付与剩余限制。
 
 ## 1. 四步确定性调用地图（直接调，不摸索）
 

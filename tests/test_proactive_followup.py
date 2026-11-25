@@ -120,8 +120,53 @@ def test_local_named_worker_only_accepts_changed_address_with_authenticated_turn
     monkeypatch.setattr(follow.dispatch, "target_identity", lambda peer: ({"peer":peer}, {"name":peer}, None))
     monkeypatch.setattr(follow.dispatch, "read_object", lambda path: original if "turn-route" in path.name else {})
     monkeypatch.setattr(follow.dispatch.bridge_history.bridge_inbound, "read_records", lambda *a:[inbound])
-    monkeypatch.setattr(follow.dispatch, "session_view", lambda *a:{"state":"active"})
+    monkeypatch.setattr(follow.bridge_activity, "read_activity", lambda *a:{"state":"active"})
     assert follow.local_receipt("owner", "worker", "new", "chat")["session"]["state"] == "active"
     assert follow.local_receipt("other-owner", "worker", "new", "chat") is None
+    original["mid"] = "another-turn"
+    sent = {"message_id":"signed", "ts":2, "route":{"kind":"a2a", "peer":"owner", "dest":"chat", "reply_to":"new"}}
+    monkeypatch.setattr(follow.dispatch.bridge_history, "_outbound_from_ledger", lambda name:[sent])
+    assert follow.local_receipt("owner", "worker", "new", "chat")["reply_mid"] == "signed"
+    sent["route"]["dest"] = "other-chat"
+    assert follow.local_receipt("owner", "worker", "new", "chat") is None
+    original["mid"] = "new"
     inbound["mentioned_bot"] = False
     assert follow.local_receipt("owner", "worker", "new", "chat") is None
+
+
+def test_one_dispatch_can_deliver_two_previews_with_distinct_earlier_receipts(tmp_path, monkeypatch):
+    tracker = follow.Followup("sender", tmp_path)
+    tracker.register([record("left"), record("right")])
+    monkeypatch.setattr(tracker, "observe", lambda row: {
+        "state":"已回信", "reply_mid":"r2", "reply_mids":["r2","r1"], "request_mid":"om_a"})
+    tracker.check("left")
+    tracker.check("right")
+    tracker.close("left", "左件已验", "https://example.org/left", "r1")
+    with pytest.raises(ValueError, match="各有"):
+        tracker.close("right", "右件已验", "https://example.org/right", "r1")
+    with pytest.raises(ValueError, match="各有"):
+        tracker.close("right", "右件已验", "https://example.org/left", "r2")
+    tracker.close("right", "右件已验", "https://example.org/right", "r2")
+
+
+def test_authentic_final_on_original_after_supplement_can_close_legacy_registration(tmp_path, monkeypatch):
+    tracker = follow.Followup("sender", tmp_path)
+    tracker.register([record()])
+    requests = [dict(message_id=mid, ts=ts, route={"peer":"worker", "at":"addr", "dest":"group", "kind":"a2a"})
+                for mid, ts in [("om_a", 1), ("om_extra", 10)]]
+    route = {"reply_to":"om_a", "peer":"sender", "dest":"group", "kind":"a2a"}
+    replies = [dict(message_id="stage", ts=2, route=route), dict(message_id="done", ts=12, route=route),
+               dict(message_id="wrong", ts=13, route={**route, "dest":"another-group"})]
+    monkeypatch.setattr(follow.dispatch.bridge_history, "_outbound_from_ledger",
+                        lambda who: requests if who == "sender" else replies)
+    monkeypatch.setattr(follow.dispatch, "progress", lambda *a, **kw: {"state":"目标桥已收件"})
+    tracker.link("sample", "om_extra")
+    legacy = tracker.read()
+    del legacy["tasks"]["sample"]["dispatch_chat"]
+    tracker.save(legacy)
+    evidence = tracker.check("sample")
+    assert evidence["late_original_replies"] == ["done"]
+    for receipt in ["stage", "wrong"]:
+        with pytest.raises(ValueError, match="作者回执"):
+            tracker.close("sample", "验收通过", "https://example.org/review", receipt)
+    tracker.close("sample", "验收通过", "https://example.org/review", "done")

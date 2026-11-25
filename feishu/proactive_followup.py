@@ -15,13 +15,14 @@ import bridge_injection
 import proactive_dispatch as dispatch
 
 
-def addressed_reply(bot, peer, mid):
+def addressed_replies(bot, peer, mid):
     """Match per-app addresses using the actual group, SDK sender and original request."""
     outgoing = next((r for r in dispatch.bridge_history._outbound_from_ledger(bot)
                      if r.get("message_id") == mid), {})
     route = outgoing.get("route") or {}
     if route.get("kind") != "a2a" or route.get("at") != peer or route.get("dest") != outgoing.get("target"):
-        return None
+        return []
+    replies = []
     for item in reversed(dispatch.bridge_history.bridge_inbound.read_records(dispatch.STATE, bot)):
         author = item.get("sender") or {}
         if (item.get("source") != "feishu-ws" or author.get("is_bot") is not True or
@@ -31,30 +32,57 @@ def addressed_reply(bot, peer, mid):
         raw = str(item.get("raw_text") or "").rstrip()
         stamps = list(dispatch.turn_delivery_guard.PEER_STAMP_RE.finditer(raw))
         if stamps and stamps[-1].end() == len(raw) and stamps[-1].group(3) == mid:
-            return {"reply_mid": item["message_id"], "last_signal_at": item["ts"],
-                    "state": "原收件人回执待审阅"}
+            replies.append({"reply_mid": item["message_id"], "last_signal_at": item["ts"],
+                            "state": "原收件人回执待审阅"})
+    return replies
+
+
+def addressed_reply(bot, peer, mid):
+    return next(iter(addressed_replies(bot, peer, mid)), None)
+
+
+def verified_local_turn(bot, worker, mid, chat=None):
+    name = worker["name"]
+    pin = dispatch.read_object(dispatch.STATE / f"bridge-turn-route-{name}.json")
+    if (pin.get("peer") != bot or not pin.get("dest") or
+            (chat and pin["dest"] != chat)):
+        return None
+    for item in reversed(dispatch.bridge_history.bridge_inbound.read_records(dispatch.STATE, name)):
+        sender = item.get("sender") or {}
+        if (item.get("message_id") == mid and item.get("source") == "feishu-ws" and
+                item.get("bot") == name and item.get("chat_id") == pin["dest"] and item.get("mentioned_bot") and
+                sender.get("is_bot") is True and sender.get("open_id") and sender.get("open_id") == pin.get("at")):
+            if pin.get("mid") != mid:
+                for sent in reversed(dispatch.bridge_history._outbound_from_ledger(name)):
+                    route = sent.get("route") or {}
+                    if (route.get("kind") == "a2a" and route.get("reply_to") == mid and
+                            route.get("peer") == bot and route.get("dest") == pin["dest"] and
+                            sent.get("ts", 0) >= item.get("ts", 0)):
+                        return {"state":"执行者原单已回", "reply_mid":sent["message_id"],
+                                "last_signal_at":sent["ts"], "reason":"接收方 SDK 原件与该执行者原单发件回执一致"}
+                return None
+            work = dispatch.read_object(dispatch.STATE / f"bridge-progress-state-{name}.json")
+            return {"state": "目标回合已接手" if pin.get("active") else "该回合已结束",
+                    "last_signal_at": pin.get("completed_at") or pin.get("started_at"),
+                    "session": bridge_activity.read_activity(dispatch.STATE, worker),
+                    "reason": "已核本机直接提及、SDK 原始收件和同一线程",
+                    "progress": (work.get("workline") or {}).get("progress") if (work.get("route") or {}).get("mid") == mid else None}
     return None
 
 
 def local_receipt(bot, peer, mid, chat):
-    """Cross-app addresses may differ. Use the named worker's own authenticated receipt and route."""
-    target, local, _ = dispatch.target_identity(peer)
-    if not local:
-        return None
-    pin = dispatch.read_object(dispatch.STATE / f"bridge-turn-route-{target['peer']}.json")
-    if pin.get("mid") != mid or pin.get("peer") != bot or pin.get("dest") != chat:
-        return None
-    inbound = dispatch.bridge_history.bridge_inbound.read_records(dispatch.STATE, target["peer"])
-    for item in reversed(inbound):
-        sender = item.get("sender") or {}
-        if (item.get("message_id") == mid and item.get("source") == "feishu-ws" and
-                item.get("bot") == target["peer"] and item.get("chat_id") == chat and item.get("mentioned_bot") and
-                sender.get("is_bot") is True and sender.get("open_id") and sender.get("open_id") == pin.get("at")):
-            work = dispatch.read_object(dispatch.STATE / f"bridge-progress-state-{target['peer']}.json")
-            return {"state": "目标回合已接手" if pin.get("active") else "该回合已结束",
-                    "last_signal_at": pin.get("completed_at") or pin.get("started_at"),
-                    "session": dispatch.session_view(local, target),
-                    "progress": (work.get("workline") or {}).get("progress") if (work.get("route") or {}).get("mid") == mid else None}
+    """Resolve a named worker across per-app address differences."""
+    _, worker, _ = dispatch.target_identity(peer)
+    return verified_local_turn(bot, worker, mid, chat) if worker and chat else None
+
+
+def local_addressed_receipt(bot, mid):
+    """Find the exact local recipient of an address-based dispatch."""
+    import feishu_bridge as bridge
+    for worker in bridge.load_bots():
+        proof = verified_local_turn(bot, worker, mid)
+        if proof:
+            return proof
     return None
 
 
@@ -108,35 +136,48 @@ class Followup:
         if row["request_mid"]:
             peer = row["peer"]
             mid = (row.get("updates") or [row["request_mid"]])[-1]
+            earlier = [row["request_mid"], *(row.get("updates") or [])][:-1]
+            newest_out = next((r for r in dispatch.bridge_history._outbound_from_ledger(self.bot)
+                               if r.get("message_id") == mid), {}) if earlier else {}
+            chat = (newest_out.get("route") or {}).get("dest") or row.get("dispatch_chat")
             report = dispatch.progress(self.bot, peer, mid, reconcile=True,
                 peer_open_id=peer if peer.startswith("ou_") else None)
-            if peer.startswith("ou_") and not report.get("reply_mid"):
-                report.update(addressed_reply(self.bot, peer, mid) or {})
+            receipts = []
+            if peer.startswith("ou_"):
+                receipts = addressed_replies(self.bot, peer, mid)
+                if receipts:
+                    report.update(receipts[0], reason="同一 SDK 收件人、群及原请求")
+                else:
+                    report.update(local_addressed_receipt(self.bot, mid) or {})
             elif report.get("state") == "未找到匹配派单" and row.get("updates"):
-                proof = local_receipt(self.bot, peer, mid, row.get("dispatch_chat"))
+                proof = local_receipt(self.bot, peer, mid, chat)
                 if proof:
                     report.update(proof, reason="已核目标的同群 SDK 来信、直接提及和同一原生回合")
                 reply = next((r for r in reversed(dispatch.bridge_history._outbound_from_ledger(peer))
                               if (r.get("route") or {}).get("reply_to") == mid and
-                              r["route"].get("peer") == self.bot and r["route"].get("dest") == row.get("dispatch_chat")), None)
+                              r["route"].get("peer") == self.bot and r["route"].get("dest") == chat), None)
                 if reply:
                     report.update(state="执行者原单已回", reply_mid=reply["message_id"], last_signal_at=reply["ts"],
                                   reason="发送方与回执原单、群及收件主号一致")
-            earlier = [row["request_mid"], *(row.get("updates") or [])][:-1]
             other_replies = []
+            eligible_late = []
             if earlier and peer.startswith("ou_"):
                 for previous in earlier:
-                    result = addressed_reply(self.bot, peer, previous)
-                    if result:
+                    for result in addressed_replies(self.bot, peer, previous):
                         other_replies.append([previous, result["reply_mid"]])
+                        if newest_out and result["last_signal_at"] >= newest_out["ts"]:
+                            eligible_late.append(result["reply_mid"])
             elif earlier:
-                other_replies = [[r["route"]["reply_to"], r["message_id"]]
-                                 for r in dispatch.bridge_history._outbound_from_ledger(peer)
-                                 if (r.get("route") or {}).get("reply_to") in earlier and
-                                 r["route"].get("peer") == self.bot]
+                for r in dispatch.bridge_history._outbound_from_ledger(peer):
+                    route = r.get("route") or {}
+                    if chat and route.get("reply_to") in earlier and route.get("peer") == self.bot and route.get("dest") == chat:
+                        other_replies.append([route["reply_to"], r["message_id"]])
+                        if newest_out and r["ts"] >= newest_out["ts"]:
+                            eligible_late.append(r["message_id"])
             return {k: report.get(k) for k in ("state", "reply_mid", "progress", "last_signal_at", "reason")} | {
                 "session": (report.get("session") or {}).get("state"), "request_mid": mid,
-                "other_replies": other_replies}
+                "other_replies": other_replies, "reply_mids": [r["reply_mid"] for r in receipts],
+                "late_original_replies": eligible_late}
         if row["native_log"]:
             path = Path(row["native_log"])
             for _, entry in reversed(bridge_activity._tail_records(path)):
@@ -265,6 +306,21 @@ class Followup:
             row["next_check"] = timestamp(value)
             self.save(data)
 
+    def check(self, key):
+        before = self.read()["tasks"][key]
+        if before["closed"]:
+            return before.get("evidence", {})
+        _, result = self.sample(before)
+        with self.lock():
+            data = self.read()
+            row = data["tasks"][key]
+            if row["request_mid"] != before["request_mid"] or row.get("updates") != before.get("updates"):
+                raise ValueError("核实期间派单归属变化，请查最新版")
+            if not row["closed"]:
+                row.update(evidence=result, checked_at=time.time())
+                self.save(data)
+        return result
+
     def link(self, key, mid):
         """Attach an actual follow-up sent to the same peer. Only its later receipt can close the task."""
         with self.lock():
@@ -313,9 +369,14 @@ class Followup:
             if row["dependency"] and not all(data["tasks"].get(k, {}).get("closed") for k in row["dependency"]):
                 raise ValueError("前置事项尚未验收")
             if row["request_mid"]:
-                if (evidence.get("reply_mid") != receipt or
+                if (receipt not in [evidence.get("reply_mid"), *(evidence.get("reply_mids") or []),
+                                    *(evidence.get("late_original_replies") or [])] or
                         (row.get("updates") and evidence.get("request_mid") != row["updates"][-1])):
                     raise ValueError("请提交对应本次派单的作者回执，先执行到点核查")
+                for other in data["tasks"].values():
+                    if (other["id"] != key and other.get("closed") and other.get("request_mid") == row["request_mid"] and
+                            (other.get("acceptance_receipt") == receipt or other.get("preview") == preview)):
+                        raise ValueError("同一派单的不同交付必须各有作者验收回执和对应预览")
             elif row["native_log"]:
                 if evidence.get("state") != "task_complete" or receipt != evidence.get("source"):
                     raise ValueError("原生执行者尚无对应结束回执")
@@ -332,6 +393,7 @@ def main():
     register.add_argument("--file", required=True, type=Path)
     actions.add_parser("tick")
     actions.add_parser("list")
+    actions.add_parser("check").add_argument("id")
     defer = actions.add_parser("defer")
     defer.add_argument("id")
     defer.add_argument("--next-check", required=True)
@@ -355,6 +417,8 @@ def main():
             result = {"state": "已有同一主号的检查在运行"}
     elif args.action == "defer":
         result = tracker.defer(args.id, args.next_check)
+    elif args.action == "check":
+        result = tracker.check(args.id)
     elif args.action == "close":
         result = tracker.close(args.id, args.conclusion, args.preview, args.receipt)
     elif args.action == "link":
