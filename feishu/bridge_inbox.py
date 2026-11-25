@@ -32,9 +32,50 @@ def lock_log(bot, operation, elapsed, outcome):
           f"pid={os.getpid()} elapsed={elapsed:.2f}s outcome={outcome}", file=sys.stderr, flush=True)
 
 
+def _normalized_prompt(prompt):
+    return str(prompt).replace('\r\n', '\n').replace('\r', '\n').strip()
+
+
 def prompt_digest(prompt):
-    text = str(prompt).replace('\r\n', '\n').replace('\r', '\n').strip()
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_normalized_prompt(prompt).encode("utf-8")).hexdigest()
+
+
+_ENVELOPE = re.compile(r'\[飞书 [^\]\r\n]*\]')
+
+
+def _receipt_mid(envelope, bot):
+    fields = dict(re.findall(r'(?:^|\s)(to|mid|route)=([^\]\s]+)', envelope))
+    if fields.get('to') == bot and fields.get('route') in {'p2a', 'p2a-ext', 'a2a'}:
+        return fields.get('mid')
+
+
+def _batch_receipts(db, text, bot, session):
+    """Consume whole saved prompts backwards so envelopes quoted inside one stay inside it."""
+    end = len(text)
+    rows = {}
+    while end:
+        start = text.rfind('[飞书 ', 0, end)
+        if start < 0 or not _ENVELOPE.fullmatch(text, start, end):
+            return []
+        mid = _receipt_mid(text[start:end], bot)
+        if not mid or mid in rows:
+            return []
+        row = db.execute("""SELECT id, digest, state, received_digest, handoff FROM messages
+            WHERE id=? AND session=? AND handoff IS NOT NULL
+            AND state IN ('submitting','awaiting_confirmation','uncertain','received_modified','done')""",
+            (mid, session)).fetchone()
+        if not row:
+            return []
+        saved = _normalized_prompt(json.loads(row['handoff']).get('prompt') or '')
+        if not saved or prompt_digest(saved) != row['digest'] or not text.endswith(saved, 0, end):
+            return []
+        rows[mid] = row
+        end -= len(saved)
+        if end:
+            if end == 1 or text[end - 1] != '\n':
+                return []
+            end -= 1
+    return list(rows.values()) if len(rows) > 1 else []
 
 
 class NonRetryableHandoffError(RuntimeError):
@@ -460,17 +501,44 @@ class Inbox:
             # A trusted native hook can prove receipt even when the user edits
             # the composer before Enter. Keep both digests and the original;
             # do not misreport exact delivery or replay the already accepted task.
-            envelopes = re.findall(r'\[飞书 [^\]]*\]', str(prompt))
+            text = _normalized_prompt(prompt)
+            envelopes = _ENVELOPE.findall(text)
             if not envelopes or not session:
                 return 0
-            fields = dict(re.findall(r'(?:^|\s)(to|mid|route)=([^\]\s]+)', envelopes[-1]))
-            if fields.get('to') != self.bot or fields.get('route') not in {'p2a', 'p2a-ext', 'a2a'}:
+            mid = _receipt_mid(envelopes[-1], self.bot)
+            if not mid:
                 return 0
+            if len(envelopes) > 1:
+                # A native input can contain several deliveries. Never attribute a
+                # mixed or partially recognised batch to its final envelope.
+                count = 0
+                batch = _batch_receipts(db, text, self.bot, session)
+                for row in batch:
+                    if row['state'] == 'done':
+                        continue
+                    if row['state'] == 'received_modified' and row['received_digest'] != observed:
+                        continue
+                    context = json.loads(row['handoff'])
+                    if context.get('notice') == 'received_modified':
+                        context['notice'] = 'unconfirmed'  # Correct the earlier warning.
+                    db.execute("""UPDATE messages SET state='done',payload=NULL,received_digest=digest,
+                        receipt=?,handoff=?,updated=? WHERE id=?""",
+                        (proof, json.dumps(context, ensure_ascii=False), time.time(), row['id']))
+                    count += 1
+                if batch:
+                    return count
+                # A single edited message may itself have quoted old envelopes.
+                # Attribute the edit only if its saved original contains the same envelopes.
+                original = db.execute('SELECT handoff FROM messages WHERE id=? AND session=?',
+                                      (mid, session)).fetchone()
+                saved = json.loads(original['handoff'] or '{}').get('prompt', '') if original else ''
+                if _ENVELOPE.findall(saved) != envelopes:
+                    return 0
             cur = db.execute("""UPDATE messages SET state='received_modified',session=?,
                 received_digest=?,receipt=?,updated=? WHERE id=? AND digest IS NOT NULL
                 AND (session IS NULL OR session=?)
                 AND state IN ('submitting','awaiting_confirmation','uncertain')""",
-                (session, observed, proof, time.time(), fields.get('mid'), session))
+                (session, observed, proof, time.time(), mid, session))
             return cur.rowcount
 
     def finish(self, mid):

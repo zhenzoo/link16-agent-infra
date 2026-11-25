@@ -384,6 +384,58 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(self.inbox.get('a')['state'], 'done')
         self.assertEqual(self.inbox.get('b')['state'], 'awaiting_confirmation')
 
+    def stage_message(self, mid, text, session='thread', bot='unit'):
+        prompt = f'{text} [飞书 from=host to={bot} route=p2a mid={mid}]'
+        self.inbox.receive(payload(mid))
+        self.inbox.claim()
+        self.inbox.boundary(mid, prompt=prompt, session=session, handoff={'chat_id': 'chat'})
+        self.inbox.finish(mid)
+        return prompt
+
+    def test_three_messages_in_one_native_input_correct_old_warning_once(self):
+        prompts = [self.stage_message(mid, '同一段\n\n正文') for mid in ('a', 'b', 'c')]
+        merged = '\r\n'.join(prompts)
+        # A previous bridge recorded the entire input as a change to the last message.
+        self.inbox.handoff_notice('c', 'received_modified')
+        with self.inbox.connect() as db:
+            db.execute("UPDATE messages SET state='received_modified',received_digest=? WHERE id='c'",
+                       (bi.prompt_digest(merged),))
+        self.inbox.confirm(prompts[0], 'thread')
+        proof = {'source': 'thread/turns/list', 'turn_id': 'turn', 'item_id': 'item'}
+        self.assertEqual(self.inbox.confirm(merged, 'thread', proof), 2)
+        self.assertEqual(self.inbox.confirm(merged, 'thread', proof), 0)
+        for mid in ('a', 'b', 'c'):
+            row = self.inbox.get(mid)
+            self.assertEqual(row['state'], 'done')
+            self.assertEqual(row['received_digest'], row['digest'])
+        self.assertEqual(json.loads(self.inbox.get('c')['receipt']), proof)
+        self.assertEqual(json.loads(self.inbox.get('c')['handoff'])['notice'], 'unconfirmed')
+
+    def test_merged_receipt_requires_full_text_and_the_original_bot_and_thread(self):
+        first = self.stage_message('a', '甲')
+        second = self.stage_message('b', '乙')
+        foreign = self.stage_message('c', '丙', session='another-thread')
+        other_bot = self.stage_message('d', '丁', bot='elsewhere')
+        for text in (first + '\n' + second.replace('乙', '改'),
+                     '引用：' + first + '\n' + second, first + '\n' + foreign,
+                     other_bot + '\n' + second, first + '\n' + first):
+            self.assertEqual(self.inbox.confirm(text, 'thread'), 0)
+        self.assertEqual(self.inbox.counts(), {'awaiting_confirmation': 4})
+
+    def test_envelope_quoted_in_an_owned_message_is_never_counted_separately(self):
+        quoted = self.stage_message('quoted', '旧信')
+        first = self.stage_message('a', '引用：\n' + quoted + '\n引用结束。')
+        second = self.stage_message('b', '另一个请求')
+        self.assertEqual(self.inbox.confirm(first + '\n' + second, 'thread'), 2)
+        self.assertEqual(self.inbox.get('quoted')['state'], 'awaiting_confirmation')
+
+    def test_edit_to_single_message_with_a_quote_preserves_its_original(self):
+        quoted = self.stage_message('quoted', '旧信')
+        outer = self.stage_message('outer', quoted + '\n同意')
+        self.assertEqual(self.inbox.confirm(outer.replace('同意', '暂缓'), 'thread'), 1)
+        self.assertEqual(self.inbox.get('outer')['state'], 'received_modified')
+        self.assertEqual(self.inbox.get('quoted')['state'], 'awaiting_confirmation')
+
     def test_legacy_cutover_dedupes_old_id_without_claiming_it_completed(self):
         self.assertEqual(self.inbox.import_legacy(lambda: [{'message_id': 'old', 'received_ts': 100}]), 1)
         self.assertFalse(self.inbox.receive(payload('old')))

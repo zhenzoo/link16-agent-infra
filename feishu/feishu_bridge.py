@@ -2510,12 +2510,19 @@ async def settle_inbound_handoffs(bot, inbox, channel):
     for row in inbox.inbound_handoffs():
         context = json.loads(row['handoff'])
         if cron_delivery.accepted(row):
+            if context.get('notice') == 'unconfirmed':
+                result = await card_send(channel, context['chat_id'],
+                                         f'✅ 刚才提醒你还在核实的消息，现已确认 Codex 收到了完整原文。'
+                                         f'不用重发。\n消息 ID：{row["id"]}', bot['name'])
+                if result == 'failed':
+                    continue
+                inbox.handoff_notice(row['id'], 'receipt_sent')
             if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
                 inbox.handoff_notice(row['id'], 'done')
         elif row['state'] == 'received_modified':
             result = await card_send(channel, context['chat_id'],
-                                    '⚠️ Codex 已接收这条消息，但收到的文字与桥保存的原文不一致。'
-                                    '我不会重复提交；完整原文和接收记录已保留，请核对本条处理结果。', bot['name'])
+                                    '⚠️ Codex 收到了这条消息，但收到的文字和你发来的原文有出入。'
+                                    f'原文已保存，请先核对它的回复再决定是否补充。\n消息 ID：{row["id"]}', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'received_modified')
         elif (row['state'] in pending
@@ -2524,16 +2531,16 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                    or time.time() - row['received'] >= cron_delivery.INBOUND_ACK_ALERT_SEC)):
             error = row.get('error') or ''
             if 'folder-trust prompt cannot be ruled out' in error or '后台画面暂时无法完整读取' in error:
-                reason = 'Wmux 无法完整读取后台面板，输入保护拒绝了投递或提交'
+                reason = '桥看不全 Codex 的输入框，暂时无法核实提交结果。'
             elif 'wmux-rpc enter failed:' in error:
-                reason = '文字写入后，提交 Enter 失败；尚无原生接收回执'
+                reason = '文字已填入 Codex，提交时遇到了问题。'
             else:
-                reason = context.get('waiting_reason') or error or '尚无原生接收回执，当前投递结果无法确认'
+                reason = ''
             if cron_delivery.accepted(inbox.get(row['id'])):
                 continue  # A late receipt wins over the timeout notification.
             result = await card_send(channel, context['chat_id'],
-                                    f'⚠️ 消息投递未确认：{reason}。\n'
-                                    '原消息和现场已保留，桥不会盲目重贴；这不表示 Codex 已开始处理。\n'
+                                    f'⏳ 飞书桥已收到并保存这条消息。{reason}还在核实 Codex 有没有收到。'
+                                    '你不用重发，确认后会通知你。\n'
                                     f'消息 ID：{row["id"]}', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'unconfirmed')
@@ -2553,8 +2560,8 @@ async def settle_inbound_handoffs(bot, inbox, channel):
             if not compacting and context.get('notice') == 'pending':
                 continue
             result = await card_send(channel, context['chat_id'],
-                                    'compacting context' if compacting else
-                                    '⏳ 原消息已保存，尚未取得 Codex 接收确认；正在检查投递状态。', bot['name'])
+                                    '⏳ Codex 正在整理当前对话。桥已保存你的消息，你不用重发。' if compacting else
+                                    '⏳ 桥已收到你的消息，正在等 Codex 确认。你不用重发。', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'compacting' if compacting else 'pending')
 
@@ -4537,12 +4544,12 @@ def cmd_status(bot_filter=None):
 def _inbox_status_text(inbox):
     row = inbox.delivery_status()
     if not row:
-        return "收件记录：暂无普通消息交接"
-    labels = {"queued": "已落盘，等待自动投递", "processing": "已落盘，正在准备投递",
-              "submitting": "已落盘，正在提交", "awaiting_confirmation": "已落盘，正在核对会话接收回执",
-              "uncertain": "已落盘，正在核对会话原生记录", "done": "目标会话已确认接收",
-              "received_modified": "目标会话已接收；正文有变化，原文已保留", "cancelled": "已按控制命令取消",
-              "failed": "已落盘，启动失败，需排除启动故障"}
+        return "桥还没有收到普通消息。"
+    labels = {"queued": "桥已保存，正在排队。你不用重发。", "processing": "桥已保存，正在准备发送。",
+              "submitting": "桥已保存，正在提交给智能体。", "awaiting_confirmation": "桥已收到，正在等智能体确认。你不用重发。",
+              "uncertain": "桥已保存，正在核实智能体有没有收到。你不用重发。", "done": "智能体已收到。",
+              "received_modified": "智能体已收到，但文字有出入。桥已保留原文。", "cancelled": "这条消息已按指令取消。",
+              "failed": "桥已保存，发送遇到了问题，请查看这条消息的错误提醒。"}
     result = f"最近消息 {row['id'][-6:]}：{labels.get(row['state'], row['state'])}"
     if row.get("received_digest"):
         result += f"\n接收会话：{row.get('session') or '未记录'}"

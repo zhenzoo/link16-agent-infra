@@ -73,7 +73,7 @@ def test_compacting_notice_matches_live_footer_without_enter_or_false_receipt(sc
     settle(scene)
     fb.wmux.assert_not_called()
     scene.channel.add_reaction.assert_not_called()
-    fb.card_send.assert_awaited_once_with(scene.channel, 'chat', 'compacting context', 'target')
+    fb.card_send.assert_awaited_once_with(scene.channel, 'chat', '⏳ Codex 正在整理当前对话。桥已保存你的消息，你不用重发。', 'target')
     fb.read_screen.return_value = '• Working (2m • esc to interrupt)\n› \n\nstatus'
     settle(scene)
     fb.card_send.assert_awaited_once()
@@ -98,7 +98,7 @@ def test_compacting_text_in_history_draft_or_queue_is_not_live_status(scene, scr
     delayed(scene)
     fb.read_screen.return_value = screen
     settle(scene)
-    assert fb.card_send.call_args.args[2] == '⏳ 原消息已保存，尚未取得 Codex 接收确认；正在检查投递状态。'
+    assert fb.card_send.call_args.args[2] == '⏳ 桥已收到你的消息，正在等 Codex 确认。你不用重发。'
     fb.wmux.assert_not_called()
     scene.channel.add_reaction.assert_not_called()
 
@@ -111,7 +111,7 @@ def test_pending_notice_can_upgrade_to_compacting_once(scene):
     settle(scene)
     settle(scene)
     assert [call.args[2] for call in fb.card_send.call_args_list] == [
-        '⏳ 原消息已保存，尚未取得 Codex 接收确认；正在检查投递状态。', 'compacting context']
+        '⏳ 桥已收到你的消息，正在等 Codex 确认。你不用重发。', '⏳ Codex 正在整理当前对话。桥已保存你的消息，你不用重发。']
 
 
 def test_normal_recovery_resumes_after_compaction_without_another_warning(scene):
@@ -308,7 +308,7 @@ def test_alarm_does_not_depend_on_terminal_read_or_injection_lock(scene, state):
     for _ in range(2):
         asyncio.run(fb.settle_inbound_handoffs(scene.bot, scene.inbox, scene.channel))
     fb.card_send.assert_awaited_once()
-    assert '消息投递未确认' in fb.card_send.call_args.args[2]
+    assert '还在核实 Codex 有没有收到' in fb.card_send.call_args.args[2]
     fb.wmux.assert_not_called()
     scene.channel.add_reaction.assert_not_called()
 
@@ -355,16 +355,19 @@ def test_enter_rejection_alerts_immediately_once_and_keeps_late_receipt(scene):
     settle(scene)
     fb.card_send.assert_awaited_once()
     text = fb.card_send.call_args.args[2]
-    assert '消息投递未确认' in text and '后台面板' in text and 'om_m' in text
+    assert '桥已收到并保存' in text and '看不全 Codex 的输入框' in text and 'om_m' in text
+    assert '你不用重发' in text and 'wmux-rpc' not in text
     fb.wmux.assert_not_called()
     scene.channel.add_reaction.assert_not_called()
     assert scene.inbox.get('om_m')['error'] == error
     scene.inbox.confirm(scene.marker, 'thread', {'source': 'turn/start', 'turn_id': 'late'})
+    scene.channel.add_reaction.side_effect = [RuntimeError('transient network failure'), SimpleNamespace(success=True)]
     settle(scene)
     settle(scene)
     assert delivery.accepted(scene.inbox.get('om_m'))
-    scene.channel.add_reaction.assert_awaited_once()
-    fb.card_send.assert_awaited_once()
+    assert scene.channel.add_reaction.await_count == 2
+    assert fb.card_send.await_count == 2
+    assert '现已确认 Codex 收到了完整原文' in fb.card_send.call_args.args[2]
 
 
 def test_probe_error_preserves_original_submission_failure(scene):
@@ -373,7 +376,7 @@ def test_probe_error_preserves_original_submission_failure(scene):
     fb.read_screen.side_effect = RuntimeError('later read failed')
     settle(scene)
     assert scene.inbox.get('om_m')['error'] == error
-    assert '后台面板' in fb.card_send.call_args.args[2]
+    assert '看不全 Codex 的输入框' in fb.card_send.call_args.args[2]
 
 
 @pytest.mark.parametrize('screen,state', [('unreadable', 'idle'), ('› another draft\n\nstatus', 'idle'),
@@ -383,7 +386,7 @@ def test_pending_upgrades_to_bounded_alarm_even_without_readable_draft(scene, sc
     fb.read_screen.return_value = screen
     fb.bridge_activity.read_activity.return_value = {'state': state}
     settle(scene)
-    assert '尚未取得 Codex 接收确认' in fb.card_send.call_args.args[2]
+    assert '正在等 Codex 确认' in fb.card_send.call_args.args[2]
     with scene.inbox.connect() as db:
         db.execute('UPDATE messages SET received=?', (time.time() - delivery.INBOUND_ACK_ALERT_SEC - 1,))
     settle(scene)
@@ -391,7 +394,7 @@ def test_pending_upgrades_to_bounded_alarm_even_without_readable_draft(scene, sc
     for _ in range(4):
         settle(scene)
     assert fb.card_send.await_count == 2
-    assert '消息投递未确认' in fb.card_send.call_args.args[2]
+    assert '还在核实 Codex 有没有收到' in fb.card_send.call_args.args[2]
     assert json.loads(scene.inbox.get('om_m')['handoff'])['notice'] == 'unconfirmed'
     fb.wmux.assert_not_called()
     scene.channel.add_reaction.assert_not_called()

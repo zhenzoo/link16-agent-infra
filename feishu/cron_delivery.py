@@ -137,7 +137,7 @@ def accepted(row):
     return bool(row and row['state'] == 'done' and row.get('session')
                 and row.get('digest') and row['digest'] == row.get('received_digest')
                 and json.loads(row.get('receipt') or '{}').get('source')
-                in {'UserPromptSubmit', 'turn/start'})
+                in {'UserPromptSubmit', 'turn/start', 'thread/turns/list'})
 
 
 def confirm_inbound(fb, bot, row):

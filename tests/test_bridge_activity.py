@@ -136,9 +136,11 @@ def test_inbox_reconciliation_uses_native_user_message_only(tmp_path, rpc):
     rpc.turn['items'] = [{'type': 'agentMessage', 'text': prompt}]
     assert a.reconcile_codex_inbox(tmp_path, CODEX, inbox) == 0
     assert inbox.get('om_probe')['state'] == 'awaiting_confirmation'
-    rpc.turn['items'] = [{'type': 'userMessage', 'content': [{'type': 'text', 'text': prompt}]}]
+    rpc.turn['items'] = [{'type': 'userMessage', 'id': 'item-1', 'content': [{'type': 'text', 'text': prompt}]}]
     assert a.reconcile_codex_inbox(tmp_path, CODEX, inbox) == 1
     assert inbox.get('om_probe')['state'] == 'done'
+    assert json.loads(inbox.get('om_probe')['receipt']) == {
+        'source': 'thread/turns/list', 'turn_id': 'turn-1', 'item_id': 'item-1'}
     assert set(method for method, _ in rpc.calls) == {'initialize', 'initialized', 'thread/read', 'thread/turns/list'}
     before = len(rpc.calls)
     assert a.reconcile_codex_inbox(tmp_path, CODEX, inbox) == 0
