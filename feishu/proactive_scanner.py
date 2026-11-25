@@ -724,6 +724,16 @@ def _preview_image(record) -> str:
     return f'<img class="preview-image" loading="lazy" src="{html.escape(image)}" alt="{html.escape(record.get("title") or "原件")}预览">'
 
 
+def _preview_document(title, ref):
+    original = _url(ref, local=True)
+    target = urlsplit(original)
+    if not original or target.scheme or target.query or Path(target.path).suffix.casefold() not in {".html", ".htm"}:
+        return ""
+    escaped = html.escape(original)
+    return (f'<iframe class="chapter-preview" title="{html.escape(title)} · 同版预览" data-review-document="{escaped}" '
+            f'src="{escaped}" loading="lazy" sandbox="allow-scripts"></iframe>')
+
+
 def _local_document_path(record, output_dir):
     ref = _url(record.get("local_document"), local=True)
     if not output_dir or not ref or urlsplit(ref).scheme:
@@ -738,6 +748,7 @@ def _local_document_path(record, output_dir):
 
 def _render_file(record, output_dir=None) -> str:
     esc = html.escape
+    item_id = f' data-work-item="{esc(str(record["id"]))}"' if record.get("id") else ""
     preview = esc(record.get("preview") or "")
     frame = ""
     topics = []
@@ -760,8 +771,15 @@ def _render_file(record, output_dir=None) -> str:
             frame_src = esc(f"{parts.path}?preview={section}#{section}")
             frame = (f'<iframe class="chapter-preview" title="{esc(record.get("title") or "原稿")} · 章节预览" '
                      f'data-review-fragment="{esc(original)}" src="{frame_src}" loading="lazy" sandbox="allow-scripts"></iframe>')
+    if not frame and record.get("preview_document"):
+        frame = _preview_document(record.get("title") or "原件", original)
+    if frame and item_id:
+        title = esc(record.get("title") or "原件")
+        frame = (f'<button type="button" class="open-file-preview" aria-haspopup="dialog">展开预览</button>'
+                 f'<dialog class="file-preview-drawer" aria-label="{title}"><header><strong>{title}</strong>'
+                 f'<button type="button" class="close-file-preview" aria-label="关闭预览">关闭</button></header>{frame}</dialog>')
     return (
-        f'<article class="review-card"><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
+        f'<article class="review-card"{item_id}><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
         f'<span class="status-tag">{esc(record.get("status") or "待核")}</span></div>'
         f'{frame or _preview_image(record)}<p class="preview-text">{preview}</p>{"".join(topics)}'
         f'<div class="record-links">{_link("打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div>'
@@ -912,6 +930,105 @@ def review_key(kind, record):
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
+def _task_messages(tasks):
+    rows = []
+    for task in tasks:
+        owner = html.escape(str(task.get("owner") or "待分派"))
+        status = html.escape(str(task.get("status") or "待分派"))
+        title = html.escape(str(task["title"]))
+        track = html.escape(str(task.get("track") or ""))
+        result = html.escape(str(task.get("result") or ""))
+        link = _link("查看回执", task.get("url"), local=True)
+        rows.append(f'<article class="dispatch-row" data-item><div><small>{track}</small>'
+                    f'<h4>{title}</h4><p>{result}</p>{link}</div>'
+                    f'<div class="dispatch-owner"><b>{owner}</b><span>{status}</span></div></article>')
+    return (f'<section class="dispatch-work" data-expect-count="{len(tasks)}" data-expect-of="派单与跟进记录">'
+            '<h3>待跟进</h3>' + "".join(rows) + '</section>') if rows else ""
+
+
+def _project_timeline(config, closed, tasks, output_dir):
+    if not config:
+        return ""
+    esc = html.escape
+    # Only explicit decisions and delivered files are eligible for project history.
+    entries = []
+    for entry in config.get("nodes", []):
+        previous = closed.get(entry.get("closed_id"), {})
+        entries.append({**previous, **entry})
+    entries.extend(task for task in tasks if task.get("closed") is True)
+    months = list(config["months"])
+    lanes = list(config["tracks"])
+    schedule = list(config.get("schedule") or [])
+    def month_of(entry):
+        return str(entry.get("month") or entry.get("at") or "")[:7]
+    def track_of(entry):
+        return entry.get("track") or ""
+    usable = []
+    for entry in entries:
+        kind = entry.get("kind")
+        title = entry.get("title") or entry.get("topic")
+        if not (title and month_of(entry) and track_of(entry) and (entry.get("source") or entry.get("source_id") or entry.get("links"))):
+            continue
+        if kind == "file" and entry.get("edition") or kind == "meeting" and all(
+                entry.get(f) for f in ("background", "question", "result")) and (entry.get("person") or entry.get("respondent")):
+            usable.append(entry)
+            for milestone in entry.get("milestones") or []:
+                if (milestone.get("owner") and milestone.get("title") and
+                        re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", str(milestone.get("month") or ""))):
+                    schedule.append({**milestone, "track": milestone.get("track") or track_of(entry)})
+    for entry in [*usable, *schedule]:
+        track, month = track_of(entry), month_of(entry)
+        if track and track not in lanes:
+            lanes.append(track)
+        if re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", month) and month not in months:
+            months.append(month)
+    months.sort()
+    def node(entry):
+        is_file = entry["kind"] == "file"
+        fields = [("版本", entry["edition"])] if is_file else [
+            ("背景", entry["background"]), ("问题", entry["question"]),
+            ("答复人", entry.get("respondent") or entry.get("person")), ("结论", entry["result"])]
+        content = "".join(f'<div><dt>{k}</dt><dd>{esc(str(v))}</dd></div>' for k,v in fields)
+        links = []
+        for item in entry.get("links") or []:
+            link = _link(item.get("label") or "原件", item.get("url"), local=True)
+            version, sha = str(item.get("mobile_version") or ""), str(item.get("source_sha256") or "")
+            if link and re.fullmatch(r"[a-f0-9]{20}", version) and re.fullmatch(r"[a-f0-9]{64}", sha):
+                link = link.replace("<a ", f'<a data-archive-version="{version}" data-source-sha256="{sha}" ', 1)
+            links.append(link)
+        for url in dict.fromkeys(str(entry.get(k) or "") for k in ("preview_url", "url", "source")):
+            if url.startswith(("https://", "http://")):
+                links.append(_link("原件" if is_file else "来源", url))
+        key = str(entry.get("id") or "")
+        ident = f' id="node-{key}" data-record-id="{key}"' if re.fullmatch(r"[A-Za-z0-9_-]+", key) else ""
+        return (f'<details class="timeline-node review-topic" data-kind="{entry["kind"]}"{ident}>'
+                f'<summary><span>{"文件" if is_file else "会议"}</span>{esc(str(entry.get("title") or entry["topic"]))}</summary>'
+                f'<dl>{content}</dl><div class="archive-links">{" ".join(links)}</div>'
+                f'{_local_document_path(entry, output_dir)}</details>')
+    def schedule_chip(entry):
+        owner, title = (esc(str(entry.get(k) or "")) for k in ("owner", "title"))
+        return f'<div class="schedule-chip"><b>{title}</b><small>{owner}</small></div>'
+    headers = "".join(f'<div class="month-label"><small>{m[:4]} 年</small> {int(m[5:])} 月</div>' for m in months)
+    grouped_rows = {}
+    for track in lanes:
+        group = track.partition(" · ")[0].strip()
+        cells = []
+        for month in months:
+            events = [node(e) for e in usable if track_of(e) == track and month_of(e) == month]
+            events += [schedule_chip(e) for e in schedule if track_of(e) == track and month_of(e) == month]
+            cells.append('<div class="timeline-cell">' + "".join(events) + '</div>')
+        grouped_rows.setdefault(group, []).append(
+            f'<div class="track-row" data-track="{esc(track)}" data-item>'
+            f'<div class="track-label">{esc(track)}</div>{"".join(cells)}</div>')
+    groups = "".join(
+        f'<div class="track-group" data-track-group="{esc(group)}" style="--track-color:var(--lane-{i % 6})">{"".join(rows)}</div>'
+        for i, (group, rows) in enumerate(grouped_rows.items()))
+    return (f'<section id="closed" class="project-timeline" aria-label="项目时间线"><h2>项目时间线</h2>'
+            f'<div class="timeline-scroll" tabindex="0" aria-label="按月份横向滚动项目时间线"><div class="timeline-grid" style="--months:{len(months)}" data-expect-count="{len(lanes)}" data-expect-of="项目线">'
+            f'<div class="track-row timeline-head"><div class="track-label">项目线</div>{headers}</div>'
+            f'{groups}</div></div></section>')
+
+
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     esc = html.escape
     actions_pack = actions_pack or {}
@@ -926,6 +1043,9 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
                     for row in actions_pack[key] or []
                 ]
     closed = set(actions_pack.get("owner_closed_keys") or [])
+    if "review_file_ids" in actions_pack:
+        allowed = set(actions_pack["review_file_ids"])
+        actions_pack = {**actions_pack, "files": [r for r in actions_pack.get("files", []) if r.get("id") in allowed]}
     if closed:
         actions_pack = dict(actions_pack)
         for kind in ("files", "sources", "sheet_previews", "reminders"):
@@ -963,7 +1083,25 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         else:
             files.append(record)
     calendar_html = "".join(_render_calendar(event) for event in events)
+    tasks = actions_pack.get("work_items") or []
+    pending_tasks = [t for t in tasks if t.get("closed") is not True and t.get("title") and not t.get("_dispatch")]
+    assignments = [t for t in tasks if t.get("closed") is not True and t.get("title") and t.get("_dispatch")]
+    assigned_html = ""
+    if assignments:
+        assigned_html = (f'<details class="dispatch-overview"><summary>本轮派单 · {len(assignments)} 项</summary>'
+                         + _task_messages(assignments) + '</details>')
     drafts_html = _render_drafts_section(drafts, coordinator=actions_pack.get("draft_coordinator"))
+    drafts_html += _task_messages(pending_tasks)
+    for t in assignments:
+        if t.get("preview_url") and t.get("publish_file") is not True:
+            title = esc(t["title"])
+            visual = _preview_image({"title":t["title"], "image":t.get("image") or t["preview_url"]})
+            if not visual:
+                visual = _preview_document(t["title"],t["preview_url"])
+            link = _link("打开同版预览", t["preview_url"], local=True)
+            drafts_html += (f'<article class="review-card pending-preview" data-work-item="{esc(t["id"])}">'
+                            f'<div class="record-head"><h3>{title}</h3><span class="status-tag">{esc(t.get("status") or "待审")}</span></div>'
+                            f'{visual}<p>{esc(t.get("result") or "")}</p><div class="record-links">{link}</div></article>')
     sent_html = _render_drafts_section(visible_sent, state="sent")
     pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
@@ -989,7 +1127,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
                  if not (r.get("kind") == "已约会议" and (r.get("id") or r.get("url")) in known)]
     calendar_label = "日程与待办" if "reminders" in actions_pack else "日程"
     calendar_count = f"{len(events)} 个日程 · {len(reminders)} 项待办" if "reminders" in actions_pack else f"{len(events)} 项"
-    categories = {"messages": ("消息", len(drafts) + len(visible_sent)), "files": ("文件", len(file_records)),
+    categories = {"messages": ("消息", len(drafts) + len(visible_sent) + len(pending_tasks)), "files": ("文件", len(file_records)),
                   "calendar": (calendar_label, len(events) + len(reminders)), "approvals": ("审批", len(approvals))}
     sections = actions_pack.get("sections", list(categories))
     if (not isinstance(sections, list) or not sections or
@@ -1010,8 +1148,15 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         cloud = f'<a class="board-cloud" href="{esc(online_url)}" title="打开已登记的线上工作台" target="_blank" rel="noopener noreferrer">云</a>'
 
     empty = '<p class="empty">本轮尚无收录项</p>'
+    archive = _project_timeline(actions_pack.get("project_timeline"), actions_pack.get("closed_items") or {}, tasks, output_dir)
+    timeline_jump = '<a class="timeline-jump" href="#closed">查看项目时间线 ↓</a>' if archive else ''
+    if not archive:
+        archive = _render_closed_items(actions_pack.get("closed_items") or {}, output_dir, collapsed=actions_pack.get("archive_collapsed") is True)
+    message_count = f'{len(drafts)} 待发 · {len(visible_sent)} 已发'
+    if pending_tasks:
+        message_count = f'{len(pending_tasks)} 待跟进 · ' + message_count
     sections_html = {
-        "messages": (f'<h2>消息 <small>{len(drafts)} 待发 · {len(visible_sent)} 已发</small></h2>',
+        "messages": (f'<h2>消息 <small>{message_count}</small></h2>',
                      drafts_html + messages_actions + sent_html + pending_verification + fallback_html),
         "files": (f'<h2>文件 <small>{len(file_records)} 项</small></h2>', files_html + file_actions),
         "calendar": (f'<h2>{calendar_label} <small>{calendar_count}</small></h2>',
@@ -1032,16 +1177,38 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 <body><div class="workspace-shell">
 <aside class="rail"><div class="rail-heading"><h1 class="rail-title">{esc(payload.get("owner_name") or payload["bot"])}的工作台</h1>{cloud}</div>
 <nav class="section-nav" aria-label="分类导航">{routes}</nav>
+{timeline_jump}
+{assigned_html}
 {_overview(actions_pack.get("fleet_overview") or [], actions_pack.get("fleet_history") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
   {main_html}
-  {_render_closed_items(actions_pack.get("closed_items") or {}, output_dir, collapsed=actions_pack.get("archive_collapsed") is True)}
+  {archive}
 </main></div>
 <script>
 const sections = [...document.querySelectorAll("main > .major")];
 const navigation = [...document.querySelectorAll(".section-nav a")];
 const overview = document.querySelector(".fleet-overview");
 if (overview && window.matchMedia("(max-width: 800px)").matches) overview.open = false;
+document.querySelectorAll(".open-file-preview").forEach(button => {{
+  const drawer = button.nextElementSibling;
+  button.addEventListener("click", () => drawer.showModal());
+  drawer.querySelector(".close-file-preview").addEventListener("click", () => drawer.close());
+  drawer.addEventListener("click", event => {{
+    if (event.target === drawer && event.clientX < drawer.getBoundingClientRect().left) drawer.close();
+  }});
+}});
+document.addEventListener("click", event => {{
+  const link = event.target.closest("a[href^='#']");
+  if (!link || event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  const id = decodeURIComponent(link.getAttribute("href").slice(1));
+  const target = document.getElementById(id);
+  if (!target) return;
+  event.preventDefault();
+  target.scrollIntoView();
+  const location = new URL(window.location.href);
+  location.hash = id;
+  history.replaceState(null, "", location.href);
+}});
 function markSection(id) {{
   for (const link of navigation) {{
     if (link.hash === "#" + id) link.setAttribute("aria-current", "location");
@@ -1124,7 +1291,30 @@ def main() -> int:
 
     actions_pack = None
     if args.actions_json:
-        actions_pack = json.loads(Path(args.actions_json).read_text(encoding="utf-8-sig"))
+        actions_path = Path(args.actions_json)
+        actions_pack = json.loads(actions_path.read_text(encoding="utf-8-sig"))
+        if tasks_file := actions_pack.get("work_items_file"):
+            if Path(tasks_file).name != tasks_file:
+                parser.error("派单记录须为工作包目录内的文件")
+            dispatch = json.loads((actions_path.parent / tasks_file).read_text(encoding="utf-8-sig"))
+            tasks = [dict(t, _dispatch=True) for t in dispatch["tasks"]]
+            receipts = dispatch.get("records") or []
+            actions_pack["work_items"] = [*(actions_pack.get("work_items") or []), *tasks, *receipts, *dispatch.get("work_items", [])]
+            if actions_pack.get("project_timeline") and dispatch.get("schedule"):
+                config = actions_pack["project_timeline"]
+                config["schedule"] = [*(config.get("schedule") or []), *dispatch["schedule"]]
+            for task in [*tasks, *receipts]:
+                if task.get("publish_file") is True and task.get("preview_url"):
+                    if "review_file_ids" in actions_pack:
+                        actions_pack["review_file_ids"].append(task["id"])
+                    actions_pack.setdefault("files", []).append({
+                        "id": task["id"], "title": task["title"], "status": task.get("status"),
+                        "preview": task.get("result"), "url": task["preview_url"], "project": task.get("track"),
+                        "assignment": {"agent": task.get("owner")}, "preview_fragment": task.get("preview_fragment"),
+                        "review_topics": task.get("review_topics") or [], "image": task.get("image") or
+                        (task["preview_url"] if _url(task["preview_url"], local=True, image=True) else ""),
+                        "links": task.get("links") or [], "preview_document": True,
+                    })
     if args.from_scan:
         payload = json.loads(Path(args.from_scan).read_text(encoding="utf-8-sig"))
         if (not isinstance(payload, dict) or not isinstance(payload.get("generated_at"), str)

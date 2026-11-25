@@ -13,6 +13,43 @@ import proactive_mobile as mobile
 import proactive_scanner as scanner
 
 
+def test_mobile_timeline_keeps_model_colors_and_source_order(tmp_path):
+    tracks = ["A · base", "B · body", "A · cover", "C · support"]
+    archive = {"id":"decision-1", "track":tracks[0], "month":"2026-01", "kind":"meeting", "closed":True,
+               "title":"Weight", "background":"Review", "question":"Measured?", "respondent":"Team",
+               "result":"Confirmed", "source":"https://example.com/meeting"}
+    pack = {"project_timeline":{"months":["2026-01"], "tracks":tracks}, "work_items":[archive]}
+    board_path = tmp_path / "board.html"
+    board_path.write_text(scanner.render_html({"bot":"test"},pack), encoding="utf8")
+    site = Path(mobile.pack(board_path, tmp_path / "versions")["site"])
+    page = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser")
+    groups = page.select(".track-group")
+    assert [g["data-track-group"] for g in groups] == ["A","B","C"]
+    assert len({g["style"] for g in groups}) == 3
+    assert [r["data-track"] for r in groups[0].select(".track-row")] == [tracks[0],tracks[2]]
+    assert page.select_one("#node-decision-1")["data-kind"] == "meeting"
+
+
+def test_file_drawer_carries_only_its_own_selected_original(tmp_path):
+    doc = tmp_path / "review.html"
+    doc.write_text('<main id="update">原表与修改</main>', encoding="utf8")
+    board_path = tmp_path / "board.html"
+    file = {"id":"review", "title":"原表", "url":"review.html#update", "preview_document":True}
+    board_path.write_text(scanner.render_html({"bot":"test"},{"files":[file]}), encoding="utf8")
+    package = mobile.pack(board_path, tmp_path / "versions")
+    page = BeautifulSoup((Path(package["site"]) / "index.html").read_text("utf8"), "html.parser")
+    card = page.select_one("article[data-work-item=review]")
+    assert card.select_one("button[aria-haspopup=dialog]") and card.select_one("dialog button.close-file-preview")
+    frame = card.select_one("dialog iframe")
+    assert frame["src"] == card.select_one(".record-links a")["href"]
+    assert frame["src"].endswith(".html#update") and frame["sandbox"] == ["allow-scripts"]
+    source = BeautifulSoup(board_path.read_text("utf8"), "html.parser")
+    source.select_one("iframe")["src"] = "other.html"
+    board_path.write_text(str(source), encoding="utf8")
+    with pytest.raises(ValueError, match="同卡"):
+        mobile.pack(board_path, tmp_path / "versions")
+
+
 @pytest.mark.parametrize("prefix,manifest_id,keys", [
     ("link16", "link16-asset-sources", ["preview", "detail"]),
     ("link16", "link16-accessory-sources", ["base", "shell", "cover", "port", "wheel", "handle"]),

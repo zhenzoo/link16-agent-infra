@@ -89,6 +89,7 @@ class Bundle:
         self.audio = {}
         self.originals = {}
         self.frame_ids = {}
+        self.has_document_frame = False
         self.catalogs = set()
         self.archived = {}
         self.current_archive_exports = {}
@@ -248,6 +249,20 @@ class Bundle:
 
     def prepare_frames(self, soup, path):
         for frame in soup.find_all("iframe"):
+            if path == self.board and frame.has_attr("data-review-document"):
+                ref = frame["data-review-document"]
+                parts = urlsplit(ref)
+                dest = relative_target(path, ref)
+                card = frame.find_parent("article")
+                if (not card or not any(a["href"] == ref for a in card.select("a[href]"))
+                        or parts.query or dest == path or dest not in self.docs or not can_read(dest, self.roots, HTML)
+                        or frame.get("src") != ref):
+                    raise ValueError("全文预览须为同卡已选择的原稿")
+                self.has_document_frame = True
+                frame.attrs = {**{k: frame[k] for k in ("class","title") if k in frame.attrs},
+                               "src": self.docs[dest] + ("#" + quote(unquote(parts.fragment), safe="") if parts.fragment else ""),
+                               "sandbox":"allow-scripts","loading":"lazy","referrerpolicy":"no-referrer"}
+                continue
             if path != self.board or not frame.has_attr("data-review-fragment"):
                 frame.decompose()
                 continue
@@ -321,7 +336,7 @@ class Bundle:
             policy += "; frame-src 'self'"
         if path == self.board:
             policy = policy.replace("base-uri 'none'", "base-uri 'self'")
-            if self.frame_ids:
+            if self.frame_ids or self.has_document_frame:
                 policy += "; frame-src 'self'"
         policy = soup.new_tag("meta", attrs={"http-equiv": "Content-Security-Policy", "content": policy})
         soup.head.insert(0, policy)
