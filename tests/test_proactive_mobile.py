@@ -45,6 +45,38 @@ def test_selected_model_preserves_declared_lazy_payloads_and_rejects_changed_fil
         mobile.pack(page, out)
 
 
+def test_owner_archive_keeps_accepted_original_after_local_revision_changes(tmp_path):
+    source = tmp_path / "spec.html"
+    source.write_text("<html><head><title>原版</title></head><body>首次评审</body></html>", encoding="utf8")
+    board_path = tmp_path / "board.html"
+    output = tmp_path / "versions"
+    def render(pack):
+        board_path.write_text(scanner.render_html({"bot": "test"}, pack, output_dir=tmp_path), encoding="utf8")
+    render({"files": [{"title": "规格书", "url": "spec.html"}]})
+    first = mobile.pack(board_path, output)
+    source.write_text("<html><head><title>下版</title></head><body>在途</body></html>", encoding="utf8")
+    frozen = next(item for item in first["originals"] if item["file"] == "spec.html")
+    ack = {"id": "request", "target_name": "工程师", "message": "请跟进", "verified": True,
+           "message_id": "first", "receipt_url": "https://example.com/message"}
+    archive = {"at": "2026-11-25 12:00", "person": "工程师", "topic": "首版", "result": "已交",
+               "local_document": "spec.html", "links": [{"label": "原稿", "url": "spec.html",
+                                                        "mobile_version": first["version"], "source_sha256": frozen["sha256"]}]}
+    render({"closed_items": {"v1": archive}, "sent_messages": [ack], "drafts": [ack],
+            "owner_closed_keys": [scanner.review_key("sent_messages", ack)]})
+    second = mobile.pack(board_path, output, archive_paths=True)
+    soup = BeautifulSoup((output / second["version"] / "index.html").read_text("utf8"), "html.parser")
+    assert "0 待发 · 0 已发" in soup.select_one("#messages").get_text()
+    assert soup.select_one("#closed code").get_text() == str(source)
+    entry = soup.select_one("#closed .archive-links a")["href"]
+    assert entry == frozen["entry"]
+    assert (output / second["version"] / entry).read_bytes() == (output / first["version"] / entry).read_bytes()
+    default = mobile.pack(board_path, output)
+    assert "本机路径" not in (output / default["version"] / "index.html").read_text("utf8")
+    (output / first["version"] / entry).write_text("changed", encoding="utf8")
+    with pytest.raises(ValueError, match="归档资源"):
+        mobile.pack(board_path, output)
+
+
 def test_file_only_review_stays_file_only_on_mobile(tmp_path):
     board_path = tmp_path / "board.html"
     board_path.write_text(scanner.render_html({"bot": "demo"}, {

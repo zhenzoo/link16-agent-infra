@@ -80,15 +80,18 @@ def clean_unlinked(tag):
 
 
 class Bundle:
-    def __init__(self, board, stage, roots):
+    def __init__(self, board, stage, roots, *, archive_paths=False):
         self.board, self.stage, self.roots = board, stage, roots
         self.docs = {}
         self.images = {}
         self.videos = {}
         self.originals = {}
         self.frame_ids = {}
+        self.archived = {}
+        self.archive_versions = {}
         self.unavailable = 0
         self.directory = stage / "assets"
+        self.archive_paths = archive_paths
         self.directory.mkdir()
 
     def image(self, path):
@@ -128,7 +131,29 @@ class Bundle:
             raise ValueError("入口须为本次生成的 Link16 审阅工作台")
         self.docs[self.board] = "index.html"
         self.originals[self.board] = digest(source)
-        for a in board.select("article a[href]"):
+        for anchor in board.select("#closed .archive-links a[data-archive-version]"):
+            version = anchor["data-archive-version"]
+            sha = anchor["data-source-sha256"]
+            path = relative_target(self.board, anchor["href"])
+            if (not can_read(path, self.roots, HTML) or not re.fullmatch(r"[a-f0-9]{20}", version)
+                    or not re.fullmatch(r"[a-f0-9]{64}", sha)):
+                raise ValueError("归档原件路径或验收版本无效")
+            if version not in self.archive_versions:
+                directory = self.stage.parent.parent / version
+                receipt = json.loads(directory.with_suffix(".receipt.json").read_text("utf-8"))
+                if receipt["version"] != version or digest(json.dumps(receipt["files"], sort_keys=True).encode())[:20] != version:
+                    raise ValueError("旧手机包与归档回执不一致")
+                self.archive_versions[version] = (directory, receipt, {r["path"]: r for r in receipt["files"]})
+            directory, receipt, inventory = self.archive_versions[version]
+            original = next((o for o in receipt["originals"] if o["file"] == path.name and o["sha256"] == sha), None)
+            if not original or original["entry"] != "assets/doc-" + sha + ".html":
+                raise ValueError("已验手机包中找不到归档原稿：" + path.name)
+            export = original["entry"]
+            self.copy_archived(directory, inventory, export)
+            self.archived[path, sha] = original
+        for a in board.select("article a[href], #closed .archive-links a[href]"):
+            if a.has_attr("data-archive-version"):
+                continue
             dest = relative_target(self.board, a["href"])
             if dest in self.docs or not can_read(dest, self.roots, HTML):
                 continue
@@ -150,11 +175,54 @@ class Bundle:
                     for fragment in self.frame_ids[path]:
                         if fragment not in declared or len(soup.find_all(id=fragment)) != 1:
                             raise ValueError(f"原稿缺少声明或唯一可预览锚点：{path.name}#{fragment}")
+            # Machine paths are private by default. The owner can opt in to the path
+            # of an archived original that is itself selected in the very same row.
+            archive_labels = []
+            for code in soup.select("#closed code[data-archive-document]") if path == self.board else []:
+                ref = code.attrs.pop("data-archive-document")
+                selected = relative_target(path, ref)
+                row = code.find_parent("tr")
+                code.clear()
+                if (self.archive_paths and (selected in self.originals or any(p == selected for p, _ in self.archived)) and selected != self.board and row
+                        and any(relative_target(path, a["href"]) == selected for a in row.select(".archive-links a[href]"))):
+                    archive_labels.append((code, selected))
+                else:
+                    code.parent.decompose()
             self.format(soup, path, export)
             html = str(soup)
             if LOCAL_ADDRESS.search(html) or PRIVATE.search(html):
                 raise ValueError("页面仍含机器路径或私密凭据：" + path.name)
+            for label, original in archive_labels:
+                label.string = str(original)
+            if archive_labels:
+                html = str(soup)
             (self.stage / export).write_text(html, encoding="utf-8", newline="\n")
+
+    def copy_archived(self, directory, inventory, entry):
+        """Retain only the selected original and its immutable in-package dependencies."""
+        if not re.fullmatch(r"assets/[a-zA-Z0-9._-]+", entry) or entry not in inventory:
+            raise ValueError("归档文件未列入已验手机包：" + entry)
+        dest = self.stage / entry
+        expected = inventory[entry]["sha256"]
+        if dest.exists():
+            if digest(dest.read_bytes()) != expected:
+                raise ValueError("归档资源与本包的同名文件不同：" + entry)
+            return
+        data = (directory / entry).read_bytes()
+        if digest(data) != expected:
+            raise ValueError("已验手机包的归档资源发生变化：" + entry)
+        dest.write_bytes(data)
+        if dest.suffix not in HTML:
+            return
+        doc = BeautifulSoup(data.decode("utf-8"), "html.parser")
+        names = {node.get(key) for key in ("src", "href", "poster") for node in doc.select(f"[{key}]")}
+        for manifest in doc.select('script[type="application/json"][id$="-sources"]'):
+            names.update(json.loads(manifest.get_text()).values())
+        for name in names:
+            # Generated bundles store documents and dependencies together in assets/.
+            parts = urlsplit(name)
+            if not parts.scheme and not parts.netloc and parts.path:
+                self.copy_archived(directory, inventory, "assets/" + parts.path)
 
     def prepare_frames(self, soup, path):
         for frame in soup.find_all("iframe"):
@@ -226,8 +294,10 @@ class Bundle:
         policy = POLICY
         if self.copy_accessory_sources(soup, path):
             policy += "; frame-src 'self'"
-        if path == self.board and self.frame_ids:
-            policy = policy.replace("base-uri 'none'", "base-uri 'self'; frame-src 'self'")
+        if path == self.board:
+            policy = policy.replace("base-uri 'none'", "base-uri 'self'")
+            if self.frame_ids:
+                policy += "; frame-src 'self'"
         policy = soup.new_tag("meta", attrs={"http-equiv": "Content-Security-Policy", "content": policy})
         soup.head.insert(0, policy)
         if not soup.select_one('meta[name="viewport"]'):
@@ -253,7 +323,9 @@ class Bundle:
                 a["rel"] = "noopener noreferrer"
                 continue
             dest = relative_target(path, ref)
-            target = self.docs.get(dest)
+            archived = self.archived.get((dest, a.attrs.pop("data-source-sha256", ""))) if path == self.board else None
+            a.attrs.pop("data-archive-version", None)
+            target = archived["entry"] if archived else self.docs.get(dest)
             if not target and can_read(dest, self.roots, IMAGES):
                 target = self.image(dest)
             if not target and can_read(dest, self.roots, VIDEO):
@@ -264,7 +336,9 @@ class Bundle:
                 continue
             fragment = urlsplit(ref).fragment
             a["href"] = posixpath.relpath(target, posixpath.dirname(export) or ".") + ("#" + fragment if fragment else "")
-            if dest in self.originals and dest != self.board:
+            if archived:
+                a["title"] = "已验归档原稿 · SHA-256 " + archived["sha256"][:12]
+            elif dest in self.originals and dest != self.board:
                 a["title"] = "本次随包原稿 · SHA-256 " + self.originals[dest][:12]
         for tag in soup.select("video, [src], [srcset], [poster], link[href]"):
             if tag.name == "iframe":
@@ -300,7 +374,7 @@ class Bundle:
                 raise ValueError("选中原件采用尚未纳入的样式资源：" + path.name)
 
 
-def pack(board, output, extra_roots=()):
+def pack(board, output, extra_roots=(), *, archive_paths=False):
     board = board.resolve(strict=True)
     output = output.resolve()
     roots = [board.parent, *(p.resolve(strict=True) for p in extra_roots)]
@@ -308,7 +382,7 @@ def pack(board, output, extra_roots=()):
     with tempfile.TemporaryDirectory(prefix=".build-", dir=output) as tmp:
         stage = Path(tmp) / "site"
         stage.mkdir()
-        bundle = Bundle(board, stage, roots)
+        bundle = Bundle(board, stage, roots, archive_paths=archive_paths)
         bundle.build()
         files = sorted(p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file())
         inventory_path = Path(tmp) / "allowlist.json"
@@ -327,7 +401,9 @@ def pack(board, output, extra_roots=()):
                 stage.rename(target)
         receipt = {"version": version, "entry": "index.html", "site": str(target),
                    "source_sha256": bundle.originals[board], "bytes": inv["totalBytes"], "files": inv["files"],
-                   "originals": [{"file": p.name, "sha256": bundle.originals[p], "entry": entry} for p, entry in bundle.docs.items()],
+                   "originals": list({r["entry"]: r for r in [
+                       *({"file": p.name, "sha256": bundle.originals[p], "entry": entry} for p, entry in bundle.docs.items()),
+                       *bundle.archived.values()]}.values()),
                    "local_references_marked": bundle.unavailable}
         bridge_injection.atomic_write_json(output / (version + ".receipt.json"), receipt)
         return receipt
@@ -338,6 +414,7 @@ if __name__ == "__main__":
     parser.add_argument("--board", type=Path, required=True, help="日常生成的原审阅 HTML")
     parser.add_argument("--out-dir", type=Path, required=True, help="私有成包根目录")
     parser.add_argument("--asset-root", type=Path, action="append", default=[], help="原工作台之外允许随包的资料目录")
+    parser.add_argument("--archive-paths", action="store_true", help="在本人私有包中显示同一归档行已随包原稿的本机绝对路径")
     args = parser.parse_args()
-    result = pack(args.board, args.out_dir, args.asset_root)
+    result = pack(args.board, args.out_dir, args.asset_root, archive_paths=args.archive_paths)
     print(json.dumps({k: result[k] for k in ("version", "site", "bytes", "local_references_marked")}, ensure_ascii=False))

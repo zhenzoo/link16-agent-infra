@@ -722,6 +722,17 @@ def _render_file(record) -> str:
     esc = html.escape
     preview = esc(record.get("preview") or "")
     frame = ""
+    topics = []
+    for topic in record.get("review_topics") or []:
+        title = html.escape(topic["title"])
+        anchor = topic.get("anchor", "")
+        ident = f' id="{anchor}"' if re.fullmatch(r"[a-z][a-z0-9-]*", anchor) else ""
+        rows = "".join(f'<div><dt>{esc(label)}</dt><dd>{esc(detail)}</dd></div>' for label, detail in topic.get("rows") or [])
+        decisions = f'<p class="review-decisions">{esc(topic["decisions"])}</p>' if topic.get("decisions") else ""
+        links = _links(topic, local=True)
+        sources = f'<div class="record-links">{links}</div>' if links else ""
+        topics.append(f'<details class="review-topic"{ident}><summary>{title}</summary>'
+                      f'<p>{esc(topic.get("fact") or "")}</p><dl>{rows}</dl>{decisions}{sources}</details>')
     original = _url(record.get("url"), local=True)
     section = record.get("preview_fragment") or ""
     if original and re.fullmatch(r"[a-zA-Z][\w-]{0,64}", section):
@@ -733,7 +744,7 @@ def _render_file(record) -> str:
     return (
         f'<article class="review-card"><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
         f'<span class="status-tag">{esc(record.get("status") or "待核")}</span></div>'
-        f'{frame or _preview_image(record)}<p class="preview-text">{preview}</p>'
+        f'{frame or _preview_image(record)}<p class="preview-text">{preview}</p>{"".join(topics)}'
         f'<div class="record-links">{_link("打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div>'
         f'{_assignment_line(record, show_missing=False)}</article>'
     )
@@ -838,18 +849,41 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
     )
 
 
-def _render_closed_items(records):
+def _render_closed_items(records, output_dir=None, *, collapsed=False):
     fields = ("at", "person", "topic", "result")
     entries = [item for item in records.values() if all(item.get(field) for field in fields)]
     if not entries:
         return ""
     rows = []
     for entry in sorted(entries, key=lambda item: item["at"], reverse=True):
-        cells = "".join(f"<td>{html.escape(entry[field])}</td>" for field in fields)
+        cells = "".join(f"<td>{html.escape(entry[field])}</td>" for field in fields[:-1])
+        result = html.escape(entry["result"])
+        links = []
+        for item in entry.get("links") or []:
+            link = _link(item.get("label") or "原件", item.get("url"), local=True)
+            version = str(item.get("mobile_version") or "")
+            sha = str(item.get("source_sha256") or "")
+            if link and re.fullmatch(r"[a-f0-9]{20}", version) and re.fullmatch(r"[a-f0-9]{64}", sha):
+                link = link.replace("<a ", f'<a data-archive-version="{version}" data-source-sha256="{sha}" ', 1)
+            if link:
+                links.append(link)
+        if links:
+            result += f'<div class="archive-links">{" ".join(links)}</div>'
+        local_ref = _url(entry.get("local_document"), local=True)
+        if output_dir and local_ref and not urlsplit(local_ref).scheme:
+            folder = Path(output_dir).resolve()
+            original = (folder / unquote(urlsplit(local_ref).path)).resolve()
+            if original.is_relative_to(folder) and original.is_file() and original.suffix.lower() in (".html", ".htm"):
+                result += (f'<details class="archive-path"><summary>本机路径</summary>'
+                           f'<code data-archive-document="{html.escape(local_ref)}">{html.escape(str(original))}</code></details>')
+        cells += f"<td>{result}</td>"
         rows.append(f"<tr>{cells}</tr>")
     headers = "".join(f'<th scope="col">{label}</th>' for label in ("时间", "姓名", "事项", "结论"))
-    return (f'<section id="closed" aria-labelledby="closed-heading"><h2 id="closed-heading">已闭环</h2>'
-            f'<table><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></section>')
+    table = f'<table><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+    if collapsed:
+        return (f'<section id="closed" aria-label="已归档"><details><summary>已归档 · {len(rows)} 项</summary>'
+                f'{table}</details></section>')
+    return f'<section id="closed" aria-labelledby="closed-heading"><h2 id="closed-heading">已闭环</h2>{table}</section>'
 
 
 def review_key(kind, record):
@@ -857,6 +891,8 @@ def review_key(kind, record):
     links = record.get("links") or [{}]
     topic = record.get("id") or record.get("title") or record.get("target_name") or ""
     identity = record.get("source_id") or record.get("url") or links[0].get("url") or ""
+    if kind == "sent_messages" and record.get("message_id"):
+        identity = record["message_id"]
     parts = [kind, topic, identity]
     if record.get("project"):
         parts.append(record["project"])
@@ -892,6 +928,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         elif not closed or review_key("drafts", draft) not in closed:
             input_drafts.append(draft)
     sent = [m for m in sent_records if m.get("verified") is True and m.get("message_id") and _url(m.get("receipt_url"))]
+    visible_sent = [m for m in sent if review_key("sent_messages", m) not in closed]
 
     def message_key(record):
         return (record.get("id"), record.get("target_name"), record.get("message"))
@@ -914,7 +951,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
             files.append(record)
     calendar_html = "".join(_render_calendar(event) for event in events)
     drafts_html = _render_drafts_section(drafts, coordinator=actions_pack.get("draft_coordinator"))
-    sent_html = _render_drafts_section(sent, state="sent")
+    sent_html = _render_drafts_section(visible_sent, state="sent")
     pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
     files_html = "".join(
@@ -939,7 +976,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
                  if not (r.get("kind") == "已约会议" and (r.get("id") or r.get("url")) in known)]
     calendar_label = "日程与待办" if "reminders" in actions_pack else "日程"
     calendar_count = f"{len(events)} 个日程 · {len(reminders)} 项待办" if "reminders" in actions_pack else f"{len(events)} 项"
-    categories = {"messages": ("消息", len(drafts) + len(sent)), "files": ("文件", len(file_records)),
+    categories = {"messages": ("消息", len(drafts) + len(visible_sent)), "files": ("文件", len(file_records)),
                   "calendar": (calendar_label, len(events) + len(reminders)), "approvals": ("审批", len(approvals))}
     sections = actions_pack.get("sections", list(categories))
     if (not isinstance(sections, list) or not sections or
@@ -961,7 +998,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 
     empty = '<p class="empty">本轮尚无收录项</p>'
     sections_html = {
-        "messages": (f'<h2>消息 <small>{len(drafts)} 待发 · {len(sent)} 已发</small></h2>',
+        "messages": (f'<h2>消息 <small>{len(drafts)} 待发 · {len(visible_sent)} 已发</small></h2>',
                      drafts_html + messages_actions + sent_html + pending_verification + fallback_html),
         "files": (f'<h2>文件 <small>{len(file_records)} 项</small></h2>', files_html + file_actions),
         "calendar": (f'<h2>{calendar_label} <small>{calendar_count}</small></h2>',
@@ -985,7 +1022,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 {_overview(actions_pack.get("fleet_overview") or [], actions_pack.get("fleet_history") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
   {main_html}
-  {_render_closed_items(actions_pack.get("closed_items") or {})}
+  {_render_closed_items(actions_pack.get("closed_items") or {}, output_dir, collapsed=actions_pack.get("archive_collapsed") is True)}
 </main></div>
 <script>
 const sections = [...document.querySelectorAll("main > .major")];

@@ -254,12 +254,33 @@ a.context-label { color: var(--action); }
   .ap-row { flex-wrap: wrap; }
 }
 #closed { margin-block: 2rem; scroll-margin-block-start: 1rem; }
+#closed > details > summary { font-size: 1.1rem; font-weight: 650; cursor: pointer; padding: .6rem 0; }
 #closed table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 #closed th, #closed td { border-bottom: 1px solid #d7dce0; padding: .6rem .4rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 #closed th:first-child { width: 25%; }
 #closed th:nth-child(2) { width: 16%; }
 #closed th:nth-child(3) { width: 27%; }
 #closed td:first-child { font-variant-numeric: tabular-nums; }
+.archive-links { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .35rem; }
+.archive-path { margin-top: .3rem; font-size: .84em; }
+.archive-path summary { cursor: pointer; }
+.archive-path code { user-select: all; }
+.review-topic { border-top: 1px solid #d7dce0; padding: .65rem 0; }
+.review-topic summary { cursor: pointer; font-weight: 650; }
+.review-topic p, .review-topic dl { margin: .65rem 0; }
+.review-topic dl > div { display: grid; grid-template-columns: minmax(9rem, 24%) 1fr; gap: .8rem; padding: .45rem 0; }
+.review-topic dt { font-weight: 600; }
+.review-topic dd { margin: 0; }
+.review-decisions { font-weight: 600; }
+@media (max-width: 600px) {
+  .review-topic dl > div { grid-template-columns: 1fr; gap: .15rem; }
+  #closed tr { display: grid; grid-template-columns: auto 1fr; gap: .2rem .6rem; padding: .6rem 0; border-bottom: 1px solid #d7dce0; }
+  #closed thead { position: absolute; clip-path: inset(50%); }
+  #closed td { border: 0; padding: 0; }
+  #closed td:nth-child(1), #closed td:nth-child(2) { color: #535b63; font-size: .85em; }
+  #closed td:nth-child(3), #closed td:nth-child(4) { grid-column: 1 / -1; }
+  #closed td:nth-child(3) { font-weight: 650; }
+}
 @media print {
   .workspace-shell { display: block; }
   .rail { position: static; height: auto; padding: 0; border: 0; background: none; }
