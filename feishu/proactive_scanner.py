@@ -838,6 +838,20 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
     )
 
 
+def _render_closed_items(records):
+    fields = ("at", "person", "topic", "result")
+    entries = [item for item in records.values() if all(item.get(field) for field in fields)]
+    if not entries:
+        return ""
+    rows = []
+    for entry in sorted(entries, key=lambda item: item["at"], reverse=True):
+        cells = "".join(f"<td>{html.escape(entry[field])}</td>" for field in fields)
+        rows.append(f"<tr>{cells}</tr>")
+    headers = "".join(f'<th scope="col">{label}</th>' for label in ("时间", "姓名", "事项", "结论"))
+    return (f'<section id="closed" aria-labelledby="closed-heading"><h2 id="closed-heading">已闭环</h2>'
+            f'<table><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></section>')
+
+
 def review_key(kind, record):
     """Suppress only the reviewed item in its original lane, never a person's future messages."""
     links = record.get("links") or [{}]
@@ -971,6 +985,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 {_overview(actions_pack.get("fleet_overview") or [], actions_pack.get("fleet_history") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
   {main_html}
+  {_render_closed_items(actions_pack.get("closed_items") or {})}
 </main></div>
 <script>
 const sections = [...document.querySelectorAll("main > .major")];

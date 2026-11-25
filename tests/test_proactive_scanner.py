@@ -9,6 +9,19 @@ import proactive_scanner as ps
 
 
 class ProactiveScannerTests(unittest.TestCase):
+    def test_archive_uses_dated_results_and_leaves_message_lanes_intact(self):
+        pack = {"sections": ["messages"], "owner_closed_keys": ["suppressed-draft"]}
+        page = ps.render_html({"bot": "demo"}, pack)
+        self.assertNotIn('id="closed"', page)
+        pack["closed_items"] = {
+            "a": {"at": "2026-11-24 12:00", "person": "甲", "topic": "日期", "result": "周五"},
+            "b": {"at": "2026-11-25 12:00", "person": "乙", "topic": "尺寸", "result": "<5 mm"},
+        }
+        page = ps.render_html({"bot": "demo"}, pack)
+        self.assertLess(page.index('<section id="messages"'), page.index('<section id="closed"'))
+        self.assertLess(page.index("&lt;5 mm"), page.index("周五"))
+        self.assertNotIn("suppressed-draft", page)
+
     def test_cross_project_lanes_owners_and_closed_keys(self):
         file_record = {"title": "Spec", "assignment": {"agent": "editor", "machine": "node"}}
         draft = {"id": "q", "target_name": "Editor", "message": "请核对", "source_id": "same"}
