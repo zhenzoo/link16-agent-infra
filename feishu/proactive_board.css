@@ -254,6 +254,13 @@ a.context-label { color: var(--action); }
   .control-row > *, .form-preview :is(dt,dd) { padding: .38rem .48rem; }
   .ap-row { flex-wrap: wrap; }
 }
+.timeline-project { border-top: 1px solid var(--line); }
+.timeline-project summary { padding: .8rem 0; font-weight: 650; cursor: pointer; }
+.timeline-project small, .timeline-project time, .timeline-project dt { color: var(--muted); }
+.timeline-project ol { list-style: none; margin: 0 0 1rem .4rem; padding: 0 0 0 1rem; border-left: 2px solid var(--edge); }
+.timeline-project li + li { margin-top: 1.4rem; }
+.timeline-project dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .25rem .8rem; margin: .45rem 0; }
+.timeline-project dd { margin: 0; overflow-wrap: anywhere; }
 #closed { margin-block: 2rem; scroll-margin-block-start: 1rem; }
 #closed table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 #closed th, #closed td { border-bottom: 1px solid #d7dce0; padding: .6rem .4rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }

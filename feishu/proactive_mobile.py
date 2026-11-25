@@ -123,13 +123,15 @@ class Bundle:
         source = self.board.read_bytes()
         board = BeautifulSoup(source.decode("utf-8-sig"), "html.parser")
         sections = [n.get("id") for n in board.select("main > section.major")]
+        if sections[-1:] == ["project-timeline"]:
+            sections.pop()
         allowed = {"messages", "files", "calendar", "approvals"}
         legacy = sections == ["messages", "files", "reminders", "calendar", "approvals"]
         if not legacy and (not sections or len(sections) != len(set(sections)) or not set(sections) <= allowed):
             raise ValueError("入口须为本次生成的 Link16 审阅工作台")
         self.docs[self.board] = "index.html"
         self.originals[self.board] = digest(source)
-        for a in board.select("article a[href]"):
+        for a in board.select("article a[href], #project-timeline a[href]"):
             dest = relative_target(self.board, a["href"])
             if dest in self.docs or not can_read(dest, self.roots, HTML):
                 continue
@@ -266,7 +268,8 @@ class Bundle:
                 continue
             dest = relative_target(path, ref)
             target = self.docs.get(dest)
-            if (path == self.board and a.get("data-review-text") == "true" and a.find_parent("article")
+            if (path == self.board and a.get("data-review-text") == "true"
+                    and (a.find_parent("article") or a.find_parent("section", id="project-timeline"))
                     and can_read(dest, self.roots, {".txt", ".md"})):
                 data = dest.read_bytes()
                 body = data.decode("utf-8-sig")

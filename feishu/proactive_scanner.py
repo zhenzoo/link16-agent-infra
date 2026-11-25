@@ -855,16 +855,39 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
 
 def _render_closed_items(records):
     fields = ("at", "person", "topic", "result")
-    entries = [item for item in records.values() if all(item.get(field) for field in fields)]
+    entries = [item for item in records.values() if isinstance(item, dict)
+               and all(isinstance(item.get(field), str) and item[field].strip() for field in fields)]
     if not entries:
-        return ""
+        return "", ""
+    projects = {}
     rows = []
     for entry in sorted(entries, key=lambda item: item["at"], reverse=True):
-        cells = "".join(f"<td>{html.escape(entry[field])}</td>" for field in fields)
-        rows.append(f"<tr>{cells}</tr>")
+        if "background" in entry or "evidence_url" in entry:
+            evidence_url = entry.get("evidence_url")
+            evidence = _link("查看凭据", evidence_url, local=True,
+                             text_file=str(evidence_url or "").lower().endswith((".txt", ".md")))
+            if all(isinstance(entry.get(k), str) and entry[k].strip() for k in ("project", "background")) and evidence:
+                details = "".join(f"<dt>{label}</dt><dd>{html.escape(entry[key])}</dd>"
+                                  for label, key in (("背景", "background"), ("问题", "topic"),
+                                                     ("答复人", "person"), ("结论", "result")))
+                projects.setdefault(entry["project"], []).append(
+                    f'<li><time>{html.escape(entry["at"])}</time><dl>{details}</dl>{evidence}</li>')
+        else:
+            cells = "".join(f"<td>{html.escape(entry[field])}</td>" for field in fields)
+            rows.append(f"<tr>{cells}</tr>")
+    timeline = ""
+    if projects:
+        groups = "".join(f'<details class="timeline-project"{" open" if i == 0 else ""}>'
+                         f'<summary>{html.escape(project)} <small>{len(nodes)} 项</small></summary>'
+                         f'<ol>{"".join(nodes)}</ol></details>'
+                         for i, (project, nodes) in enumerate(projects.items()))
+        timeline = f'<section class="major" id="project-timeline"><h2>项目时间线</h2>{groups}</section>'
+    if not rows:
+        return timeline, ""
     headers = "".join(f'<th scope="col">{label}</th>' for label in ("时间", "姓名", "事项", "结论"))
-    return (f'<section id="closed" aria-labelledby="closed-heading"><h2 id="closed-heading">已闭环</h2>'
-            f'<table><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></section>')
+    legacy = (f'<section id="closed" aria-labelledby="closed-heading"><h2 id="closed-heading">已闭环</h2>'
+              f'<table><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></section>')
+    return timeline, legacy
 
 
 def review_key(kind, record):
@@ -968,6 +991,9 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
         reminders_html = f'<div id="reminders">{items}</div>'
     routes = "".join(f'<a href="#{key}"><span class="nav-label">{categories[key][0]}</span>'
                      f'<span class="nav-count">{categories[key][1]}</span></a>' for key in sections)
+    timeline, archive = _render_closed_items(actions_pack.get("closed_items") or {})
+    if timeline:
+        routes += '<a href="#project-timeline"><span class="nav-label">项目时间线</span></a>'
     stylesheet = Path(__file__).with_name("proactive_board.css").read_text(encoding="utf-8")
     online_url = str(actions_pack.get("online_url") or "").strip()
     cloud = ""
@@ -1000,7 +1026,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
 {_overview(actions_pack.get("fleet_overview") or [], actions_pack.get("fleet_history") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
   {main_html}
-  {_render_closed_items(actions_pack.get("closed_items") or {})}
+  {timeline}{archive}
 </main></div>
 <script>
 const sections = [...document.querySelectorAll("main > .major")];

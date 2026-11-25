@@ -13,6 +13,21 @@ import proactive_mobile as mobile
 import proactive_scanner as scanner
 
 
+def test_timeline_keeps_verified_text_available_on_mobile(tmp_path):
+    page = tmp_path / "board.html"
+    evidence = tmp_path / "final.txt"
+    evidence.write_text("已验的成稿", encoding="utf8")
+    record = dict(project="文稿", at="2026-11-25 09:00", person="编辑", topic="原文",
+                  background="审阅样稿", result="已核对正文", evidence_url=evidence.name)
+    page.write_text(scanner.render_html({"bot": "desk"}, {"sections": ["files"], "closed_items": {"r1": record}}),
+                    encoding="utf8")
+    site = Path(mobile.pack(page, tmp_path / "mobile", [tmp_path])["site"])
+    soup = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser")
+    assert soup.select_one('nav a[href="#project-timeline"]')
+    target = site / soup.select_one("#project-timeline li a")["href"]
+    assert evidence.read_text("utf8") in target.read_text("utf8")
+
+
 @pytest.mark.parametrize("prefix,manifest_id,keys", [
     ("link16", "link16-asset-sources", ["preview", "detail"]),
     ("link16", "link16-accessory-sources", ["base", "shell", "cover", "port", "wheel", "handle"]),
