@@ -239,6 +239,26 @@ def test_signed_calendar_forward_is_replaced_with_navigation_to_native_event(tmp
     assert soup.select_one('article a[href="#calendar"]') and not soup.select('a[href*="token="]')
 
 
+def test_verified_message_pair_has_one_card_and_scopes_receipt_links(tmp_path):
+    url = "https://applink.feishu.cn/client/message/link/open?token=fixtureA"
+    pair = {"sent": 2, "expected": 2, "download_verified": True, "gif": url, "text": url + "B"}
+    task = {"_dispatch": True, "title": "动画与说明", "id": "sample", "delivery": pair}
+    source = tmp_path / "index.html"
+    pack = {"work_items": [task], "files": [{"title": "其他入口", "url": url}]}
+    for target, expected_links in [(url + "B", 2), (url + "&access_token=fixture", 1)]:
+        pair["text"] = target
+        source.write_text(scanner.render_html({"bot": "test"}, pack), "utf8")
+        site = Path(mobile.pack(source, tmp_path / "versions")["site"])
+        doc = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser")
+        assert len(doc.select("#messages #task-sample")) == 1
+        assert "动画与说明" not in doc.select_one("aside").get_text()
+        assert len(doc.select('#task-sample a[href*="token="]')) == expected_links
+        assert not doc.select('#files a[href*="token="]')
+    pair["download_verified"] = False
+    source.write_text(scanner.render_html({"bot": "test"}, pack), "utf8")
+    assert "动画与说明" in BeautifulSoup(source.read_text("utf8"), "html.parser").select_one("aside").get_text()
+
+
 def test_combined_schedule_keeps_nested_tasks_and_sidebar_roles(tmp_path):
     source = tmp_path / "board.html"
     source.write_text(

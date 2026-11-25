@@ -930,7 +930,14 @@ def review_key(kind, record):
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
-def _task_messages(tasks):
+def _received_pair(task):
+    delivery = task.get("delivery") or {}
+    return (delivery.get("sent") == delivery.get("expected") == 2
+            and delivery.get("download_verified") is True
+            and _url(delivery.get("gif")) and _url(delivery.get("text")))
+
+
+def _task_messages(tasks, *, delivered=False):
     rows = []
     for task in tasks:
         owner = html.escape(str(task.get("owner") or "待分派"))
@@ -939,11 +946,19 @@ def _task_messages(tasks):
         track = html.escape(str(task.get("track") or ""))
         result = html.escape(str(task.get("result") or ""))
         link = _link("查看回执", task.get("url"), local=True)
-        rows.append(f'<article class="dispatch-row" data-item><div><small>{track}</small>'
+        anchor = ""
+        if delivered:
+            pair = task["delivery"]
+            link = _link("新版 GIF · 原聊", pair["gif"]) + " " + _link("订正配文 · 原聊", pair["text"])
+            link = link.replace('<a ', '<a data-message-permalink ', 2)
+            if re.fullmatch(r"[\w-]+", str(task.get("id") or "")):
+                anchor = f' id="task-{html.escape(str(task["id"]))}"'
+        rows.append(f'<article class="dispatch-row"{anchor} data-item><div><small>{track}</small>'
                     f'<h4>{title}</h4><p>{result}</p>{link}</div>'
                     f'<div class="dispatch-owner"><b>{owner}</b><span>{status}</span></div></article>')
+    heading = "已送达" if delivered else "待跟进"
     return (f'<section class="dispatch-work" data-expect-count="{len(tasks)}" data-expect-of="派单与跟进记录">'
-            '<h3>待跟进</h3>' + "".join(rows) + '</section>') if rows else ""
+            f'<h3>{heading}</h3>' + "".join(rows) + '</section>') if rows else ""
 
 
 def _project_timeline(config, closed, tasks, output_dir):
@@ -1085,7 +1100,9 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     calendar_html = "".join(_render_calendar(event) for event in events)
     tasks = actions_pack.get("work_items") or []
     pending_tasks = [t for t in tasks if t.get("closed") is not True and t.get("title") and not t.get("_dispatch")]
-    assignments = [t for t in tasks if t.get("closed") is not True and t.get("title") and t.get("_dispatch")]
+    assigned_tasks = [t for t in tasks if t.get("closed") is not True and t.get("title") and t.get("_dispatch")]
+    delivered_tasks = [t for t in assigned_tasks if _received_pair(t)]
+    assignments = [t for t in assigned_tasks if not _received_pair(t)]
     assigned_html = ""
     if assignments:
         assigned_html = (f'<details class="dispatch-overview"><summary>本轮派单 · {len(assignments)} 项</summary>'
@@ -1102,7 +1119,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
             drafts_html += (f'<article class="review-card pending-preview" data-work-item="{esc(t["id"])}">'
                             f'<div class="record-head"><h3>{title}</h3><span class="status-tag">{esc(t.get("status") or "待审")}</span></div>'
                             f'{visual}<p>{esc(t.get("result") or "")}</p><div class="record-links">{link}</div></article>')
-    sent_html = _render_drafts_section(visible_sent, state="sent")
+    sent_html = _task_messages(delivered_tasks, delivered=True) + _render_drafts_section(visible_sent, state="sent")
     pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
     files_html = "".join(
@@ -1127,7 +1144,8 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
                  if not (r.get("kind") == "已约会议" and (r.get("id") or r.get("url")) in known)]
     calendar_label = "日程与待办" if "reminders" in actions_pack else "日程"
     calendar_count = f"{len(events)} 个日程 · {len(reminders)} 项待办" if "reminders" in actions_pack else f"{len(events)} 项"
-    categories = {"messages": ("消息", len(drafts) + len(visible_sent) + len(pending_tasks)), "files": ("文件", len(file_records)),
+    sent_count = len(visible_sent) + len(delivered_tasks)
+    categories = {"messages": ("消息", len(drafts) + sent_count + len(pending_tasks)), "files": ("文件", len(file_records)),
                   "calendar": (calendar_label, len(events) + len(reminders)), "approvals": ("审批", len(approvals))}
     sections = actions_pack.get("sections", list(categories))
     if (not isinstance(sections, list) or not sections or
@@ -1152,7 +1170,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     timeline_jump = '<a class="timeline-jump" href="#closed">查看项目时间线 ↓</a>' if archive else ''
     if not archive:
         archive = _render_closed_items(actions_pack.get("closed_items") or {}, output_dir, collapsed=actions_pack.get("archive_collapsed") is True)
-    message_count = f'{len(drafts)} 待发 · {len(visible_sent)} 已发'
+    message_count = f'{len(drafts)} 待发 · {sent_count} 已发'
     if pending_tasks:
         message_count = f'{len(pending_tasks)} 待跟进 · ' + message_count
     sections_html = {

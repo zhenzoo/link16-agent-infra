@@ -345,12 +345,20 @@ class Bundle:
         # Explicitly named content and same-version navigation only. Do not traverse secondary documents.
         for a in soup.select("a[href]"):
             ref = str(a["href"]).strip()
+            message_receipt = a.has_attr("data-message-permalink") and path == self.board
+            a.attrs.pop("data-message-permalink", None)
             if ref.startswith("#"):
                 continue
             if remote_web(ref):
                 parsed = urlsplit(ref)
                 params = parse_qsl(parsed.query) + parse_qsl(parsed.fragment)
-                if any(ACCESS_PARAMETER.search(k) for k, _ in params):
+                # Feishu's copied single-message permalink uses a message selector named
+                # token. Preserve only explicitly selected receipts on its canonical route.
+                message_receipt = (message_receipt and parsed.netloc == "applink.feishu.cn"
+                                   and parsed.path == "/client/message/link/open" and not parsed.fragment
+                                   and len(params) == 1 and params[0][0] == "token"
+                                   and re.fullmatch(r"[A-Za-z0-9_+/=-]{8,256}", params[0][1]))
+                if any(ACCESS_PARAMETER.search(k) for k, _ in params) and not message_receipt:
                     if (path == self.board and soup.select_one("main > section#calendar") and
                             parsed.hostname == "www.feishu.cn" and parsed.path == "/calendar/share"):
                         a.attrs = {"href": "#calendar", "title": "从本页日程进入飞书原事件"}
