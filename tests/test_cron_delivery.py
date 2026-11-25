@@ -530,3 +530,15 @@ def test_folded_composer_only_confirms_rendering_for_the_first_enter(draft, visi
     prompt = '6中\n文😀尾'
     assert delivery.initial_paste_visible(screen, prompt) == visible
     assert not delivery.draft_matches(screen, prompt)
+
+
+def test_folded_report_with_wrapped_visible_prefix_and_suffix():
+    hidden = '长' * 1615
+    prompt = '2号报告\n\n六张动作方位图 位于原页\nhttps://example.test/path' + hidden + '尾部原消息'
+    draft = '2号报告\n \n  六张动作方\n  位图 位于原页\n  https://example.\n  test/path[Pasted Content 1615 chars]尾部\n  原消息'
+    screen = f'› {draft}\n \n  tab to queue message'
+    assert delivery.initial_paste_visible(screen, prompt)
+    assert not delivery.initial_paste_visible(screen.replace('1615', '1614'), prompt)
+    assert not delivery.initial_paste_visible(screen.replace('位图 位', '位图位'), prompt)
+    assert not delivery.initial_paste_visible(screen.replace('尾部', '头部'), prompt)
+    assert not delivery.draft_matches(screen, prompt)

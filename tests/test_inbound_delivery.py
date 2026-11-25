@@ -338,11 +338,31 @@ def test_alarm_arrives_while_recovery_thread_is_still_reading(scene):
 
 
 def test_initial_codex_injection_never_uses_screen_or_busy_label_as_receipt(scene, monkeypatch):
-    fb.read_screen.return_value = '› Ask Codex to do anything\n\nstatus'
+    fb.read_screen.side_effect = ['› Ask Codex to do anything\n\nstatus', *[f'› {scene.marker}\n\nstatus'] * 2]
     monkeypatch.setattr(fb.time, 'sleep', lambda _: None)
     assert fb._inject_unlocked('pty', 'ws', scene.marker, runtime_bot=scene.bot)
     assert [call.args[0] for call in fb.wmux.call_args_list] == ['paste', 'enter']
     assert not delivery.accepted(scene.inbox.get('om_m'))
+
+
+@pytest.mark.parametrize('footer,expected', [('tab to queue message', 'tab'), ('status', None)])
+def test_first_submission_on_busy_codex_only_uses_advertised_queue(scene, monkeypatch, footer, expected):
+    fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    draft = f'› {scene.marker}\n\n  {footer}'
+    fb.read_screen.side_effect = ['› Ask Codex to do anything\n\nstatus', draft, draft]
+    monkeypatch.setattr(fb.time, 'sleep', lambda _: None)
+    if expected:
+        assert fb._inject_unlocked('pty', 'ws', scene.marker, runtime_bot=scene.bot,
+                                   on_queued=lambda: scene.inbox.handoff_observe('om_m', '已按排队键', queue_key=True))
+        assert fb.wmux.call_args.args == ('key', 'pty', 'tab', '--allow-ws', 'ws')
+        delayed(scene)
+        asyncio.run(fb.settle_inbound_handoffs(scene.bot, scene.inbox, scene.channel))
+        assert '已按排队键' in fb.card_send.call_args.args[2]
+        assert not delivery.accepted(scene.inbox.get('om_m'))
+    else:
+        with pytest.raises(RuntimeError, match='排队入口'):
+            fb._inject_unlocked('pty', 'ws', scene.marker, runtime_bot=scene.bot)
+        assert [call.args[0] for call in fb.wmux.call_args_list] == ['paste']
 
 
 def test_enter_rejection_alerts_immediately_once_and_keeps_late_receipt(scene):

@@ -1962,7 +1962,7 @@ def _kimi_active_turn(runtime_bot):
     )
 
 
-def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_native_receipt=False):
+def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_native_receipt=False, on_queued=None):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
@@ -1993,24 +1993,35 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
     chunks = max(1, -(-len(marker) // 100))
     time.sleep(min(INJECT_SETTLE_CAP, INJECT_SETTLE_BASE + INJECT_SETTLE_PER_CHUNK * chunks))
-    if is_codex and win32_input and len(marker) > 1000:
-        # ConPTY can take several seconds after the write to render a large paste.
-        # Enter during this interval becomes a newline in the still-growing paste.
-        # We still own the initial injection lock. Recovery requires an exact draft.
-        deadline = time.monotonic() + 30
-        while not cron_delivery.initial_paste_visible(read_screen(pty, None), marker):
+    if is_codex:
+        # A busy TUI uses Enter to steer its current turn. Only its advertised
+        # queue key preserves that turn. The paste lock still belongs to us here.
+        deadline = time.monotonic() + (30 if win32_input and len(marker) > 1000 else 3)
+        while True:
+            screen = read_screen(pty, None)
+            if cron_delivery.initial_paste_visible(screen, marker):
+                break
             if time.monotonic() >= deadline:
-                raise RuntimeError('长稿粘贴后未能核实完整输入框，尚未按回车；原稿已保留')
+                raise RuntimeError('输入框尚未显示本次原稿，已保留消息等待核对')
             time.sleep(0.25)
+        state = bridge_activity.read_activity(STATE_DIR, runtime_bot).get('state')
+        screen = read_screen(pty, None)
+        if (state not in {'idle', 'active'} or cron_delivery.is_compacting(screen)
+                or not cron_delivery.initial_paste_visible(screen, marker)):
+            raise RuntimeError('会话或草稿正在变化，原稿已保留')
+        if cron_delivery.queue_tab_available(screen):
+            wmux("key", pty, "tab", *allow)
+            if on_queued:
+                on_queued()
+            return True
+        if state != 'idle':
+            raise RuntimeError('Codex 正忙，暂未显示排队入口，消息已保留')
+        wmux("enter", pty, *allow)
+        return True
     if steer_kimi:
         wmux("send", pty, "\x1b[115;5u", *allow)
     else:
         wmux("enter", pty, *allow)
-    if is_codex:
-        # This is only a successful transport call. Inbox + the native hook
-        # decide reception; recovery may retry Enter on an idle exact draft or
-        # the explicitly advertised queue Tab on an active exact draft.
-        return True
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
     tries = 15 if is_kimi else INJECT_VERIFY_TRIES
     for i in range(tries):
@@ -2043,13 +2054,13 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
-def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None, require_native_receipt=False):
+def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None, require_native_receipt=False, on_queued=None):
     """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
     with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
         if idle_bot and bridge_activity.read_activity(STATE_DIR, idle_bot).get("state") != "idle":
             raise RuntimeError("会话已不空闲；一次性 effort 任务未注入，请等当前回合结束后重发")
         return _inject_unlocked(pty, workspace_id, marker, runtime_bot=runtime_bot,
-                                require_native_receipt=require_native_receipt)
+                                require_native_receipt=require_native_receipt, on_queued=on_queued)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
@@ -2538,8 +2549,10 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                 reason = ''
             if cron_delivery.accepted(inbox.get(row['id'])):
                 continue  # A late receipt wins over the timeout notification.
+            status = ('桥已按排队键提交这条消息，仍在等 Codex 确认读到。' if context.get('queue_key_at') else
+                      f'飞书桥已收到并保存这条消息。{reason}还在核实 Codex 有没有收到。')
             result = await card_send(channel, context['chat_id'],
-                                    f'⏳ 飞书桥已收到并保存这条消息。{reason}还在核实 Codex 有没有收到。'
+                                    f'⏳ {status}'
                                     '你不用重发，确认后会通知你。\n'
                                     f'消息 ID：{row["id"]}', bot['name'])
             if result != 'failed':
@@ -2559,9 +2572,13 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                 continue
             if not compacting and context.get('notice') == 'pending':
                 continue
-            result = await card_send(channel, context['chat_id'],
-                                    '⏳ Codex 正在整理当前对话。桥已保存你的消息，你不用重发。' if compacting else
-                                    '⏳ 桥已收到你的消息，正在等 Codex 确认。你不用重发。', bot['name'])
+            if compacting:
+                status = 'Codex 正在整理当前对话。桥已保存你的消息，你不用重发。'
+            elif context.get('queue_key_at'):
+                status = '桥已按排队键提交这条消息。Codex 读到后会在原消息上点 👍，你不用重发。'
+            else:
+                status = '桥已收到你的消息，正在等 Codex 确认。你不用重发。'
+            result = await card_send(channel, context['chat_id'], f'⏳ {status}', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'compacting' if compacting else 'pending')
 
@@ -3983,7 +4000,8 @@ def _run_bot(bot_name=None):
                     durable_inbox.boundary(msg.id, prompt=marker, session=target_session, handoff=handoff)
                     inject_ok = await asyncio.to_thread(
                         _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None,
-                        runtime_bot=bot)
+                        runtime_bot=bot, on_queued=lambda: durable_inbox.handoff_observe(
+                            msg.id, '已按排队键，等 Codex 读到这条消息', queue_key=True))
                     if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
                         blog(bot["name"], f"[{tid}] 输入框校验未通过；继续核对原生接收回执")
                     # Durable inbox owns delivery now. Absence of outbox output

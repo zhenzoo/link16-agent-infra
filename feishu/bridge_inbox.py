@@ -301,7 +301,7 @@ class Inbox:
                 db.execute('UPDATE messages SET handoff=? WHERE id=?',
                            (json.dumps(context, ensure_ascii=False), mid))
 
-    def handoff_observe(self, mid, reason):
+    def handoff_observe(self, mid, reason, *, queue_key=False):
         """Persist the latest non-receipt explanation, not a delivery verdict."""
         with self.connect() as db:
             row = db.execute('SELECT handoff,state FROM messages WHERE id=?', (mid,)).fetchone()
@@ -309,8 +309,10 @@ class Inbox:
                     'queued', 'submitting', 'awaiting_confirmation', 'uncertain'):
                 return
             context = json.loads(row['handoff'])
-            if context.get('waiting_reason') != reason:
+            if context.get('waiting_reason') != reason or (queue_key and not context.get('queue_key_at')):
                 context.update(waiting_reason=reason, checked_at=time.time())
+                if queue_key:
+                    context['queue_key_at'] = context['checked_at']
                 db.execute('UPDATE messages SET handoff=? WHERE id=?',
                            (json.dumps(context, ensure_ascii=False), mid))
 

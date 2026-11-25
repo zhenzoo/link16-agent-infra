@@ -59,8 +59,28 @@ def draft_matches(screen, prompt):
     return bool(draft) and compact(draft) == compact(prompt)
 
 
+def _visible_edge_lengths(source, rendered):
+    """Return the possible original length of an anchored, terminal-wrapped edge."""
+    if not rendered:
+        return (0, 0)
+    pos = 0
+    for line in rendered.split('\n'):
+        literal = line.strip()
+        if not literal:
+            continue
+        while pos < len(source) and source[pos].isspace():
+            pos += 1
+        if not source.startswith(literal, pos):
+            return None
+        pos += len(literal)
+    end = pos
+    while end < len(source) and source[end].isspace():
+        end += 1
+    return pos, end
+
+
 def initial_paste_visible(screen, prompt):
-    """Readiness for the first Enter after our own paste, never proof for replay."""
+    """Readiness immediately after our own paste under its lock, never proof of receipt or replay."""
     if draft_matches(screen, prompt):
         return True
     draft = _draft(screen) or ''
@@ -69,8 +89,15 @@ def initial_paste_visible(screen, prompt):
         return False
     prefix, count, suffix = folded.groups()
     text = prompt.replace('\r\n', '\n').replace('\r', '\n')
-    return (text.startswith(prefix) and text.endswith(suffix)
-            and len(prefix) + int(count) + len(suffix) == len(text))
+    # The TUI counts original characters inside the fold. Read-screen adds
+    # line wraps and margins outside it, which are absent from that count.
+    count = int(count)
+    if not 0 < count <= len(text):
+        return False
+    left = _visible_edge_lengths(text, prefix)
+    right = _visible_edge_lengths(text[::-1], suffix[::-1])
+    visible = len(text) - count
+    return bool(left and right and left[0] + right[0] <= visible <= left[1] + right[1])
 
 
 def empty_composer(screen):
@@ -178,14 +205,16 @@ def confirm_inbound(fb, bot, row):
             return waiting('原生会话状态不可确认，未补交')
         if not draft_matches(screen, marker):
             return waiting('无法从画面核实完整原草稿，未重贴或补按键')
-        if state == 'active' and not queue_tab_available(screen):
+        queue = queue_tab_available(screen)
+        if state == 'active' and not queue:
             return waiting('完整原稿仍在输入框，但当前回合未提供排队入口')
         if inbox.handoff_attempt(row['id'], limit=MAX_SUBMITS, delay=RETRY_DELAY_SEC):
-            if state == 'active':
+            if queue:
                 fb.wmux('key', pty, 'tab', '--allow-ws', ws)
+                inbox.handoff_observe(row['id'], '已按排队键，等 Codex 读到这条消息', queue_key=True)
             else:
                 fb.wmux('enter', pty, '--allow-ws', ws)
-            inbox.handoff_observe(row['id'], '已补交完整原草稿，仍等待原生接收回执')
+                inbox.handoff_observe(row['id'], '已补交完整原草稿，仍等待原生接收回执')
         else:
             saved = json.loads(inbox.get(row['id'])['handoff'])
             if saved.get('submits', 0) >= MAX_SUBMITS:
@@ -263,7 +292,7 @@ def confirm(fb, bot, job, row, *, timeout=WAIT_SEC):
                     if accepted(inbox.get(row['id'])):
                         return True
                     if inbox.scheduled_attempt(row['id']):
-                        if state == 'active':
+                        if queue_tab_available(screen):
                             fb.wmux('key', pty, 'tab', '--allow-ws', ws)
                         else:
                             fb.wmux('enter', pty, '--allow-ws', ws)
