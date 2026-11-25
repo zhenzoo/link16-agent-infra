@@ -1116,13 +1116,15 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     calendar_html = "".join(_render_calendar(event) for event in events)
     tasks = actions_pack.get("work_items") or []
     pending_tasks = [t for t in tasks if t.get("closed") is not True and t.get("title") and not t.get("_dispatch")]
-    assigned_tasks = [t for t in tasks if t.get("closed") is not True and t.get("title") and t.get("_dispatch")]
+    assigned_tasks = [t for t in tasks if t.get("closed") is not True and t.get("title") and t.get("_dispatch")
+                      and not (t.get("_owner_entry") or {}).get("remove_from_pending")]
     delivered_tasks = [t for t in assigned_tasks if _received_pair(t)]
     assignments = [t for t in assigned_tasks if not _received_pair(t)]
     assigned_html = ""
-    if assignments:
-        assigned_html = (f'<details class="dispatch-overview"><summary>本轮派单 · {len(assignments)} 项</summary>'
-                         + _task_messages(assignments) + '</details>')
+    sidebar_tasks = [t for t in assignments if not (t.get("_owner_entry") or {}).get("hide_assignment")]
+    if sidebar_tasks:
+        assigned_html = (f'<details class="dispatch-overview"><summary>本轮派单 · {len(sidebar_tasks)} 项</summary>'
+                         + _task_messages(sidebar_tasks) + '</details>')
     drafts_html = _render_drafts_section(drafts, coordinator=actions_pack.get("draft_coordinator"))
     drafts_html += _task_messages(pending_tasks)
     for t in assignments:
@@ -1135,7 +1137,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
             link = _link(entry.get("preview_label") or "打开同版预览", t["preview_url"], local=True)
             drafts_html += (f'<article class="review-card pending-preview" data-work-item="{esc(t["id"])}">'
                             f'<div class="record-head"><h3>{title}</h3><span class="status-tag">{esc(t.get("status") or "待审")}</span></div>'
-                            f'{_owner_entry(t)}{visual}<p>{esc(t.get("result") or "")}</p><div class="record-links">{link}</div></article>')
+                            f'{_owner_entry(t)}{visual}<p>{esc(entry.get("summary") or t.get("result") or "")}</p><div class="record-links">{link}</div></article>')
     sent_html = _task_messages(delivered_tasks, delivered=True) + _render_drafts_section(visible_sent, state="sent")
     pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]

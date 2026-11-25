@@ -290,6 +290,20 @@ def test_original_entry_precedes_preview_on_the_same_existing_card(tmp_path):
     assert not dom.select('a[href*="staff-only"]')
 
 
+def test_reopened_item_has_one_current_card_and_keeps_other_pending_work():
+    current = {"id":"spec", "title":"需求复核", "_dispatch":True, "preview_url":"preview.html"}
+    old = {"id":"superseded", "title":"旧稿派单", "_dispatch":True}
+    waiting = {"id":"sample", "title":"样件测量"}
+    entries = {"spec":{"hide_assignment":True,"summary":"按原件修订"},
+               "superseded":{"remove_from_pending":True}}
+    page = scanner.render_html({"bot":"test"},{"work_items":[current,old,waiting],"owner_entries":entries})
+    dom = BeautifulSoup(page,"html.parser")
+    assert len(dom.select('#messages [data-work-item="spec"]'))==1
+    assert not dom.select(".dispatch-overview")
+    assert "按原件修订" in dom.select_one('#messages [data-work-item="spec"]').get_text()
+    assert "样件测量" in dom.select_one("#messages").get_text() and "旧稿派单" not in page
+
+
 def test_combined_schedule_keeps_nested_tasks_and_sidebar_roles(tmp_path):
     source = tmp_path / "board.html"
     source.write_text(
