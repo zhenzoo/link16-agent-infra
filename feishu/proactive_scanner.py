@@ -360,7 +360,13 @@ def _link(label, value, *, local=False) -> str:
 
 
 def _links(record, *, local=False) -> str:
-    return " ".join(_link(lk.get("label") or "原件", lk.get("url"), local=local) for lk in record.get("links", []))
+    links = []
+    for item in record.get("links") or []:
+        link = _link(item.get("label") or "原件", item.get("url"), local=local)
+        if link and local and item.get("catalog") == "entries":
+            link = link.replace("<a ", '<a data-review-catalog="entries" ', 1)
+        links.append(link)
+    return " ".join(links)
 
 
 def _priority(record) -> str:
@@ -718,7 +724,19 @@ def _preview_image(record) -> str:
     return f'<img class="preview-image" loading="lazy" src="{html.escape(image)}" alt="{html.escape(record.get("title") or "原件")}预览">'
 
 
-def _render_file(record) -> str:
+def _local_document_path(record, output_dir):
+    ref = _url(record.get("local_document"), local=True)
+    if not output_dir or not ref or urlsplit(ref).scheme:
+        return ""
+    folder = Path(output_dir).resolve()
+    original = (folder / unquote(urlsplit(ref).path)).resolve()
+    if not (original.is_relative_to(folder) and original.is_file() and original.suffix.lower() in (".html", ".htm")):
+        return ""
+    return (f'<details class="archive-path"><summary>本机路径</summary>'
+            f'<code data-archive-document="{html.escape(ref)}">{html.escape(str(original))}</code></details>')
+
+
+def _render_file(record, output_dir=None) -> str:
     esc = html.escape
     preview = esc(record.get("preview") or "")
     frame = ""
@@ -732,7 +750,8 @@ def _render_file(record) -> str:
         links = _links(topic, local=True)
         sources = f'<div class="record-links">{links}</div>' if links else ""
         topics.append(f'<details class="review-topic"{ident}><summary>{title}</summary>'
-                      f'<p>{esc(topic.get("fact") or "")}</p><dl>{rows}</dl>{decisions}{sources}</details>')
+                      f'<p>{esc(topic.get("fact") or "")}</p><dl>{rows}</dl>{decisions}{sources}'
+                      f'{_local_document_path(topic, output_dir)}</details>')
     original = _url(record.get("url"), local=True)
     section = record.get("preview_fragment") or ""
     if original and re.fullmatch(r"[a-zA-Z][\w-]{0,64}", section):
@@ -869,13 +888,7 @@ def _render_closed_items(records, output_dir=None, *, collapsed=False):
                 links.append(link)
         if links:
             result += f'<div class="archive-links">{" ".join(links)}</div>'
-        local_ref = _url(entry.get("local_document"), local=True)
-        if output_dir and local_ref and not urlsplit(local_ref).scheme:
-            folder = Path(output_dir).resolve()
-            original = (folder / unquote(urlsplit(local_ref).path)).resolve()
-            if original.is_relative_to(folder) and original.is_file() and original.suffix.lower() in (".html", ".htm"):
-                result += (f'<details class="archive-path"><summary>本机路径</summary>'
-                           f'<code data-archive-document="{html.escape(local_ref)}">{html.escape(str(original))}</code></details>')
+        result += _local_document_path(entry, output_dir)
         cells += f"<td>{result}</td>"
         rows.append(f"<tr>{cells}</tr>")
     headers = "".join(f'<th scope="col">{label}</th>' for label in ("时间", "姓名", "事项", "结论"))
@@ -955,7 +968,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
     files_html = "".join(
-        _render_sheet_previews([record]) if is_sheet else _render_file(record)
+        _render_sheet_previews([record]) if is_sheet else _render_file(record, output_dir)
         for record, is_sheet in sorted(file_records, key=lambda entry: _priority_rank(entry[0]))
     )
     approvals_html = _render_approvals_section(approvals, output_dir)

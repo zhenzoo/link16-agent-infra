@@ -98,6 +98,28 @@ def test_selected_wav_is_playable_and_truncation_is_rejected(tmp_path):
         mobile.pack(board_path, tmp_path / "versions")
 
 
+def test_selected_catalog_rewrites_known_entries_without_copying_the_library(tmp_path):
+    import json
+
+    for name in ("selected", "other"):
+        (tmp_path / (name + ".html")).write_text("<html><title>" + name + "</title></html>", encoding="utf8")
+    spec = {"local": "selected.html#one", "previewURL": "selected.html#one", "online": "https://example.com/spec"}
+    book = {"local": "other.html", "previewURL": "other.html", "online": "https://example.com/?token=private"}
+    (tmp_path / "menu.html").write_text('<html><script>const DATA=' + json.dumps({"entries":[spec,book]}) + ';</script></html>', encoding="utf8")
+    pack = {"files": [{"url":"selected.html", "links":[{"catalog":"entries","url":"menu.html"}]}]}
+    home = tmp_path / "board.html"
+    home.write_text(scanner.render_html({"bot":"example"}, pack), encoding="utf8")
+    result = mobile.pack(home, tmp_path / "out")
+    files = {r["file"]:r["entry"] for r in result["originals"]}
+    assert "other.html" not in files
+    menu = tmp_path / "out" / result["version"] / files["menu.html"]
+    js = BeautifulSoup(menu.read_bytes(), "html.parser").script.get_text()
+    data, _ = json.JSONDecoder().raw_decode(js.removeprefix("const DATA="))
+    chosen, other = data["entries"]
+    assert chosen["local"] == chosen["previewURL"] == Path(files["selected.html"]).name + "#one"
+    assert other["local"] == other["previewURL"] == other["online"] == ""
+
+
 def test_file_only_review_stays_file_only_on_mobile(tmp_path):
     board_path = tmp_path / "board.html"
     board_path.write_text(scanner.render_html({"bot": "demo"}, {

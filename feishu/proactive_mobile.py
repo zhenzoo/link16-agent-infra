@@ -89,6 +89,7 @@ class Bundle:
         self.audio = {}
         self.originals = {}
         self.frame_ids = {}
+        self.catalogs = set()
         self.archived = {}
         self.current_archive_exports = {}
         self.archive_versions = {}
@@ -174,6 +175,8 @@ class Bundle:
             if a.has_attr("data-archive-version"):
                 continue
             dest = relative_target(self.board, a["href"])
+            if a.attrs.pop("data-review-catalog", "") == "entries" and can_read(dest, self.roots, HTML):
+                self.catalogs.add(dest)
             if dest in self.docs or not can_read(dest, self.roots, HTML):
                 continue
             source = dest.read_bytes()
@@ -197,13 +200,13 @@ class Bundle:
             # Machine paths are private by default. The owner can opt in to the path
             # of an archived original that is itself selected in the very same row.
             archive_labels = []
-            for code in soup.select("#closed code[data-archive-document]") if path == self.board else []:
+            for code in soup.select("#closed code[data-archive-document], .review-topic code[data-archive-document]") if path == self.board else []:
                 ref = code.attrs.pop("data-archive-document")
                 selected = relative_target(path, ref)
-                row = code.find_parent("tr")
+                row = code.find_parent("tr") or code.find_parent("details", class_="review-topic")
                 code.clear()
                 if (self.archive_paths and (selected in self.originals or any(p == selected for p, _ in self.archived)) and selected != self.board and row
-                        and any(relative_target(path, a["href"]) == selected for a in row.select(".archive-links a[href]"))):
+                        and any(relative_target(path, a["href"]) == selected for a in row.select(".archive-links a[href], .record-links a[href]"))):
                     archive_labels.append((code, selected))
                 else:
                     code.parent.decompose()
@@ -311,6 +314,9 @@ class Bundle:
             offset = 1 if container.contents and isinstance(container.contents[0], Doctype) else 0
             container.insert(offset, soup.new_tag("head"))
         policy = POLICY
+        if path in self.catalogs:
+            self.format_catalog(soup, path, export)
+            policy += "; frame-src 'self'"
         if self.copy_accessory_sources(soup, path):
             policy += "; frame-src 'self'"
         if path == self.board:
@@ -397,6 +403,44 @@ class Bundle:
             resources = (url.strip("'\" ") for url in re.findall(r"url\(([^)]*)\)", css, re.I))
             if re.search(r"@import\b", css, re.I) or any(not url.startswith(("data:", "#")) for url in resources):
                 raise ValueError("选中原件采用尚未纳入的样式资源：" + path.name)
+
+    def format_catalog(self, soup, path, export):
+        """An explicitly selected dynamic directory may navigate only already selected local originals."""
+        candidates = [s for s in soup.find_all("script") if (s.string or "").lstrip().startswith("const DATA=")]
+        if len(candidates) != 1:
+            raise ValueError("目录中找不到唯一的条目数据：" + path.name)
+        script = candidates[0]
+        text = script.string
+        start = text.index("const DATA=") + len("const DATA=")
+        data, end = json.JSONDecoder().raw_decode(text[start:])
+        if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+            raise ValueError("目录格式与选择的入口不同：" + path.name)
+        for entry in data["entries"]:
+            online = entry.get("online", "")
+            if online:
+                parsed = urlsplit(online)
+                params = parse_qsl(parsed.query) + parse_qsl(parsed.fragment)
+                # An original catalog can carry public HTTP manufacturer sheets as external links.
+                public_host = parsed.scheme in ("https", "http") and remote_web(parsed._replace(scheme="https").geturl())
+                if not public_host or any(ACCESS_PARAMETER.search(k) for k, _ in params):
+                    entry["online"] = ""
+            for key in ("local", "preview", "previewURL", "rawURL"):
+                ref = entry.get(key)
+                if not ref:
+                    continue
+                dest = relative_target(path, ref)
+                target = self.docs.get(dest) or self.current_archive_exports.get(dest)
+                fragment = urlsplit(ref).fragment
+                entry[key] = (posixpath.relpath(target, posixpath.dirname(export)) +
+                              ("#" + fragment if fragment else "")) if target else ""
+            entry["missingLocal"] = not bool(entry.get("local"))
+            if not entry.get("previewURL"):
+                entry["previewMode"] = ""
+                entry["previewNote"] = "请从该项在线入口或本机目录查看。"
+            else:
+                entry["previewNote"] = "本次工作台随包原件"
+        data["online"] = ""  # The mirrored directory itself is the current edition.
+        script.string = text[:start] + json.dumps(data, ensure_ascii=False).replace("</", "<\\/") + text[start + end:]
 
 
 def pack(board, output, extra_roots=(), *, archive_paths=False):
