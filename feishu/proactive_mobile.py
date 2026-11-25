@@ -12,6 +12,7 @@ import json
 import posixpath
 import re
 import tempfile
+import wave
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
@@ -85,9 +86,11 @@ class Bundle:
         self.docs = {}
         self.images = {}
         self.videos = {}
+        self.audio = {}
         self.originals = {}
         self.frame_ids = {}
         self.archived = {}
+        self.current_archive_exports = {}
         self.archive_versions = {}
         self.unavailable = 0
         self.directory = stage / "assets"
@@ -121,6 +124,20 @@ class Bundle:
             self.videos[path] = asset
         return self.videos[path]
 
+    def wav(self, path):
+        if path not in self.audio:
+            if path.stat().st_size > 100_000_000:
+                raise ValueError("单个音频超过妙搭 100 MB 限制：" + path.name)
+            with wave.open(str(path), "rb") as stream:
+                frames = stream.getnframes()
+                if not frames or len(stream.readframes(frames)) != frames * stream.getnchannels() * stream.getsampwidth():
+                    raise ValueError("WAV 样本数据不完整：" + path.name)
+            data = path.read_bytes()
+            entry = "assets/audio-" + digest(data) + ".wav"
+            (self.stage / entry).write_bytes(data)
+            self.audio[path] = entry
+        return self.audio[path]
+
     def build(self):
         source = self.board.read_bytes()
         board = BeautifulSoup(source.decode("utf-8-sig"), "html.parser")
@@ -151,6 +168,8 @@ class Bundle:
             export = original["entry"]
             self.copy_archived(directory, inventory, export)
             self.archived[path, sha] = original
+            if path not in self.current_archive_exports and digest(path.read_bytes()) == sha:
+                self.current_archive_exports[path] = export
         for a in board.select("article a[href], #closed .archive-links a[href]"):
             if a.has_attr("data-archive-version"):
                 continue
@@ -326,6 +345,8 @@ class Bundle:
             archived = self.archived.get((dest, a.attrs.pop("data-source-sha256", ""))) if path == self.board else None
             a.attrs.pop("data-archive-version", None)
             target = archived["entry"] if archived else self.docs.get(dest)
+            if not target:
+                target = self.current_archive_exports.get(dest)
             if not target and can_read(dest, self.roots, IMAGES):
                 target = self.image(dest)
             if not target and can_read(dest, self.roots, VIDEO):
@@ -343,11 +364,12 @@ class Bundle:
         for tag in soup.select("video, [src], [srcset], [poster], link[href]"):
             if tag.name == "iframe":
                 continue  # The card, URL, and owner-reviewed document contract are checked together above.
-            if tag.name == "video":
+            if tag.name in ("audio", "video"):
                 tag.attrs.pop("autoplay", None)
                 tag["preload"] = "none"
                 tag["controls"] = ""
-                tag["playsinline"] = ""
+                if tag.name == "video":
+                    tag["playsinline"] = ""
             tag.attrs.pop("srcset", None)
             for attr in ("src", "poster", "href"):
                 ref = tag.get(attr)
@@ -361,6 +383,9 @@ class Bundle:
                 elif (attr == "src" and (tag.name == "video" or (tag.name == "source" and tag.parent.name == "video"))
                       and can_read(dest, self.roots, VIDEO)):
                     tag[attr] = posixpath.relpath(self.video(dest), posixpath.dirname(export) or ".")
+                elif (attr == "src" and (tag.name == "audio" or (tag.name == "source" and tag.parent.name == "audio"))
+                      and can_read(dest, self.roots, {".wav"})):
+                    tag[attr] = posixpath.relpath(self.wav(dest), posixpath.dirname(export) or ".")
                 else:
                     raise ValueError("选中原件有尚未纳入的显示依赖：" + path.name + " / " + tag.name)
         for value in soup.find_all(string=True):

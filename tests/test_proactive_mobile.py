@@ -77,6 +77,27 @@ def test_owner_archive_keeps_accepted_original_after_local_revision_changes(tmp_
         mobile.pack(board_path, output)
 
 
+def test_selected_wav_is_playable_and_truncation_is_rejected(tmp_path):
+    import wave
+
+    sound = tmp_path / "scene.wav"
+    with wave.open(str(sound), "wb") as stream:
+        stream.setparams((1, 2, 8000, 0, "NONE", ""))
+        stream.writeframes(bytes(160))
+    source = tmp_path / "sound.html"
+    source.write_text('<html><body><audio src="scene.wav" autoplay></audio></body></html>', encoding="utf8")
+    board_path = tmp_path / "board.html"
+    board(board_path, "sound.html")
+    first = mobile.pack(board_path, tmp_path / "versions")
+    target, = (tmp_path / "versions" / first["version"] / "assets").glob("doc-*.html")
+    audio = BeautifulSoup(target.read_text("utf8"), "html.parser").audio
+    assert audio["preload"] == "none" and "controls" in audio.attrs and "autoplay" not in audio.attrs
+    assert (target.parent / audio["src"]).read_bytes() == sound.read_bytes()
+    sound.write_bytes(sound.read_bytes()[:-8])
+    with pytest.raises(ValueError, match="WAV"):
+        mobile.pack(board_path, tmp_path / "versions")
+
+
 def test_file_only_review_stays_file_only_on_mobile(tmp_path):
     board_path = tmp_path / "board.html"
     board_path.write_text(scanner.render_html({"bot": "demo"}, {
