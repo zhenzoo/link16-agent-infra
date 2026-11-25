@@ -272,6 +272,24 @@ def test_selected_card_csv_preserves_bytes_and_rejects_broken_rows(tmp_path):
         mobile.pack(source, tmp_path / "versions")
 
 
+def test_original_entry_precedes_preview_on_the_same_existing_card(tmp_path):
+    entry = "https://example.com/original"
+    source = tmp_path / "board.html"
+    original = tmp_path / "preview.html"
+    original.write_text("<p>原表预览</p>","utf8")
+    item = {"id":"sample", "title":"原表", "url":"preview.html"}
+    config = {"links":[{"label":"飞书原稿","url":entry}],"preview_label":"演示预览"}
+    task = {"id":"sample", "title":"原表","_dispatch":True,"url":"https://example.com/staff-only"}
+    source.write_text(scanner.render_html({"bot":"test"},{"files":[item],"work_items":[task],
+                                                          "owner_entries":{"sample":config}}),"utf8")
+    site = Path(mobile.pack(source,tmp_path/"versions")["site"])
+    dom = BeautifulSoup((site/"index.html").read_text("utf8"),"html.parser")
+    cards = dom.select('#files article[data-work-item="sample"]')
+    assert len(cards)==1 and cards[0].select_one("a[href]")["href"]==entry
+    assert "演示预览" in cards[0].select_one(".record-links a").get_text()
+    assert not dom.select('a[href*="staff-only"]')
+
+
 def test_combined_schedule_keeps_nested_tasks_and_sidebar_roles(tmp_path):
     source = tmp_path / "board.html"
     source.write_text(

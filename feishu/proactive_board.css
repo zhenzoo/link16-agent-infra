@@ -118,6 +118,9 @@ a.context-label { color: var(--action); }
 .foot-actions, .record-links, .head-right { display: flex; flex-wrap: wrap; align-items: baseline; gap: .32rem 1.1rem; }
 .link-pill, .ap-btn { display: inline-block; color: var(--action); font-size: .91rem; font-weight: 550; text-decoration: underline; overflow-wrap: anywhere; }
 .link-pill:hover, .ap-btn:hover { color: #123f2c; text-decoration-thickness: 2px; }
+.owner-entry { display: flex; flex-wrap: wrap; align-items: baseline; gap: .3rem 1rem; margin: .4rem 0; }
+.owner-entry .link-pill { font-weight: 650; }
+.owner-entry small { color: var(--muted); }
 .copy-btn { padding: .22rem .7rem; border: 1px solid var(--edge); border-radius: .3rem; background: var(--paper); color: var(--secondary); font-size: .88rem; }
 .copy-btn:hover, .copy-btn.copied { color: var(--action); border-color: #83998c; }
 

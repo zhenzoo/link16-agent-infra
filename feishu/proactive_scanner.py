@@ -369,6 +369,16 @@ def _links(record, *, local=False) -> str:
     return " ".join(links)
 
 
+def _owner_entry(record):
+    entry = record.get("_owner_entry") or {}
+    links = _links(entry)
+    if not links:
+        return ""
+    note = html.escape(entry.get("note") or "")
+    note_html = f'<small>{note}</small>' if note else ""
+    return f'<div class="owner-entry">{links}{note_html}</div>'
+
+
 def _priority(record) -> str:
     value = record.get("priority")
     if value in ("今天", "明天", "两天内", "本周", "下周"):
@@ -781,8 +791,8 @@ def _render_file(record, output_dir=None) -> str:
     return (
         f'<article class="review-card"{item_id}><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
         f'<span class="status-tag">{esc(record.get("status") or "待核")}</span></div>'
-        f'{frame or _preview_image(record)}<p class="preview-text">{preview}</p>{"".join(topics)}'
-        f'<div class="record-links">{_link("打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div>'
+        f'{_owner_entry(record)}{frame or _preview_image(record)}<p class="preview-text">{preview}</p>{"".join(topics)}'
+        f'<div class="record-links">{_link((record.get("_owner_entry") or {}).get("preview_label") or "打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div>'
         f'{_assignment_line(record, show_missing=False)}</article>'
     )
 
@@ -945,7 +955,7 @@ def _task_messages(tasks, *, delivered=False):
         title = html.escape(str(task["title"]))
         track = html.escape(str(task.get("track") or ""))
         result = html.escape(str(task.get("result") or ""))
-        link = _link("查看回执", task.get("url"), local=True)
+        link = _owner_entry(task) or _link("查看回执", task.get("url"), local=True)
         anchor = ""
         if delivered:
             pair = task["delivery"]
@@ -1047,6 +1057,12 @@ def _project_timeline(config, closed, tasks, output_dir):
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     esc = html.escape
     actions_pack = actions_pack or {}
+    owner_entries = actions_pack.get("owner_entries") or {}
+    if owner_entries:
+        actions_pack = dict(actions_pack)
+        for key in ("files", "work_items"):
+            actions_pack[key] = [dict(item, _owner_entry=owner_entries.get(item.get("id"), {}))
+                                 for item in actions_pack.get(key) or []]
     if actions_pack.get("project"):
         # A project's display label must not change legacy closed-item keys.
         default_project = actions_pack["project"]
@@ -1111,14 +1127,15 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     drafts_html += _task_messages(pending_tasks)
     for t in assignments:
         if t.get("preview_url") and t.get("publish_file") is not True:
-            title = esc(t["title"])
+            entry = t.get("_owner_entry") or {}
+            title = esc(entry.get("title") or t["title"])
             visual = _preview_image({"title":t["title"], "image":t.get("image") or t["preview_url"]})
             if not visual:
                 visual = _preview_document(t["title"],t["preview_url"])
-            link = _link("打开同版预览", t["preview_url"], local=True)
+            link = _link(entry.get("preview_label") or "打开同版预览", t["preview_url"], local=True)
             drafts_html += (f'<article class="review-card pending-preview" data-work-item="{esc(t["id"])}">'
                             f'<div class="record-head"><h3>{title}</h3><span class="status-tag">{esc(t.get("status") or "待审")}</span></div>'
-                            f'{visual}<p>{esc(t.get("result") or "")}</p><div class="record-links">{link}</div></article>')
+                            f'{_owner_entry(t)}{visual}<p>{esc(t.get("result") or "")}</p><div class="record-links">{link}</div></article>')
     sent_html = _task_messages(delivered_tasks, delivered=True) + _render_drafts_section(visible_sent, state="sent")
     pending_verification = _render_drafts_section([m for m in sent_records if m not in sent], state="unverified")
     file_records = [(r, False) for r in files] + [(r, True) for r in sheet_previews]
