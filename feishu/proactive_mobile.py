@@ -239,7 +239,7 @@ class Bundle:
             for code in soup.select("#closed code[data-archive-document], .review-topic code[data-archive-document]") if path == self.board else []:
                 ref = code.attrs.pop("data-archive-document")
                 selected = relative_target(path, ref)
-                row = code.find_parent("tr") or code.find_parent("details", class_="review-topic")
+                row = code.find_parent("tr") or code.find_parent(["article","details"], class_="review-topic")
                 code.clear()
                 if (self.archive_paths and (selected in self.originals or any(p == selected for p, _ in self.archived)) and selected != self.board and row
                         and any(relative_target(path, a["href"]) == selected for a in row.select(".archive-links a[href], .record-links a[href]"))):

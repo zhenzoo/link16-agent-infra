@@ -908,6 +908,8 @@ def _render_closed_items(records, output_dir=None, *, collapsed=False):
         links = []
         for item in entry.get("links") or []:
             link = _link(item.get("label") or "原件", item.get("url"), local=True)
+            if item.get("verified_message_permalink") and link:
+                link = link.replace("<a ", "<a data-message-permalink ", 1)
             version = str(item.get("mobile_version") or "")
             sha = str(item.get("source_sha256") or "")
             if link and re.fullmatch(r"[a-f0-9]{20}", version) and re.fullmatch(r"[a-f0-9]{64}", sha):
@@ -989,6 +991,7 @@ def _project_timeline(config, closed, tasks, output_dir, *, daily=False):
     def track_of(entry):
         return entry.get("track") or ""
     usable = []
+    seen = set()
     for entry in entries:
         kind = entry.get("kind")
         title = entry.get("title") or entry.get("topic")
@@ -996,6 +999,10 @@ def _project_timeline(config, closed, tasks, output_dir, *, daily=False):
             continue
         if kind == "file" and entry.get("edition") or kind == "meeting" and all(
                 entry.get(f) for f in ("background", "question", "result")) and (entry.get("person") or entry.get("respondent")):
+            key = entry.get("archive_key") or entry.get("closed_id") or entry.get("id") or (track_of(entry), title, entry.get("source_id") or str(entry.get("source")))
+            if key in seen:
+                continue
+            seen.add(key)
             usable.append(entry)
             for milestone in entry.get("milestones") or []:
                 if (milestone.get("owner") and milestone.get("title") and
@@ -1024,8 +1031,25 @@ def _project_timeline(config, closed, tasks, output_dir, *, daily=False):
         for url in dict.fromkeys(str(entry.get(k) or "") for k in ("preview_url", "url", "source")):
             if url.startswith(("https://", "http://")):
                 links.append(_link("原件" if is_file else "来源", url))
+        receipt=(config.get("source_message_urls") or {}).get(entry.get("source_mid") or entry.get("source_id"))
+        if receipt and not any(html.escape(receipt,quote=True) in a for a in links):
+            links.append(_link("原消息",receipt))
         key = str(entry.get("id") or "")
         ident = f' id="node-{key}" data-record-id="{key}"' if re.fullmatch(r"[A-Za-z0-9_-]+", key) else ""
+        if daily:
+            title = str(entry.get("display_title") or entry.get("title") or entry["topic"])
+            group = str(entry.get("track") or "").partition(" · ")[0]
+            title = re.sub(r"^"+re.escape(group)+r"(?=\s|[·：:｜-])\s*[·：:｜-]?\s*", "", title)
+            title = title.replace("初版", "V1.0").replace("第一版", "V1.0")
+            edition = str(entry.get("edition") or "").replace("初版","V1.0").replace("第一版","V1.0")
+            caption = esc(title)+(f'<small class="node-version">{esc(edition)}</small>' if edition and edition not in title else "")
+            if is_file:
+                content = f'<div><dt>版本</dt><dd>{esc(edition)}</dd></div>'
+            return (f'<article class="timeline-node review-topic" data-kind="{entry["kind"]}"{ident}>'
+                    f'<button type="button" data-event-open>{caption}</button>'
+                    f'<dialog class="timeline-dialog"><header><b>{esc(title)}</b><button type="button" data-event-close>关闭</button></header>'
+                    f'<dl>{content}</dl><div class="archive-links">{" ".join(dict.fromkeys(links))}</div>'
+                    f'{_local_document_path(entry, output_dir)}</dialog></article>')
         return (f'<details class="timeline-node review-topic" data-kind="{entry["kind"]}"{ident}>'
                 f'<summary><span>{"文件" if is_file else "会议"}</span>{esc(str(entry.get("title") or entry["topic"]))}</summary>'
                 f'<dl>{content}</dl><div class="archive-links">{" ".join(links)}</div>'
@@ -1058,16 +1082,13 @@ def _project_timeline(config, closed, tasks, output_dir, *, daily=False):
 
 
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
-    from proactive_business import render, migrate_registered_rows
+    from proactive_business import render, migrate_registered_rows, approval_table
     pack = actions_pack or {}
     timeline = _project_timeline(pack.get("project_timeline"), pack.get("closed_items") or {}, pack.get("work_items") or [], output_dir, daily=True)
-    decisions = "".join('<article class="owner-decision"><h3>'+html.escape(a["title"])+'</h3><ol type="A">'
-                        + "".join("<li>"+html.escape(choice)+"</li>" for choice in a["choices"])
-                        +"</ol>"+_link(a.get("source_label") or "原文",a.get("source"))+"</article>"
-                        for a in pack.get("owner_decisions") or [] if not a.get("decided"))
-    return render(payload.get("owner_name") or payload.get("bot") or "本人", dt.datetime.now(TZ_SHANGHAI),
+    owner=payload.get("owner_name") or payload.get("bot") or "本人"
+    return render(owner, dt.datetime.now(TZ_SHANGHAI),
                   pack["business_rows"] if "business_rows" in pack else migrate_registered_rows(pack),
-                  decisions + _render_approvals_section(pack.get("approvals") or [], output_dir),
+                  approval_table(pack, owner),
                   timeline, pack.get("online_url") or "")
 
 

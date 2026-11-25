@@ -135,6 +135,35 @@ def business_rows(rows):
     return ''.join(out)
 
 
+def approval_table(pack, owner):
+    rows=[]
+    for item in (pack.get("approvals") or []):
+        if not item.get("url"):
+            continue
+        saved=item.get("native_draft") or {}
+        if saved.get("reopened") and saved.get("permalink_verified"):
+            target, label=saved["permalink"],"打开本人草稿"
+        elif saved.get("reopened"):
+            target, label=item["url"],"打开原表 → 草稿箱 → "+saved["saved_at"]
+        else:
+            target, label=item["url"],"原表" if item.get("local_draft") else "打开原审批单"
+        rows.append((item["title"],(item.get("assignment") or {}).get("handler") or owner,
+                     link(label,target),""))
+    for item in pack.get("owner_decisions") or []:
+        if item.get("decided") or not item.get("source"):
+            continue
+        options="".join(f'<li>{text(s,160)}</li>' for s in item.get("choices") or [])
+        rows.append((item["title"],item.get("owner") or owner,
+                     link(item.get("source_label") or "原方案",item["source"])+
+                     (f'<ol type="A">{options}</ol>' if options else ""), ""))
+    headings="<thead><tr><th>负责人</th><th>业务</th><th>结果</th><th>附件</th></tr></thead>"
+    body="".join(f'<tr data-approval-row><td class="identity"><b>{i}</b><small>{text(who)}</small></td>'
+                 f'<th scope="row">{text(name,180)}</th><td class="outcomes">{outcome}</td><td class="attachments">{media}</td></tr>'
+                 for i,(name,who,outcome,media) in enumerate(rows,1))
+    return ('<div class="business-scroll" tabindex="0"><table class="business"><colgroup><col class="reg"><col class="name">'
+            '<col class="result"><col class="media"></colgroup>'+headings+'<tbody>'+body+'</tbody></table></div>')
+
+
 def migrate_registered_rows(pack):
     """Give existing authorized originals and active assignments a business row on first render."""
     grouped = {}
@@ -195,7 +224,7 @@ def day_timeline(months, tracks, entries, schedule, render_node):
         days.extend(date(year, month, i).isoformat() for i in range(1,count+1))
         cursor=date(year+int(month==12),month%12+1,1)
     pos = {d:i+2 for i,d in enumerate(days)}
-    month_heads = ''.join(f'<div class="month-name" style="grid-column:{s}/span {n}">{m[:4]} 年 {int(m[5:])} 月</div>' for m,(s,n) in spans.items())
+    month_heads = ''.join(f'<div class="month-name" style="grid-column:{s}/span {n}"><span>{m[:4]} 年 {int(m[5:])} 月</span></div>' for m,(s,n) in spans.items())
     heads = ''.join(f'<span class="day" data-day="{d}" style="grid-column:{p}">{int(d[-2:])}</span>' for d,p in pos.items())
     groups = {}
     for track in tracks:
@@ -226,7 +255,7 @@ def day_timeline(months, tracks, entries, schedule, render_node):
                     body = f'<div class="schedule-chip">{text(e["title"],180)} · {text(e["owner"],180)}</div>'
                 else:
                     body = render_node(e)
-                visual_span = min(max(4,count) if precision=="day" else count,len(days)+2-start)
+                visual_span = count
                 end = start + visual_span
                 level = next((i for i,ranges in enumerate(occupied) if all(end<=lo or start>=hi for lo,hi in ranges)),len(occupied))
                 if level==len(occupied):
@@ -234,9 +263,11 @@ def day_timeline(months, tracks, entries, schedule, render_node):
                 occupied[level].append((start,end))
                 style = f'grid-column:{start}/span {count};grid-row:{level+1};--label-days:{visual_span}'
                 items.append(f'<div class="day-node" data-precision="{precision}" data-when="{escape(start_day if precision!="month" else m)}" style="{style}">{body}</div>')
-        groups.setdefault(group,[]).append(f'<div class="track-row" data-track="{escape(track)}" data-item><b class="track-label" style="grid-row:1/span {max(1,len(occupied))}">{escape(track)}</b>{"".join(items)}</div>')
+        label=track.partition(" · ")[2] or track
+        group_label=f'<small>{escape(group)}</small>' if group not in groups and label!=group else ""
+        groups.setdefault(group,[]).append(f'<div class="track-row" data-track="{escape(track)}" data-item><b class="track-label" style="grid-row:1/span {max(1,len(occupied))}">{group_label}{escape(label)}</b>{"".join(items)}</div>')
     group_html = ''.join(f'<div class="track-group" data-track-group="{escape(g)}" style="--track-color:var(--lane-{i%6})">{"".join(r)}</div>' for i,(g,r) in enumerate(groups.items()))
-    return (f'<section id="closed" class="major project-timeline"><h2>项目时间线</h2><div class="timeline-scroll" tabindex="0" aria-label="按日横向滚动">'
+    return (f'<section id="closed" class="major project-timeline"><div class="timeline-heading"><h2>项目时间线</h2><div><button type="button" data-week="-1">上一周</button> <button type="button" data-week="1">下一周</button></div></div><div class="timeline-scroll" tabindex="0" aria-label="按日横向滚动">'
             f'<div class="timeline-grid" data-expect-count="{len(tracks)}" data-expect-of="项目轨" style="--day-count:{len(days)}"><div class="month-head"><b class="track-label">项目线</b>{month_heads}</div>'
             f'<div class="day-head"><b class="track-label">日期</b>{heads}</div>{group_html}</div></div></section>')
 
@@ -249,4 +280,4 @@ def render(owner, timestamp, rows, approvals, timeline, online_url):
 <nav><a href="#business">业务审批</a><a href="#closed">项目时间线</a></nav></aside><main>{cloud}
 <section class="major" id="business"><h2>业务</h2><div class="business-scroll" tabindex="0"><table class="business"><colgroup><col class="reg"><col class="name"><col class="result"><col class="media"></colgroup><thead><tr><th>执行者</th><th>业务</th><th>结果</th><th>附件</th></tr></thead><tbody data-expect-count="{len(rows)}" data-expect-of="登记业务">{business_rows(rows)}</tbody></table></div></section>
 <section class="major" id="approvals"><h2>审批</h2>{approvals}</section>{timeline or '<section class="major project-timeline" id="closed"><h2>项目时间线</h2></section>'}</main></div>
-<script>document.addEventListener('click',e=>{{const a=e.target.closest('a[data-flyout-target]');if(a){{const d=document.getElementById(a.dataset.flyoutTarget);if(d){{e.preventDefault();d.showModal();}}}}if(e.target.closest('[data-close-proposal]'))e.target.closest('dialog').close();}});const timeline=document.querySelector('.timeline-scroll');if(timeline){{const dated=timeline.querySelector('.day-node[data-precision="day"]');if(dated)timeline.scrollLeft=Math.max(0,dated.offsetLeft-timeline.querySelector('.track-label').offsetWidth-60);}}</script></body></html>"""
+<script>const timeline=document.querySelector('.timeline-scroll');document.addEventListener('click',e=>{{const a=e.target.closest('a[data-flyout-target]');if(a){{const d=document.getElementById(a.dataset.flyoutTarget);if(d){{e.preventDefault();d.showModal();}}}}if(e.target.closest('[data-event-open]'))e.target.closest('article').querySelector('dialog').showModal();if(e.target.closest('[data-close-proposal],[data-event-close]'))e.target.closest('dialog').close();const turn=e.target.closest('[data-week]');if(turn&&timeline)timeline.scrollBy({{left:Math.round(timeline.querySelector('.day').getBoundingClientRect().width*7)*Number(turn.dataset.week)}});}});if(timeline){{const today='{timestamp:%Y-%m-%d}', days=[...timeline.querySelectorAll('.day')],selected=days.find(d=>d.dataset.day===today)||days.find(d=>timeline.querySelector('[data-when="'+d.dataset.day+'"]'));if(selected){{const day=new Date(selected.dataset.day+'T12:00:00Z').getUTCDay();timeline.scrollLeft=Math.max(0,(days.indexOf(selected)-(day+6)%7)*selected.getBoundingClientRect().width);}}}}</script></body></html>"""

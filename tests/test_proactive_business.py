@@ -72,6 +72,36 @@ def test_default_migrates_permitted_legacy_file_into_original_business_table():
     assert page.select_one("#business-a a")["href"]=="https://example.org/doc"
 
 
+def test_approval_table_distinguishes_verified_draft_from_form_and_instance():
+    original="https://example.org/form"
+    direct="https://example.org/draft/specific"
+    data={"approvals":[
+        {"title":"已发起实例","url":"https://example.org/instance","form_fields":[{"secret":"既有字段值"}]},
+        {"title":"草稿箱定位","local_draft":True,"url":original,"native_draft":{"reopened":True,"saved_at":"11月1日 10:15"}},
+        {"title":"独立草稿","local_draft":True,"url":original,"native_draft":{"reopened":True,"permalink_verified":True,"permalink":direct}},
+        {"title":"尚未存稿","local_draft":True,"url":original,"native_draft":{"reopened":False,"permalink":direct}}]}
+    page=BeautifulSoup(business.approval_table(data,"办理人"),"html.parser")
+    rows=page.select("tr[data-approval-row]")
+    assert all(len(r.find_all(["th","td"],recursive=False))==4 for r in rows)
+    assert [r.a["href"] for r in rows]==["https://example.org/instance",original,direct,original]
+    assert "草稿箱" in rows[1].a.text and "10:15" in rows[1].a.text
+    assert rows[3].a.text=="原表" and "既有字段值" not in page.text
+
+
+def test_daily_archive_deduplicates_receipt_and_stacks_two_titles_on_the_same_date():
+    track="Model · 产品"
+    entry={"id":"first","kind":"file","closed":True,"track":track,"title":"Model · 交付甲","edition":"初版",
+           "date":"2028-02-29","source_id":"source","links":[{"label":"原件","url":"https://example.org/a"}]}
+    second={**entry,"id":"second","title":"交付乙","edition":"r9"}
+    page=BeautifulSoup(scanner._project_timeline({"months":[],"tracks":[track],"nodes":[entry,second]},
+                                                  {},[entry],None,daily=True),"html.parser")
+    nodes=page.select(".day-node")
+    assert len(nodes)==2 and all(c["data-when"]=="2028-02-29" for c in nodes)
+    assert "grid-row:1;" in nodes[0]["style"] and "grid-row:2;" in nodes[1]["style"]
+    assert nodes[0].button.get_text(strip=True)=="交付甲V1.0" and nodes[1].button.get_text(strip=True)=="交付乙r9"
+    assert all(n.select_one("dialog .archive-links a[href]") and not n.select_one("summary") for n in nodes)
+
+
 def test_mobile_build_rejects_changed_status_even_after_render(tmp_path):
     source=tmp_path/"board.html"
     page=scanner.render_html({"bot":"example"},{"business_rows":[{"id":"x","name":"业务",
