@@ -99,6 +99,21 @@ class RoutedResultCards(FakeCards):
 
 
 class BridgeOutboxTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bad_full_table_stays_private_and_next_answer_can_be_delivered(self):
+        cards, state, blocked = FakeCards(), fresh_state(), []
+        bad = {"kind": "answer", "text": "|配件|单件预估成本|\n|---|---|\n|三脚架|¥840–1,165|"}
+        good = {"kind": "answer", "text": "|对比项|DJI|\n|---|---|\n|单品标价（元）|599|"}
+        await bridge_outbox.drain_batch(
+            [bad, good], state=state, new_card=cards.new_card, edit_card=cards.edit_card,
+            send_plain=cards.send_plain, clock=lambda: 100, coalesce_sec=0, force_flush=True,
+            on_text_rejected=lambda record, issues: blocked.append((record, issues)),
+        )
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0][0]["text"], bad["text"])
+        self.assertTrue(blocked[0][1][0].startswith("TABLE.VALUE"))
+        self.assertEqual(len(cards.new), 1)
+        self.assertNotIn("840", cards.new[0][0])
+        self.assertIn("599", cards.new[0][0])
     async def test_failed_native_turn_edits_working_card_to_stopped_and_deduplicates(self):
         import codex_app_server_worker as worker
         acc, state, cards = MilestoneAccumulator(), fresh_state(), FakeCards()

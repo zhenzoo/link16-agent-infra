@@ -2796,6 +2796,17 @@ async def _deliver_peer_result(bot_name, text, route, purpose, fragment):
         receipt(bot_name, {**base, "kind": "peer_result", "delivered": False,
                            "err": "missing_request_mid"})
         return {"ok": False, "message_id": None}
+    if len(text or "") < 64 and (fragment or {}).get("total", 1) == 1:
+        from proactive_dispatch import is_work_ack, RESULT_ONLY
+        if is_work_ack(text or ""):
+            import bridge_inbound
+            original = next((r for r in reversed(bridge_inbound.read_records(STATE_DIR, bot_name))
+                             if r.get("message_id") == route["mid"]), {})
+            prompt = original.get("text") or original.get("raw_text") or ""
+            if RESULT_ONLY in prompt and re.search(r"(?m)^\s*\[Proactive [\w.-]+\]", prompt):
+                receipt(bot_name, {**base, "kind": "a2a_ack_local", "delivered": False,
+                                   "suppressed": True, "reason": "result_only_dispatch"})
+                return {"ok": True, "message_id": None, "suppressed": True}
     try:
         from send_feishu_msg import send_agent_message
         sent = await asyncio.to_thread(
@@ -4782,6 +4793,11 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             print(f"❌ 图片不存在: {image}", file=sys.stderr); sys.exit(2)
     if doc and not Path(doc).is_file():
         print(f"❌ 文档不存在: {doc}", file=sys.stderr); sys.exit(2)
+    from user_text import require_text
+    require_text(text)
+    if doc and Path(doc).suffix.lower() in {".md", ".markdown", ".txt", ".html", ".htm"}:
+        fmt = "html" if Path(doc).suffix.lower() in {".html", ".htm"} else "markdown"
+        require_text(Path(doc).read_text(encoding="utf-8-sig"), fmt)
     doc_stats = _doc_source_stats(doc)
     # 文档授权对象 = 显式 open_id 目标 > owner > 会话 open_id（bot 建的文档必授权否则 owner 打不开）
     grant_oid = None

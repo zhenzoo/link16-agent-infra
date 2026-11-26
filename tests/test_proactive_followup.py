@@ -211,6 +211,23 @@ def test_external_wait_suppresses_only_reviewed_receipt_and_wakes_for_new_eviden
     assert "awaiting_input" not in tracker.read()["tasks"]["sample"]
 
 
+def test_eighty_checks_on_same_receipt_create_one_notice_and_new_receipt_rearms(tmp_path, monkeypatch):
+    tracker = follow.Followup("desk", tmp_path)
+    tracker.register([record()])
+    observation = dict(state="执行者原单已回", request_mid="om_a", reply_mid="receipt1")
+    monkeypatch.setattr(tracker, "observe", lambda row: dict(observation))
+    now = 1700000000
+    monkeypatch.setattr(follow.time, "time", lambda: now)
+    notices = []
+    for _ in range(80):
+        notices.extend(tracker.tick(wake=False)["attention"])
+        now += 901
+    assert notices == ["sample"]
+    assert len(tracker.read()["alarms"]) == 1
+    observation["reply_mid"] = "receipt2"
+    assert tracker.tick(wake=False)["attention"] == ["sample"]
+
+
 def test_matching_request_cannot_be_rebound_or_closed_by_unrelated_reply(tmp_path, monkeypatch):
     tracker = follow.Followup("sender", tmp_path)
     tracker.register([record()])

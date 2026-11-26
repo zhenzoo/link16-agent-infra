@@ -212,6 +212,17 @@ def test_read_only_receipt_for_addressed_handoff_separates_original_from_subsequ
     assert lookup(peer_open_id="ou_sdk")["state"] == "未找到匹配派单"
 
 
+def test_bad_draft_does_not_reserve_task_or_call_sender(local, monkeypatch):
+    _, _, root = local
+    prompt = root / "prompt.txt"
+    prompt.write_text("|配件|成本（元）|\n|---|---|\n|三脚架|840–1165|", encoding="utf-8")
+    monkeypatch.setattr(d.subprocess, "run", lambda *_a, **_k: pytest.fail("rejected content cannot be sent"))
+    result = d.send("manager", "worker", "stable", "long", prompt, [], item="tripod")
+    assert result["ready"] is False and "TABLE.VALUE" in result["reason"]
+    assert not d.task_path("manager", "stable").exists()
+    assert d.pending_peer_claim("worker", "manager", "stable")[1] is None
+
+
 def test_concurrent_identifiers_one_target_single_send_and_cross_sender_lease(local, monkeypatch):
     _, ledger, root = local
     prompt = root / "prompt.txt"

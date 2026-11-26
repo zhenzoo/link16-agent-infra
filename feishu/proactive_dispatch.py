@@ -358,9 +358,17 @@ def pending_peer_claim(peer, sender, task_id):
     return claim_path, dict(ready=False, reason="目标已有在途派单，先查原请求回执", request_mid=mid, **claim)
 
 
+RESULT_ONLY = "接收、开工留在后台，原单有新成品、阻塞或需本人决定时才回复。"
+
+
+def is_work_ack(text):
+    body = re.sub(r"\n+---\s*\n✅ 已完成\s*$", "", text.strip())
+    return bool(re.fullmatch(r"(?:已?收到|已接单|已开工|已开始处理)[。！.!]?", body.strip()))
+
+
 def dispatch_prompt(sender, task_id, prompt, artifacts):
     instruction = (f"主号补充 · 回执：成果就绪或遇到阻塞时，在本派单直接答复 {sender}。"
-                   "写明产物入口、已验结果、仍缺什么。桥会自动关联原请求；同一回执只交一次。")
+                   f"{RESULT_ONLY}写明产物入口、已验结果、仍缺什么。桥会自动关联原请求；同一回执只交一次。")
     return product_brief(f"[Proactive {identifier(task_id)}]\n" + prompt + "\n\n" + instruction, artifacts)
 
 
@@ -430,7 +438,10 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
         if (now_session["state"] not in {"cold", "idle"} or
                 any(now_session.get(k) != checked["session"].get(k) for k in ("binding", "cwd", "thread"))):
             return dict(ready=False, target=now_target, session=now_session, reason="核验期间目标会话已变化")
+        outgoing = dispatch_prompt(sender, task_id, prompt, artifacts)
+        from user_text import require_text
         try:
+            require_text(outgoing)
             with ItemOwners(STATE).author(sender, item, peer, task_id):
                 pass
         except ValueError as exc:
@@ -442,7 +453,7 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
         try:
             sent = subprocess.run([sys.executable, str(HERE / "send_feishu_msg.py"), "--bot", sender, "--to-agent", peer,
                                    "--item", item, "--task-id", task_id,
-                                   "--text", dispatch_prompt(sender, task_id, prompt, artifacts), "--json"],
+                                   "--text", outgoing, "--json"],
                                   capture_output=True, text=True, encoding="utf-8")
         except OSError as exc:
             saved["attempt"] = {"state": "本地投递程序启动失败", "error_type": type(exc).__name__}

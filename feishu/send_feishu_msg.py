@@ -464,6 +464,11 @@ def main():
         raise SystemExit("❌ 需要 --bot <发送方>")
     if not a.text:
         raise SystemExit("❌ 需要 --text <正文>")
+    from user_text import require_text
+    try:
+        require_text(a.text)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if a.reply_to and not a.to_agent:
         raise SystemExit("❌ --reply-to 必须配 --to-agent")
     if a.coordination and (not a.to_agent or a.item or a.task_id or a.reply_to):

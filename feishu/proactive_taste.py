@@ -39,6 +39,8 @@ def check_message(body, policy):
 def check_outgoing(bot, recipient, body, business=None):
     """Route human sends/replies by the registered business and recipient."""
     check_message(body, None)
+    from user_text import require_text
+    require_text(body)
     state = Path(__file__).resolve().parent / "_state" / "proactive"
     matched = False
     for path in state.glob("*/morning-business.json"):
@@ -123,6 +125,8 @@ def check_pair_row(row, key, pair):
 
 def check_registered_board(html, plan):
     from bs4 import BeautifulSoup
+    from user_text import require_text
+    require_text(html, "html")
     page = BeautifulSoup(html, "html.parser")
     if "outcomes" in plan or page.select_one("#workbench-outcomes"):
         from proactive_outcomes import validate

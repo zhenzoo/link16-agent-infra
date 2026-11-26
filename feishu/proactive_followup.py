@@ -385,9 +385,15 @@ class Followup:
                                next_check=now + row["interval"])
                     if not running and (state != "等待前置验收" or
                             all(self.delivered(data["tasks"], i) for i in (row["dependency"] or []))):
-                        if row.get("alert_state") != state or now >= row.get("remind_after", 0):
+                        event = [state, observation.get("state"), self.receipt_key(observation),
+                                 observation.get("handoff_receipt"), observation.get("reason")]
+                        if row.get("native_log"):
+                            event.append(observation.get("last_signal_at"))
+                        if row.get("alert_event") != event:
                             notice.append(row["id"])
-                            row.update(alert_state=state, remind_after=now + max(900, row["interval"] * 2))
+                            row.update(alert_state=state, alert_event=event)
+                    elif running:
+                        row.pop("alert_event", None)
                 if notice:
                     bucket = str(int(now // 60))
                     alarm = data["alarms"].setdefault(bucket, {"ids": [], "attempts": 0})
@@ -467,6 +473,7 @@ class Followup:
             if row["closed"] or row.get("retired_to"):
                 raise ValueError("任务已结单")
             row["next_check"] = timestamp(value)
+            row.pop("alert_event", None)
             if row.pop("awaiting_input", None):
                 row.update(state="待查")
                 row.pop("alert_state", None)

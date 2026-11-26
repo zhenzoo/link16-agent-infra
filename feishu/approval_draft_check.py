@@ -314,6 +314,7 @@ def main(argv=None):
     parser.add_argument("evidence", type=Path, help="私有目录中的脱敏证据 JSON，格式见 SOP-151")
     parser.add_argument("--profile", help="用指定登记身份只读核对当前本人和原表定义")
     parser.add_argument("--delivery", action="store_true", help="严格核工作台一次点击后实际到达的原生业务页面")
+    parser.add_argument("--wording", action="store_true", help="只输出本次证据支持的可见回执文字")
     args = parser.parse_args(argv)
     try:
         report = json.loads(args.evidence.read_text(encoding="utf-8-sig"))
@@ -334,7 +335,17 @@ def main(argv=None):
     except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         print("未通过：证据无法读取或结构不完整", file=sys.stderr)
         return 1
-    print(json.dumps(result, ensure_ascii=False))
+    if args.wording:
+        if args.delivery:
+            label = {"draft_review": "草稿", "handle_instance": "本人待办", "view_instance": "原审批实例"}[result["intent"]]
+            wording = f"{label}入口已验，业务点击 {result['business_clicks']} 次，客户端确认 {result['client_confirmations']} 次。"
+        else:
+            wording = f"审批草稿已保存并重开，实显必填 {result['required_controls']} 项，附件 {result['attachments']} 件。"
+        from user_text import require_text
+        require_text(wording)
+        print(wording)
+    else:
+        print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

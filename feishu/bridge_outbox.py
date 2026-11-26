@@ -20,6 +20,7 @@ from pathlib import Path
 
 import session_work
 import card_tables
+from user_text import problems as text_problems
 
 PROGRESS_TAIL = 20          # 合并进度卡最多显示最近 N 步（旧·已不用）
 
@@ -911,12 +912,23 @@ class RetrySend(Exception):
 
 async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_sec, clock,
                       force_flush=False, on_ask=None, on_resume=None, persist_answer=None,
-                      persist_progress=None, workline_gate=None):
+                      persist_progress=None, workline_gate=None, on_text_rejected=None):
     """统一卡片流：progress 当前卡 edit_card 原地长大 → 满 CARD_BUDGET 或 edit 失败 → 冻结开新卡接着写(不截断)；
     answer 拆 ≤BUDGET 连续多卡(new_card·失败退 send_plain)·发前先把进度卡刷到最新·保序。
     deps（均 coroutine）：new_card(text)->mid|{ok,message_id}|None · edit_card(mid,text)->bool · send_plain(text)。
     state = {turn,steps,usage,seg_start,cur_mid,flushed,last_flush,sent}。返回动作数。"""
     n = 0
+
+    def rejected(record, text):
+        if not text.strip():
+            return False
+        issues = text_problems(text)
+        if not issues:
+            return False
+        if on_text_rejected is None:
+            raise ValueError("text-lint\n" + "\n".join(issues[:12]))
+        on_text_rejected(record, issues)
+        return True
 
     def _result(result):
         if isinstance(result, dict):
@@ -1435,6 +1447,8 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
                 if _route_key(doc.get("route")) == _route_key(route)
             ]
             text = _answer_with_docs(text, matched_docs)
+            if rejected(r, text):
+                continue
             already = (state.get("answer_delivery", {}).get("answers", {}).get(_answer_id(r, text, route)) or {})
             if already.get("completed_at") is not None:
                 continue  # A replayed old final must not close the current turn's card.
@@ -1466,13 +1480,16 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             key = _ask_key(r)
             if key in state["sent"]:
                 continue
+            from jsonl_reply_extract import render_ask_card
+            question_text = render_ask_card(questions, r.get("context") or "")
+            if rejected(r, question_text):
+                continue
             await _flush_progress()                        # 进度卡刷到最新·保序
             full = state.get("steps") or []
             state["cur_mid"] = None                         # 进度卡封口·问题另起
             state["seg_start"] = len(full)
             state["flushed"] = len(full)
-            from jsonl_reply_extract import render_ask_card
-            await _deliver(_ans_chunks(render_ask_card(questions, r.get("context") or "")), key)
+            await _deliver(_ans_chunks(question_text), key)
             state["sent"].add(key)
             if len(state["sent"]) > SENT_CAP:
                 state["sent"].clear()
@@ -1480,6 +1497,10 @@ async def drain_batch(recs, *, new_card, edit_card, send_plain, state, coalesce_
             if on_ask:
                 on_ask(questions, key, r.get("session"))
         elif kind == "progress":
+            visible = "\n\n".join(str(step.get("label") or "") for step in r.get("steps") or []
+                                  if step.get("kind") != "tool")
+            if rejected(r, visible or str(r.get("label") or "")):
+                continue
             if r.get("contract") == "milestone-v1":
                 turn = r.get("root_turn") or r.get("turn")
                 partial_diagnostic = bool(r.get("runtime") == "kimi" and r.get("kimi_diagnostic"))
@@ -1545,11 +1566,20 @@ async def outbox_drainer(bot, *, state_dir, new_card, edit_card, send_plain, asl
              "pending_docs": load_delivery_state(state_dir, bot),
              "answer_delivery": load_answer_state(state_dir, bot),
              **load_progress_state(state_dir, bot)}
+    def record_text_rejection(record, issues):
+        # The original remains in the private outbox. A replay rewrites the same record.
+        # Failed receipt persistence raises before the high-water mark advances.
+        from bridge_injection import atomic_write_json
+        key = hashlib.sha256(_canonical_json(record).encode("utf-8")).hexdigest()
+        atomic_write_json(Path(state_dir) / "text-lint" / bot / (key + ".json"),
+                          {"delivered": False, "kind": record.get("kind"),
+                           "turn_key": _request_key(record), "issues": issues[:12]})
     deps = dict(
         new_card=new_card, edit_card=edit_card, send_plain=send_plain,
         persist_answer=lambda delivery: save_answer_state(state_dir, bot, delivery),
         persist_progress=lambda value: save_progress_state(state_dir, bot, value),
         workline_gate=lambda record: session_work.delivery_work(bot, record, state_dir),
+        on_text_rejected=record_text_rejection,
     )
     # ask → 落 picker 结构化状态供答题侧读；回合恢复(answer/progress) → 清。两端零读屏。
     on_ask = lambda qs, key, sess: picker_write(state_dir, bot, qs, session=sess, key=key)   # noqa: E731
