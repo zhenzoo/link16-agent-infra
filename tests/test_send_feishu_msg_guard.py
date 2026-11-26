@@ -59,3 +59,49 @@ def test_history_failure_does_not_invite_duplicate_resend(tmp_path, monkeypatch,
     output = capsys.readouterr().out
     assert "消息已发出" in output
     assert "不要重发" in output
+
+
+@pytest.mark.parametrize("options,text", [
+    ([], "继续写同一产品"),
+    ([], "[Proactive stable] 改原件"),
+    (["--item","example","--task-id","stable"], "改原件"),
+])
+def test_managed_dispatcher_cannot_bypass_product_owner_at_tenant_send(tmp_path, monkeypatch, options, text):
+    from proactive_ownership import ItemOwners
+    with ItemOwners(tmp_path).author("desk","example","elected","original"):
+        pass
+    monkeypatch.setattr(sender, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(sender, "local_name", lambda name:name)
+    monkeypatch.setattr(sender, "assert_sender_identity", lambda name:None)
+    monkeypatch.setattr(sender, "resolve_open_id", lambda name:"ou_other")
+    monkeypatch.setattr(sender, "shared_group", lambda *a:"oc_group")
+    monkeypatch.setattr(sender, "send_agent_message", lambda *a, **kw:pytest.fail("duplicate sent"))
+    monkeypatch.setattr(sys, "argv",["send","--bot","desk","--to-agent","other","--in","oc_group",
+                                     "--text",text,*options])
+    with pytest.raises(SystemExit) as failed:
+        sender.main()
+    assert failed.value.code != 0
+
+
+def test_same_author_can_update_original_task_through_tenant_with_product_format(tmp_path, monkeypatch):
+    from proactive_ownership import ItemOwners, PRODUCT_STYLE
+    with ItemOwners(tmp_path).author("desk","example","elected","original"):
+        pass
+    monkeypatch.setattr(sender,"STATE_DIR",tmp_path)
+    monkeypatch.setattr(sender,"local_name",lambda n:n)
+    monkeypatch.setattr(sender,"assert_sender_identity",lambda n:None)
+    monkeypatch.setattr(sender,"resolve_open_id",lambda n:"ou_writer")
+    monkeypatch.setattr(sender,"shared_group",lambda *a:"oc_group")
+    monkeypatch.setattr(sender.bridge_outbound,"append_delivery",lambda *a,**kw:True)
+    captured=[]
+    def publish(bot, peer, text, **kwargs):
+        captured.append((peer,text))
+        return {"ok":True,"message_id":"om_receipt","mirror":None}
+    monkeypatch.setattr(sender,"send_agent_message",publish)
+    for text in ("改PRD-100 原表。","补充 PRD-100 对应视角。"):
+        monkeypatch.setattr(sys,"argv",["send","--bot","desk","--to-agent","elected","--in","oc_group",
+                                        "--item","example","--task-id","original","--text",text,"--json"])
+        with pytest.raises(SystemExit) as sent:
+            sender.main()
+        assert sent.value.code == 0
+    assert len(captured)==2 and all(peer=="elected" and PRODUCT_STYLE in text for peer,text in captured)

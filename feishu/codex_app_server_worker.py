@@ -192,7 +192,7 @@ class ObserverSlotTaken(RuntimeError):
 
 
 def record_turn_receipt(state_dir, bot, request, turn_id):
-    """A successful official turn/start response confirms this exact input."""
+    """A successful native start or steer confirms the input for its bound thread."""
     if not turn_id:
         return
     import bridge_inbox
@@ -200,7 +200,7 @@ def record_turn_receipt(state_dir, bot, request, turn_id):
     prompt = "\n".join(part.get("text", "") for part in params.get("input", [])
                        if isinstance(part, dict) and part.get("type") == "text")
     bridge_inbox.confirm_prompt(state_dir, bot, prompt, params.get("threadId"),
-                                {"source": "turn/start", "turn_id": turn_id})
+                                {"source": request.get("method", "turn/start"), "turn_id": turn_id})
 
 
 def acquire_observer_slot(state_dir, bot):
@@ -759,7 +759,8 @@ def run(args) -> int:
                 progress.record["observer_pid"] = observer["observer_pid"]
 
             def turn_result(request, turn_id):
-                turn_effort.result(request, turn_id)
+                if request.get("method") == "turn/start":
+                    turn_effort.result(request, turn_id)
                 record_turn_receipt(state_dir, args.bot, request, turn_id)
 
             def startup_request(method):

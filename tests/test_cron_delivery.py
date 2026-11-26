@@ -83,34 +83,33 @@ def test_empty_unrecognizable_or_modified_screen_is_never_success_or_repaste(sce
     assert not delivery.accepted(scene.inbox.get(scene.row['id']))
 
 
-@pytest.mark.parametrize('state', ['active', 'waiting', 'unknown'])
-def test_busy_or_unknown_native_state_never_retries(scene, state):
+@pytest.mark.parametrize('state', ['waiting', 'unknown'])
+def test_waiting_or_unknown_native_state_never_retries(scene, state):
     scene.fb.bridge_activity.read_activity.return_value = {'state': state}
     with pytest.raises(RuntimeError):
         delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
     scene.fb.wmux.assert_not_called()
 
 
-def test_active_exact_owned_draft_uses_advertised_queue_tab_once(scene):
+def test_active_exact_owned_draft_uses_enter_even_when_tab_is_advertised(scene):
     scene.inbox.scheduled_attempt(scene.row['id'])
     scene.fb.bridge_activity.read_activity.return_value = {'state': 'active'}
     scene.fb.read_screen.return_value = f'Working\n\n› {scene.marker}\n \n  tab to queue message     48% context left'
     scene.fb.wmux.side_effect = lambda *a: scene.inbox.confirm(scene.marker, 'thread')
     assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
     assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
-    scene.fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    scene.fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
     scene.fb._inject.assert_not_called()
 
 
 @pytest.mark.parametrize('state,screen', [
-    ('active', 'tab to queue message\n\n› {marker}\n\nstatus'),
     ('active', '› other draft\n\n  tab to queue message'),
     ('active', '› {marker}\n tab to queue message'),
     ('waiting', '› {marker}\n\n  tab to queue message'),
     ('unknown', '› {marker}\n\n  tab to queue message'),
     ('active', '• Compacting context (1m 34s • esc to interrupt)\n  └ Making room to continue.\n\n› {marker}\n\n  tab to queue message'),
 ])
-def test_queue_tab_requires_active_exact_draft_live_footer_and_no_compaction(scene, state, screen):
+def test_enter_requires_owned_draft_readable_footer_and_ready_state(scene, state, screen):
     scene.fb.bridge_activity.read_activity.return_value = {'state': state}
     scene.fb.read_screen.return_value = screen.format(marker=scene.marker)
     with pytest.raises(RuntimeError):
@@ -529,4 +528,16 @@ def test_folded_composer_only_confirms_rendering_for_the_first_enter(draft, visi
     screen = f'› {draft}\n\n  gpt-6 · current workspace'
     prompt = '6中\n文😀尾'
     assert delivery.initial_paste_visible(screen, prompt) == visible
+    assert not delivery.draft_matches(screen, prompt)
+
+
+def test_folded_report_with_wrapped_visible_prefix_and_suffix():
+    hidden = '长' * 1615
+    prompt = '2号报告\n\n六张动作方位图 位于原页\nhttps://example.test/path' + hidden + '尾部原消息'
+    draft = '2号报告\n \n  六张动作方\n  位图 位于原页\n  https://example.\n  test/path[Pasted Content 1615 chars]尾部\n  原消息'
+    screen = f'› {draft}\n \n  tab to queue message'
+    assert delivery.initial_paste_visible(screen, prompt)
+    assert not delivery.initial_paste_visible(screen.replace('1615', '1614'), prompt)
+    assert not delivery.initial_paste_visible(screen.replace('位图 位', '位图位'), prompt)
+    assert not delivery.initial_paste_visible(screen.replace('尾部', '头部'), prompt)
     assert not delivery.draft_matches(screen, prompt)

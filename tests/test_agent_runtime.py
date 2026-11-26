@@ -417,6 +417,7 @@ class AgentProfileTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         not_ready = subprocess.run(
             [sys.executable, str(cli), "ready", "--profile", "cxp"],
+            env=utf8_env,
             input="Do you trust the contents of this directory?\nPress enter to continue",
             text=True,
             capture_output=True,
@@ -425,6 +426,7 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(not_ready.returncode, 1)
         trust = subprocess.run(
             [sys.executable, str(cli), "needs-trust", "--profile", "cxp"],
+            env=utf8_env,
             input="Do you trust the contents of this directory?\nPress enter to continue",
             text=True,
             capture_output=True,
@@ -801,6 +803,8 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
         """CLI 输出必须是 LF：残留的 \\r 会打穿 shell wrapper 的 unalias。"""
         done = subprocess.run(
             [sys.executable, str(ROOT / "feishu" / "agent_profile_cli.py"), "list", "--names"],
+            env={**os.environ, agent_runtime.PROFILE_REGISTRY_ENV:
+                 str(ROOT / "tests" / "fixtures" / "agent-profiles.legacy.json")},
             capture_output=True, check=True,
         )
         self.assertNotIn(b"\r", done.stdout)

@@ -345,7 +345,9 @@ def reconcile_codex_inbox(state_dir, bot, inbox):
                         continue
                     prompt = "\n".join(part.get("text", "") for part in item.get("content") or []
                                        if part.get("type") == "text")
-                    confirmed += inbox.confirm(prompt, thread)
+                    confirmed += inbox.confirm(prompt, thread, {
+                        "source": "thread/turns/list", "turn_id": turn.get("id"), "item_id": item.get("id"),
+                    })
             cursor = page.get("nextCursor")
             if not cursor or not inbox.awaiting_receipts():
                 break

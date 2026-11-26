@@ -59,11 +59,10 @@ feishu/cron-jobs/
 Codex 的输入框出现文字、Wmux 返回按键成功、读屏暂时为空，都不能证明任务被接受。
 `cron_delivery.py` 在粘贴前将任务、原文摘要和目标 thread 写入现有 `bridge_inbox`；
 成功只认同一 thread、同一完整原文的原生回执：已有 `UserPromptSubmit` hook，或
-TUI 网关收到官方 `turn/start` 成功响应及 turn ID。两者都更新同一记录，不另建发送队列。
+TUI 网关收到官方 `turn/start` 或 `turn/steer` 的成功响应及对应回合 ID。两类回执都更新原收件记录。
 官方接口合同见 [Codex App Server](https://learn.chatgpt.com/docs/app-server)。
 
-没有回执时保持待确认。Wmux必须读到输入框仍是完整原稿：原生线程明确idle时经
-受工作区保护的`input.sendKey`补Enter；active时只有当前输入框底栏明确出现`tab to queue message`才补一次Tab进入原生队列。
+缺少回执时保持待确认。Wmux 核实输入框仍有完整原稿、线程处于 idle 或 active 后，经受工作区保护的 `input.sendKey` 补 Enter。执行中的会话可以在当前回合接收该条消息。
 历史输出中的提示、残稿、其他稿、waiting/unknown及compacting均不允许补按；入队画面不是接收成功，仍等原生hook。
 未知结果不重新粘贴，不清稿、不新建会话。首次投递与恢复共用
 终端互斥锁，已确认记录重复恢复零发送。确认窗口为 20 秒，登记的提交尝试最多 3 次，
@@ -73,7 +72,7 @@ TUI 网关收到官方 `turn/start` 成功响应及 turn ID。两者都更新同
 Inbox将该证明单独持久化，后续诊断不能覆盖它。等待至少20秒、原线程明确idle或active、绑定不变且读屏能识别
 **空输入框**后，才经原受保护注入入口重新投递；空读屏不是空输入框，其他草稿不覆盖。
 首次投递和恢复共用空稿识别，包括Codex原生占位文字`Ask Codex to do anything`；必须读到完整输入框与状态栏，不能把占位文字误作用户草稿后永久等待。
-active重新粘贴只允许持久零写入证明，完整原稿的Tab入队不重贴；不能一律等长任务结束才恢复，否则一条未送达任务会阻塞以后全部整点。unknown/waiting、compacting及无零写入证明的active保持不重贴；补Enter仍要求idle且完整原稿。
+活跃回合的输入框仍有已核实的完整原稿时，直接补 Enter。只有驱动已记录零写入且输入框可核为空时才重新粘贴。会话状态未知、正在等待交互或正在压缩时保留待办。
 每次重投前原子消耗证明并累计次数，防止提交后进程崩溃导致盲目重贴；再次取得明确未提交证明才可再试。
 普通投递总共最多3次，最后一次仍明确未提交则记`failed`并停止恢复；未知结果继续待确认。
 Wmux明确返回`not_written`，且原因是后台屏幕读不全、无法排除文件夹信任框时，记为

@@ -32,9 +32,117 @@ def lock_log(bot, operation, elapsed, outcome):
           f"pid={os.getpid()} elapsed={elapsed:.2f}s outcome={outcome}", file=sys.stderr, flush=True)
 
 
+def _normalized_prompt(prompt):
+    return str(prompt).replace('\r\n', '\n').replace('\r', '\n').strip()
+
+
 def prompt_digest(prompt):
-    text = str(prompt).replace('\r\n', '\n').replace('\r', '\n').strip()
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_normalized_prompt(prompt).encode("utf-8")).hexdigest()
+
+
+_ENVELOPE = re.compile(r'\[飞书 [^\]\r\n]*\]')
+
+
+def _receipt_mid(envelope, bot):
+    fields = dict(re.findall(r'(?:^|\s)(to|mid|route)=([^\]\s]+)', envelope))
+    if fields.get('to') == bot and fields.get('route') in {'p2a', 'p2a-ext', 'a2a'}:
+        return fields.get('mid')
+
+
+def quoted_draft_matches(saved, shown, bot, mid, *, screen=False):
+    """Recognize the Windows editor continuing an existing Markdown quote.
+
+    The saved envelope must belong to this row. Only line-leading quote marks
+    added at original paragraph boundaries may differ. Native receipts retain
+    their real whitespace and digest; only a terminal frame can wrap visually.
+    """
+    envelope = saved[saved.rfind('[飞书 '):]
+    if not _ENVELOPE.fullmatch(envelope) or _receipt_mid(envelope, bot) != mid:
+        return False
+    source = _normalized_prompt(saved).split('\n')
+    actual = _normalized_prompt(shown).split('\n')
+    if not screen and len(source) != len(actual):
+        return False
+    allowed = set()
+    pos = 0
+    quoted = False
+    fence = None
+    for i, line in enumerate(source):
+        stripped = line.lstrip()
+        delimiter = re.match(r'(`{3,}|~{3,})', stripped)
+        permit = quoted and not fence and not delimiter and not line.startswith(('    ', '\t'))
+        if screen:
+            compact = ''.join(line.split())
+            if permit:
+                leading = len(compact) - len(compact.lstrip('>'))
+                allowed.update(range(pos, pos + leading + 1))
+            pos += len(compact)
+        elif actual[i] != line:
+            prefix = actual[i][:len(actual[i]) - len(line)]
+            if not (permit and actual[i].endswith(line) and re.fullmatch(r'(?:> *)+', prefix)):
+                return False
+        if delimiter:
+            token = delimiter.group(1)
+            if not fence:
+                fence = token
+            elif token.startswith(fence):
+                fence = None
+            quoted = False
+        elif not fence and re.match(r'^ {0,3}>(?:\s|$)', line):
+            quoted = True
+    if not screen:
+        return True
+    expected = ''.join(saved.split())
+    pos = 0
+    for line in actual:
+        at_prefix = True
+        for char in ''.join(line.split()):
+            if pos < len(expected) and char == expected[pos]:
+                pos += 1
+            elif char != '>' or not at_prefix or pos not in allowed:
+                return False
+            at_prefix = at_prefix and char == '>'
+    return pos == len(expected)
+
+
+def _batch_receipts(db, text, bot, session):
+    """Consume whole saved prompts backwards so envelopes quoted inside one stay inside it."""
+    end = len(text)
+    rows = {}
+    while end:
+        start = text.rfind('[飞书 ', 0, end)
+        if start < 0 or not _ENVELOPE.fullmatch(text, start, end):
+            return []
+        mid = _receipt_mid(text[start:end], bot)
+        if not mid or mid in rows:
+            return []
+        row = db.execute("""SELECT id, digest, state, received_digest, handoff FROM messages
+            WHERE id=? AND session=? AND handoff IS NOT NULL
+            AND state IN ('submitting','awaiting_confirmation','uncertain','received_modified','done')""",
+            (mid, session)).fetchone()
+        if not row:
+            return []
+        saved = _normalized_prompt(json.loads(row['handoff']).get('prompt') or '')
+        if not saved or prompt_digest(saved) != row['digest']:
+            return []
+        if text.endswith(saved, 0, end):
+            part = saved
+        else:
+            first = end
+            for _ in range(saved.count('\n') + 1):
+                first = text.rfind('\n', 0, first)
+                if first < 0:
+                    break
+            part = text[first + 1:end]
+            if not quoted_draft_matches(saved, part, bot, mid):
+                return []
+        rows[mid] = (row, prompt_digest(part))
+        end -= len(part)
+        if end:
+            if end == 1 or text[end - 1] != '\n':
+                return []
+            end -= 1
+    return list(rows.values())
 
 
 class NonRetryableHandoffError(RuntimeError):
@@ -204,16 +312,23 @@ class Inbox:
     def claim(self):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            now = time.time()
             row = db.execute("SELECT * FROM messages WHERE state='queued' AND retry_at<=? ORDER BY seq LIMIT 1",
-                             (time.time(),)).fetchone()
+                             (now,)).fetchone()
             if not row:
                 return None
+            control = None
             if self.priority:
-                for candidate in db.execute("SELECT * FROM messages WHERE state='queued' AND retry_at<=? ORDER BY seq",
-                                            (time.time(),)):
-                    if self.priority(dict(candidate)):
-                        row = candidate
-                        break
+                control = next((candidate for candidate in db.execute(
+                    "SELECT * FROM messages WHERE state='queued' AND retry_at<=? ORDER BY seq", (now,))
+                    if self.priority(dict(candidate))), None)
+            if control is not None:
+                row = control
+            elif db.execute("""SELECT 1 FROM messages WHERE state='queued' AND handoff IS NOT NULL
+                    AND seq < ? LIMIT 1""", (row['seq'],)).fetchone():
+                # An earlier Codex handoff is waiting to retry a proven zero write.
+                # Keep later messages behind it, including across a service restart.
+                return None
             db.execute("UPDATE messages SET state='processing',attempts=attempts+1,updated=? WHERE id=?",
                        (time.time(), row['id']))
             return dict(row)
@@ -260,18 +375,26 @@ class Inbox:
                 db.execute('UPDATE messages SET handoff=? WHERE id=?',
                            (json.dumps(context, ensure_ascii=False), mid))
 
-    def handoff_observe(self, mid, reason):
+    def handoff_observe(self, mid, reason, *, enter=False, left=False):
         """Persist the latest non-receipt explanation, not a delivery verdict."""
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT handoff,state FROM messages WHERE id=?', (mid,)).fetchone()
             if not row or not row['handoff'] or row['state'] not in (
                     'queued', 'submitting', 'awaiting_confirmation', 'uncertain'):
                 return
             context = json.loads(row['handoff'])
-            if context.get('waiting_reason') != reason:
+            if context.get('waiting_reason') != reason or enter or (left and not context.get('composer_left_at')):
                 context.update(waiting_reason=reason, checked_at=time.time())
+                if enter:
+                    context['enter_at'] = context['checked_at']
+                if left:
+                    context['composer_left_at'] = context['checked_at']
                 db.execute('UPDATE messages SET handoff=? WHERE id=?',
                            (json.dumps(context, ensure_ascii=False), mid))
+                if enter or left:
+                    db.execute("""UPDATE messages SET state='awaiting_confirmation', error=NULL,
+                               retry_at=0, updated=? WHERE id=?""", (context['checked_at'], mid))
 
     def handoff_attempt(self, mid, *, limit, delay):
         """Reserve a bounded Enter BEFORE writing; a restart cannot reset it."""
@@ -462,17 +585,49 @@ class Inbox:
             # A trusted native hook can prove receipt even when the user edits
             # the composer before Enter. Keep both digests and the original;
             # do not misreport exact delivery or replay the already accepted task.
-            envelopes = re.findall(r'\[飞书 [^\]]*\]', str(prompt))
+            text = _normalized_prompt(prompt)
+            envelopes = _ENVELOPE.findall(text)
             if not envelopes or not session:
                 return 0
-            fields = dict(re.findall(r'(?:^|\s)(to|mid|route)=([^\]\s]+)', envelopes[-1]))
-            if fields.get('to') != self.bot or fields.get('route') not in {'p2a', 'p2a-ext', 'a2a'}:
+            mid = _receipt_mid(envelopes[-1], self.bot)
+            if not mid:
                 return 0
+            if text.endswith(envelopes[-1]):
+                # A native input can contain several deliveries. Never attribute a
+                # mixed or partially recognised batch to its final envelope.
+                count = 0
+                batch = _batch_receipts(db, text, self.bot, session)
+                for row, part_digest in batch:
+                    if row['state'] == 'done':
+                        continue
+                    if row['state'] == 'received_modified' and row['received_digest'] != observed:
+                        continue
+                    context = json.loads(row['handoff'])
+                    if context.get('notice') == 'received_modified':
+                        context['notice'] = 'unconfirmed'  # Correct the earlier warning.
+                    part_proof = proof
+                    if part_digest != row['digest']:
+                        part_proof = json.dumps(dict(json.loads(proof), formatting='continued_quote'),
+                                                ensure_ascii=False)
+                    db.execute("""UPDATE messages SET state='done',payload=NULL,received_digest=?,
+                        receipt=?,handoff=?,updated=? WHERE id=?""",
+                        (part_digest, part_proof, json.dumps(context, ensure_ascii=False), time.time(), row['id']))
+                    count += 1
+                if batch:
+                    return count
+            if len(envelopes) > 1:
+                # A single edited message may itself have quoted old envelopes.
+                # Attribute the edit only if its saved original contains the same envelopes.
+                original = db.execute('SELECT handoff FROM messages WHERE id=? AND session=?',
+                                      (mid, session)).fetchone()
+                saved = json.loads(original['handoff'] or '{}').get('prompt', '') if original else ''
+                if _ENVELOPE.findall(saved) != envelopes:
+                    return 0
             cur = db.execute("""UPDATE messages SET state='received_modified',session=?,
                 received_digest=?,receipt=?,updated=? WHERE id=? AND digest IS NOT NULL
                 AND (session IS NULL OR session=?)
                 AND state IN ('submitting','awaiting_confirmation','uncertain')""",
-                (session, observed, proof, time.time(), fields.get('mid'), session))
+                (session, observed, proof, time.time(), mid, session))
             return cur.rowcount
 
     def finish(self, mid):
@@ -527,7 +682,10 @@ class Inbox:
         """Latest ordinary handoff, including its real native receipt (no body)."""
         with self.connect() as db:
             row = db.execute("""SELECT id,state,session,received,updated,attempts,
-                digest,received_digest FROM messages WHERE digest IS NOT NULL
+                digest,received_digest,json_extract(handoff,'$.enter_at') AS enter_at,
+                json_extract(handoff,'$.queue_key_at') AS queue_key_at,
+                json_extract(handoff,'$.queue_left_at') AS queue_left_at,
+                json_extract(receipt,'$.formatting') AS formatting FROM messages WHERE digest IS NOT NULL
                 OR state IN ('queued','processing','failed')
                 ORDER BY seq DESC LIMIT 1""").fetchone()
             return dict(row) if row else None

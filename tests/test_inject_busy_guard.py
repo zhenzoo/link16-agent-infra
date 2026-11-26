@@ -93,9 +93,15 @@ class InjectBusyGuardTest(unittest.TestCase):
     def _run_runtime(self, runtime, state):
         calls = []
         bot = {"name": "unit-bot", "agent": runtime}
+        def screen(*_args):
+            if runtime != 'codex':
+                return CLEAR
+            if not calls:
+                return '› Ask Codex to do anything\n\nstatus'
+            footer = 'tab to queue message' if state == 'active' else 'status'
+            return f'› {MARK}\n\n{footer}'
         with mock.patch.object(fb, "wmux", side_effect=lambda *a: calls.append(a)), \
-             mock.patch.object(fb, "read_screen", return_value=(
-                 '› Ask Codex to do anything\n\nstatus' if runtime == 'codex' else CLEAR)), \
+             mock.patch.object(fb, "read_screen", side_effect=screen), \
              mock.patch.object(fb.bridge_activity, "read_activity", return_value={"state": state}) as activity, \
              mock.patch.object(fb.bridge_activity, "kimi_prompt_submitted", return_value=True), \
              mock.patch("time.sleep"):
@@ -175,13 +181,11 @@ class InjectBusyGuardTest(unittest.TestCase):
                 self.assertTrue(result)
                 self.assertEqual([call[0] for call in calls], ["paste", "enter"])
 
-    def test_other_runtimes_never_steer(self):
-        for runtime in ("codex", "claude"):
-            with self.subTest(runtime=runtime):
-                result, calls, activity = self._run_runtime(runtime, "active")
-                self.assertTrue(result)
-                self.assertEqual([call[0] for call in calls], ["paste", "enter"])
-                activity.assert_not_called()
+    def test_claude_uses_its_normal_submit_key(self):
+        result, calls, activity = self._run_runtime("claude", "active")
+        self.assertTrue(result)
+        self.assertEqual([call[0] for call in calls], ["paste", "enter"])
+        activity.assert_not_called()
 
     def test_all_runtimes_paste_without_automatic_draft_replacement(self):
         for runtime in ("claude", "codex", "kimi"):

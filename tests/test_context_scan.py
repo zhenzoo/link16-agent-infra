@@ -184,6 +184,14 @@ class BotNamingTests(unittest.TestCase):
         bots = cs.suggest_bots(projects, "tb26", {"tb26-obsbot", "tb26-baseball"})
         self.assertEqual(bots[0]["bot"], "tb26-obsbot-2")
 
+    def test_role_recommendation_uses_project_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            projects = [{"name":"project","path":folder,"reason":""}]
+            first = cs.suggest_bots(projects, "host", {"host-project"})
+            existing = cs.suggest_bots(projects, "host", set(), {Path(folder).resolve()})
+            self.assertEqual(first[0]["recommended_role"], "项目 0 号位")
+            self.assertEqual(existing[0]["recommended_role"], "项目执行者")
+
     def test_hostname_fallback_prefix(self):
         with mock.patch.object(cs.socket, "gethostname", return_value="DESKTOP-EXAMPLE"), \
              mock.patch.dict(sys.modules, {"machine_identity": None}):

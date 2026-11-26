@@ -14,6 +14,23 @@ POLICY = {"kind": "procurement", "salutation": "小何", "required": [["报价"]
 DRAFT = "小何，\n请报价。\n规格 https://example.org/spec"
 
 
+def test_prose_checks_repetition_without_forcing_every_sentence_short():
+    fact = "收到作者原片后，主号通知原作者。"
+    issues = list(taste.prose_findings(f"{fact}\n\n{fact}\n"))
+    assert len(issues) == 1 and issues[0][:2] == ("error", 3)
+    assert not list(taste.prose_findings(f"{fact}\n\n## 另一业务\n\n{fact}"))
+    assert not list(taste.prose_findings("> 进行确认操作\n\n```\n进行处理工作\n```"))
+    assert not list(taste.prose_findings("为防止重复付款，如果费用明细与发票金额不同，先问经办人差额的原因，再把原票金额记入报销表。"))
+    notes = list(taste.prose_findings("经办人进行了核对工作。"))
+    assert len(notes) == 1 and notes[0][0] == "review"
+
+
+@pytest.mark.parametrize("name", ["SOP-150-proactive-agent-loop.md", "TASTE-010-proactive-dispatch.md"])
+def test_workbench_guides_have_no_duplicate_instructions(name):
+    guide = Path(__file__).resolve().parents[1] / "docs" / name
+    assert not [f for f in taste.prose_findings(guide.read_text("utf-8-sig")) if f[0] == "error"]
+
+
 def test_pair_checks_rendered_anchors_and_visible_text():
     html = ('<table><tr data-business-id="demo"><td class="outcomes"><div class="result-links">'
             '<a href="demo.html#review">本地 · 成品</a><a href="https://example.org/demo">在线 · 成品</a>'

@@ -291,6 +291,28 @@ class RoutedFinalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["guard_chars"], 1)
         self.assertEqual(kwargs["render_target"], 2790)
 
+    async def test_result_only_dispatch_keeps_ack_local_and_delivers_blocker(self):
+        from proactive_dispatch import dispatch_prompt
+
+        route = {"kind": "a2a", "peer": "main", "mid": "original", "dest": "room"}
+        prompt = dispatch_prompt("main", "test", "更新审批草稿", [])
+        inbound = [{"message_id": "original", "text": prompt}]
+        sent = dict(ok=True, message_id="reply", route=route, to="main",
+                    via="app", err=None, mirror=None)
+        with (mock.patch("bridge_inbound.read_records", return_value=inbound),
+              mock.patch("send_feishu_msg.send_agent_message", return_value=sent) as send,
+              mock.patch.object(feishu_bridge, "_record_automatic_outbound", return_value=True),
+              mock.patch.object(feishu_bridge, "receipt")):
+            ack = await feishu_bridge._deliver_peer_result(
+                "worker", "收到。\n\n---\n✅ 已完成", route, "answer", None)
+            self.assertTrue(ack["suppressed"])
+            self.assertIsNone(ack["message_id"])
+            send.assert_not_called()
+            result = await feishu_bridge._deliver_peer_result(
+                "worker", "缺采购签字，审批单无法提交。", route, "answer", None)
+            self.assertTrue(result["ok"])
+            send.assert_called_once()
+
     async def test_group_progress_is_skipped_but_robot_prefixed_final_is_not(self):
         calls = []
         with mock.patch.object(

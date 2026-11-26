@@ -129,7 +129,7 @@ class TuiTextHandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, "STATE_DIR", Path(tmp)):
             for mid, body in [("om_tab", "name\tvalue"), ("om_emoji", "😀" * 8001)]:
                 pointer, reason = feishu_bridge._prepare_tui_text("unit", mid, body)
-                saved = Path(tmp) / f"bridge-inbox-unit-{bridge_inbox.prompt_digest(mid)[:24]}.txt"
+                saved = next(path for path in Path(tmp).glob("*.txt") if path.as_posix() in pointer)
                 self.assertEqual(saved.read_bytes(), body.encode("utf-8"))
                 self.assertIn(saved.as_posix(), pointer)
                 self.assertTrue(reason)
@@ -140,13 +140,21 @@ class TuiTextHandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "没有截断提交"):
                 feishu_bridge._prepare_tui_text("unit", "om_full", "1. 一\t2. 二")
 
-    def test_codex_long_or_tall_drafts_keep_the_original_in_native_history(self):
+    def test_windows_codex_queues_one_line_and_keeps_each_original_immutable(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(feishu_bridge, 'STATE_DIR', Path(tmp)), \
+                mock.patch.object(feishu_bridge.sys, 'platform', 'win32'), \
                 mock.patch.object(feishu_bridge.agent_runtime, 'uses_app_server', return_value=True):
-            for body in ['保留原文😀' * 210, '一行\r\n' * 15]:
-                self.assertEqual(feishu_bridge._prepare_tui_text(
-                    'unit', 'om_original', body, runtime_bot={'profile': 'cxp'}), (body, ''))
-            self.assertEqual(list(Path(tmp).iterdir()), [])
+            originals = {}
+            for body in ['保留原文😀' * 210, '一行\r\n' * 15, '> 引用\n\n原话\n> 第二段']:
+                pointer, reason = feishu_bridge._prepare_tui_text(
+                    'unit', 'om_original', body, runtime_bot={'profile': 'cxp'})
+                self.assertTrue(reason)
+                self.assertEqual(len(pointer.splitlines()), 1)
+                saved = next(path for path in Path(tmp).glob('*.txt') if path.as_posix() in pointer)
+                originals[saved] = body
+            self.assertEqual(len(originals), 3)
+            for path, body in originals.items():
+                self.assertEqual(path.read_bytes(), body.encode('utf-8'))
 
     def test_cron_uses_same_lossless_body_policy_and_keeps_occurrence_route(self):
         import bridge_cron

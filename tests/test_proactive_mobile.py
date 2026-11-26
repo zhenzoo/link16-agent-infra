@@ -13,6 +13,43 @@ import proactive_mobile as mobile
 import proactive_scanner as scanner
 
 
+def test_mobile_timeline_keeps_model_colors_and_source_order(tmp_path):
+    tracks = ["A · base", "B · body", "A · cover", "C · support"]
+    archive = {"id":"decision-1", "track":tracks[0], "month":"2026-01", "kind":"meeting", "closed":True,
+               "title":"Weight", "background":"Review", "question":"Measured?", "respondent":"Team",
+               "result":"Confirmed", "source":"https://example.com/meeting"}
+    pack = {"project_timeline":{"months":["2026-01"], "tracks":tracks}, "work_items":[archive]}
+    board_path = tmp_path / "board.html"
+    board_path.write_text(scanner.render_archived_html({"bot":"test"},pack), encoding="utf8")
+    site = Path(mobile.pack(board_path, tmp_path / "versions")["site"])
+    page = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser")
+    groups = page.select(".track-group")
+    assert [g["data-track-group"] for g in groups] == ["A","B","C"]
+    assert len({g["style"] for g in groups}) == 3
+    assert [r["data-track"] for r in groups[0].select(".track-row")] == [tracks[0],tracks[2]]
+    assert page.select_one("#node-decision-1")["data-kind"] == "meeting"
+
+
+def test_file_drawer_carries_only_its_own_selected_original(tmp_path):
+    doc = tmp_path / "review.html"
+    doc.write_text('<main id="update">原表与修改</main>', encoding="utf8")
+    board_path = tmp_path / "board.html"
+    file = {"id":"review", "title":"原表", "url":"review.html#update", "preview_document":True}
+    board_path.write_text(scanner.render_archived_html({"bot":"test"},{"files":[file]}), encoding="utf8")
+    package = mobile.pack(board_path, tmp_path / "versions")
+    page = BeautifulSoup((Path(package["site"]) / "index.html").read_text("utf8"), "html.parser")
+    card = page.select_one("article[data-work-item=review]")
+    assert card.select_one("button[aria-haspopup=dialog]") and card.select_one("dialog button.close-file-preview")
+    frame = card.select_one("dialog iframe")
+    assert frame["src"] == card.select_one(".record-links a")["href"]
+    assert frame["src"].endswith(".html#update") and frame["sandbox"] == ["allow-scripts"]
+    source = BeautifulSoup(board_path.read_text("utf8"), "html.parser")
+    source.select_one("iframe")["src"] = "other.html"
+    board_path.write_text(str(source), encoding="utf8")
+    with pytest.raises(ValueError, match="同卡"):
+        mobile.pack(board_path, tmp_path / "versions")
+
+
 def test_timeline_keeps_verified_text_available_on_mobile(tmp_path):
     page = tmp_path / "board.html"
     evidence = tmp_path / "final.txt"
@@ -60,9 +97,84 @@ def test_selected_model_preserves_declared_lazy_payloads_and_rejects_changed_fil
         mobile.pack(page, out)
 
 
+def test_owner_archive_keeps_accepted_original_after_local_revision_changes(tmp_path):
+    source = tmp_path / "spec.html"
+    source.write_text("<html><head><title>原版</title></head><body>首次评审</body></html>", encoding="utf8")
+    board_path = tmp_path / "board.html"
+    output = tmp_path / "versions"
+    def render(pack):
+        board_path.write_text(scanner.render_archived_html({"bot": "test"}, pack, output_dir=tmp_path), encoding="utf8")
+    render({"files": [{"title": "规格书", "url": "spec.html"}]})
+    first = mobile.pack(board_path, output)
+    source.write_text("<html><head><title>下版</title></head><body>在途</body></html>", encoding="utf8")
+    frozen = next(item for item in first["originals"] if item["file"] == "spec.html")
+    ack = {"id": "request", "target_name": "工程师", "message": "请跟进", "verified": True,
+           "message_id": "first", "receipt_url": "https://example.com/message"}
+    archive = {"at": "2026-11-25 12:00", "person": "工程师", "topic": "首版", "result": "已交",
+               "local_document": "spec.html", "links": [{"label": "原稿", "url": "spec.html",
+                                                        "mobile_version": first["version"], "source_sha256": frozen["sha256"]}]}
+    render({"closed_items": {"v1": archive}, "sent_messages": [ack], "drafts": [ack],
+            "owner_closed_keys": [scanner.review_key("sent_messages", ack)]})
+    second = mobile.pack(board_path, output, archive_paths=True)
+    soup = BeautifulSoup((output / second["version"] / "index.html").read_text("utf8"), "html.parser")
+    assert "0 待发 · 0 已发" in soup.select_one("#messages").get_text()
+    assert soup.select_one("#closed code").get_text() == str(source)
+    entry = soup.select_one("#closed .archive-links a")["href"]
+    assert entry == frozen["entry"]
+    assert (output / second["version"] / entry).read_bytes() == (output / first["version"] / entry).read_bytes()
+    default = mobile.pack(board_path, output)
+    assert "本机路径" not in (output / default["version"] / "index.html").read_text("utf8")
+    (output / first["version"] / entry).write_text("changed", encoding="utf8")
+    with pytest.raises(ValueError, match="归档资源"):
+        mobile.pack(board_path, output)
+
+
+def test_selected_wav_is_playable_and_truncation_is_rejected(tmp_path):
+    import wave
+
+    sound = tmp_path / "scene.wav"
+    with wave.open(str(sound), "wb") as stream:
+        stream.setparams((1, 2, 8000, 0, "NONE", ""))
+        stream.writeframes(bytes(160))
+    source = tmp_path / "sound.html"
+    source.write_text('<html><body><audio src="scene.wav" autoplay></audio></body></html>', encoding="utf8")
+    board_path = tmp_path / "board.html"
+    board(board_path, "sound.html")
+    first = mobile.pack(board_path, tmp_path / "versions")
+    target, = (tmp_path / "versions" / first["version"] / "assets").glob("doc-*.html")
+    audio = BeautifulSoup(target.read_text("utf8"), "html.parser").audio
+    assert audio["preload"] == "none" and "controls" in audio.attrs and "autoplay" not in audio.attrs
+    assert (target.parent / audio["src"]).read_bytes() == sound.read_bytes()
+    sound.write_bytes(sound.read_bytes()[:-8])
+    with pytest.raises(ValueError, match="WAV"):
+        mobile.pack(board_path, tmp_path / "versions")
+
+
+def test_selected_catalog_rewrites_known_entries_without_copying_the_library(tmp_path):
+    import json
+
+    for name in ("selected", "other"):
+        (tmp_path / (name + ".html")).write_text("<html><title>" + name + "</title></html>", encoding="utf8")
+    spec = {"local": "selected.html#one", "previewURL": "selected.html#one", "online": "https://example.com/spec"}
+    book = {"local": "other.html", "previewURL": "other.html", "online": "https://example.com/?token=private"}
+    (tmp_path / "menu.html").write_text('<html><script>const DATA=' + json.dumps({"entries":[spec,book]}) + ';</script></html>', encoding="utf8")
+    pack = {"files": [{"url":"selected.html", "links":[{"catalog":"entries","url":"menu.html"}]}]}
+    home = tmp_path / "board.html"
+    home.write_text(scanner.render_archived_html({"bot":"example"}, pack), encoding="utf8")
+    result = mobile.pack(home, tmp_path / "out")
+    files = {r["file"]:r["entry"] for r in result["originals"]}
+    assert "other.html" not in files
+    menu = tmp_path / "out" / result["version"] / files["menu.html"]
+    js = BeautifulSoup(menu.read_bytes(), "html.parser").script.get_text()
+    data, _ = json.JSONDecoder().raw_decode(js.removeprefix("const DATA="))
+    chosen, other = data["entries"]
+    assert chosen["local"] == chosen["previewURL"] == Path(files["selected.html"]).name + "#one"
+    assert other["local"] == other["previewURL"] == other["online"] == ""
+
+
 def test_file_only_review_stays_file_only_on_mobile(tmp_path):
     board_path = tmp_path / "board.html"
-    board_path.write_text(scanner.render_html({"bot": "demo"}, {
+    board_path.write_text(scanner.render_archived_html({"bot": "demo"}, {
         "project": "Example", "sections": ["files"],
         "files": [{"title": "Requirements", "assignment": {"agent": "editor"}}],
     }), encoding="utf8")
@@ -96,7 +208,7 @@ def board(path, original, online=""):
     payload = {"bot": "test-bot", "owner_name": "审阅人", "generated_at": "2026-11-24", "items": [], "counts": {},
                "preflight": {"all_ready": False, "entries": []}}
     pack = {"files": [{"title": "原件", "url": original, "preview": "图纸"}], "online_url": online}
-    path.write_text(scanner.render_html(payload, pack, output_dir=path.parent), encoding="utf-8")
+    path.write_text(scanner.render_archived_html(payload, pack, output_dir=path.parent), encoding="utf-8")
 
 
 def test_release_preserves_exact_selected_page_fragment_and_display_asset_not_other_local_files(tmp_path):
@@ -159,6 +271,71 @@ def test_signed_calendar_forward_is_replaced_with_navigation_to_native_event(tmp
     result = mobile.pack(path, tmp_path / "build")
     soup = BeautifulSoup((Path(result["site"]) / "index.html").read_text(encoding="utf-8"), "html.parser")
     assert soup.select_one('article a[href="#calendar"]') and not soup.select('a[href*="token="]')
+
+
+def test_verified_message_pair_has_one_card_and_scopes_receipt_links(tmp_path):
+    url = "https://applink.feishu.cn/client/message/link/open?token=fixtureA"
+    pair = {"sent": 2, "expected": 2, "download_verified": True, "gif": url, "text": url + "B"}
+    task = {"_dispatch": True, "title": "动画与说明", "id": "sample", "delivery": pair}
+    source = tmp_path / "index.html"
+    pack = {"work_items": [task], "files": [{"title": "其他入口", "url": url}]}
+    for target, expected_links in [(url + "B", 2), (url + "&access_token=fixture", 1)]:
+        pair["text"] = target
+        source.write_text(scanner.render_archived_html({"bot": "test"}, pack), "utf8")
+        site = Path(mobile.pack(source, tmp_path / "versions")["site"])
+        doc = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser")
+        assert len(doc.select("#messages #task-sample")) == 1
+        assert "动画与说明" not in doc.select_one("aside").get_text()
+        assert len(doc.select('#task-sample a[href*="token="]')) == expected_links
+        assert not doc.select('#files a[href*="token="]')
+    pair["download_verified"] = False
+    source.write_text(scanner.render_archived_html({"bot": "test"}, pack), "utf8")
+    assert "动画与说明" in BeautifulSoup(source.read_text("utf8"), "html.parser").select_one("aside").get_text()
+
+
+def test_selected_card_csv_preserves_bytes_and_rejects_broken_rows(tmp_path):
+    source = tmp_path / "board.html"
+    diff = tmp_path / "changes.csv"
+    diff.write_bytes("项目,前值,后值\r\n质量,5,4\r\n".encode("utf-8-sig"))
+    board(source, "changes.csv")
+    site = Path(mobile.pack(source, tmp_path / "versions")["site"])
+    link = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser").select_one('article a[href$=".csv"]')
+    assert link and (site / link["href"]).read_bytes() == diff.read_bytes()
+    diff.write_bytes(b"old,new\nshows,extra,field")
+    with pytest.raises(ValueError, match="CSV"):
+        mobile.pack(source, tmp_path / "versions")
+
+
+def test_original_entry_precedes_preview_on_the_same_existing_card(tmp_path):
+    entry = "https://example.com/original"
+    source = tmp_path / "board.html"
+    original = tmp_path / "preview.html"
+    original.write_text("<p>原表预览</p>","utf8")
+    item = {"id":"sample", "title":"原表", "url":"preview.html"}
+    config = {"links":[{"label":"飞书原稿","url":entry}],"preview_label":"演示预览"}
+    task = {"id":"sample", "title":"原表","_dispatch":True,"url":"https://example.com/staff-only"}
+    source.write_text(scanner.render_archived_html({"bot":"test"},{"files":[item],"work_items":[task],
+                                                          "owner_entries":{"sample":config}}),"utf8")
+    site = Path(mobile.pack(source,tmp_path/"versions")["site"])
+    dom = BeautifulSoup((site/"index.html").read_text("utf8"),"html.parser")
+    cards = dom.select('#files article[data-work-item="sample"]')
+    assert len(cards)==1 and cards[0].select_one("a[href]")["href"]==entry
+    assert "演示预览" in cards[0].select_one(".record-links a").get_text()
+    assert not dom.select('a[href*="staff-only"]')
+
+
+def test_reopened_item_has_one_current_card_and_keeps_other_pending_work():
+    current = {"id":"spec", "title":"需求复核", "_dispatch":True, "preview_url":"preview.html"}
+    old = {"id":"superseded", "title":"旧稿派单", "_dispatch":True}
+    waiting = {"id":"sample", "title":"样件测量"}
+    entries = {"spec":{"hide_assignment":True,"summary":"按原件修订"},
+               "superseded":{"remove_from_pending":True}}
+    page = scanner.render_archived_html({"bot":"test"},{"work_items":[current,old,waiting],"owner_entries":entries})
+    dom = BeautifulSoup(page,"html.parser")
+    assert len(dom.select('#messages [data-work-item="spec"]'))==1
+    assert not dom.select(".dispatch-overview")
+    assert "按原件修订" in dom.select_one('#messages [data-work-item="spec"]').get_text()
+    assert "样件测量" in dom.select_one("#messages").get_text() and "旧稿派单" not in page
 
 
 def test_combined_schedule_keeps_nested_tasks_and_sidebar_roles(tmp_path):

@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bridge_env import (  # noqa: E402
     assert_sender_identity,
     bots_config_path,
+    expand_project_path,
     resolve_env_path,
     resolve_wmux_rpc,
 )
@@ -230,7 +231,7 @@ def _apply_roster_defaults(spec, defaults):
     runtime = str(spec.get("agent") or spec.get("runtime") or "claude").lower()
     merged = {
         k: v for k, v in defaults.items()
-        if k not in identity_keys and k != "profiles" and not k.startswith("_")
+        if k not in identity_keys and k not in {"profiles", "project_controls"} and not k.startswith("_")
     }
     merged.update(spec)
     if any(spec.get(k) for k in identity_keys):
@@ -329,6 +330,7 @@ def load_bots():
             "profile": profile,
             "agent": runtime,
             "display_name": s.get("display_name"),
+            "project_controls": s.get("project_controls", {}),
             "codex_transport": s.get("codex_transport"),
             "delivery_contract": s.get("delivery_contract"),
             "agent_cmd": s.get("agent_cmd"),
@@ -345,12 +347,7 @@ def load_bots():
 def _expand_cd_path(s):
     """展开 /cd 配置里的跨机 token（绝不写死盘符/用户名·用户 CLAUDE.md 跨机铁律）：
       `$PROJECT`→本仓库根(自适应有无 tools 层) · `$VIBECODING_ROOT` 等环境变量 · `~`→各机 home。返回正斜杠路径。"""
-    s = (s or "").strip()
-    if not s:
-        return s
-    s = s.replace("$PROJECT", str(PROJECT)).replace("${PROJECT}", str(PROJECT))
-    s = os.path.expanduser(os.path.expandvars(s))
-    return s.replace("\\", "/")
+    return expand_project_path(s, PROJECT)
 
 
 def load_cd_config():
@@ -928,9 +925,9 @@ def _peer_slash_request(text, target):
     if not sep or not body.startswith("/") or "\n" in body or "\r" in body:
         return None
     peer, arrow, recipient = header.partition(" → ")
-    if not arrow or recipient != target or not re.fullmatch(r"[\w-]+", peer):
+    if not arrow or recipient.casefold() != target.casefold() or not re.fullmatch(r"[\w-]+", peer):
         return None
-    tail = f" [飞书_from_{peer}_to_{target}]"
+    tail = f" [飞书_from_{peer}_to_{recipient}]"
     if not body.endswith(tail):
         return None
     command = body[:-len(tail)]
@@ -940,16 +937,19 @@ def _peer_slash_request(text, target):
 
 
 def _verify_peer_app(bot, peer, mid, chat, expected_text):
-    """Read the signed-in recipient's platform record and bind it to a local app."""
+    """Return the platform-authenticated App ID, bound to this recipient and message."""
+    import agent_grant
     import feishu_rest
     import tenant_probe
     import bridge_scope_audit
     if not re.fullmatch(r"om_[a-zA-Z0-9_-]+", mid or ""):
         return False
-    spec = tenant_probe._bot_spec(peer)
-    if not spec:
-        return False
-    app = bridge_scope_audit._env_val(spec["app_id_env"])
+    rule = agent_grant.project_rule(bot, peer)
+    if rule is None:
+        spec = tenant_probe._bot_spec(peer)
+        app = bridge_scope_audit._env_val(spec["app_id_env"]) if spec else None
+    else:
+        app = rule.get("app_id") if rule.get("target") == bot["name"] and rule.get("chat_id") == chat else None
     if not app:
         return False
     token = _tenant_token(bot["app_id"], bot["app_secret"])
@@ -965,11 +965,13 @@ def _verify_peer_app(bot, peer, mid, chat, expected_text):
                 key = mention.get("key")
                 if key and body.startswith(key + " "):
                     body = body[len(key):].lstrip()
-            return body == expected_text
+            if rule is not None and author.get("id_type") != "app_id":
+                return False
+            return app if body == expected_text else False
     return False
 
 
-def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None):
+def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None, verified_app=None, chat=None):
     """群内破坏性命令放不放行 → (bool, 原因)。三条放行路径，其余一律拒：
       ① 主人本人在群里下的（sender == 本 bot 的 owner）——他本来就是老大。
       ② agent 关自己（解析出来就是我）——自己关自己无风险，主人 2026-08-03 拍板永远放行。
@@ -982,7 +984,7 @@ def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None):
     等于「谁都关不了」。标准 peer 命令从飞书原消息核对发件 App ID；文字戳只用于关联。"""
     cap = cmd.lstrip("/")
     cap = _CAP_ALIAS.get(cap, cap)
-    if sender and sender == load_owner(bot["name"]):
+    if not verified_peer and sender and sender == load_owner(bot["name"]):
         return True, "主人本人"
     try:
         from registry import name_for_open_id
@@ -993,14 +995,13 @@ def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None):
             name_for_open_id = None
     who = verified_peer or (name_for_open_id(sender, default=None) if name_for_open_id and sender else None)
     src = "飞书发件应用" if verified_peer else "open_id"
+    import agent_grant
+    if who and agent_grant.project_rule(bot, who) is not None:
+        return agent_grant.review_control(bot, who, verified_app, chat, text or cmd)
     if who and who == bot["name"]:
         return True, "自己关自己（永远放行）"
     if not who:
         return False, "发信应用身份未核实"
-    try:
-        import agent_grant
-    except ImportError:
-        return False, "授权模块不可用·fail closed"
     if agent_grant.has_cap(who, cap, STATE_DIR, target=bot["name"]):
         return True, f"{who} 持有 {cap} 授权（认人来源：{src}）"
     return False, f"{who} 没有 `{cap}` 授权（主人私聊它一句、它自己 claim 即可）"
@@ -1047,12 +1048,25 @@ def _prepare_tui_text(bot_name, message_id, text, *, runtime_bot=None):
         reason = "含制表符 TAB·内联会损坏"
     elif _cmdline_units(text) > SEND_MAX_CHARS:
         reason = "超长·内联会撑爆命令行上限"
+    elif (sys.platform == 'win32' and runtime_bot and agent_runtime.uses_app_server(runtime_bot)
+          and ('\n' in text or '\r' in text or len(text) > 512)):
+        # Windows Codex treats pasted newlines as editor keystrokes and can
+        # continue Markdown quotes. Submit a one-line reference to the verbatim body.
+        reason = "多行或长消息按编号保存，直接提交原文引用"
     if not reason:
         return text, ""
     try:
         STATE_DIR.mkdir(exist_ok=True)
-        inbox = STATE_DIR / f"bridge-inbox-{bot_name}-{bridge_inbox.prompt_digest(message_id)[:24]}.txt"
-        inbox.write_bytes(text.encode("utf-8"))  # No Windows newline translation.
+        raw = text.encode("utf-8")
+        key = hashlib.sha256(message_id.encode("utf-8") + b'\0' + raw).hexdigest()[:24]
+        inbox = STATE_DIR / f"bridge-inbox-{bot_name}-{key}.txt"
+        if not inbox.exists() or inbox.read_bytes() != raw:
+            temp = inbox.with_suffix(f".{uuid.uuid4().hex}.tmp")
+            try:
+                temp.write_bytes(raw)
+                temp.replace(inbox)
+            finally:
+                temp.unlink(missing_ok=True)
     except OSError as exc:
         raise RuntimeError("完整原文尚未保存，消息保留待办；没有截断提交") from exc
     return (f"[桥转交] 请先读取 UTF-8 文件 {inbox.as_posix()} "
@@ -2007,7 +2021,7 @@ def _kimi_active_turn(runtime_bot):
     )
 
 
-def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_native_receipt=False):
+def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_native_receipt=False, on_submitted=None):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
@@ -2038,24 +2052,29 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     # ① 线性分档 settle（块数 = 字数÷100·向上取整）
     chunks = max(1, -(-len(marker) // 100))
     time.sleep(min(INJECT_SETTLE_CAP, INJECT_SETTLE_BASE + INJECT_SETTLE_PER_CHUNK * chunks))
-    if is_codex and win32_input and len(marker) > 1000:
-        # ConPTY can take several seconds after the write to render a large paste.
-        # Enter during this interval becomes a newline in the still-growing paste.
-        # We still own the initial injection lock. Recovery requires an exact draft.
-        deadline = time.monotonic() + 30
-        while not cron_delivery.initial_paste_visible(read_screen(pty, None), marker):
+    if is_codex:
+        # Enter submits to the current turn even when the TUI offers deferred follow-ups.
+        deadline = time.monotonic() + (30 if win32_input and len(marker) > 1000 else 3)
+        while True:
+            screen = read_screen(pty, None)
+            if cron_delivery.initial_paste_visible(screen, marker):
+                break
             if time.monotonic() >= deadline:
-                raise RuntimeError('长稿粘贴后未能核实完整输入框，尚未按回车；原稿已保留')
+                raise RuntimeError('输入框尚未显示本次原稿，已保留消息等待核对')
             time.sleep(0.25)
+        state = bridge_activity.read_activity(STATE_DIR, runtime_bot).get('state')
+        screen = read_screen(pty, None)
+        if (state not in {'idle', 'active'} or cron_delivery.is_compacting(screen)
+                or not cron_delivery.initial_paste_visible(screen, marker)):
+            raise RuntimeError('会话或草稿正在变化，原稿已保留')
+        wmux("enter", pty, *allow)
+        if on_submitted:
+            on_submitted()
+        return True
     if steer_kimi:
         wmux("send", pty, "\x1b[115;5u", *allow)
     else:
         wmux("enter", pty, *allow)
-    if is_codex:
-        # This is only a successful transport call. Inbox + the native hook
-        # decide reception; recovery may retry Enter on an idle exact draft or
-        # the explicitly advertised queue Tab on an active exact draft.
-        return True
     # ②③ 回车后闭环校验：读屏确认输入框真空了(=已提交)·没提交就重按（第一次早读·省常态短消息延迟）
     tries = 15 if is_kimi else INJECT_VERIFY_TRIES
     for i in range(tries):
@@ -2088,13 +2107,13 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
-def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None, require_native_receipt=False):
+def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None, require_native_receipt=False, on_submitted=None):
     """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
     with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
         if idle_bot and bridge_activity.read_activity(STATE_DIR, idle_bot).get("state") != "idle":
             raise RuntimeError("会话已不空闲；一次性 effort 任务未注入，请等当前回合结束后重发")
         return _inject_unlocked(pty, workspace_id, marker, runtime_bot=runtime_bot,
-                                require_native_receipt=require_native_receipt)
+                                require_native_receipt=require_native_receipt, on_submitted=on_submitted)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
@@ -2555,12 +2574,19 @@ async def settle_inbound_handoffs(bot, inbox, channel):
     for row in inbox.inbound_handoffs():
         context = json.loads(row['handoff'])
         if cron_delivery.accepted(row):
+            if context.get('notice') == 'unconfirmed':
+                result = await card_send(channel, context['chat_id'],
+                                         f'✅ 刚才提醒你还在核实的消息，现已确认 Codex 收到了这条任务。'
+                                         f'不用重发。\n消息 ID：{row["id"]}', bot['name'])
+                if result == 'failed':
+                    continue
+                inbox.handoff_notice(row['id'], 'receipt_sent')
             if await _thumbs_up(channel, row['id'], bot['name'], delays=(0,)):
                 inbox.handoff_notice(row['id'], 'done')
         elif row['state'] == 'received_modified':
             result = await card_send(channel, context['chat_id'],
-                                    '⚠️ Codex 已接收这条消息，但收到的文字与桥保存的原文不一致。'
-                                    '我不会重复提交；完整原文和接收记录已保留，请核对本条处理结果。', bot['name'])
+                                    '⚠️ Codex 收到了这条消息，但收到的文字和你发来的原文有出入。'
+                                    f'原文已保存，请先核对它的回复再决定是否补充。\n消息 ID：{row["id"]}', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'received_modified')
         elif (row['state'] in pending
@@ -2569,16 +2595,19 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                    or time.time() - row['received'] >= cron_delivery.INBOUND_ACK_ALERT_SEC)):
             error = row.get('error') or ''
             if 'folder-trust prompt cannot be ruled out' in error or '后台画面暂时无法完整读取' in error:
-                reason = 'Wmux 无法完整读取后台面板，输入保护拒绝了投递或提交'
+                reason = '桥看不全 Codex 的输入框，暂时无法核实提交结果。'
             elif 'wmux-rpc enter failed:' in error:
-                reason = '文字写入后，提交 Enter 失败；尚无原生接收回执'
+                reason = '文字已填入 Codex，提交时遇到了问题。'
             else:
-                reason = context.get('waiting_reason') or error or '尚无原生接收回执，当前投递结果无法确认'
+                reason = ''
             if cron_delivery.accepted(inbox.get(row['id'])):
                 continue  # A late receipt wins over the timeout notification.
+            status = ('桥已按 Enter 提交这条消息，正在等 Codex 确认收到。' if context.get('enter_at') else
+                      '这条消息还在旧版 Codex 后续队列中。' if context.get('queue_key_at') else
+                      f'飞书桥已收到并保存这条消息。{reason}还在核实 Codex 有没有收到。')
             result = await card_send(channel, context['chat_id'],
-                                    f'⚠️ 消息投递未确认：{reason}。\n'
-                                    '原消息和现场已保留，桥不会盲目重贴；这不表示 Codex 已开始处理。\n'
+                                    f'⏳ {status}'
+                                    '你不用重发，确认后会通知你。\n'
                                     f'消息 ID：{row["id"]}', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'unconfirmed')
@@ -2597,9 +2626,15 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                 continue
             if not compacting and context.get('notice') == 'pending':
                 continue
-            result = await card_send(channel, context['chat_id'],
-                                    'compacting context' if compacting else
-                                    '⏳ 原消息已保存，尚未取得 Codex 接收确认；正在检查投递状态。', bot['name'])
+            if compacting:
+                status = 'Codex 正在整理当前对话。桥已保存你的消息，你不用重发。'
+            elif context.get('enter_at'):
+                status = '桥已按 Enter 提交这条消息，正在等 Codex 确认收到。你不用重发。'
+            elif context.get('queue_key_at'):
+                status = '桥已按排队键提交这条消息。Codex 读到后会在原消息上点 👍，你不用重发。'
+            else:
+                status = '桥已收到你的消息，正在等 Codex 确认。你不用重发。'
+            result = await card_send(channel, context['chat_id'], f'⏳ {status}', bot['name'])
             if result != 'failed':
                 inbox.handoff_notice(row['id'], 'compacting' if compacting else 'pending')
 
@@ -2807,6 +2842,17 @@ async def _deliver_peer_result(bot_name, text, route, purpose, fragment):
         receipt(bot_name, {**base, "kind": "peer_result", "delivered": False,
                            "err": "missing_request_mid"})
         return {"ok": False, "message_id": None}
+    if len(text or "") < 64 and (fragment or {}).get("total", 1) == 1:
+        from proactive_dispatch import is_work_ack, RESULT_ONLY
+        if is_work_ack(text or ""):
+            import bridge_inbound
+            original = next((r for r in reversed(bridge_inbound.read_records(STATE_DIR, bot_name))
+                             if r.get("message_id") == route["mid"]), {})
+            prompt = original.get("text") or original.get("raw_text") or ""
+            if RESULT_ONLY in prompt and re.search(r"(?m)^\s*\[Proactive [\w.-]+\]", prompt):
+                receipt(bot_name, {**base, "kind": "a2a_ack_local", "delivered": False,
+                                   "suppressed": True, "reason": "result_only_dispatch"})
+                return {"ok": True, "message_id": None, "suppressed": True}
     try:
         from send_feishu_msg import send_agent_message
         sent = await asyncio.to_thread(
@@ -3122,7 +3168,7 @@ def _run_bot(bot_name=None):
             await respond(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
         async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None, inbound_id=None,
-                               created=None, verified_peer=None, reply=reply):
+                               created=None, verified_peer=None, verified_app=None, reply=reply):
             cmd = text.split()[0].lower()
             arg = text[len(cmd):].strip()
             if verified_peer and cmd.lstrip("/") in _GATED_CAPS and not created:
@@ -3140,7 +3186,8 @@ def _run_bot(bot_name=None):
             #   （close 关会话 / clear 抹光我上下文 / cd 改我工作目录 / account 换我账号 / new / stop）。
             #   这不是新开的口子，是**早就大敞、今天才装闸**。私聊(非群)不受影响：私聊已过 is_allowed=只有主人。
             if from_group and (cmd.lstrip("/") in _GATED_CAPS or (verified_peer and cmd == "/screen")):
-                verdict, why = _gate_verdict(bot, sender, cmd, text, verified_peer=verified_peer)
+                verdict, why = _gate_verdict(bot, sender, cmd, text, verified_peer=verified_peer,
+                                             verified_app=verified_app, chat=chat_id)
                 if not verdict:
                     blog(bot["name"], f"🚧 拒绝群内 {cmd}：{why}")
                     receipt(bot["name"], {"tid": "gate", "kind": "slash_denied", "cmd": cmd,
@@ -3834,7 +3881,9 @@ def _run_bot(bot_name=None):
                     cmd = command.split()[0].lower()
                     durable_inbox.boundary(msg.id)
                     try:
-                        authenticated = (getattr(msg.sender, "is_bot", False) and not resources and
+                        app_event = getattr(msg, "link16_sender_type", None)
+                        is_app = app_event in {"app", "bot"} if app_event else getattr(msg.sender, "is_bot", False)
+                        authenticated = (is_app and not resources and
                                          await asyncio.to_thread(_verify_peer_app, bot, peer, msg.id, msg.chat_id, text))
                     except (OSError, ValueError, RuntimeError, KeyError, SystemExit):
                         authenticated = False
@@ -3850,7 +3899,7 @@ def _run_bot(bot_name=None):
 
                     if cmd.lstrip("/") in _GATED_CAPS or cmd in ("/help", "/screen"):
                         await handle_slash(msg.chat_id, command, sender=sender, from_group=True,
-                                           arrived=time.time(), inbound_id=msg.id, verified_peer=peer,
+                                           arrived=time.time(), inbound_id=msg.id, verified_peer=peer, verified_app=authenticated,
                                            created=bridge_inbound.event_ts(getattr(msg, "create_time", None), 0.0),
                                            reply=collect_result)
                     else:
@@ -4059,7 +4108,8 @@ def _run_bot(bot_name=None):
                     durable_inbox.boundary(msg.id, prompt=marker, session=target_session, handoff=handoff)
                     inject_ok = await asyncio.to_thread(
                         _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None,
-                        runtime_bot=bot)
+                        runtime_bot=bot, on_submitted=lambda: durable_inbox.handoff_observe(
+                            msg.id, '已按 Enter 提交，等待 Codex 接收', enter=True))
                     if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
                         blog(bot["name"], f"[{tid}] 输入框校验未通过；继续核对原生接收回执")
                     # Durable inbox owns delivery now. Absence of outbox output
@@ -4623,16 +4673,25 @@ def cmd_status(bot_filter=None):
 def _inbox_status_text(inbox):
     row = inbox.delivery_status()
     if not row:
-        return "收件记录：暂无普通消息交接"
-    labels = {"queued": "已落盘，等待自动投递", "processing": "已落盘，正在准备投递",
-              "submitting": "已落盘，正在提交", "awaiting_confirmation": "已落盘，正在核对会话接收回执",
-              "uncertain": "已落盘，正在核对会话原生记录", "done": "目标会话已确认接收",
-              "received_modified": "目标会话已接收；正文有变化，原文已保留", "cancelled": "已按控制命令取消",
-              "failed": "已落盘，启动失败，需排除启动故障"}
-    result = f"最近消息 {row['id'][-6:]}：{labels.get(row['state'], row['state'])}"
+        return "桥还没有收到普通消息。"
+    labels = {"queued": "桥已保存，正在排队。你不用重发。", "processing": "桥已保存，正在准备发送。",
+              "submitting": "桥已保存，正在提交给智能体。", "awaiting_confirmation": "桥已收到，正在等智能体确认。你不用重发。",
+              "uncertain": "桥已保存，正在核实智能体有没有收到。你不用重发。", "done": "智能体已收到。",
+              "received_modified": "智能体已收到，但文字有出入。桥已保留原文。", "cancelled": "这条消息已按指令取消。",
+              "failed": "桥已保存，发送遇到了问题，请查看这条消息的错误提醒。"}
+    status = labels.get(row['state'], row['state'])
+    if row['state'] in ('submitting', 'uncertain', 'awaiting_confirmation') and row.get('enter_at'):
+        status = '已按 Enter 直接提交，正在等智能体确认收到。'
+    elif row['state'] in ('submitting', 'uncertain', 'awaiting_confirmation') and row.get('queue_key_at'):
+        status = ('消息已离开输入框，正在等智能体读取。' if row.get('queue_left_at')
+                  else '桥已按排队键，正在等智能体读取。')
+    result = f"最近消息 {row['id'][-6:]}：{status}"
     if row.get("received_digest"):
         result += f"\n接收会话：{row.get('session') or '未记录'}"
-        result += "\n正文核对：" + ("一致" if row['digest'] == row['received_digest'] else "有差异（可对照原文）")
+        comparison = "一致" if row['digest'] == row['received_digest'] else "有差异（可对照原文）"
+        if row.get('formatting') == 'continued_quote':
+            comparison = "正文已核对，输入框多加了行首引用符号"
+        result += "\n正文核对：" + comparison
     return result
 
 
@@ -4824,6 +4883,11 @@ def cmd_send(bot_name, text, to=None, as_json=False, image=None, doc=None, doc_n
             print(f"❌ 图片不存在: {image}", file=sys.stderr); sys.exit(2)
     if doc and not Path(doc).is_file():
         print(f"❌ 文档不存在: {doc}", file=sys.stderr); sys.exit(2)
+    from user_text import require_text
+    require_text(text)
+    if doc and Path(doc).suffix.lower() in {".md", ".markdown", ".txt", ".html", ".htm"}:
+        fmt = "html" if Path(doc).suffix.lower() in {".html", ".htm"} else "markdown"
+        require_text(Path(doc).read_text(encoding="utf-8-sig"), fmt)
     doc_stats = _doc_source_stats(doc)
     # 文档授权对象 = 显式 open_id 目标 > owner > 会话 open_id（bot 建的文档必授权否则 owner 打不开）
     grant_oid = None

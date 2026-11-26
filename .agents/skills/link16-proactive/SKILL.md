@@ -1,6 +1,6 @@
 ---
 name: link16-proactive
-description: Link16 主动工作台。按本人实际职责发现事项、跨仓跨机分派，验收后在本人私聊用交互卡片汇报。支持四种登记平台。
+description: Link16 主动工作台。按本人职责分派和追单，收执行者的验收结论及同版预览，在本人私聊交付。支持四种登记平台。
 ---
 
 # Link16 Proactive — 跨机跨平台主动闭环地图
@@ -12,18 +12,41 @@ description: Link16 主动工作台。按本人实际职责发现事项、跨仓
 - **跨机任务模板**：`feishu/tasks/proactive-loop.yaml`
 - **工具总索引**：`TOOLS.md`
 
+### 按业务排
+
+本人要求梳理新业务或排业务时，在本轮业务登记选 `"mode":"arrange_business"` 并指定登记主号 `dispatch_bot`。登记的 `previous`、`items` 每项按原单填稳定 `id`、`name`（业务）、`agent`（具体登记名）和 `expected`（可验交付）。先核当前续单作者，历史派单和回执保留原样。
+
+1. `python feishu/proactive_business_list.py refresh-members --bot <登记主号>` 从本租户已登记群回读跨机机器人。登记名取有效舰队、本机运行名册和实核的租户机器人，群内人名与外观相似的别名无法通过。
+2. `python feishu/proactive_business_list.py arrange --round-json <本轮业务登记.json>` 输出可直接粘贴的 `- 业务项｜登记智能体名称｜具体交付物`。对话原样用通过的正文；工作台使用同一清单。
+3. `python feishu/proactive_business_list.py check --round-json <本轮业务登记.json> --bullets <待贴文本.txt>` 核顺序及每一栏。失败时依报错修正原单登记或待贴文本，再运行；整单通过才使用。
+
+普通进度、事后汇报和消息沿原通道。排业务命令只有读取、验证和输出功能。
+
+### 派单后必须登记和追踪
+
+在主派单机用 `python feishu/proactive_ownership.py list` 核现有物品及原作者。Tenant 直派和同人同单补充都用 `send_feishu_msg.py --to-agent <原执行者> --item <同一物品> --task-id <原任务> ...`；补充取得 MID 后照下方 `link` 关联。独立复核只读，发布只原样上架。换责任人先给旧作者停笔指令，用 `proactive_ownership.py stop --item <物品> --owner <旧作者> --stop-mid <原请求>` 冻结生产派单。收齐旧作者停止写入或外发的原回执、封存文件与未完要求后，执行 `proactive_ownership.py transfer --item <物品> --owner <旧作者> --next-owner <新作者> --bot <主号> --stop-mid <原请求> --receipt <停笔回执> --handoff <交接文件>`。已发的重复子单用 `proactive_followup.py --bot <主号> retire <旧单> --to <唯一责任单> --receipt <停笔回执> --handoff <交接文件>`，由新作者对接收的全部要求自验。
+
+1. 同一物品或业务事项沿用稳定的 `--item` 和唯一作者，模型、原文档、图/GIF、回填验收、获准的消息均在该作者原单完成，不同物品可并行。`proactive_dispatch.py send --item <物品> --next-check <带时区的时间>` 在取得派单回执后自动登记；首次检查用原派单预计完成时间。同租户直发、历史派单及原生委派用 `python feishu/proactive_followup.py --bot <主号> register --file <私有JSON>`，每项给 `id`、`title`、`next_check`、`interval_seconds`，以及实际 `peer` 和 `request_mid`，或独立原生线程的 `native_log`，或前置任务 ID 列表 `dependency`。无回音、已收但空闲的提前查，重复登记同一单保留已定提醒。
+2. 在 Windows 派单机运行 `feishu/install_proactive_followup.ps1 -Bot <主号>`；其他主机使用当地已有调度每分钟执行同一 `tick`。主号第一次和恢复时实际运行 `python feishu/proactive_followup.py --bot <主号> tick`，用 `list` 查原单、执行证据、下一次检查与唤醒回执。此定时器独立于整台工作台巡检开关。
+3. 工具按期查原派单、桥接收/运行状态及关联回信。进行中的单自动续约；执行者给出更准时间就用 `defer <id> --next-check <带时区的时间>` 修订。无进展、缺回执、检查失败和收到结果时，工具合并唤醒主号，主号查原单处理。重启从私有账本续查。
+4. 给同一执行者发补单后用 `link <id> --request-mid <新请求>` 关联同群同收件人的实际原单。用 `check <id>` 立即回读证据。验收须覆盖最新补充；作者在补充后回原单的终报也可采用。一个派单交多件时，每件分别绑定自己的作者回执和同版预览。执行者明确验收通过，已满足本人要求的确认后，用 `close <id> --conclusion <结论> --preview <原件> --receipt <作者回执>` 登记交付与剩余限制。
+
 ## 1. 四步确定性调用地图（直接调，不摸索）
+
+已登记物品的主号通过 Tenant 发普通协调消息时按实际职责标记 `--coordination handoff|receipt|publish|compute|control`，分别用于停笔交接、收回执、原样上架、依确定输入跑计算、原生平台控制。产品判断及文件改动均走物品作者派单。作者对原单的业务回执仍使用原自动回址。
+
+模型和规格文档任务用 `proactive_dispatch.py preview --bot <主号> --item <物品> --task-id <原单> --prompt-file <原话> --artifact <原文档>` 核正常派单的全文。实际派发自动带上已验模型、HTML/PRD、点名改动、表格行列和指标口径，以及新增功能、对应视角 GIF 与过程记录的归属。
 
 | 阶段 | 要做什么 | 唯一确定性入口 |
 |---|---|---|
 | **Phase 0 预检** | 按当前应用身份分别检查授权与可读资源，各域保存成功、缺权或部分读取的证据 | `python feishu/proactive_scanner.py --bot <bot> --preflight-only` |
-| **Phase 1 巡检** | 业务主号按时间查本人消息、日历和临时会议、纪要及逐字稿、周报手写行、任务与审批。按岗位和原件判定待办，关联已派任务和已执行回执；同一工作台仅一个定时 writer | `python feishu/bridge_cron.py board`，SOP-150 §2 |
-| **Phase 2 审阅与委派** | 先核目标机运行、额度和在途，再按原请求收件。原工作台按业务、审批、项目时间线排列。消息显示收件人、出处背景和拟回全文，权限矩阵独立交付 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
-| **Phase 3 确认执行** | 按具体授权更新原表、发送本人消息或办理审批，分别回读实际结果。本人网页外发与网页业务能力只在相应组件已安装、目标租户和身份已核时启用。 | `docs/SOP-150-proactive-agent-loop.md` §4、当前业务仓原件 |
+| **Phase 1 巡检** | 主号派执行者核实本人消息、日历与临时会议、会议逐字稿、周报手写行、任务和审批。关联原任务与执行回执，同一工作台一个 writer | `python feishu/bridge_cron.py board`，SOP-150 §2 |
+| **Phase 2 审阅与委派** | 主号核目标机运行、额度和在途工作后沿原单分派。消息显示收件人、出处及拟回全文。业务和审批均使用 TASTE-010 四列，审批链接按 SOP-151 点验，从工作台一次进入该笔原单。七天日轴跨周、跨月，已闭环事项按真实日期与原件去重补录，同日节点纵排、全称可读 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
+| **Phase 3 确认执行** | 按具体授权分派原表更新与审批办理，执行者回读并报结果；主号统一发送获授权的消息。本人网页通道须核插件、租户和身份 | `docs/SOP-150-proactive-agent-loop.md` §4、当前业务仓原件 |
 
 ## 2. 不可违背的四条护栏
 
 1. **按能力验权**：每次新机/新 bot 接入先跑 `--preflight-only`，核本人绑定、源数据与具体动作；某域缺口只影响对应动作，已授权来源继续。企业等级、本人授权和业务实测分别记载。
 2. **按租户能力选择通道。** 审批定义与开放范围按应用核实，网页通道按本机安装与登录态核实。缺插件或缺权时保留草稿。
 3. **对外发送与审批按本人授权。** 先预览拟写的原件、待发文案或单据，再按已确认范围处理和回读。主号在本人私聊汇报使用应用身份。
-4. **沿用原工作台。** 按来源项目、负责人和实际业务栏目展示成果。执行者沿原单回主号，主号验收后即向本人私聊发按项编号的交互卡片，各点空一行。业务类别与检查规则读 Link16 TASTE-010，操作读 SOP-150。称呼、来源和原单随私有业务登记。
+4. **沿用原工作台。** 按来源项目和负责人展示成果。业务查看、执行和验收均交给原单执行者或另派的验收人。主号接验收结论及预览，更新条目并向本人私聊发按项编号的交互卡片，点间空一行。业务类别与检查规则读 Link16 TASTE-010，操作读 SOP-150。称呼、来源和原单随私有业务登记。
