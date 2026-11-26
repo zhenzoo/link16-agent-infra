@@ -193,6 +193,27 @@ class Bundle:
             self.archived[path, sha] = original
             if path not in self.current_archive_exports and digest(path.read_bytes()) == sha:
                 self.current_archive_exports[path] = export
+        # A paired local entry opens the original on desktop. On a hosted
+        # board the same control reveals its checked workstation path.
+        original_paths = []
+        marker = board.select_one("#workbench-round-checks")
+        for spec in json.loads(marker.string) if marker else []:
+            pair = spec.get("artifact_pair")
+            if not pair:
+                continue
+            selected = relative_target(self.board, pair["local"])
+            if not self.archive_paths or not can_read(selected, [self.board.parent], HTML):
+                raise ValueError("双入口成品须有已授权展示路径的本地原 HTML")
+            row = board.find(id="business-" + spec["id"])
+            anchor = row.select_one(".result-links a")
+            pointer = board.new_tag("code", id="local-" + spec["id"])
+            pointer["class"] = ["local-artifact-path"]
+            anchor["href"] = "#" + pointer["id"]
+            anchor["data-show-local-path"] = ""
+            anchor["aria-controls"] = pointer["id"]
+            anchor["aria-expanded"] = "false"
+            anchor.parent.append(pointer)
+            original_paths.append((pointer, selected))
         for a in board.select("article a[href], #business tr[data-business-id] a[href], #closed .archive-links a[href]"):
             if a.has_attr("data-archive-version"):
                 continue
@@ -222,7 +243,7 @@ class Bundle:
                             raise ValueError(f"原稿缺少声明或唯一可预览锚点：{path.name}#{fragment}")
             # Machine paths are private by default. The owner can opt in to the path
             # of an archived original that is itself selected in the very same row.
-            archive_labels = []
+            archive_labels = list(original_paths) if path == self.board else []
             if path == self.board:
                 for code in soup.select("#business tr[data-business-id] code[data-local-original]"):
                     selected = Path(code.get_text())

@@ -3,6 +3,7 @@ import json
 import hashlib
 import re
 from bs4 import BeautifulSoup
+from proactive_taste import artifact_links, check_message, check_pair_row
 
 
 def ordered_assignments(plan):
@@ -53,6 +54,19 @@ def apply_round(rows,plan):
                 raise ValueError("成果缺少原作者或原始回执")
             row["result_source"]=receipt["source"]
             row["results"]=receipt["results"]
+        policies = plan.get("message_policies", {}).get(key, {})
+        if policies:
+            for entry in row.get("results", []):
+                if entry["type"] == "draft_message":
+                    if entry["recipient"] not in policies:
+                        raise ValueError("采购草稿收件人未登记")
+                    check_message(entry["text"], policies[entry["recipient"]])
+        pair = plan.get("artifact_pairs", {}).get(key)
+        if pair:
+            row["artifact_pair"] = pair
+            row["results"] = [{"type": "links", "items": artifact_links(pair)}]
+            row["media"] = []
+            row["topics"] = []
         decision=plan.get("owner_reviews",{}).get(key)
         if decision:
             if (decision.get("reviewer")!=plan["owner"] or decision.get("decision") not in ("accept","revise")
@@ -74,6 +88,7 @@ def row_signatures(rows):
         actual=any((e.get("items") and any(m.get("value") is not None for m in e["items"]))
                    if e["type"]=="metrics" else True for e in entries)
         signatures.append({"id":row["id"],"agent":row["agent"],"name":row["name"],"expected":row["expected"],
+                           **({"artifact_pair":row["artifact_pair"]} if row.get("artifact_pair") else {}),
                            "actual":bool(actual),"review":(row.get("owner_review") or {}).get("decision",""),
                            "review_mid":(row.get("owner_review") or {}).get("mid",""),
                            "media":[m["sha256"] for m in row.get("media",[])],
@@ -146,7 +161,9 @@ def validate_html(page,plan=None):
             if spec.get("review_mid","")!=(plan.get("owner_reviews",{}).get(key) or {}).get("mid",""):
                 raise ValueError("本人验收来源不符")
             receipt=plan.get("receipts",{}).get(key)
-            if receipt:
+            if spec.get("artifact_pair") != plan.get("artifact_pairs", {}).get(key):
+                raise ValueError("本地与在线成品须对应登记的同一交付物")
+            if receipt and not spec.get("artifact_pair"):
                 original=row_signatures([{"id":key,"agent":owners[key],"name":spec["name"],"expected":expected,
                                            "results":receipt["results"]}])[0]
                 if any(spec.get(k)!=original[k] for k in ("actual","metrics","statuses","drafts","link_labels","tables")):
@@ -173,6 +190,8 @@ def validate_html(page,plan=None):
         if any(not set(n.get("class",[]))&allowed and n.name not in {"blockquote","a"} for n in out.find_all(recursive=False)):
             raise ValueError("结果含未登记的自由文本")
         links=out.select(":scope > .result-links")
+        if pair := spec.get("artifact_pair"):
+            check_pair_row(row, spec["id"], pair)
         if any(str(t).strip() for group in links for t in group.find_all(string=True,recursive=False)):
             raise ValueError("链接栏含未登记的自由文本")
         if [a.get_text() for group in links for a in group.select(":scope > a[href]")]!=spec.get("link_labels",[]):
@@ -212,6 +231,13 @@ def validate_html(page,plan=None):
                 for d in out.select("details.draft-message")]
         if drafts!=spec.get("drafts",[]):
             raise ValueError("草稿的收件人或原文与作者回执不符")
+        if plan:
+            policies = plan.get("message_policies", {}).get(spec["id"], {})
+            for draft in out.select("details.draft-message"):
+                recipient = draft.summary.get_text().removeprefix("拟发给 ")
+                if policies and recipient not in policies:
+                    raise ValueError("采购草稿收件人未登记")
+                check_message(draft.blockquote.get_text(), policies.get(recipient))
         media=[m.get("data-sha256") for m in attachments.select("figure img,figure video")]
         if media!=spec["media"] or (not media and attachments.get_text(strip=True)):
             raise ValueError("无原附件须留白，有原附件须与署名指纹相符")
