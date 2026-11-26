@@ -238,4 +238,3 @@ def validate(dom, plan):
             if (len(anchors) != 1 or len(result.select("a")) != 1 or anchors[0]["href"] != target
                     or result.get_text(strip=True) != s["label"] or anchors[0].get_text() != s["label"]):
                 raise ValueError("该行须且仅须一个指定原件：" + key)
-

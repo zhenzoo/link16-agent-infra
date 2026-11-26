@@ -570,12 +570,11 @@ def suggest_bots(projects: list[dict], prefix: str, existing_names: set[str] | N
 
 
 def existing_projects():
-    from bridge_env import bots_config_path
-    from feishu_bridge import _expand_cd_path
+    from bridge_env import bots_config_path, expand_project_path
     config = json.loads(bots_config_path(HERE.parent).read_text(encoding="utf-8-sig"))
     bots = config["bots"]
     default = (config.get("defaults") or {}).get("cwd")
-    directories = {Path(_expand_cd_path(b.get("cwd", default)) or HERE.parent).resolve() for b in bots}
+    directories = {Path(expand_project_path(b.get("cwd", default), HERE.parent) or HERE.parent).resolve() for b in bots}
     return {b["name"] for b in bots}, directories
 
 
@@ -622,12 +621,18 @@ def scan(roots=None, days=7, top=3, exports=None, profile=None) -> dict:
     roots = [Path(r) for r in roots] if roots else default_roots()
     projects = active_projects(roots, days, top, claude_home.get("sessions") or [])
     prefix = machine_prefix()
-    names, directories = existing_projects()
-    bots = suggest_bots(projects, prefix["prefix"], names, directories)
+    roster_error = None
+    try:
+        names, directories = existing_projects()
+        bots = suggest_bots(projects, prefix["prefix"], names, directories)
+    except (OSError, KeyError, TypeError, ValueError, AttributeError):
+        roster_error = "本机运行名册未能读全，修复名册后可重新生成岗位建议。"
+        bots = []
     return {
         "schema": SCHEMA,
         "generated_at": _iso(time.time()),
         "hostname": socket.gethostname(),
+        "roster_error": roster_error,
         "days": days,
         "roots": [str(r) for r in roots],
         "sources": sources,
@@ -679,7 +684,9 @@ def render(report: dict) -> str:
     lines.append(f"③ 建议的智能体（机器代号 {mp['prefix']} · 来源：{mp['source']}）")
     for b in report["suggested_bots"]:
         lines.append(f"  · {b['bot']}   工作目录 {b['cwd']}   建议岗位 {b.get('recommended_role', '待选择')}")
-    if not report["suggested_bots"]:
+    if report.get("roster_error"):
+        lines.append("  " + report["roster_error"])
+    elif not report["suggested_bots"]:
         lines.append("  （没有活跃项目就不建议 bot；可手动 --cwd 指定）")
     t = report["targets"]
     lines.append("")

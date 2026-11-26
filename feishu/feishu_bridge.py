@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bridge_env import (  # noqa: E402
     assert_sender_identity,
     bots_config_path,
+    expand_project_path,
     resolve_env_path,
     resolve_wmux_rpc,
 )
@@ -346,12 +347,7 @@ def load_bots():
 def _expand_cd_path(s):
     """展开 /cd 配置里的跨机 token（绝不写死盘符/用户名·用户 CLAUDE.md 跨机铁律）：
       `$PROJECT`→本仓库根(自适应有无 tools 层) · `$VIBECODING_ROOT` 等环境变量 · `~`→各机 home。返回正斜杠路径。"""
-    s = (s or "").strip()
-    if not s:
-        return s
-    s = s.replace("$PROJECT", str(PROJECT)).replace("${PROJECT}", str(PROJECT))
-    s = os.path.expanduser(os.path.expandvars(s))
-    return s.replace("\\", "/")
+    return expand_project_path(s, PROJECT)
 
 
 def load_cd_config():

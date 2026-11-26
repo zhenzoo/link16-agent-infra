@@ -75,6 +75,11 @@ def force_utf8_std():
             pass
 
 
+def expand_project_path(value, project_root):
+    value = (value or "").strip().replace("${PROJECT}", str(project_root)).replace("$PROJECT", str(project_root))
+    return os.path.expanduser(os.path.expandvars(value)).replace("\\", "/")
+
+
 def bots_config_path(project_root):
     """bot 名册路径：机器本地 `bridge-bots.local.json`（gitignore · 每台机各管各的 bot + cwd · 跨机零冲突）。
 

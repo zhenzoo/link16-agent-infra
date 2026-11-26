@@ -107,7 +107,7 @@ def test_ordinary_reports_are_outside_this_mode():
 
 
 def test_eight_part_round_checks_actual_inbound_dispatch_and_provider_receipts(tmp_path, monkeypatch):
-    import bridge_history, bridge_inbound, feishu_bridge
+    import bridge_env, bridge_history, bridge_inbound, feishu_bridge
     import proactive_business_list as business
     import send_feishu_msg as sender
     bot = "leader"
@@ -118,6 +118,7 @@ def test_eight_part_round_checks_actual_inbound_dispatch_and_provider_receipts(t
                                                expected="经核对的原表") for i in range(8)])
     monkeypatch.setattr(business, "registered_names", lambda bot: {f"worker-{i}" for i in range(8)})
     monkeypatch.setattr(business, "dispatch_ledgers", lambda bot: LEDGERS)
+    monkeypatch.setattr(bridge_env, "assert_sender_identity", lambda bot: None)
     for module in (bridge_history, feishu_bridge, sender):
         monkeypatch.setattr(module, "STATE_DIR", tmp_path)
     monkeypatch.setattr(feishu_bridge, "load_owner_record", lambda bot: {"open_id": "ou_owner"})
@@ -131,6 +132,10 @@ def test_eight_part_round_checks_actual_inbound_dispatch_and_provider_receipts(t
         with pytest.raises(ValueError):
             business.dispatch_parts(dict(p, source_parts=bad), bot)
     business.main(["arrange", "--round-json", str(path)])
+    path.write_text(json.dumps(dict(p, items=list(reversed(p["items"])))), encoding="utf-8")
+    with pytest.raises(ValueError, match="已修改"):
+        business.review_outgoing(path, bot, "item0", "worker-0", parts[0])
+    path.write_text(json.dumps(p), encoding="utf-8")
     monkeypatch.setattr(sender, "local_name", lambda bot: bot)
     monkeypatch.setattr(sender, "assert_sender_identity", lambda bot: None)
     monkeypatch.setattr(sender, "peer_address", lambda *args: ("oc_group", "ou_worker"))

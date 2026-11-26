@@ -1,5 +1,6 @@
-"""Arrange registered businesses for a conversation or validate an edited list. Read-only."""
+"""Review business assignments and bind owner-approved source messages to outgoing work."""
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -283,7 +284,12 @@ def check_recipient(jobs, item, peer, text):
 
 
 def review_outgoing(path, bot, item, peer, text):
+    from bridge_history import STATE_DIR
     plan = load(path)
+    index = round_index(STATE_DIR, bot)
+    binding = load(index).get(item) if index.is_file() else None
+    if binding and binding["mid"] == plan.get("source_mid") and binding.get("digest") != round_digest(plan):
+        raise ValueError("登记后的分段或清单已修改，请重新核对并登记批次")
     jobs = dispatch_parts(plan, bot)
     check_recipient(jobs, item, peer, text)
     return plan["source_mid"]
@@ -295,13 +301,20 @@ def round_index(state, bot):
     return Path(state) / "proactive" / bot / "dispatch-rounds.json"
 
 
+def round_digest(plan):
+    return hashlib.sha256(json.dumps(plan, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def register_round(state, path, plan, jobs):
+    from bridge_env import assert_sender_identity
     bot = plan["dispatch_bot"]
+    assert_sender_identity(bot)
     index = round_index(state, bot)
+    digest = round_digest(plan)
     with injection_lock(state, "dispatch-rounds", bot):
         active = load(index) if index.is_file() else {}
         for key in jobs:
-            active[key] = {"path": str(path.resolve()), "mid": plan["source_mid"]}
+            active[key] = {"path": str(path.resolve()), "mid": plan["source_mid"], "digest": digest}
         atomic_write_json(index, active)
 
 

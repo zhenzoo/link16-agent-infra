@@ -119,4 +119,3 @@ def test_gate_rejects_multiple_objects_inside_a_single_registration(registered):
     for bad in (dict(plan["outcomes"][0], pair=True), dict(plan["outcomes"][1], kind="file")):
         with pytest.raises(ValueError):
             validate_spec(bad)
-

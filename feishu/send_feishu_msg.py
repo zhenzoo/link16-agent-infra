@@ -18,8 +18,8 @@
   · 机械【告警/里程碑】→ `scripts/notify.py`(群 webhook)
   · **本工具 = 主动发【文字 + @】到任意会话**(群/DM)
 
-**@ 寻址**：`--at` 收 open_id(ou_…·可多次)。拿对方 open_id：同机 bot 用各自 `bot/v3/info` 的 self id
-(跨 app @ 实测生效)；跨机 bot 让它在自己那台跑 `bot/v3/info` 报过来(飞书群成员 API 只列真人·不列 bot)。
+**@ 寻址**：`--at` 收 open_id(ou_…·可多次)。本机可读已登记的地址。
+跨机用发送方读取登记群的机器人成员，核对应用和群内收件地址，见 SOP-150。
 
 用法：
   # 【推荐·按名字喊】不用知道 open_id / 群 id：自动解析 + 找共享群 + @ 醒它（回信桥自动投回你会话）
@@ -363,12 +363,8 @@ def shared_group(sender, target, override=None):
         raise SystemExit(f"❌ 本机没有发送方 {sender} 的凭据，发不了。")
     if target_groups is None:
         raise SystemExit(
-            f"❌ 本机【没有 {target} 的飞书凭据】（.env 里没有它的 FEISHU_BRIDGE_*_APP_ID/SECRET），"
-            f"因此查不到它在哪些群 —— **拒绝猜**。\n"
-            f"   · 跨机 bot 常见：它的凭据在它自己那台机上。\n"
-            f"   · 要发给它：① 在本机 .env 补上它的凭据，或 ② `--in <oc_群id>` 显式指定一个"
-            f"【它确实在里面】的群，或 ③ 让它那台机的 agent 代发。\n"
-            f"   （2026-08-20 之前这里会静默退回「发送方的唯一群」并报成功 —— 那是个 fail-open bug，已根治。）")
+            f"未核到 {sender} 与 {target} 的共享群。请用 proactive_business_list.py refresh-members "
+            f"--bot {sender} 读取登记群后重试；已有可靠群地址时可指定 --in。")
     inter = [g for g in sender_groups if g in set(target_groups)]  # 保序
     if inter:
         return inter[0]
