@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from bridge_inbox import Inbox, RetryableHandoffError, prompt_digest
+from bridge_inbox import Inbox, RetryableHandoffError, prompt_digest, quoted_draft_matches
 from bridge_injection import injection_lock
 import codex_startup
 
@@ -161,9 +161,11 @@ def _paste(fb, bot, inbox, row, pty, ws, marker, *, job=None):
 
 
 def accepted(row):
+    proof = json.loads((row or {}).get('receipt') or '{}')
     return bool(row and row['state'] == 'done' and row.get('session')
-                and row.get('digest') and row['digest'] == row.get('received_digest')
-                and json.loads(row.get('receipt') or '{}').get('source')
+                and row.get('digest') and row.get('received_digest')
+                and (row['digest'] == row['received_digest'] or proof.get('formatting') == 'continued_quote')
+                and proof.get('source')
                 in {'UserPromptSubmit', 'turn/start', 'thread/turns/list'})
 
 
@@ -180,6 +182,8 @@ def confirm_inbound(fb, bot, row):
     if not current or current['state'] not in {'submitting', 'awaiting_confirmation', 'uncertain'}:
         return False
     context = json.loads(current.get('handoff') or '{}')
+    if context.get('queue_left_at'):
+        return False  # The queued draft already left the composer; await its native receipt.
     def waiting(reason):
         inbox.handoff_observe(row['id'], reason)
         return False
@@ -190,8 +194,14 @@ def confirm_inbound(fb, bot, row):
     if context['profile'] != fb.agent_runtime.profile_name(bot, required=True):
         raise RuntimeError('待交账号已变化；不补交')
     with injection_lock(fb.STATE_DIR, 'tui-inject', ws):
-        if accepted(inbox.get(row['id'])):
+        current = inbox.get(row['id'])
+        if accepted(current):
             return True
+        if not current or current['state'] not in {'submitting', 'awaiting_confirmation', 'uncertain'}:
+            return False
+        context = json.loads(current.get('handoff') or '{}')
+        if context.get('queue_left_at'):
+            return False
         _binding(fb, bot, ws, pty, current['session'])
         state = fb.bridge_activity.read_activity(fb.STATE_DIR, bot).get('state')
         screen = fb.read_screen(pty, None)
@@ -199,12 +209,20 @@ def confirm_inbound(fb, bot, row):
         if accepted(inbox.get(row['id'])):
             return True
         _binding(fb, bot, ws, pty, current['session'])
+        if context.get('queue_key_at') and empty_composer(screen):
+            inbox.handoff_observe(row['id'], '消息已离开输入框排队，等待 Codex 接收', queue_left=True)
+            return False
         if is_compacting(screen):
             return waiting('Codex 正在压缩上下文，尚未确认接收本条消息')
         if state not in {'idle', 'active'}:
             return waiting('原生会话状态不可确认，未补交')
-        if not draft_matches(screen, marker):
+        if not (draft_matches(screen, marker) or
+                quoted_draft_matches(marker, _draft(screen) or '', bot['name'], row['id'], screen=True)):
+            if context.get('queue_key_at'):
+                return False
             return waiting('无法从画面核实完整原草稿，未重贴或补按键')
+        if time.time() - context.get('queue_key_at', 0) < RETRY_DELAY_SEC:
+            return False  # Allow the UI to consume a successful Tab before considering another key.
         queue = queue_tab_available(screen)
         if state == 'active' and not queue:
             return waiting('完整原稿仍在输入框，但当前回合未提供排队入口')

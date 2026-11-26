@@ -1002,12 +1002,25 @@ def _prepare_tui_text(bot_name, message_id, text, *, runtime_bot=None):
         reason = "含制表符 TAB·内联会损坏"
     elif _cmdline_units(text) > SEND_MAX_CHARS:
         reason = "超长·内联会撑爆命令行上限"
+    elif (sys.platform == 'win32' and runtime_bot and agent_runtime.uses_app_server(runtime_bot)
+          and ('\n' in text or '\r' in text or len(text) > 512)):
+        # Windows Codex treats pasted newlines as editor keystrokes and can
+        # continue Markdown quotes. Queue one line while keeping the body verbatim.
+        reason = "多行或长消息按编号排队，正文从原文件读取"
     if not reason:
         return text, ""
     try:
         STATE_DIR.mkdir(exist_ok=True)
-        inbox = STATE_DIR / f"bridge-inbox-{bot_name}-{bridge_inbox.prompt_digest(message_id)[:24]}.txt"
-        inbox.write_bytes(text.encode("utf-8"))  # No Windows newline translation.
+        raw = text.encode("utf-8")
+        key = hashlib.sha256(message_id.encode("utf-8") + b'\0' + raw).hexdigest()[:24]
+        inbox = STATE_DIR / f"bridge-inbox-{bot_name}-{key}.txt"
+        if not inbox.exists() or inbox.read_bytes() != raw:
+            temp = inbox.with_suffix(f".{uuid.uuid4().hex}.tmp")
+            try:
+                temp.write_bytes(raw)
+                temp.replace(inbox)
+            finally:
+                temp.unlink(missing_ok=True)
     except OSError as exc:
         raise RuntimeError("完整原文尚未保存，消息保留待办；没有截断提交") from exc
     return (f"[桥转交] 请先读取 UTF-8 文件 {inbox.as_posix()} "
@@ -2523,7 +2536,7 @@ async def settle_inbound_handoffs(bot, inbox, channel):
         if cron_delivery.accepted(row):
             if context.get('notice') == 'unconfirmed':
                 result = await card_send(channel, context['chat_id'],
-                                         f'✅ 刚才提醒你还在核实的消息，现已确认 Codex 收到了完整原文。'
+                                         f'✅ 刚才提醒你还在核实的消息，现已确认 Codex 收到了这条任务。'
                                          f'不用重发。\n消息 ID：{row["id"]}', bot['name'])
                 if result == 'failed':
                     continue
@@ -4568,10 +4581,17 @@ def _inbox_status_text(inbox):
               "uncertain": "桥已保存，正在核实智能体有没有收到。你不用重发。", "done": "智能体已收到。",
               "received_modified": "智能体已收到，但文字有出入。桥已保留原文。", "cancelled": "这条消息已按指令取消。",
               "failed": "桥已保存，发送遇到了问题，请查看这条消息的错误提醒。"}
-    result = f"最近消息 {row['id'][-6:]}：{labels.get(row['state'], row['state'])}"
+    status = labels.get(row['state'], row['state'])
+    if row['state'] in ('submitting', 'uncertain', 'awaiting_confirmation') and row.get('queue_key_at'):
+        status = ('消息已离开输入框，正在等智能体读取。' if row.get('queue_left_at')
+                  else '桥已按排队键，正在等智能体读取。')
+    result = f"最近消息 {row['id'][-6:]}：{status}"
     if row.get("received_digest"):
         result += f"\n接收会话：{row.get('session') or '未记录'}"
-        result += "\n正文核对：" + ("一致" if row['digest'] == row['received_digest'] else "有差异（可对照原文）")
+        comparison = "一致" if row['digest'] == row['received_digest'] else "有差异（可对照原文）"
+        if row.get('formatting') == 'continued_quote':
+            comparison = "正文已核对，输入框多加了行首引用符号"
+        result += "\n正文核对：" + comparison
     return result
 
 

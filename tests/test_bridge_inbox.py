@@ -322,6 +322,19 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(self.inbox.get('om_test')['state'], 'uncertain')
         self.assertIsNone(self.inbox.claim())
 
+    def test_zero_write_backoff_preserves_order_across_restart_and_allows_control(self):
+        for mid in ('first', 'second', 'control'):
+            self.inbox.receive(payload(mid))
+        self.assertEqual(self.inbox.claim()['id'], 'first')
+        self.inbox.boundary('first', prompt='body', session='thread', handoff={'pty': 'pty'})
+        self.inbox.fail('first', bi.RetryableHandoffError('busy'))
+        restored = bi.Inbox(self.sd, self.inbox.bot)
+        self.assertIsNone(restored.claim())
+        restored.priority = lambda row: row['id'] == 'control'
+        self.assertEqual(restored.claim()['id'], 'control')
+        with patch.object(bi.time, 'time', return_value=restored.get('first')['retry_at'] + 1):
+            self.assertEqual(restored.claim()['id'], 'first')
+
     def test_late_failure_does_not_reopen_a_confirmed_message(self):
         self.inbox.receive(payload())
         self.inbox.claim()

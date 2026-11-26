@@ -199,6 +199,53 @@ def test_lost_enter_recovers_owned_draft_then_reacts_only_after_exact_native_rec
     assert delivery.accepted(scene.inbox.get('om_m'))
 
 
+def test_legacy_quoted_draft_queues_once_and_mixed_native_batch_confirms_each_part(scene):
+    envelope = '[飞书 from=host to=target via=DM route=p2a mid=om_quote]'
+    marker = '> 第一段\n\n采购 3 件\n> 第二段 ' + envelope
+    shown = marker.replace('\n\n采购', '\n> \n> 采购').replace('\n> 第二', '\n> > 第二')
+    scene.inbox.receive({'message': {'message_id': 'om_quote', 'chat_id': 'chat'}})
+    scene.inbox.claim()
+    scene.inbox.boundary('om_quote', prompt=marker, session='thread', handoff=scene.binding)
+    scene.inbox.finish('om_quote')
+    fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    for draft in [shown.replace('3 件', '4 件'), shown.replace('om_quote', 'om_m'),
+                  shown.replace('第一段', '第一>段'), shown[:-1]]:
+        fb.read_screen.return_value = f'› {draft}\n\n  tab to queue message'
+        delivery.confirm_inbound(fb, scene.bot, scene.inbox.get('om_quote'))
+        fb.wmux.assert_not_called()
+    fb.read_screen.return_value = f'› {shown}\n\n  tab to queue message'
+    for _ in range(2):
+        delivery.confirm_inbound(fb, scene.bot, scene.inbox.get('om_quote'))
+    fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    assert not delivery.accepted(scene.inbox.get('om_quote'))
+    assert '已按排队键' in fb._inbox_status_text(scene.inbox)
+    assert scene.inbox.confirm(scene.marker + '\n' + shown, 'thread', {'source': 'turn/start'}) == 2
+    row = scene.inbox.get('om_quote')
+    assert row['received_digest'] == bridge_inbox.prompt_digest(shown) != row['digest']
+    assert delivery.accepted(row) and delivery.accepted(scene.inbox.get('om_m'))
+    assert '多加了行首引用符号' in fb._inbox_status_text(scene.inbox)
+
+
+def test_lost_initial_tab_retries_only_while_same_draft_remains(scene, monkeypatch):
+    clock = time.time()
+    monkeypatch.setattr(time, 'time', lambda: clock)
+    fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    fb.read_screen.return_value = f'› {scene.marker}\n\n  tab to queue message'
+    scene.inbox.handoff_observe('om_m', 'queued key', queue_key=True)
+    delivery.confirm_inbound(fb, scene.bot, scene.row)
+    fb.wmux.assert_not_called()
+    clock += delivery.RETRY_DELAY_SEC + 1
+    delivery.confirm_inbound(fb, scene.bot, scene.row)
+    fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    fb.read_screen.return_value = '› \n\nstatus'
+    delivery.confirm_inbound(fb, scene.bot, scene.row)
+    assert json.loads(scene.inbox.get('om_m')['handoff'])['queue_left_at']
+    fb.read_screen.return_value = f'› {scene.marker}\n\n  tab to queue message'
+    clock += delivery.RETRY_DELAY_SEC + 1
+    delivery.confirm_inbound(fb, scene.bot, scene.row)
+    assert fb.wmux.call_count == 1
+
+
 @pytest.mark.parametrize('changed', ['', '\n\n新增另一段', 'truncated'])
 def test_multiline_handoff_preserves_blank_lines_and_requires_whole_prompt(scene, changed):
     marker = '今天 Slot one 发了吗？\n\n请查发布回执。\n再核今日选题。 ' + scene.marker
@@ -387,7 +434,7 @@ def test_enter_rejection_alerts_immediately_once_and_keeps_late_receipt(scene):
     assert delivery.accepted(scene.inbox.get('om_m'))
     assert scene.channel.add_reaction.await_count == 2
     assert fb.card_send.await_count == 2
-    assert '现已确认 Codex 收到了完整原文' in fb.card_send.call_args.args[2]
+    assert '现已确认 Codex 收到了这条任务' in fb.card_send.call_args.args[2]
 
 
 def test_probe_error_preserves_original_submission_failure(scene):
