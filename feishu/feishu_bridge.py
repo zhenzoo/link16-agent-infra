@@ -1005,8 +1005,8 @@ def _prepare_tui_text(bot_name, message_id, text, *, runtime_bot=None):
     elif (sys.platform == 'win32' and runtime_bot and agent_runtime.uses_app_server(runtime_bot)
           and ('\n' in text or '\r' in text or len(text) > 512)):
         # Windows Codex treats pasted newlines as editor keystrokes and can
-        # continue Markdown quotes. Queue one line while keeping the body verbatim.
-        reason = "多行或长消息按编号排队，正文从原文件读取"
+        # continue Markdown quotes. Submit a one-line reference to the verbatim body.
+        reason = "多行或长消息按编号保存，直接提交原文引用"
     if not reason:
         return text, ""
     try:
@@ -1975,7 +1975,7 @@ def _kimi_active_turn(runtime_bot):
     )
 
 
-def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_native_receipt=False, on_queued=None):
+def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_native_receipt=False, on_submitted=None):
     """把带标记的消息 paste 进 bot 会话并【确认真提交】（同步 · 给 to_thread 用）。返回 True=已提交 / False=重按上限仍卡。
 
     三层保证（§2.12b · 2026-07-16 根治「回车被吞·消息卡输入框」）：
@@ -2007,8 +2007,7 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     chunks = max(1, -(-len(marker) // 100))
     time.sleep(min(INJECT_SETTLE_CAP, INJECT_SETTLE_BASE + INJECT_SETTLE_PER_CHUNK * chunks))
     if is_codex:
-        # A busy TUI uses Enter to steer its current turn. Only its advertised
-        # queue key preserves that turn. The paste lock still belongs to us here.
+        # Enter submits to the current turn even when the TUI offers deferred follow-ups.
         deadline = time.monotonic() + (30 if win32_input and len(marker) > 1000 else 3)
         while True:
             screen = read_screen(pty, None)
@@ -2022,14 +2021,9 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
         if (state not in {'idle', 'active'} or cron_delivery.is_compacting(screen)
                 or not cron_delivery.initial_paste_visible(screen, marker)):
             raise RuntimeError('会话或草稿正在变化，原稿已保留')
-        if cron_delivery.queue_tab_available(screen):
-            wmux("key", pty, "tab", *allow)
-            if on_queued:
-                on_queued()
-            return True
-        if state != 'idle':
-            raise RuntimeError('Codex 正忙，暂未显示排队入口，消息已保留')
         wmux("enter", pty, *allow)
+        if on_submitted:
+            on_submitted()
         return True
     if steer_kimi:
         wmux("send", pty, "\x1b[115;5u", *allow)
@@ -2067,13 +2061,13 @@ def _inject_unlocked(pty, workspace_id, marker, *, runtime_bot=None, require_nat
     return False                                 # 空闲且重按 INJECT_VERIFY_TRIES 次仍卡 = 真没提交 → 调用方喊人
 
 
-def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None, require_native_receipt=False, on_queued=None):
+def _inject(pty, workspace_id, marker, *, idle_bot=None, runtime_bot=None, require_native_receipt=False, on_submitted=None):
     """跨进程串行 TUI paste/submit，防桥消息、cron、watchdog 与监督回调互相穿插。"""
     with bridge_injection.injection_lock(STATE_DIR, "tui-inject", workspace_id):
         if idle_bot and bridge_activity.read_activity(STATE_DIR, idle_bot).get("state") != "idle":
             raise RuntimeError("会话已不空闲；一次性 effort 任务未注入，请等当前回合结束后重发")
         return _inject_unlocked(pty, workspace_id, marker, runtime_bot=runtime_bot,
-                                require_native_receipt=require_native_receipt, on_queued=on_queued)
+                                require_native_receipt=require_native_receipt, on_submitted=on_submitted)
 
 
 def _stop_clear_composer(pty, workspace_id, marker):
@@ -2562,7 +2556,8 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                 reason = ''
             if cron_delivery.accepted(inbox.get(row['id'])):
                 continue  # A late receipt wins over the timeout notification.
-            status = ('桥已按排队键提交这条消息，仍在等 Codex 确认读到。' if context.get('queue_key_at') else
+            status = ('桥已按 Enter 提交这条消息，正在等 Codex 确认收到。' if context.get('enter_at') else
+                      '这条消息还在旧版 Codex 后续队列中。' if context.get('queue_key_at') else
                       f'飞书桥已收到并保存这条消息。{reason}还在核实 Codex 有没有收到。')
             result = await card_send(channel, context['chat_id'],
                                     f'⏳ {status}'
@@ -2587,6 +2582,8 @@ async def settle_inbound_handoffs(bot, inbox, channel):
                 continue
             if compacting:
                 status = 'Codex 正在整理当前对话。桥已保存你的消息，你不用重发。'
+            elif context.get('enter_at'):
+                status = '桥已按 Enter 提交这条消息，正在等 Codex 确认收到。你不用重发。'
             elif context.get('queue_key_at'):
                 status = '桥已按排队键提交这条消息。Codex 读到后会在原消息上点 👍，你不用重发。'
             else:
@@ -4013,8 +4010,8 @@ def _run_bot(bot_name=None):
                     durable_inbox.boundary(msg.id, prompt=marker, session=target_session, handoff=handoff)
                     inject_ok = await asyncio.to_thread(
                         _inject, pty, ws, marker, idle_bot=bot if temporary_effort else None,
-                        runtime_bot=bot, on_queued=lambda: durable_inbox.handoff_observe(
-                            msg.id, '已按排队键，等 Codex 读到这条消息', queue_key=True))
+                        runtime_bot=bot, on_submitted=lambda: durable_inbox.handoff_observe(
+                            msg.id, '已按 Enter 提交，等待 Codex 接收', enter=True))
                     if not inject_ok:      # §2.12b 第三层·极兜底：闭环重按 N 次仍卡输入框 → 喊主人·绝不静默
                         blog(bot["name"], f"[{tid}] 输入框校验未通过；继续核对原生接收回执")
                     # Durable inbox owns delivery now. Absence of outbox output
@@ -4582,7 +4579,9 @@ def _inbox_status_text(inbox):
               "received_modified": "智能体已收到，但文字有出入。桥已保留原文。", "cancelled": "这条消息已按指令取消。",
               "failed": "桥已保存，发送遇到了问题，请查看这条消息的错误提醒。"}
     status = labels.get(row['state'], row['state'])
-    if row['state'] in ('submitting', 'uncertain', 'awaiting_confirmation') and row.get('queue_key_at'):
+    if row['state'] in ('submitting', 'uncertain', 'awaiting_confirmation') and row.get('enter_at'):
+        status = '已按 Enter 直接提交，正在等智能体确认收到。'
+    elif row['state'] in ('submitting', 'uncertain', 'awaiting_confirmation') and row.get('queue_key_at'):
         status = ('消息已离开输入框，正在等智能体读取。' if row.get('queue_left_at')
                   else '桥已按排队键，正在等智能体读取。')
     result = f"最近消息 {row['id'][-6:]}：{status}"

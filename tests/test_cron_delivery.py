@@ -83,34 +83,33 @@ def test_empty_unrecognizable_or_modified_screen_is_never_success_or_repaste(sce
     assert not delivery.accepted(scene.inbox.get(scene.row['id']))
 
 
-@pytest.mark.parametrize('state', ['active', 'waiting', 'unknown'])
-def test_busy_or_unknown_native_state_never_retries(scene, state):
+@pytest.mark.parametrize('state', ['waiting', 'unknown'])
+def test_waiting_or_unknown_native_state_never_retries(scene, state):
     scene.fb.bridge_activity.read_activity.return_value = {'state': state}
     with pytest.raises(RuntimeError):
         delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
     scene.fb.wmux.assert_not_called()
 
 
-def test_active_exact_owned_draft_uses_advertised_queue_tab_once(scene):
+def test_active_exact_owned_draft_uses_enter_even_when_tab_is_advertised(scene):
     scene.inbox.scheduled_attempt(scene.row['id'])
     scene.fb.bridge_activity.read_activity.return_value = {'state': 'active'}
     scene.fb.read_screen.return_value = f'Working\n\n› {scene.marker}\n \n  tab to queue message     48% context left'
     scene.fb.wmux.side_effect = lambda *a: scene.inbox.confirm(scene.marker, 'thread')
     assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
     assert delivery.confirm(scene.fb, scene.bot, scene.job, scene.row, timeout=0)
-    scene.fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    scene.fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
     scene.fb._inject.assert_not_called()
 
 
 @pytest.mark.parametrize('state,screen', [
-    ('active', 'tab to queue message\n\n› {marker}\n\nstatus'),
     ('active', '› other draft\n\n  tab to queue message'),
     ('active', '› {marker}\n tab to queue message'),
     ('waiting', '› {marker}\n\n  tab to queue message'),
     ('unknown', '› {marker}\n\n  tab to queue message'),
     ('active', '• Compacting context (1m 34s • esc to interrupt)\n  └ Making room to continue.\n\n› {marker}\n\n  tab to queue message'),
 ])
-def test_queue_tab_requires_active_exact_draft_live_footer_and_no_compaction(scene, state, screen):
+def test_enter_requires_owned_draft_readable_footer_and_ready_state(scene, state, screen):
     scene.fb.bridge_activity.read_activity.return_value = {'state': state}
     scene.fb.read_screen.return_value = screen.format(marker=scene.marker)
     with pytest.raises(RuntimeError):

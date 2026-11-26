@@ -253,11 +253,14 @@ class TuiGateway:
                             method = pending.pop(msg.get("id"), None)
                             turn_request = pending_turns.pop(msg.get("id"), None)
                             if turn_request:
-                                turn_id = None if msg.get("error") else (
-                                    ((msg.get("result") or {}).get("turn") or {}).get("id"))
+                                result = {} if msg.get("error") else msg.get("result") or {}
+                                steer = turn_request.get("method") == "turn/steer"
+                                turn_id = result.get("turnId") if steer else (result.get("turn") or {}).get("id")
+                                if steer and turn_id != (turn_request.get("params") or {}).get("expectedTurnId"):
+                                    turn_id = None
                                 try:
                                     self.on_turn_result(turn_request, turn_id)
-                                    if turn_id:
+                                    if turn_id and not steer:
                                         from bridge_effort import effective_effort
                                         accepted_effort = effective_effort(turn_request.get("params") or {})
                                         self.on_turn_accepted(accepted_effort, turn_id)
@@ -296,8 +299,8 @@ class TuiGateway:
                         pending[msg["id"]] = msg["method"]
                         self.session_requested.set()
                         self.on_request(msg["method"])
-                    if msg.get("method") == "turn/start":
-                        forwarded = self.turn_modifier(raw)
+                    if msg.get("method") in ("turn/start", "turn/steer"):
+                        forwarded = self.turn_modifier(raw) if msg["method"] == "turn/start" else raw
                         if "id" in msg:
                             pending_turns[msg["id"]] = json.loads(forwarded)
                         upstream.send(forwarded)

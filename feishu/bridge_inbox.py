@@ -375,7 +375,7 @@ class Inbox:
                 db.execute('UPDATE messages SET handoff=? WHERE id=?',
                            (json.dumps(context, ensure_ascii=False), mid))
 
-    def handoff_observe(self, mid, reason, *, queue_key=False, queue_left=False):
+    def handoff_observe(self, mid, reason, *, enter=False, left=False):
         """Persist the latest non-receipt explanation, not a delivery verdict."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -384,15 +384,15 @@ class Inbox:
                     'queued', 'submitting', 'awaiting_confirmation', 'uncertain'):
                 return
             context = json.loads(row['handoff'])
-            if context.get('waiting_reason') != reason or queue_key or (queue_left and not context.get('queue_left_at')):
+            if context.get('waiting_reason') != reason or enter or (left and not context.get('composer_left_at')):
                 context.update(waiting_reason=reason, checked_at=time.time())
-                if queue_key:
-                    context['queue_key_at'] = context['checked_at']
-                if queue_left:
-                    context['queue_left_at'] = context['checked_at']
+                if enter:
+                    context['enter_at'] = context['checked_at']
+                if left:
+                    context['composer_left_at'] = context['checked_at']
                 db.execute('UPDATE messages SET handoff=? WHERE id=?',
                            (json.dumps(context, ensure_ascii=False), mid))
-                if queue_key or queue_left:
+                if enter or left:
                     db.execute("""UPDATE messages SET state='awaiting_confirmation', error=NULL,
                                retry_at=0, updated=? WHERE id=?""", (context['checked_at'], mid))
 
@@ -671,7 +671,8 @@ class Inbox:
         """Latest ordinary handoff, including its real native receipt (no body)."""
         with self.connect() as db:
             row = db.execute("""SELECT id,state,session,received,updated,attempts,
-                digest,received_digest,json_extract(handoff,'$.queue_key_at') AS queue_key_at,
+                digest,received_digest,json_extract(handoff,'$.enter_at') AS enter_at,
+                json_extract(handoff,'$.queue_key_at') AS queue_key_at,
                 json_extract(handoff,'$.queue_left_at') AS queue_left_at,
                 json_extract(receipt,'$.formatting') AS formatting FROM messages WHERE digest IS NOT NULL
                 OR state IN ('queued','processing','failed')

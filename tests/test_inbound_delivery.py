@@ -106,6 +106,7 @@ def test_compacting_text_in_history_draft_or_queue_is_not_live_status(scene, scr
 def test_pending_notice_can_upgrade_to_compacting_once(scene):
     delayed(scene)
     fb.bridge_activity.read_activity.return_value = {'state': 'active'}
+    fb.read_screen.return_value = '› \n\nstatus'
     settle(scene)
     fb.read_screen.return_value = COMPACTING + QUEUED + '› \n\nstatus'
     settle(scene)
@@ -199,7 +200,7 @@ def test_lost_enter_recovers_owned_draft_then_reacts_only_after_exact_native_rec
     assert delivery.accepted(scene.inbox.get('om_m'))
 
 
-def test_legacy_quoted_draft_queues_once_and_mixed_native_batch_confirms_each_part(scene):
+def test_legacy_quoted_draft_submits_once_and_mixed_native_batch_confirms_each_part(scene):
     envelope = '[飞书 from=host to=target via=DM route=p2a mid=om_quote]'
     marker = '> 第一段\n\n采购 3 件\n> 第二段 ' + envelope
     shown = marker.replace('\n\n采购', '\n> \n> 采购').replace('\n> 第二', '\n> > 第二')
@@ -216,9 +217,9 @@ def test_legacy_quoted_draft_queues_once_and_mixed_native_batch_confirms_each_pa
     fb.read_screen.return_value = f'› {shown}\n\n  tab to queue message'
     for _ in range(2):
         delivery.confirm_inbound(fb, scene.bot, scene.inbox.get('om_quote'))
-    fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
     assert not delivery.accepted(scene.inbox.get('om_quote'))
-    assert '已按排队键' in fb._inbox_status_text(scene.inbox)
+    assert '已按 Enter' in fb._inbox_status_text(scene.inbox)
     assert scene.inbox.confirm(scene.marker + '\n' + shown, 'thread', {'source': 'turn/start'}) == 2
     row = scene.inbox.get('om_quote')
     assert row['received_digest'] == bridge_inbox.prompt_digest(shown) != row['digest']
@@ -226,20 +227,20 @@ def test_legacy_quoted_draft_queues_once_and_mixed_native_batch_confirms_each_pa
     assert '多加了行首引用符号' in fb._inbox_status_text(scene.inbox)
 
 
-def test_lost_initial_tab_retries_only_while_same_draft_remains(scene, monkeypatch):
+def test_lost_initial_enter_retries_only_while_same_draft_remains(scene, monkeypatch):
     clock = time.time()
     monkeypatch.setattr(time, 'time', lambda: clock)
     fb.bridge_activity.read_activity.return_value = {'state': 'active'}
     fb.read_screen.return_value = f'› {scene.marker}\n\n  tab to queue message'
-    scene.inbox.handoff_observe('om_m', 'queued key', queue_key=True)
+    scene.inbox.handoff_observe('om_m', 'submitted', enter=True)
     delivery.confirm_inbound(fb, scene.bot, scene.row)
     fb.wmux.assert_not_called()
     clock += delivery.RETRY_DELAY_SEC + 1
     delivery.confirm_inbound(fb, scene.bot, scene.row)
-    fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
     fb.read_screen.return_value = '› \n\nstatus'
     delivery.confirm_inbound(fb, scene.bot, scene.row)
-    assert json.loads(scene.inbox.get('om_m')['handoff'])['queue_left_at']
+    assert json.loads(scene.inbox.get('om_m')['handoff'])['composer_left_at']
     fb.read_screen.return_value = f'› {scene.marker}\n\n  tab to queue message'
     clock += delivery.RETRY_DELAY_SEC + 1
     delivery.confirm_inbound(fb, scene.bot, scene.row)
@@ -279,8 +280,8 @@ def test_partial_changed_and_unreadable_drafts_never_receive_enter_or_success(sc
     assert scene.inbox.get('om_m')['state'] == 'awaiting_confirmation'
 
 
-@pytest.mark.parametrize('state', ['active', 'waiting', 'unknown'])
-def test_no_recovery_keys_during_active_or_unknown_native_turn(scene, state):
+@pytest.mark.parametrize('state', ['waiting', 'unknown'])
+def test_no_recovery_keys_during_waiting_or_unknown_native_turn(scene, state):
     fb.bridge_activity.read_activity.return_value = {'state': state}
     settle(scene)
     fb.wmux.assert_not_called()
@@ -392,24 +393,19 @@ def test_initial_codex_injection_never_uses_screen_or_busy_label_as_receipt(scen
     assert not delivery.accepted(scene.inbox.get('om_m'))
 
 
-@pytest.mark.parametrize('footer,expected', [('tab to queue message', 'tab'), ('status', None)])
-def test_first_submission_on_busy_codex_only_uses_advertised_queue(scene, monkeypatch, footer, expected):
+@pytest.mark.parametrize('footer', ['tab to queue message', 'status'])
+def test_first_submission_on_busy_codex_uses_enter_regardless_of_queue_hint(scene, monkeypatch, footer):
     fb.bridge_activity.read_activity.return_value = {'state': 'active'}
     draft = f'› {scene.marker}\n\n  {footer}'
     fb.read_screen.side_effect = ['› Ask Codex to do anything\n\nstatus', draft, draft]
     monkeypatch.setattr(fb.time, 'sleep', lambda _: None)
-    if expected:
-        assert fb._inject_unlocked('pty', 'ws', scene.marker, runtime_bot=scene.bot,
-                                   on_queued=lambda: scene.inbox.handoff_observe('om_m', '已按排队键', queue_key=True))
-        assert fb.wmux.call_args.args == ('key', 'pty', 'tab', '--allow-ws', 'ws')
-        delayed(scene)
-        asyncio.run(fb.settle_inbound_handoffs(scene.bot, scene.inbox, scene.channel))
-        assert '已按排队键' in fb.card_send.call_args.args[2]
-        assert not delivery.accepted(scene.inbox.get('om_m'))
-    else:
-        with pytest.raises(RuntimeError, match='排队入口'):
-            fb._inject_unlocked('pty', 'ws', scene.marker, runtime_bot=scene.bot)
-        assert [call.args[0] for call in fb.wmux.call_args_list] == ['paste']
+    assert fb._inject_unlocked('pty', 'ws', scene.marker, runtime_bot=scene.bot,
+                               on_submitted=lambda: scene.inbox.handoff_observe('om_m', '已按 Enter', enter=True))
+    assert [call.args[0] for call in fb.wmux.call_args_list] == ['paste', 'enter']
+    delayed(scene)
+    asyncio.run(fb.settle_inbound_handoffs(scene.bot, scene.inbox, scene.channel))
+    assert '已按 Enter' in fb.card_send.call_args.args[2]
+    assert not delivery.accepted(scene.inbox.get('om_m'))
 
 
 def test_enter_rejection_alerts_immediately_once_and_keeps_late_receipt(scene):
@@ -467,13 +463,25 @@ def test_pending_upgrades_to_bounded_alarm_even_without_readable_draft(scene, sc
     scene.channel.add_reaction.assert_not_called()
 
 
-def test_active_owned_draft_uses_only_explicit_queue_key_once(scene):
+def test_active_owned_draft_enters_once_even_when_tab_is_advertised(scene):
     fb.bridge_activity.read_activity.return_value = {'state': 'active'}
     fb.read_screen.return_value = f'› {scene.marker}\n\n  tab to queue message'
     settle(scene)
     settle(scene)
-    fb.wmux.assert_called_once_with('key', 'pty', 'tab', '--allow-ws', 'ws')
+    fb.wmux.assert_called_once_with('enter', 'pty', '--allow-ws', 'ws')
     assert not delivery.accepted(scene.inbox.get('om_m'))
+
+
+def test_already_queued_legacy_message_is_not_submitted_again(scene):
+    context = json.loads(scene.row['handoff'])
+    context.update(queue_key_at=1, queue_left_at=2)
+    with scene.inbox.connect() as db:
+        db.execute('UPDATE messages SET handoff=? WHERE id=?', (json.dumps(context), 'om_m'))
+    delivery.confirm_inbound(fb, scene.bot, scene.row)
+    fb.wmux.assert_not_called()
+    assert not delivery.accepted(scene.inbox.get('om_m'))
+    assert scene.inbox.confirm(scene.marker, 'thread', {'source': 'turn/steer', 'turn_id': 'current'}) == 1
+    assert delivery.accepted(scene.inbox.get('om_m'))
 
 
 def test_idle_binding_change_during_screen_read_never_submits(scene):

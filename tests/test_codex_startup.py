@@ -201,6 +201,8 @@ class GatewayTests(unittest.TestCase):
                         ws.send(json.dumps({"id": 4, "error": {"message": "unsupported effort"}}))
                     else:
                         ws.send(json.dumps({"id": msg["id"], "result": {"turn": {"id": "turn-2"}}}))
+                elif msg.get("method") == "turn/steer":
+                    ws.send(json.dumps({"id": msg["id"], "result": {"turnId": "turn-2"}}))
                 else:
                     ws.send(json.dumps({"id": msg["id"], "result": {}}))
         with serve(upstream, "127.0.0.1", 0) as server:
@@ -217,14 +219,16 @@ class GatewayTests(unittest.TestCase):
                     tui.recv(timeout=2)
                     tui.send(json.dumps({"id": 2, "method": "turn/start", "params": {"threadId": "root"}}))
                     tui.recv(timeout=2)
-                    tui.send(json.dumps({"id": 3, "method": "turn/steer", "params": {"threadId": "root"}}))
+                    tui.send(json.dumps({"id": 3, "method": "turn/steer", "params": {"threadId": "root", "expectedTurnId": "turn-2"}}))
                     tui.recv(timeout=2)
                     tui.send(json.dumps({"id": 4, "method": "turn/start", "params": {"threadId": "root"}}))
+                    tui.recv(timeout=2)
+                    tui.send(json.dumps({"id": 5, "method": "turn/steer", "params": {"threadId": "root", "expectedTurnId": "other"}}))
                     tui.recv(timeout=2)
                 self.assertEqual(calls[1]["params"]["effort"], "xhigh")
                 self.assertNotIn("effort", calls[2]["params"])
                 self.assertEqual(accepted, [("xhigh", "turn-2")])
-                self.assertEqual(results, [(2, "turn-2"), (4, None)])
+                self.assertEqual(results, [(2, "turn-2"), (3, "turn-2"), (4, None), (5, None)])
             finally:
                 gateway.close()
 
