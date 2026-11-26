@@ -21,7 +21,8 @@ def registered():
             "outcomes":[dict(parent="versions", id="versions", name="版本分发", expected="迭代一",
                              kind="file", label="迭代一", href="https://project.feishu.cn/demo/sprint/detail/123"),
                         dict(parent="expenses", id="expenses", name="报销", expected="原草稿",
-                             kind="approval", label="原草稿", href="https://approval.feishu.cn/desktop/web/index#/create-instance?draftId=123")]}
+                             kind="approval", label="原草稿", direct_reopen_verified=True,
+                             href="https://approval.feishu.cn/desktop/web/index#/create-instance?draftId=123")]}
     html = render("demo", datetime.now(timezone.utc), rows, "", "", site, plan)
     return html, plan
 
@@ -51,6 +52,22 @@ def test_one_actual_object_in_each_visible_row(registered, fault):
         first.select_one(".outcomes").append(dom.new_tag("form"))
     with pytest.raises(ValueError):
         check_registered_board(str(dom), plan)
+
+
+def test_verified_folder_is_scoped_to_the_saved_draft():
+    from proactive_outcomes import validate_spec
+    folder = {"form_id": "52", "draft_id": "39", "saved_at": "2026-11-26T16:41:33+08:00",
+              "reopened_at": "2026-11-26T16:44:23+08:00"}
+    spec = {"kind": "approval", "href": "https://applink.feishu.cn/client/mini_program/open?path=pc%2Fpages%2Fcreate-form%2Findex%3Fid%3D52",
+            "draft_folder": folder, "label": "打开飞书原表 → 草稿箱 → 11月26日 16:41 → 编辑"}
+    validate_spec(spec)
+    for invalid in (dict(spec, label="打开原草稿"), dict(spec, draft_folder=dict(folder, form_id="53")),
+                    dict(spec, draft_folder=dict(folder, reopened_at=folder["saved_at"])),
+                    dict(spec, href="https://approval.feishu.cn/desktop/web/index#/create-instance?draftId=39")):
+        with pytest.raises(ValueError):
+            validate_spec(invalid)
+    with pytest.raises(ValueError):
+        validate_spec({"kind": "approval", "href": "https://approval.feishu.cn/desktop/web/index#/create-instance?draftId=39"})
 
 
 def test_gate_rejects_multiple_objects_inside_a_single_registration(registered):

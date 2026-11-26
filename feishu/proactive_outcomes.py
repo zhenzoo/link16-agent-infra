@@ -2,10 +2,42 @@
 import hashlib
 import json
 import re
-from urllib.parse import urlsplit
+from datetime import datetime
+from urllib.parse import parse_qs, urlsplit
 
 from bs4 import BeautifulSoup
 from proactive_taste import artifact_links, check_message, check_pair_row
+
+
+def validate_approval(spec, target):
+    folder = spec.get("draft_folder")
+    outer = parse_qs(target.query)
+    inner = urlsplit(outer.get("path", [""])[0])
+    native = (target.scheme == "https" and target.hostname == "applink.feishu.cn"
+              and target.path == "/client/mini_program/open")
+    inner_query = parse_qs(inner.query)
+    if folder is not None:
+        if not isinstance(folder, dict) or not native or inner.path != "pc/pages/create-form/index":
+            raise ValueError("草稿箱须打开原生飞书表单")
+        if (not re.fullmatch(r"[0-9]+", str(folder.get("draft_id", "")))
+                or not re.fullmatch(r"[0-9]+", str(folder.get("form_id", "")))
+                or inner_query.get("id") != [folder["form_id"]]):
+            raise ValueError("原表与重开的草稿登记不符")
+        saved = datetime.fromisoformat(folder["saved_at"])
+        reopened = datetime.fromisoformat(folder["reopened_at"])
+        if not saved.tzinfo or not reopened.tzinfo or reopened <= saved:
+            raise ValueError("缺少保存后退出并重开的证据")
+        if spec.get("label") != "打开飞书原表 → 草稿箱 → " + saved.strftime("%m月%d日 %H:%M") + " → 编辑":
+            raise ValueError("须标明草稿箱、保存时刻及编辑入口")
+        return
+    route = urlsplit(target.fragment)
+    if native and inner.path == "pages/detail/index" and re.fullmatch(r"[0-9]+", inner_query.get("instanceId", [""])[0]):
+        return
+    if (target.hostname == "approval.feishu.cn" and route.path == "/create-instance"
+            and re.fullmatch(r"[0-9]+", parse_qs(route.query).get("draftId", [""])[0])
+            and spec.get("direct_reopen_verified") is True):
+        return
+    raise ValueError("审批须定位具体实例、独立实开过的草稿或实测的草稿箱路径")
 
 
 def validate_spec(spec):
@@ -13,6 +45,8 @@ def validate_spec(spec):
     if kind not in {"file", "message", "approval"}:
         raise ValueError("成果只能登记为消息、文件或审批")
     forms = [key for key in ("href", "pair", "recipient") if key in spec]
+    if "draft_folder" in spec and (kind != "approval" or "href" not in spec or spec.get("empty")):
+        raise ValueError("草稿箱定位仅用于已保存的审批草稿")
     if spec.get("empty"):
         if forms:
             raise ValueError("空结果不应登记入口")
@@ -27,6 +61,8 @@ def validate_spec(spec):
         target = urlsplit(spec["href"])
         if not target.path or target.scheme and target.scheme != "https" or target.username or target.password:
             raise ValueError("成果入口无效")
+        if kind == "approval":
+            validate_approval(spec, target)
         if kind == "file" and target.hostname in {"applink.feishu.cn", "approval.feishu.cn"}:
             raise ValueError("消息或审批入口不能登记为文件")
 
@@ -77,9 +113,7 @@ def project(rows, plan):
                     ((parts.path == "/client/chat/open" and "position=" in parts.query)
                      or parts.path == "/client/message/link/open")):
                 raise ValueError("已发消息须定位原聊的具体一条")
-            if kind == "approval" and not (parts.hostname in {"approval.feishu.cn", "applink.feishu.cn"}
-                    and ("draftId=" in href or "instanceId%3D" in href or "instanceId=" in href)):
-                raise ValueError("审批须直达已存草稿或具体实例")
+
             if not parts.scheme and not re.fullmatch(r"[0-9a-f]{64}", s.get("source_sha256", "")):
                 raise ValueError("本地文件入口缺少登记原件指纹")
             data["results"] = [{"type": "links", "items": [

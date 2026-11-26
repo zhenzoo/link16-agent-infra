@@ -126,5 +126,5 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
    python feishu/send_as_user_web.py --bot <bot> --target-name "<群名或人名>" --target-type group --chat-id <oc_xxx> --text "<确认正文>" --send
    ```
    只有回执 `ok=true` 且 `verified=true`（附真实 `message_id` 与 `message_app_link`）才将同一正文从待发转为已发并刷新工作台。
-3. **审批与报销。** 按[原生审批草稿 SOP](SOP-151-approval-draft.md)读取当前红星、条件必填项、本人同类历史及逐行关联原单。保存后退出重开，用 `feishu/approval_draft_check.py` 对照两次实读结果，交本人原草稿链接，由本人提交。
+3. **审批与报销。** 按[原生审批草稿 SOP](SOP-151-approval-draft.md)读取当前红星、条件必填项、本人同类历史及逐行关联原单。保存后退出重开，用 `feishu/approval_draft_check.py` 核对。工作台优先给独立实点后可见原内容的草稿链接。直达失败时，实测从原表进入草稿箱并编辑同一份草稿，用一个原表链接标出保存日期时间和编辑路径，由本人提交。
 4. **约会。** 核本人和每个必要参会人的身份、日期时区和忙闲，按议题与可能追加参会的角色估时、估人数，再查房间地点、容量和可用时段。原主题已有事件则回读复用；主办人与参会名单分别回读，人员和会议室分别检查邀请状态。达不到证据的忙闲状态保持未知。
