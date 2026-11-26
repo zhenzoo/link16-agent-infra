@@ -21,7 +21,7 @@ class DraftCheckTests(unittest.TestCase):
 
     def test_template(self):
         result = checker.check(self.report)
-        self.assertEqual((result["required_controls"], result["rows"], result["attachments"]), (4, 1, 1))
+        self.assertEqual((result["required_controls"], result["rows"], result["attachments"]), (3, 1, 1))
 
     def test_conditional_star_empty_only_after_reopen(self):
         # Reproduce a form that restores its line items and attachments but loses a starred field.
@@ -34,12 +34,96 @@ class DraftCheckTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 self.assertNotEqual(checker.main([str(bad)]), 0)
 
-    def test_definition_detects_missing_active_field_even_if_star_is_missing(self):
-        self.report["expected"]["schema"][1]["required"] = True
+    def test_only_observed_stars_require_values_in_form_and_rows(self):
+        for where in ("form", "row"):
+            for api_required, starred, filled, passes in (
+                (True, False, False, True), (False, True, False, False),
+                (False, True, True, True), (True, True, False, False),
+            ):
+                with self.subTest(where=where, api=api_required, star=starred, filled=filled):
+                    r = copy.deepcopy(self.report)
+                    field = "dependent" if where == "form" else "relation"
+                    schema = r["expected"]["schema"]
+                    widget = schema[1] if where == "form" else schema[2]["children"][0]
+                    widget["required"] = api_required
+                    if where == "row" and not filled:
+                        r["expected"]["tables"]["lines"][0]["links"] = []
+                    for stage in ("before", "reopened"):
+                        ui = r[stage]
+                        scope = ui if where == "form" else ui["tables"]["lines"][0]
+                        scope["fields"][field] = filled
+                        if where == "row" and not filled:
+                            scope["links"] = []
+                        if not starred:
+                            scope["stars"].remove(field)
+                        if where == "form" and not filled:
+                            ui["historical"] = {}
+                    if passes:
+                        self.assertEqual(checker.check(r)["required_controls"], 2 + int(starred))
+                    else:
+                        with self.assertRaisesRegex(checker.CheckError, "红星.*必填"):
+                            checker.check(r)
+
+    def test_unread_star_scope_or_field_is_not_an_observed_optional_blank(self):
+        for where in ("form", "row"):
+            for missing in ("stars", "null-stars", "field", "all"):
+                with self.subTest(where=where, missing=missing):
+                    r = copy.deepcopy(self.report)
+                    ui = r["reopened"]
+                    scope = ui if where == "form" else ui["tables"]["lines"][0]
+                    field = "dependent" if where == "form" else "relation"
+                    if missing == "stars":
+                        del scope["stars"]
+                    elif missing == "null-stars":
+                        scope["stars"] = None
+                    else:
+                        scope["stars"].remove(field)
+                        del scope["fields"][field]
+                        if missing == "all":
+                            scope.update(stars=[], fields={}, choices={})
+                    with self.assertRaisesRegex(checker.CheckError, "重开后.*(未读|没有控件读数)"):
+                        checker.check(r)
+        del self.report["reopened"]
+        with self.assertRaisesRegex(checker.CheckError, "重开后编辑页未读"):
+            checker.check(self.report)
+
+    def test_unstarred_history_only_compares_values_already_filled(self):
         for stage in ("before", "reopened"):
-            del self.report[stage]["fields"]["dependent"]
             self.report[stage]["stars"].remove("dependent")
-        with self.assertRaisesRegex(checker.CheckError, "必填"):
+        self.report["reopened"]["historical"]["dependent"] = False
+        with self.assertRaisesRegex(checker.CheckError, "历史字段"):
+            checker.check(self.report)
+        for stage in ("before", "reopened"):
+            self.report[stage]["fields"]["dependent"] = False
+            self.report[stage]["historical"] = {}
+        self.assertEqual(checker.check(self.report)["required_controls"], 2)
+
+    def test_native_visible_and_hidden_observations_override_api_visibility(self):
+        self.report["expected"]["schema"][0]["visible"] = False
+        for stage in ("before", "reopened"):
+            scope = self.report[stage]
+            scope["hidden"] = ["dependent"]
+            scope["stars"].remove("dependent")
+            del scope["fields"]["dependent"]
+            scope["historical"] = {}
+        self.assertEqual(checker.check(self.report)["required_controls"], 2)
+        self.report["reopened"]["fields"]["branch"] = False
+        self.report["reopened"]["choices"]["branch"] = ""
+        with self.assertRaisesRegex(checker.CheckError, "重开后.*红星"):
+            checker.check(self.report)
+
+    def test_each_row_has_independent_star_and_value_observations(self):
+        exp = self.report["expected"]
+        second = dict(exp["tables"]["lines"][0], key="item-b", amount="2.00", links=[], purpose="")
+        exp["tables"]["lines"].append(second)
+        exp["total"] = "3.00"
+        for stage in ("before", "reopened"):
+            ui = self.report[stage]
+            ui["total"] = "3.00"
+            ui["tables"]["lines"].append(dict(second, fields={"relation": False}, stars=[], choices={}))
+        self.assertEqual(checker.check(self.report)["required_controls"], 3)
+        self.report["reopened"]["tables"]["lines"][1]["stars"].append("relation")
+        with self.assertRaisesRegex(checker.CheckError, "重开后.*第 2 行.*必填"):
             checker.check(self.report)
 
     def test_inactive_conditional_field_is_not_required(self):
@@ -54,8 +138,10 @@ class DraftCheckTests(unittest.TestCase):
         self.assertTrue(checker.check(self.report)["ok"])
 
     def test_row_conditions_can_use_a_parent_selection(self):
-        widget = self.report["expected"]["schema"][2]["children"][0]
-        widget["display_condition"] = self.report["expected"]["schema"][1]["display_condition"]
+        condition = copy.deepcopy(self.report["expected"]["schema"][1]["display_condition"])
+        condition["expressions"][0]["standard_value"] = "option-b"
+        self.report["expected"]["schema"][2]["children"].append(
+            dict(id="other", visible=True, required=True, display_condition=condition))
         self.assertTrue(checker.check(self.report)["ok"])
         del self.report["reopened"]["choices"]["branch"]
         with self.assertRaisesRegex(checker.CheckError, "条件驱动"):

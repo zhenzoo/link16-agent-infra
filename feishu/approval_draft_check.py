@@ -64,60 +64,66 @@ def applies(condition, selection):
 
 
 def check_fields(widgets, ui, outer_selection=None):
-    """Compute applicability from definition + selected option IDs, separately from stars."""
-    present, choices = ui["fields"], ui["choices"]
+    """Use native stars for requiredness. Use schema hints to detect missing observations."""
+    present, choices = ui.get("fields"), ui.get("choices")
+    require(isinstance(ui.get("stars"), list), "当前页面或明细行的红星未读")
     stars = set(strings(ui["stars"]))
+    hidden = set(strings(ui.get("hidden", [])))
     require(isinstance(present, dict) and isinstance(choices, dict) and
             all(type(v) is bool for v in present.values()), "控件读回必须是脱敏的有值/空值判断")
-    require(set(present) <= widgets.keys() and stars <= widgets.keys() and
-            choices.keys() <= present.keys(), "页面出现未映射的字段或选项")
+    require(present.keys() <= widgets.keys() and hidden <= widgets.keys() and
+            hidden.isdisjoint(present) and choices.keys() <= present.keys(), "页面字段、隐藏项或选项映射有误")
+    require(stars <= present.keys(), "红星控件的值未读或尚未映射")
+    require(present or hidden, "当前页面或明细行没有控件读数")
     for k, choice in choices.items():
         require(isinstance(choice, str) and bool(choice.strip()) == present[k], "选择器读数与字段状态不符")
-    active = {}
-    visiting = set()
 
-    def selected(k):
+    def check_unobserved(k, path):
+        if k in hidden:
+            return
+        require(k not in path, "未读控件的定位条件存在循环，需要核页面")
+        wd = widgets[k]
+        require(type(wd.get("visible")) is bool, "控件未读且缺少定位信息")
+        require(not (wd["visible"] and applies(wd.get("display_condition"),
+                                               lambda source: selected(source, path | {k}))),
+                "当前分支的控件未读，请核页面及星标")
+
+    def selected(k, path=frozenset()):
         if k not in widgets:
             require(outer_selection is not None, "条件引用了未知控件")
             return outer_selection(k)
-        if not visible(k):
+        if k not in present:
+            check_unobserved(k, path)
             return None
         require(k in choices, "条件驱动项未经读取，无法判定分支")
         return choices[k]
 
-    def visible(k):
-        if k not in active:
-            require(k not in visiting, "字段条件存在循环")
-            visiting.add(k)
-            wd = widgets[k]
-            require(type(wd["visible"]) is bool and type(wd["required"]) is bool, "定义缺少可见性或必填状态")
-            active[k] = wd["visible"] and applies(wd.get("display_condition"), selected)
-            visiting.remove(k)
-        return active[k]
-
-    required = {k for k, wd in widgets.items() if visible(k) and wd["required"]}
-    require(all(active[k] for k in present), "页面呈现与定义的条件分支不符")
     for pos, k in enumerate(widgets, 1):
-        if k in required or k in stars:
-            require(present.get(k) is True, f"定义第 {pos} 个控件必填，当前为空或没有读回")
-    return selected, active, required | stars
+        if k in stars:
+            require(present[k], f"第 {pos} 个控件有红星、必填，实读为空")
+        elif k not in present:
+            check_unobserved(k, frozenset())
+    return selected, stars
 
 
 def check_snapshot(expected, ui, schema):
+    require(isinstance(ui, dict) and ui, "当前编辑页未读")
     for k in ("draft", "owner", "definition"):
         require(isinstance(expected[k], str) and expected[k].strip() and ui[k] == expected[k],
                 "草稿、申请人或表单定义不一致")
-    selected, active, required = check_fields(schema, ui)
+    selected, required = check_fields(schema, ui)
     historical = set(strings(expected["historical"]))
     matches = ui["historical"]
-    require(isinstance(matches, dict) and matches.keys() == historical and
-            all(ui["fields"].get(k) is True and matches[k] is True for k in historical),
+    filled_historical = {k for k in historical if ui["fields"].get(k)}
+    require(historical <= schema.keys() and isinstance(matches, dict) and matches.keys() <= historical
+            and all(type(v) is bool for v in matches.values())
+            and {k for k, matched in matches.items() if matched} == filled_historical,
             "本人历史字段未全部匹配")
     require(Counter(strings(ui["attachments"])) == Counter(strings(expected["attachments"])),
             "附件与原始材料清单不符")
     tables = expected["tables"]
     require(isinstance(tables, dict) and ui["tables"].keys() == tables.keys(), "明细表清单不符")
-    active_tables = {k for k, wd in schema.items() if wd.get("children") and active[k]}
+    active_tables = {k for k in ui["fields"] if schema[k].get("children")}
     require(active_tables == tables.keys(), "当前条件下应核验的明细表缺失或多出")
     required_count = len(required)
     line_count = 0
@@ -127,15 +133,18 @@ def check_snapshot(expected, ui, schema):
         rows = indexed(ui["tables"][table_id], "key")
         sources = indexed(expected_rows, "key")
         require(rows.keys() == sources.keys() and (rows or table_id not in required), "明细缺行、重复或多行")
-        for key, src in sources.items():
+        for row_number, (key, src) in enumerate(sources.items(), 1):
             row = rows[key]
-            _, _, row_required = check_fields(columns, row, selected)
+            try:
+                _, row_required = check_fields(columns, row, selected)
+            except CheckError as ex:
+                raise CheckError(f"明细第 {row_number} 行：{ex}") from None
             required_count += len(row_required)
             line_count += 1
             require(Counter(strings(row["links"])) == Counter(strings(src["links"])), "明细关联了不同的原单")
             for attr in ("purpose", "category"):
                 if attr in src:
-                    require(row.get(attr) == src[attr] and bool(src[attr]), "明细用途或分类不符")
+                    require(attr in row and row[attr] == src[attr], "明细用途或分类未读或不符")
             if "amount" in src:
                 n = amount(row["amount"])
                 require(n == amount(src["amount"]), "明细金额与凭证不符")
@@ -148,7 +157,9 @@ def check_snapshot(expected, ui, schema):
 
 
 def check(report):
-    exp, before, after = report["expected"], report["before"], report["reopened"]
+    exp, before, after = report["expected"], report.get("before"), report.get("reopened")
+    require(isinstance(before, dict) and before, "保存前编辑页未读")
+    require(isinstance(after, dict) and after, "重开后编辑页未读")
     schema = indexed(exp["schema"], "id")
     require(schema, "缺少原表单定义")
     events = report["events"]
@@ -172,7 +183,7 @@ def check(report):
         post = check_snapshot(exp, after, schema)
     except CheckError as ex:
         raise CheckError(f"重开后：{ex}") from None
-    for k in ("choices", "fields", "stars", "historical", "stable"):
+    for k in ("choices", "fields", "stars", "stable"):
         a, b = before[k], after[k]
         require((set(a) == set(b) if k == "stars" else a == b), "保存前后字段、条件或比较结果变化")
     for k in before["tables"]:
