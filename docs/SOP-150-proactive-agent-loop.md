@@ -18,7 +18,7 @@ read_when:
   - 在任何电脑上为某只 Link16 智能体开启 24h Proactive 主动模式
   - 定时任务触发 Proactive 巡检与工作台刷新
   - 主人确认工作台中的表格拟填项或待发草稿，准备执行落表或以主人身份外发
-last_reviewed: 2026-11-25
+last_reviewed: 2026-11-26
 ---
 
 # SOP-150 · Link16 Proactive Agent 24h 主动闭环
@@ -106,6 +106,17 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
 
 <a id="workbench-checks"></a>
 
+### 工作台规范与工具的分工
+
+| 归属 | 唯一职责 | 执行与验收 |
+|---|---|---|
+| 仓库入口 AGENTS.md / CLAUDE.md | 登记主号、一项业务一位责任人、写入与发送权限 | 入口指向本总流程与对应业务规范。 |
+| [通用规范 TASTE-010](TASTE-010-proactive-dispatch.md) | 全台行列、排序、字号与文字、成果命名、空值 | `proactive_business_list.py` 核登记作者及顺序，`proactive_lint.py`、`proactive_business_contract.py` 核布局和字段。 |
+| 本总流程 SOP-150 | 收件、排序、派单、取回原件、生成、发布、实点、追单 | 发布前以 `proactive_taste.py workbench` 对照业务登记，`proactive_outcomes.py` 校验每个结果与原件；发布后用本人入口点开同一版。 |
+| 各业务 SOP，如[审批 SOP-151](SOP-151-approval-draft.md) | 定义该类业务交付的原件、数据和最后一步 | 审批用 `approval_draft_check.py` 比对保存与重开，另从工作台点验落到同一张单。具体金额、附件与页面证据留在私有回执。 |
+
+[TOOLS.md](../TOOLS.md) 提供命令索引。PLAN 记录这一次的责任、进度与恢复点，原单回执保存实测依据。新业务优先复用已有业务规范，反例加在负责该规则的工具测试中。
+
 ### 工作台与业务消息的发布校验
 
 1. 在私有业务清单 `morning-business.json` 用稳定业务 ID 登记 `artifact_pairs`（同一 HTML 的 title、local、online）和 `message_policies`（收件人、类别、称呼、原单要点）。
@@ -126,5 +137,5 @@ python feishu/proactive_scanner.py --bot <bot> --preflight-only
    python feishu/send_as_user_web.py --bot <bot> --target-name "<群名或人名>" --target-type group --chat-id <oc_xxx> --text "<确认正文>" --send
    ```
    只有回执 `ok=true` 且 `verified=true`（附真实 `message_id` 与 `message_app_link`）才将同一正文从待发转为已发并刷新工作台。
-3. **审批与报销。** 按[原生审批草稿 SOP](SOP-151-approval-draft.md)读取当前红星、条件必填项、本人同类历史及逐行关联原单。保存后退出重开，用 `feishu/approval_draft_check.py` 核对。工作台优先给独立实点后可见原内容的草稿链接。直达失败时，实测从原表进入草稿箱并编辑同一份草稿，用一个原表链接标出保存日期时间和编辑路径，由本人提交。
+3. **审批与报销。** 业务作者按[审批 SOP-151](SOP-151-approval-draft.md)核对原件。从工作台一次点开核对账号、单号和表内数据。草稿还须看到原附件与「提交」，在途实例须看到该单当前处理节点。浏览器可能提示确认唤起飞书，此项单独记录。若还需选择草稿或搜索单据，该入口验收失败。主号比对私有点验原件的指纹，仅发布与回执一致的链接，未通过则保留原单、结果格留白。最后提交或审批由本人操作。
 4. **约会。** 核本人和每个必要参会人的身份、日期时区和忙闲，按议题与可能追加参会的角色估时、估人数，再查房间地点、容量和可用时段。原主题已有事件则回读复用；主办人与参会名单分别回读，人员和会议室分别检查邀请状态。达不到证据的忙闲状态保持未知。

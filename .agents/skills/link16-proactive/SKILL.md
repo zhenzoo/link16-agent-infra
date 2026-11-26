@@ -41,7 +41,7 @@ description: Link16 主动工作台。按本人职责分派和追单，收执行
 |---|---|---|
 | **Phase 0 预检** | 按当前应用身份分别检查授权与可读资源，各域保存成功、缺权或部分读取的证据 | `python feishu/proactive_scanner.py --bot <bot> --preflight-only` |
 | **Phase 1 巡检** | 主号派执行者核实本人消息、会议逐字稿、周报、任务和审批。关联原任务与执行回执，同一工作台一个 writer | `python feishu/bridge_cron.py board`，SOP-150 §2 |
-| **Phase 2 审阅与委派** | 主号沿原单分派。业务和审批均使用 TASTE-010 四列，审批直达本人实开草稿或列明草稿箱定位。七天日轴跨周、跨月，已闭环事项按真实日期与原件去重补录，同日节点纵排、全称可读 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
+| **Phase 2 审阅与委派** | 主号沿原单分派。业务和审批均使用 TASTE-010 四列，审批链接按 SOP-151 点验，从工作台一次进入该笔原单。七天日轴跨周、跨月，已闭环事项按真实日期与原件去重补录，同日节点纵排、全称可读 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
 | **Phase 3 确认执行** | 按具体授权分派原表更新与审批办理，执行者回读并报结果；主号统一发送获授权的消息 | `docs/SOP-150-proactive-agent-loop.md` §4、当前业务仓原件 |
 
 ## 2. 不可违背的四条护栏

@@ -84,9 +84,9 @@ def test_approval_table_distinguishes_verified_draft_from_form_and_instance():
     page=BeautifulSoup(business.approval_table(data,"办理人"),"html.parser")
     rows=page.select("tr[data-approval-row]")
     assert all(len(r.find_all(["th","td"],recursive=False))==4 for r in rows)
-    assert [r.a["href"] for r in rows]==["https://example.org/instance",original,direct,original]
-    assert "草稿箱" in rows[1].a.text and "10:15" in rows[1].a.text
-    assert rows[3].a.text=="原表" and "既有字段值" not in page.text
+    assert len(rows) == 4
+    assert all(not r.select(".outcomes a") and not r.select_one(".outcomes").get_text(strip=True) for r in rows)
+    assert "既有字段值" not in page.text
 
 
 def test_daily_archive_deduplicates_receipt_and_stacks_two_titles_on_the_same_date():

@@ -165,19 +165,17 @@ def business_rows(rows):
 
 
 def approval_table(pack, owner):
+    from proactive_outcomes import validate_spec
+
     rows=[]
-    for item in (pack.get("approvals") or []):
-        if not item.get("url"):
-            continue
-        saved=item.get("native_draft") or {}
-        if saved.get("reopened") and saved.get("permalink_verified"):
-            target, label=saved["permalink"],"打开本人草稿"
-        elif saved.get("reopened"):
-            target, label=item["url"],"打开原表 → 草稿箱 → "+saved["saved_at"]
-        else:
-            target, label=item["url"],"原表" if item.get("local_draft") else "打开原审批单"
-        rows.append((item["title"],(item.get("assignment") or {}).get("handler") or owner,
-                     link(label,target),""))
+    for item in pack.get("approvals") or []:
+        outcome = ""
+        if item.get("approval_open"):
+            spec = dict(kind="approval", approval_id=item.get("approval_id"), label=item["title"],
+                        href=item["approval_open"]["href"], approval_open=item["approval_open"])
+            validate_spec(spec)
+            outcome = link(spec["label"], spec["href"])
+        rows.append((item["title"], (item.get("assignment") or {}).get("handler") or owner, outcome, ""))
     for item in pack.get("owner_decisions") or []:
         if item.get("decided") or not item.get("source"):
             continue
