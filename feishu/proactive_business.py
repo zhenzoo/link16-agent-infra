@@ -1,5 +1,6 @@
 """Render owner-reviewed business results and their evidence on the original workbench."""
 import calendar
+import json
 import hashlib
 import math
 import mimetypes
@@ -36,7 +37,7 @@ def link(label, url, receipt=False):
     return f'<a href="{address(url)}"{mark}>{text(label, 160)}</a>'
 
 
-def result(item):
+def result(item, evidence=""):
     kind = item["type"]
     if kind == "status":
         phrase = item["text"]
@@ -47,10 +48,23 @@ def result(item):
     if kind == "metrics":
         facts = []
         for m in item["items"]:
+            if m.get("value") is None:
+                continue
+            if m.get("measured") is False:
+                raise ValueError("未测指标应留空")
             if type(m["value"]) not in {int, float} or not math.isfinite(m["value"]) or m["unit"] not in UNITS:
                 raise ValueError("指标须为实数并带已登记单位")
-            facts.append(f'<span data-value="{m["value"]}" data-unit="{text(m["unit"])}">{text(m["label"], 24)} <strong>{m["value"]} {text(m["unit"])}</strong></span>')
-        return '<div class="facts">' + ''.join(facts) + '</div>'
+            source=m.get("evidence") or evidence
+            if m["value"]==0 and not source:
+                raise ValueError("实测零须有来源")
+            mark=f' data-evidence="{text(source,240)}"' if source else ""
+            facts.append(f'<span data-value="{m["value"]}" data-unit="{text(m["unit"])}"{mark}>{text(m["label"], 24)} <strong>{m["value"]} {text(m["unit"])}</strong></span>')
+        return '<div class="facts">' + ''.join(facts) + '</div>' if facts else ""
+    if kind=="draft_message":
+        if not evidence:
+            raise ValueError("待审消息须有原作者回执")
+        return ('<details class="draft-message"><summary>拟发给 '+text(item["recipient"],50)+'</summary>'
+                '<blockquote>'+text(item["text"],12000)+'</blockquote></details>')
     if kind == "message":
         if not re.fullmatch(r"om_[a-z0-9]+", item["mid"]) or not item["url"].startswith("https://"):
             raise ValueError("原话须有原消息回执")
@@ -75,6 +89,8 @@ def result(item):
         if not headers or not item["rows"] or any(len(row) != len(headers) for row in item["rows"]):
             raise ValueError("提案表须提供原表头和完整行")
         def cell(v):
+            if v is None:
+                return ""
             if isinstance(v, dict):
                 original=link(v["label"], v["url"])
                 parts=urlsplit(v["url"])
@@ -105,12 +121,18 @@ def business_rows(rows):
             raise ValueError("业务 ID 重复或无效")
         seen.add(key)
         aliases=[]
-        for alias in [f"task-{key}",*row.get("aliases",[])]:
+        legacy=[f"task-{key}"] if row.get("legacy_task_anchor",True) else []
+        for alias in [*legacy,*row.get("aliases",[])]:
             if not ID.fullmatch(alias) or alias in seen:
                 raise ValueError("旧工作台锚点无效或重复")
             seen.add(alias)
             aliases.append(f'<span id="{alias}" aria-hidden="true"></span>')
-        results = ''.join(result(r) for r in row.get("results", []))
+        results = ''.join(result(r,row.get("result_source","")) for r in row.get("results", []))
+        review=row.get("owner_review")
+        if review:
+            state=review["decision"]
+            caption={"accept":"本人已验收","revise":"本人要求修改"}[state]
+            results+=f'<p class="owner-review" data-decision="{state}" data-mid="{text(review["mid"])}">{caption}</p>'
         images = []
         for media in row.get("media", []):
             if not re.fullmatch(r"[a-f0-9]{64}",media["sha256"]):
@@ -130,8 +152,9 @@ def business_rows(rows):
         if agent and not re.fullmatch(r"[A-Za-z0-9_-]{2,32}", agent):
             raise ValueError("执行者须为登记短名")
         topics = ''.join('<small class="business-topic">'+(link(t["label"],t["url"]) if t.get("url") else text(t["label"]))+'</small>' for t in row.get("topics",[]))
+        expected=f'<p class="expected" aria-label="预期交付">{text(row["expected"])}</p>' if row.get("expected") else ""
         out.append(f'<tr id="business-{key}" data-business-id="{key}" data-item><td class="identity">{"".join(aliases)}<b>{index}</b><small>{escape(agent)}</small></td>'
-                   f'<th scope="row"><span>{text(row["name"])}</span>{topics}</th><td class="outcomes">{results}</td><td class="attachments">{"".join(images)}</td></tr>')
+                   f'<th scope="row"><span>{text(row["name"])}</span>{expected}{topics}</th><td class="outcomes">{results}</td><td class="attachments">{"".join(images)}</td></tr>')
     return ''.join(out)
 
 
@@ -272,12 +295,21 @@ def day_timeline(months, tracks, entries, schedule, render_node):
             f'<div class="day-head"><b class="track-label">日期</b>{heads}</div>{group_html}</div></div></section>')
 
 
-def render(owner, timestamp, rows, approvals, timeline, online_url):
+def render(owner, timestamp, rows, approvals, timeline, online_url, round_plan=None):
+    from proactive_business_contract import apply_round, row_signatures, validate_html
+    marker=round_attr=""
+    if round_plan:
+        rows=apply_round(rows,round_plan)
+        metadata=json.dumps(row_signatures(rows),ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
+        marker=f'<script type="application/json" id="workbench-round-checks">{metadata}</script>'
+        round_attr=f' data-round="{text(round_plan["date"])}"'
     css = Path(__file__).with_name("proactive_business.css").read_text(encoding="utf8")
     cloud = f'<a class="board-cloud" href="{address(online_url)}" aria-label="线上工作台">云</a>' if online_url else ""
-    return f"""<!doctype html><html lang="zh-CN" data-workbench-layout="business"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{text(owner)}的工作台</title><style>{css}</style></head>
+    html=f"""<!doctype html><html lang="zh-CN" data-workbench-layout="business"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{text(owner)}的工作台</title><style>{css}</style>{marker}</head>
 <body><div class="shell"><aside><time datetime="{timestamp.isoformat(timespec='seconds')}">更新于 {timestamp:%m月%d日 %H:%M}</time><h1>{text(owner)}的工作台</h1>
 <nav><a href="#business">业务审批</a><a href="#closed">项目时间线</a></nav></aside><main>{cloud}
-<section class="major" id="business"><h2>业务</h2><div class="business-scroll" tabindex="0"><table class="business"><colgroup><col class="reg"><col class="name"><col class="result"><col class="media"></colgroup><thead><tr><th>执行者</th><th>业务</th><th>结果</th><th>附件</th></tr></thead><tbody data-expect-count="{len(rows)}" data-expect-of="登记业务">{business_rows(rows)}</tbody></table></div></section>
+<section class="major" id="business"{round_attr}><h2>业务</h2><div class="business-scroll" tabindex="0"><table class="business"><colgroup><col class="reg"><col class="name"><col class="result"><col class="media"></colgroup><thead><tr><th>执行者</th><th>{"业务 · 预期交付" if round_plan else "业务"}</th><th>{"实交成果 · 本人验收" if round_plan else "结果"}</th><th>附件</th></tr></thead><tbody data-expect-count="{len(rows)}" data-expect-of="登记业务">{business_rows(rows)}</tbody></table></div></section>
 <section class="major" id="approvals"><h2>审批</h2>{approvals}</section>{timeline or '<section class="major project-timeline" id="closed"><h2>项目时间线</h2></section>'}</main></div>
 <script>const timeline=document.querySelector('.timeline-scroll');document.addEventListener('click',e=>{{const a=e.target.closest('a[data-flyout-target]');if(a){{const d=document.getElementById(a.dataset.flyoutTarget);if(d){{e.preventDefault();d.showModal();}}}}if(e.target.closest('[data-event-open]'))e.target.closest('article').querySelector('dialog').showModal();if(e.target.closest('[data-close-proposal],[data-event-close]'))e.target.closest('dialog').close();const turn=e.target.closest('[data-week]');if(turn&&timeline)timeline.scrollBy({{left:Math.round(timeline.querySelector('.day').getBoundingClientRect().width*7)*Number(turn.dataset.week)}});}});if(timeline){{const today='{timestamp:%Y-%m-%d}', days=[...timeline.querySelectorAll('.day')],selected=days.find(d=>d.dataset.day===today)||days.find(d=>timeline.querySelector('[data-when="'+d.dataset.day+'"]'));if(selected){{const day=new Date(selected.dataset.day+'T12:00:00Z').getUTCDay();timeline.scrollLeft=Math.max(0,(days.indexOf(selected)-(day+6)%7)*selected.getBoundingClientRect().width);}}}}</script></body></html>"""
+    validate_html(html,round_plan)
+    return html

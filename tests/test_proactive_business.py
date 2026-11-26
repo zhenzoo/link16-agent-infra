@@ -12,6 +12,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"feishu"))
 import proactive_business as business
 import proactive_scanner as scanner
 import proactive_mobile as mobile
+import proactive_business_contract as contract
 
 
 @pytest.mark.parametrize("item",[
@@ -100,6 +101,68 @@ def test_daily_archive_deduplicates_receipt_and_stacks_two_titles_on_the_same_da
     assert "grid-row:1;" in nodes[0]["style"] and "grid-row:2;" in nodes[1]["style"]
     assert nodes[0].button.get_text(strip=True)=="交付甲V1.0" and nodes[1].button.get_text(strip=True)=="交付乙r9"
     assert all(n.select_one("dialog .archive-links a[href]") and not n.select_one("summary") for n in nodes)
+
+
+def morning_sample():
+    plan={"date":"2026-05-23","owner":"主管","previous":[{"id":"old","agent":"review-1"},{"id":"return","agent":"review-2"}],
+          "items":[{"id":"return","name":"原业务","agent":"review-2","expected":"原稿提案"},
+                   {"id":"new","name":"跟进","agent":"review-3","expected":"两条消息"}],"expected":{"old":"可核验结果"},
+          "receipts":{"return":{"agent":"review-2","source":"om_source","results":[{"type":"status","text":"已核对原稿"},
+           {"type":"metrics","items":[{"label":"零次","value":0,"unit":"次"},{"label":"无输入","value":None,"unit":"次"}]},
+           {"type":"draft_message","recipient":"同事","text":"请查看两款方案的报价。"}]}}}
+    rows=[{"id":"old","name":"已有业务","agent":"review-1","results":[]},{"id":"return","name":"原业务","agent":"review-2","results":[]}]
+    page=BeautifulSoup(scanner.render_html({"owner_name":"主管"},{"business_round":plan,"business_rows":rows}),"html.parser")
+    return plan,page
+
+
+def test_morning_round_moves_registered_item_and_keeps_measured_zero_separate_from_missing():
+    plan,page=morning_sample()
+    assert [r["data-business-id"] for r in page.select("tr[data-business-id]")]==["return","new","old"]
+    assert page.select_one("#business-new .outcomes").get_text()==""
+    assert [m.get_text(strip=True) for m in page.select(".facts > span")]==["零次0 次"]
+    assert page.select_one("#business-new .expected").get_text()=="两条消息" and not page.select(".owner-review")
+    contract.validate_html(page,plan)
+
+
+@pytest.mark.parametrize(("broken","error"),[
+    ("column","四列"),("duplicate","排序"),("reordered","排序"),("owner","作者"),("expected_as_result","留白|空"),
+    ("absent_badge","留白|空"),("long_status","状态"),("fake_zero","实测零"),("edited_draft","原文"),
+    ("invented_review","验收"),("empty_media","附件"),("long_table","提案格")])
+def test_morning_publication_gate_rejects_mutated_render(broken,error):
+    plan,page=morning_sample()
+    first=page.select_one("#business-return")
+    blank=page.select_one("#business-new .outcomes")
+    if broken=="column": first.select_one("th").decompose()
+    if broken=="duplicate": page.select_one("#business-old")["data-business-id"]="new"
+    if broken=="reordered": first.parent.append(first.extract())
+    if broken=="owner": first.select_one(".identity small").string="review-3"
+    if broken in {"expected_as_result","absent_badge"}: blank.string="两条消息" if broken=="expected_as_result" else "暂无结果"
+    if broken=="long_status": first.select_one(".result-status").string="已核对这是一段超过十八个字的业务过程背景说明"
+    if broken=="fake_zero": del first.select_one("[data-value]")["data-evidence"]
+    if broken=="edited_draft": first.select_one("blockquote").string="改过的内容"
+    if broken=="invented_review": first.select_one(".outcomes").append(BeautifulSoup('<p class="owner-review" data-decision="accept">本人已验收</p>',"html.parser").p)
+    if broken=="empty_media": first.select_one(".attachments").string="暂无"
+    if broken=="long_table": first.select_one(".outcomes").append(BeautifulSoup('<table class="proposal"><thead><tr><th>项</th></tr></thead><tbody><tr><td>这个完整的背景句不该塞进提案格。</td></tr></tbody></table>',"html.parser").table)
+    with pytest.raises(ValueError,match=error): contract.validate_html(page,plan)
+
+
+def test_morning_source_rejects_duplicate_owner_and_invented_zero():
+    plan,_=morning_sample()
+    plan["items"][0]["agent"]="another"
+    with pytest.raises(ValueError,match="作者"): contract.ordered_assignments(plan)
+    with pytest.raises(ValueError,match="实测零"): business.result({"type":"metrics","items":[{"label":"计数","value":0,"unit":"个"}]})
+    with pytest.raises(ValueError,match="未测"): business.result({"type":"metrics","items":[{"label":"计数","value":0,"measured":False,"unit":"个"}]},"om_proof")
+
+
+def test_missing_input_stays_empty_in_native_table_and_cannot_be_replaced_with_zero():
+    plan,_=morning_sample()
+    plan["receipts"]["return"]["results"]=[{"type":"table","headers":["原件","实付金额"],"rows":[["报销票据",None]]}]
+    rows=[{"id":key,"agent":agent,"name":key,"results":[]} for key,agent in (("old","review-1"),("return","review-2"))]
+    page=BeautifulSoup(scanner.render_html({"owner_name":"主管"},{"business_round":plan,"business_rows":rows}),"html.parser")
+    amount=page.select("#business-return .proposal td")[-1]
+    assert amount.get_text()==""
+    amount.string="0 元"
+    with pytest.raises(ValueError,match="缺数值应留空"): contract.validate_html(page,plan)
 
 
 def test_mobile_build_rejects_changed_status_even_after_render(tmp_path):

@@ -152,13 +152,15 @@ class Bundle:
         business = sections == ["business", "approvals", "closed"]
         if business:
             from proactive_business import result
+            from proactive_business_contract import validate_html
+            validate_html(board)
             for status in board.select("#business .result-status"):
                 result({"type":"status","text":status.get_text()})
             for metric in board.select("#business .facts span"):
                 value,unit = metric.get("data-value"),metric.get("data-unit")
                 if value is None or not unit:
                     raise ValueError("业务指标缺少数值或单位")
-                result({"type":"metrics","items":[{"label":"指标","value":float(value),"unit":unit}]})
+                result({"type":"metrics","items":[{"label":"指标","value":float(value),"unit":unit}]},metric.get("data-evidence",""))
             for medium in board.select("#business .attachments img, #business .attachments video"):
                 original = relative_target(self.board,medium["src"])
                 if not can_read(original,self.roots,VIDEO if medium.name=="video" else IMAGES) or digest(original.read_bytes()) != medium.get("data-sha256"):
@@ -511,7 +513,7 @@ class Bundle:
         script.string = text[:start] + json.dumps(data, ensure_ascii=False).replace("</", "<\\/") + text[start + end:]
 
 
-def pack(board, output, extra_roots=(), *, archive_paths=False):
+def pack(board, output, extra_roots=(), *, archive_paths=False, round_plan=None):
     board = board.resolve(strict=True)
     output = output.resolve()
     roots = [board.parent, *(p.resolve(strict=True) for p in extra_roots)]
@@ -521,6 +523,8 @@ def pack(board, output, extra_roots=(), *, archive_paths=False):
         stage.mkdir()
         bundle = Bundle(board, stage, roots, archive_paths=archive_paths)
         bundle.build()
+        from proactive_business_contract import validate_html
+        validate_html((stage/"index.html").read_text("utf8"),round_plan)
         files = sorted(p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file())
         inventory_path = Path(tmp) / "allowlist.json"
         inventory_path.write_text(json.dumps(files), encoding="utf-8")
@@ -552,6 +556,8 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", type=Path, required=True, help="私有成包根目录")
     parser.add_argument("--asset-root", type=Path, action="append", default=[], help="原工作台之外允许随包的资料目录")
     parser.add_argument("--archive-paths", action="store_true", help="在本人私有包中显示同一归档行已随包原稿的本机绝对路径")
+    parser.add_argument("--round-json",type=Path,help="复核发布件与本人登记的晨间顺序和回执")
     args = parser.parse_args()
-    result = pack(args.board, args.out_dir, args.asset_root, archive_paths=args.archive_paths)
+    plan=json.loads(args.round_json.read_text("utf-8-sig")) if args.round_json else None
+    result = pack(args.board, args.out_dir, args.asset_root, archive_paths=args.archive_paths,round_plan=plan)
     print(json.dumps({k: result[k] for k in ("version", "site", "bytes", "local_references_marked")}, ensure_ascii=False))

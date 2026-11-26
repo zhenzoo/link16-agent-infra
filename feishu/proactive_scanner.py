@@ -1089,7 +1089,7 @@ def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = N
     return render(owner, dt.datetime.now(TZ_SHANGHAI),
                   pack["business_rows"] if "business_rows" in pack else migrate_registered_rows(pack),
                   approval_table(pack, owner),
-                  timeline, pack.get("online_url") or "")
+                  timeline, pack.get("online_url") or "", pack.get("business_round"))
 
 
 def render_archived_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
@@ -1402,11 +1402,16 @@ def main() -> int:
         payload = scan_feishu(args.bot, days=args.days, check_replies=not args.no_reply_check)
 
     out_html = Path(args.out_html).resolve()
+    if out_html.is_file() and not (actions_pack or {}).get("business_round"):
+        from bs4 import BeautifulSoup
+        existing = BeautifulSoup(out_html.read_text("utf-8-sig"), "html.parser")
+        if existing.select_one("#business[data-round], #workbench-round-checks"):
+            raise ValueError("当前工作台已登记晨间业务，须带入原工作包后再生成")
     _write_output(out_html, render_html(payload, actions_pack=actions_pack, output_dir=out_html.parent))
     mobile = {}
     if args.mobile_out_dir:
         from proactive_mobile import pack
-        result = pack(out_html, args.mobile_out_dir, args.mobile_asset_root)
+        result = pack(out_html, args.mobile_out_dir, args.mobile_asset_root,round_plan=(actions_pack or {}).get("business_round"))
         mobile = {"mobile_version": result["version"], "mobile_site": result["site"]}
 
     if args.out_json:
