@@ -1,0 +1,171 @@
+{
+  "expected": {
+    "draft": "draft-a",
+    "owner": "owner-a",
+    "definition": "form-a",
+    "schema": [
+      {
+        "id": "branch",
+        "required": true,
+        "visible": true
+      },
+      {
+        "id": "dependent",
+        "required": false,
+        "visible": true,
+        "display_condition": {
+          "conditional": "OR",
+          "expressions": [
+            {
+              "source_widget": {
+                "id": "branch"
+              },
+              "compare_type": "is",
+              "standard_value": "option-a"
+            }
+          ]
+        }
+      },
+      {
+        "id": "lines",
+        "required": true,
+        "visible": true,
+        "children": [
+          {
+            "id": "relation",
+            "required": true,
+            "visible": true
+          }
+        ]
+      }
+    ],
+    "historical": [
+      "dependent"
+    ],
+    "tables": {
+      "lines": [
+        {
+          "key": "item-a",
+          "amount": "1.00",
+          "links": [
+            "source-a"
+          ],
+          "purpose": "purpose-a",
+          "category": "category-a"
+        }
+      ]
+    },
+    "total": "1.00",
+    "attachments": [
+      "file-a"
+    ]
+  },
+  "before": {
+    "draft": "draft-a",
+    "owner": "owner-a",
+    "definition": "form-a",
+    "at": "2000-01-01T01:00:00+00:00",
+    "fields": {
+      "branch": true,
+      "dependent": true,
+      "lines": true
+    },
+    "choices": {
+      "branch": "option-a"
+    },
+    "stars": [
+      "branch",
+      "dependent"
+    ],
+    "historical": {
+      "dependent": true
+    },
+    "tables": {
+      "lines": [
+        {
+          "key": "item-a",
+          "amount": "1.00",
+          "links": [
+            "source-a"
+          ],
+          "purpose": "purpose-a",
+          "category": "category-a",
+          "fields": {
+            "relation": true
+          },
+          "stars": [
+            "relation"
+          ],
+          "choices": {}
+        }
+      ]
+    },
+    "total": "1.00",
+    "attachments": [
+      "file-a"
+    ],
+    "stable": {}
+  },
+  "reopened": {
+    "draft": "draft-a",
+    "owner": "owner-a",
+    "definition": "form-a",
+    "at": "2000-01-01T01:02:00+00:00",
+    "fields": {
+      "branch": true,
+      "dependent": true,
+      "lines": true
+    },
+    "choices": {
+      "branch": "option-a"
+    },
+    "stars": [
+      "branch",
+      "dependent"
+    ],
+    "historical": {
+      "dependent": true
+    },
+    "tables": {
+      "lines": [
+        {
+          "key": "item-a",
+          "amount": "1.00",
+          "links": [
+            "source-a"
+          ],
+          "purpose": "purpose-a",
+          "category": "category-a",
+          "fields": {
+            "relation": true
+          },
+          "stars": [
+            "relation"
+          ],
+          "choices": {}
+        }
+      ]
+    },
+    "total": "1.00",
+    "attachments": [
+      "file-a"
+    ],
+    "stable": {}
+  },
+  "events": [
+    {
+      "action": "save_draft",
+      "draft": "draft-a",
+      "persisted": true
+    },
+    {
+      "action": "leave",
+      "draft": null
+    },
+    {
+      "action": "reopen",
+      "draft": "draft-a"
+    }
+  ],
+  "new_submissions": 0
+}
