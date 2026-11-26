@@ -314,6 +314,38 @@ class Followup:
         except Exception as exc:
             return row, {"state": "检查失败", "reason": str(exc)[:280]}
 
+    @staticmethod
+    def receipt_key(observation):
+        """Identify the author's reply and any newer replies on earlier requests."""
+        return [observation.get("request_mid"), observation.get("reply_mid"),
+                sorted(observation.get("reply_mids") or []),
+                sorted(observation.get("late_original_replies") or [])]
+
+    def await_input(self, key, receipt, condition):
+        if not condition.strip() or not receipt.strip():
+            raise ValueError("请指定已读作者回执和恢复条件")
+        with self.lock("tick"):
+            before = self.read()["tasks"][key]
+            if before["closed"] or before.get("retired_to"):
+                raise ValueError("任务已结单")
+            evidence = self.observe(before)
+            if evidence.get("reply_mid") != receipt or evidence.get("late_original_replies"):
+                raise ValueError("回执与本单最新作者答复不符")
+            with self.lock():
+                data = self.read()
+                row = data["tasks"][key]
+                if row["closed"] or row.get("retired_to") or row.get("updates") != before.get("updates"):
+                    raise ValueError("原单已变更，请重读")
+                wait = dict(receipt=receipt, condition=condition.strip(), evidence=self.receipt_key(evidence))
+                row.update(awaiting_input=wait, evidence=evidence, checked_at=time.time(), state="等待外部输入")
+                for alarm in data["alarms"].values():
+                    if not alarm.get("accepted_at") and key in alarm["ids"]:
+                        quiet = alarm.setdefault("reviewed_ids", [])
+                        if key not in quiet:
+                            quiet.append(key)
+                self.save(data)
+                return {"id": key, "condition": wait["condition"], "closed": False}
+
     def tick(self, wake=True):
         with self.lock("tick"):
             now = time.time()
@@ -328,6 +360,15 @@ class Followup:
                     row = data["tasks"][prior["id"]]
                     if row["closed"] or row.get("retired_to") or row["next_check"] != prior["next_check"] or row.get("updates") != prior.get("updates"):
                         continue
+                    wait = row.get("awaiting_input")
+                    if wait and self.receipt_key(observation) == wait["evidence"]:
+                        row.update(state="等待外部输入", evidence=observation, checked_at=now,
+                                   next_check=now + row["interval"])
+                        continue
+                    if wait and observation.get("state") != "检查失败":
+                        # New evidence needs attention even inside the reminder interval.
+                        row.pop("alert_state", None)
+                        row.pop("awaiting_input")
                     state = observation["state"]
                     running = ((state == "目标回合已接手" and observation.get("session") == "active")
                                or state == "task_started")
@@ -349,8 +390,10 @@ class Followup:
                             row.update(alert_state=state, remind_after=now + max(900, row["interval"] * 2))
                 if notice:
                     bucket = str(int(now // 60))
-                    data["alarms"].setdefault(bucket, {"ids": [], "attempts": 0})
-                    data["alarms"][bucket]["ids"] = sorted(set(data["alarms"][bucket]["ids"]) | set(notice))
+                    alarm = data["alarms"].setdefault(bucket, {"ids": [], "attempts": 0})
+                    alarm["ids"] = sorted(set(alarm["ids"]) | set(notice))
+                    if alarm.get("reviewed_ids"):
+                        alarm["reviewed_ids"] = sorted(set(alarm["reviewed_ids"]) - set(notice))
                 data["last_tick"] = now
                 self.save(data)
             if wake:
@@ -368,7 +411,8 @@ class Followup:
         if not pending:
             return
         key, alarm = pending[0]
-        active_ids = [task_id for task_id in alarm["ids"] if not data["tasks"][task_id]["closed"] and not data["tasks"][task_id].get("retired_to")]
+        active_ids = [task_id for task_id in alarm["ids"] if task_id not in alarm.get("reviewed_ids", ())
+                      and not data["tasks"][task_id]["closed"] and not data["tasks"][task_id].get("retired_to")]
         if not active_ids:
             with self.lock():
                 current = self.read()
@@ -423,6 +467,9 @@ class Followup:
             if row["closed"] or row.get("retired_to"):
                 raise ValueError("任务已结单")
             row["next_check"] = timestamp(value)
+            if row.pop("awaiting_input", None):
+                row.update(state="待查")
+                row.pop("alert_state", None)
             self.save(data)
 
     def check(self, key):
@@ -505,6 +552,7 @@ class Followup:
                 if row.get("evidence"):
                     row.setdefault("prior_evidence", []).append(row.pop("evidence"))
                 row.update(next_check=time.time(), state="补单待查")
+                row.pop("awaiting_input", None)
                 row.pop("alert_state", None)
                 self.save(data)
 
@@ -610,6 +658,10 @@ def main():
     actions.add_parser("tick")
     actions.add_parser("list")
     actions.add_parser("check").add_argument("id")
+    wait = actions.add_parser("await-input", help="已读作者回执，等待外部材料。后台继续检查，有新回执才唤醒主号")
+    wait.add_argument("id")
+    wait.add_argument("--receipt", required=True)
+    wait.add_argument("--condition", required=True)
     defer = actions.add_parser("defer")
     defer.add_argument("id")
     defer.add_argument("--next-check", required=True)
@@ -642,6 +694,8 @@ def main():
         result = tracker.defer(args.id, args.next_check)
     elif args.action == "check":
         result = tracker.check(args.id)
+    elif args.action == "await-input":
+        result = tracker.await_input(args.id, args.receipt, args.condition)
     elif args.action == "close":
         result = tracker.close(args.id, args.conclusion, args.preview, args.receipt, args.parent_task)
     elif args.action == "retire":

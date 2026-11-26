@@ -57,6 +57,34 @@ def check_outgoing(bot, recipient, body, business=None):
         raise ValueError("指定业务与收件人没有已登记的消息规则")
 
 
+def prose_findings(markdown):
+    """Review explanatory paragraphs in Markdown. Leave quotations, code and tables alone."""
+    from markdown_it import MarkdownIt
+
+    lines = markdown.splitlines(keepends=True)
+    if lines and lines[0].strip() == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+        if end is not None:
+            lines[:end + 1] = ["\n"] * (end + 1)
+    tokens = MarkdownIt("commonmark").enable("table").parse("".join(lines))
+    previous = None
+    for index, token in enumerate(tokens):
+        if token.type != "paragraph_open" or token.level != 0:
+            continue
+        inline = tokens[index + 1]
+        first, last = inline.map
+        original = inline.content.strip()
+        if previous:
+            prior_text, prior_end = previous
+            if original == prior_text and not any(line.strip() for line in lines[prior_end:first]):
+                yield ("error", first + 1, "相邻两段完全相同，保留一段。")
+        previous = original, last
+        # Only prose is reviewed. A code identifier or URL cannot trigger a wording suggestion.
+        visible = "".join(child.content if child.type == "text" else " " for child in inline.children)
+        for match in re.finditer(r"进行(?:了)?(?:核对|确认|检查|验证|更新|处理)(?:工作|操作|动作)", visible):
+            yield ("review", first + 1, f"「{match[0]}」可直接写谁做了什么；保留原条件。")
+
+
 def artifact_links(pair):
     local, online = urlsplit(pair["local"]), urlsplit(pair["online"])
     path = unquote(local.path)
@@ -128,8 +156,17 @@ def main():
     board = commands.add_parser("workbench", help="Check the rendered workbench against its private business register")
     board.add_argument("--plan", required=True, type=Path)
     board.add_argument("--html", required=True, type=Path)
+    prose = commands.add_parser("prose", help="检查 SOP/TASTE 正文；逐处标行，写法建议不阻止交付")
+    prose.add_argument("files", nargs="+", type=Path)
     args = parser.parse_args()
     try:
+        if args.command == "prose":
+            failed = False
+            for path in args.files:
+                for level, line, message in prose_findings(path.read_text("utf-8-sig")):
+                    print(f"{path}:{line} {level} {message}")
+                    failed |= level == "error"
+            return int(failed)
         if args.command == "workbench":
             check_registered_board(args.html.read_text("utf-8-sig"), json.loads(args.plan.read_text("utf-8-sig")))
         else:
@@ -140,4 +177,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

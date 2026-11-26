@@ -190,6 +190,27 @@ def test_active_rearms_but_stagnant_observations_wake_owner(tmp_path, monkeypatc
         now[0] += 61
 
 
+def test_external_wait_suppresses_only_reviewed_receipt_and_wakes_for_new_evidence(tmp_path, monkeypatch):
+    tracker = follow.Followup("desk", tmp_path)
+    tracker.register([record()])
+    observation = dict(state="执行者原单已回", request_mid="om_a", reply_mid="receipt1")
+    monkeypatch.setattr(tracker, "observe", lambda row: dict(observation))
+    now = 1700000000
+    monkeypatch.setattr(follow.time, "time", lambda: now)
+    assert tracker.tick(wake=False)["attention"] == ["sample"]
+    with pytest.raises(ValueError, match="回执"):
+        tracker.await_input("sample", "unrelated", "等待侧拍原片")
+    tracker.await_input("sample", "receipt1", "等待侧拍原片")
+    assert all(a["ids"] == a["reviewed_ids"] == ["sample"] for a in tracker.read()["alarms"].values())
+    now += 3600
+    assert tracker.tick(wake=False)["attention"] == []
+    assert not tracker.read()["tasks"]["sample"]["closed"]
+    observation["late_original_replies"] = ["later-on-earlier-request"]
+    now += 61
+    assert tracker.tick(wake=False)["attention"] == ["sample"]
+    assert "awaiting_input" not in tracker.read()["tasks"]["sample"]
+
+
 def test_matching_request_cannot_be_rebound_or_closed_by_unrelated_reply(tmp_path, monkeypatch):
     tracker = follow.Followup("sender", tmp_path)
     tracker.register([record()])
