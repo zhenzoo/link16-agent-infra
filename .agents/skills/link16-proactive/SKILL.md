@@ -12,6 +12,16 @@ description: Link16 主动工作台。按本人职责分派和追单，收执行
 - **跨机任务模板**：`feishu/tasks/proactive-loop.yaml`
 - **工具总索引**：`TOOLS.md`
 
+### 按业务排
+
+本人要求梳理新业务或排业务时，在本轮业务登记选 `"mode":"arrange_business"` 并指定登记主号 `dispatch_bot`。登记的 `previous`、`items` 每项按原单填稳定 `id`、`name`（业务）、`agent`（具体登记名）和 `expected`（可验交付）。先核当前续单作者，历史派单和回执保留原样。
+
+1. `python feishu/proactive_business_list.py refresh-members --bot <登记主号>` 从本租户已登记群回读跨机机器人。登记名取有效舰队、本机运行名册和实核的租户机器人，群内人名与外观相似的别名无法通过。
+2. `python feishu/proactive_business_list.py arrange --round-json <本轮业务登记.json>` 输出可直接粘贴的 `- 业务项｜登记智能体名称｜具体交付物`。对话原样用通过的正文；工作台使用同一清单。
+3. `python feishu/proactive_business_list.py check --round-json <本轮业务登记.json> --bullets <待贴文本.txt>` 核顺序及每一栏。失败时依报错修正原单登记或待贴文本，再运行；整单通过才使用。
+
+普通进度、事后汇报和消息沿原通道。排业务命令只有读取、验证和输出功能。
+
 ### 派单后必须登记和追踪
 
 在主派单机用 `python feishu/proactive_ownership.py list` 核现有物品及原作者。Tenant 直派和同人同单补充都用 `send_feishu_msg.py --to-agent <原执行者> --item <同一物品> --task-id <原任务> ...`；补充取得 MID 后照下方 `link` 关联。独立复核只读，发布只原样上架。换责任人先给旧作者停笔指令，用 `proactive_ownership.py stop --item <物品> --owner <旧作者> --stop-mid <原请求>` 冻结生产派单。收齐旧作者停止写入或外发的原回执、封存文件与未完要求后，执行 `proactive_ownership.py transfer --item <物品> --owner <旧作者> --next-owner <新作者> --bot <主号> --stop-mid <原请求> --receipt <停笔回执> --handoff <交接文件>`。已发的重复子单用 `proactive_followup.py --bot <主号> retire <旧单> --to <唯一责任单> --receipt <停笔回执> --handoff <交接文件>`，由新作者对接收的全部要求自验。

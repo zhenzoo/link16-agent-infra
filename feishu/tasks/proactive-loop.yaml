@@ -1,13 +1,16 @@
 # Link16 Portable Task Template · Proactive 24h Closed-Loop
 # 归属 Link16 仓库（跨机器、跨平台通用），任何电脑启用 Proactive 均参照本文件与 docs/SOP-150-proactive-agent-loop.md。
 task_id: link16-proactive-loop
-version: 6
+version: 7
 sop: docs/SOP-150-proactive-agent-loop.md
 taste: docs/TASTE-010-proactive-dispatch.md
 owner_repo: link16-agent-infra
 
 # 由绑定此模式的工作台主号在收到本人晨间新业务或晨审请求时执行。
 morning_review:
+  arrange_command: python feishu/proactive_business_list.py arrange --round-json <本轮业务登记.json>
+  check_command: python feishu/proactive_business_list.py check --round-json <本轮业务登记.json> --bullets <准备贴出的文本.txt>
+  mode: 本人要求梳理或排业务时显式选 arrange_business。对话原样使用命令通过的要点，工作台读取同一登记；退回时纠正具体行再验。普通消息及执行回报直接走原流程。
   intake: 先以要点列出每项业务、唯一登记负责人和预期交付物，同一清单原位进入工作台，供本人逐项核对。
   order: 新增批次置顶，同一事项保留原键和原作者，旧项保持相对顺序并连续编号。
   coordination: 消息联系实际对口人；本人另行指定约会时才安排日程。业务内按步骤接续，文件、媒体和获准消息随同一作者。

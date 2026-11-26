@@ -23,6 +23,10 @@ def ordered_assignments(plan):
 
 def apply_round(rows,plan):
     order,owners=ordered_assignments(plan)
+    registered={}
+    if plan.get("mode") == "arrange_business":
+        from proactive_business_list import assignments
+        registered={key:(name,expected) for key,name,agent,expected in assignments(plan)}
     known={row["id"]:dict(row) for row in rows}
     if len(known)!=len(rows) or set(known)-set(order):
         raise ValueError("发现重复或尚未登记的新业务")
@@ -37,10 +41,10 @@ def apply_round(rows,plan):
         row["legacy_task_anchor"]=key in previous_ids
         if row.get("agent")!=owners[key] or not re.fullmatch(r"[A-Za-z0-9_-]{2,32}",owners[key]):
             raise ValueError("每项业务须与一名登记作者对应")
-        row["name"]=item.get("name",row["name"])
+        row["name"]=registered[key][0] if registered else item.get("name",row["name"])
         if item.get("aliases"):
             row["aliases"]=list(dict.fromkeys([*row.get("aliases",[]),*item["aliases"]]))
-        row["expected"]=item.get("expected") or plan.get("expected",{}).get(key)
+        row["expected"]=registered[key][1] if registered else item.get("expected") or plan.get("expected",{}).get(key)
         if not isinstance(row["expected"],str) or not 2<=len(row["expected"])<=80:
             raise ValueError("业务缺少可验的预期交付物")
         receipt=plan.get("receipts",{}).get(key)
@@ -118,14 +122,21 @@ def validate_html(page,plan=None):
         raise ValueError("业务重复、缺失或新旧排序错误")
     if plan:
         order,owners=ordered_assignments(plan)
+        if plan.get("mode") == "arrange_business":
+            from proactive_business_list import assignments
+            approved=assignments(plan)
+            presented=[(s["id"],s["name"],s["agent"],s["expected"]) for s in specs]
+            if presented!=approved:
+                raise ValueError("工作台与按业务排原清单的业务、作者或交付物不符")
         if ids!=order or any(s["agent"]!=owners[s["id"]] for s in specs):
             raise ValueError("发布队列与当日登记顺序或作者不符")
         incoming={i["id"]:i for i in plan["items"]}
+        registered_expected={k:exp for k,_,_,exp in approved} if plan.get("mode")=="arrange_business" else {}
         prior={i["id"] for i in plan["previous"]}
         for spec in specs:
             key=spec["id"]
             item=incoming.get(key,{})
-            expected=item.get("expected") or plan.get("expected",{}).get(key)
+            expected=registered_expected.get(key) or item.get("expected") or plan.get("expected",{}).get(key)
             if spec["expected"]!=expected or (item.get("name") and spec["name"]!=item["name"]):
                 raise ValueError("交付目标与本轮登记不符")
             if key not in prior and key not in plan.get("receipts",{}) and spec["actual"]:
