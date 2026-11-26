@@ -144,6 +144,33 @@ def test_verify_named_control_reply_across_addresses_without_earlier_alias(tmp_p
     assert tracker.read()["tasks"]["sample"]["next_check"] is None
 
 
+def test_first_named_request_corroborates_receiver_sdk_envelope_and_both_apps(tmp_path, monkeypatch):
+    import send_feishu_msg
+
+    native, original, _, _ = native_addresses_fixture(monkeypatch)
+    tracker = follow.Followup("desk", tmp_path)
+    tracker.register([dict(record(), request_mid="orig")])
+    envelope = dict(message_id="orig", chat_id="oc_group", bot="worker", source="feishu-ws",
+                    mentioned_bot=True, ts=2, sender={"is_bot":True, "open_id":"ou_receiver_scope"})
+    monkeypatch.setattr(follow.dispatch.bridge_history.bridge_inbound, "read_records",
+                        lambda state, peer: [envelope] if peer == "worker" else [])
+    monkeypatch.setattr(send_feishu_msg, "resolve_app_id", lambda bot:"cli_" + bot)
+    envelope["mentioned_bot"] = False
+    with pytest.raises(ValueError):
+        tracker.link("sample", "orig", verify_app=True)
+    envelope["mentioned_bot"] = True
+    native["orig"]["mentions"] = [{"id":"cli_other"}]
+    with pytest.raises(ValueError):
+        tracker.link("sample", "orig", verify_app=True)
+    native["orig"]["mentions"] = [{"id":"cli_worker"}]
+    tracker.link("sample", "orig", verify_app=True)
+    monkeypatch.setattr(follow.dispatch, "progress", lambda *a, **kw: {"state":"未找到匹配派单"})
+    monkeypatch.setattr(follow, "local_addressed_receipt", lambda *args:None)
+    observed = tracker.check("sample")
+    assert observed["state"] == "目标桥已收件" and observed["last_signal_at"] == 2
+    assert not observed["reply_mid"] and not tracker.read()["tasks"]["sample"].get("updates")
+
+
 def record(key="sample"):
     return dict(id=key, peer="worker", request_mid="om_a", next_check="2020-01-01T00:00:00+00:00",
                 interval_seconds=60)

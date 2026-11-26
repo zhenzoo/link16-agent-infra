@@ -95,6 +95,28 @@ def verified_mention_alias(bot, original, extra):
                 address=second["at"], original_address=first["at"])
 
 
+def verified_first_delivery(bot, peer, outgoing):
+    """Bind a named first request to its local recipient's copy of the same SDK message."""
+    import send_feishu_msg
+
+    mid, route = outgoing.get("message_id"), outgoing.get("route") or {}
+    chat, address = route.get("dest"), route.get("at") or ""
+    if (not mid or not chat or outgoing.get("target") != chat or not address.startswith("ou_") or
+            route.get("kind") != "a2a" or route.get("reply_to") or route.get("peer") != peer):
+        return None
+    native = native_app_routes(bot, [mid], chat).get(mid)
+    if not native or native[1:] != (send_feishu_msg.resolve_app_id(bot), send_feishu_msg.resolve_app_id(peer)):
+        return None
+    for item in reversed(dispatch.bridge_history.bridge_inbound.read_records(dispatch.STATE, peer)):
+        author = item.get("sender") or {}
+        if (item.get("message_id") == mid and item.get("chat_id") == chat and item.get("bot") == peer and
+                item.get("source") == "feishu-ws" and item.get("mentioned_bot") is True and
+                author.get("is_bot") is True and author.get("open_id") and item.get("ts")):
+            return dict(chat=chat, tenant=native[0], sender_app=native[1], recipient_app=native[2],
+                        address=address, original_address=address, received_at=item["ts"])
+    return None
+
+
 def verified_local_turn(bot, worker, mid, chat=None):
     name = worker["name"]
     pin = dispatch.read_object(dispatch.STATE / f"bridge-turn-route-{name}.json")
@@ -229,6 +251,9 @@ class Followup:
                     proof = local_addressed_receipt(self.bot, mid)
                     if proof:
                         report.update(proof)
+                    elif alias.get("received_at") and not report.get("reply_mid"):
+                        report.update(state="目标桥已收件", reason="原请求的实际收发应用与目标 SDK 原件一致",
+                                      last_signal_at=alias["received_at"])
                     elif alias and not report.get("reply_mid"):
                         report.update(state="同群同一收件应用已投递，待回", reason="已从两条原生请求核实收件应用",
                                       last_signal_at=newest_out.get("ts") or report.get("last_signal_at"))
@@ -424,6 +449,8 @@ class Followup:
         alias = None
         local_proof = None
         known_aliases = before.get("mention_aliases") or {}
+        if verify_app and mid == before["request_mid"] and mid not in known_aliases:
+            alias = verified_first_delivery(self.bot, before["peer"], original)
         if (not before["closed"] and not before.get("retired_to") and mid != before["request_mid"]
                 and mid not in known_aliases):
             first, second = original.get("route") or {}, extra.get("route") or {}
@@ -447,7 +474,7 @@ class Followup:
                 raise ValueError("需要未结单的桥派单")
             if before["request_mid"] != row["request_mid"]:
                 raise ValueError("核验期间原请求变化，请重新关联")
-            if mid in (row.get("updates") or []):
+            if (mid and mid == row["request_mid"]) or mid in (row.get("updates") or []):
                 if alias and mid not in row.get("mention_aliases", {}):
                     row.setdefault("mention_aliases", {})[mid] = alias
                     self.save(data)
@@ -589,7 +616,7 @@ def main():
     link = actions.add_parser("link")
     link.add_argument("id")
     link.add_argument("--request-mid", required=True)
-    link.add_argument("--verify-app", action="store_true", help="回读原单和补单的实际收发应用，供跨地址的直接回执核验")
+    link.add_argument("--verify-app", action="store_true", help="核实同群实际收发应用，将原单收件或补单回执归给登记作者")
     close = actions.add_parser("close")
     close.add_argument("id")
     close.add_argument("--parent-task", help="仅限明确要求作者回复历史原单的查据请求")
