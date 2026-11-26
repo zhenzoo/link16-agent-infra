@@ -152,12 +152,18 @@ def test_eight_part_round_checks_actual_inbound_dispatch_and_provider_receipts(t
         return done.value.code
     assert run(0, "worker-1", parts[0]) != 0
     assert run(0, "worker-0", parts[1]) != 0
+    assert run(0, "worker-0", parts[0] + parts[1]) != 0
     assert not calls
     for i, part in enumerate(parts):
         assert run(i, f"worker-{i}", part) == 0
     assert run(0, "worker-0", parts[0], "--round-json", str(path)) != 0
     assert len(set(calls)) == 8
     business.main(["audit-sends", "--round-json", str(path)])
+    rows = sender.bridge_outbound.read_records(tmp_path, bot)
+    rows[0]["message_id"] = "webhook-123"
+    monkeypatch.setattr(sender.bridge_outbound, "read_records", lambda *args: rows)
+    with pytest.raises(SystemExit):
+        business.main(["audit-sends", "--round-json", str(path)])
     monkeypatch.setattr(feishu_bridge, "load_owner_record", lambda bot: {"open_id": "ou_other"})
     with pytest.raises(ValueError, match="本人原文"):
         business.dispatch_parts(p, bot)

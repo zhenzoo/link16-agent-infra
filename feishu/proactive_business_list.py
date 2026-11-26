@@ -276,11 +276,17 @@ def dispatch_parts(plan, bot):
 def check_recipient(jobs, item, peer, text):
     if item not in jobs or normalize(jobs[item][0]) != normalize(peer):
         raise ValueError("收件人与该段原文的登记执行者不符")
-    remaining = text.replace("\r\n", "\n")
+    body = text.replace("\r\n", "\n")
+    remaining = body
     for part in jobs[item][1]:
         _, found, remaining = remaining.partition(part)
         if not found:
             raise ValueError("派单正文未按序保留分给此执行者的原文")
+    shared = {part for owner, parts in jobs.values() if normalize(owner) == normalize(peer) for part in parts}
+    for _, parts in jobs.values():
+        for part in parts:
+            if part in body and not any(part in allowed for allowed in shared):
+                raise ValueError("派单包含单独分给其他执行者的原文")
 
 
 def review_outgoing(path, bot, item, peer, text):
@@ -360,6 +366,8 @@ def main(argv=None):
                     route = row.get("route") or {}
                     if (route.get("source_mid") == plan["source_mid"] and route.get("item") == item
                             and normalize(route.get("peer") or "") == normalize(peer) and row.get("message_id")):
+                        if route.get("kind") != "a2a" or not re.fullmatch(r"om_[A-Za-z0-9_-]+", row["message_id"]):
+                            raise ValueError(f"{item} 已有发送记录，仍缺飞书原生消息编号；请核原投递")
                         check_recipient(jobs, item, peer, row["text"])
                         mids.add(row["message_id"])
                 if len(mids) != 1:
