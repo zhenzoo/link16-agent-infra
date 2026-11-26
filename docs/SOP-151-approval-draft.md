@@ -6,6 +6,7 @@ status: active
 url: ""
 purpose: 让本人从工作台一次点击到指定草稿或已有审批实例，核到完整内容和下一步操作，再由本人决定。
 owns:
+  - 公司制度、审批原表、填报模板的阅读路线与逐格取值方法
   - 审批草稿专用的字段来源、条件必填、附件及同一草稿的验收
   - 私有双次读回证据和只读检查工具的使用方法
   - 逐业务核对工作台入口、原生落点、本人职责与可用操作
@@ -13,6 +14,7 @@ does_not_own:
   - 工作台业务排序与全业务结果检查
   - 审批定义维护、财务裁决与本人最终提交
 read_when:
+  - 办理报销、出差、采购或用印，需判断哪些格必填、从哪里取值
   - 接手已保存的原生审批草稿
   - 报销等表单会随选项显示新字段，或明细需要关联其他审批
 last_reviewed: 2026-11-26
@@ -30,6 +32,23 @@ related:
 2. 先读当前定义，再看本人当前阶段实际显示的表单。历史同类已完成单可用于核对填法。使用在途原单作参考时，记清它的状态。只取这次已授权、与本人和本次业务相符的资料。遇到两份来源不一致、号码掩码、选项失效或款项归属不明时，明确哪一项需要本人决定。
 3. 报销草稿逐一核报销类型、银行卡账号、开户行及开户支行、报销付款主体、劳动合同签约公司。银行资料只在本人授权的原单和当前草稿间比对、填写。比较结果只保留「匹配／不匹配／无法核实」，不要把号码、开户资料、截图、票据明文或可还原的摘要写入命令日志、群消息、共享样例或 Git。
 4. 申请人、部门取当前表单与本人资料。金额、实际费用日期、费用归属、报销项目、申请关联和附件取本次原件。差旅明细按下节从公司现行原表填写。历史本人清单用于比对字段和已核来源。
+
+### 制度与表单阅读路线（Roadmap）
+
+先选业务，再读对应条款和当前表单。下表中的审批入口来自本人可发起目录，用于查表样。办理已有单据时从原草稿或原实例继续。新业务先在[公司制度专区「常用管理办法指路」](https://n8r2cr07gk.feishu.cn/wiki/RTezwUIZGiQv0EkndxRcPeEinag)按职能找现行制度，再用下方工具按正式名称查表。
+
+| 办什么 | 先读哪份原件 | 哪些要填，依据什么填 |
+| --- | --- | --- |
+| 费用报销、借款冲账 | [财务报销流程与模板](https://n8r2cr07gk.feishu.cn/wiki/Inn0wu3CbiFJOgkcnjcc1Do6n7d)、[付款管理办法，第五、六章](https://n8r2cr07gk.feishu.cn/wiki/Aq4UwUUcdiAVNWkG3jTcU0xwnMd)、[费用报销申请](https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path=pc%2Fpages%2Fcreate-form%2Findex%3Fid%3D7572909218064695297%26scene%3Ddefinition-share&relaunch=true) | 先确认谁垫付、哪个主体付款，按实际选择报销或冲账。金额、日期、用途和原单关联逐笔取自凭证。选报销时核付款日期，选冲账时从原借款单取金额并复核退补额。研发项目归属和费用类别另查[研发费用管理制度，第 4、5 章](https://n8r2cr07gk.feishu.cn/wiki/CPwwwQtp3ix7lHkwC2ZcE1kynLe)。 |
+| 出差申请 | [境内外差旅管理办法，§6.1.3](https://n8r2cr07gk.feishu.cn/wiki/NKiSwmovPic91Fk4HxwcERyDnjh)、[出差申请](https://n8r2cr07gk.feishu.cn/people/workforce-employee/trip/apply) | 制度明确要求「出差工作计划」和「差旅费用计划」。前者写本次目的、行程和工作安排，后者按行程估往返交通与住宿，成本中心和发票抬头按劳动关系主体确认。入口是飞书人事应用，审批定义返回空字段数组，其余必填项须读人事原表的当前提示。 |
+| 住宿、交通与差旅报销 | [差旅标准签批件，§6.2–6.5](https://n8r2cr07gk.feishu.cn/wiki/NKiSwmovPic91Fk4HxwcERyDnjh)、[市内因公外出交通办法](https://n8r2cr07gk.feishu.cn/wiki/Y3NIwFJnpig5YtkdV5HcXMtNnnc)、[差旅费用明细表所在工作簿](https://n8r2cr07gk.feishu.cn/file/BMJxbEssXoFLnGxuV5jcTQEunY2) | 住宿按城市、房型、晚数对 §6.2.3.2，分别核票面额和适用上限。交通按行程区分市内外出、机场接送和城际出行。凭证、超标说明和垫付方查 §6.3、§6.5.2，工作表逐列填法见下节。 |
+| 竞品采购 | [签章采购管理办法，第二、三、五节](https://n8r2cr07gk.feishu.cn/wiki/FXjBwcqddi1spNknddscZCoBnye)、[竞品采购申请](https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path=pc%2Fpages%2Fcreate-form%2Findex%3Fid%3D7572909094596902913%26scene%3Ddefinition-share&relaunch=true) | 从业务需求取用途、所属项目、交期、拆解要求及是否需要协助。从选定商品或报价取名称、数量、单价和采购链接，复核计算总价。原表「用途」无红星，采购办法第三节仍要求说明用途。 |
+| 办公用品采购 | [签章采购管理办法，第二、三节](https://n8r2cr07gk.feishu.cn/wiki/FXjBwcqddi1spNknddscZCoBnye)、[采购及报销培训，第 4–5 页](https://n8r2cr07gk.feishu.cn/wiki/KUgVwhR5Cie2P4kMEilcCGFsnJg)、[办公用品采购申请](https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path=pc%2Fpages%2Fcreate-form%2Findex%3Fid%3D7100844438944808961%26scene%3Ddefinition-share&relaunch=true) | 用途、分类和交付地点取本次需求，选「需要 IT/行政协助采购」后填期望交付日期。明细逐件取名称、规格、数量、单价、采购链接，公式总价与报价核对。项目名称为选填，按实际归属和适用制度处理。培训旧截图中的钉钉入口已由当前飞书原表承接。 |
+| 用印、采购章、印章外借 | [新人必读手册「智书合同 vs 用印申请 使用规范」](https://n8r2cr07gk.feishu.cn/wiki/ACqgwUTSdiXBC9kv0twc6YcpnOe#Bxlnd1dAwoQHfHxCd9Gc80nInBe)、[公司合同模板目录](https://n8r2cr07gk.feishu.cn/drive/folder/ZShTfBtu9lekvqdGWtHcYQGinpb?from=from_copylink) | 手册将合同、协议（含框架及补充协议）归入智书合同。无实质权利义务约定的授权书、表单等走[用印申请](https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path=pc%2Fpages%2Fcreate-form%2Findex%3Fid%3D7574745842398055620%26scene%3Ddefinition-share&relaunch=true)。采购章请用和实物外借可分别查[采购章请用申请](https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path=pc%2Fpages%2Fcreate-form%2Findex%3Fid%3D7637462241884769253%26scene%3Ddefinition-share&relaunch=true)、[印章外借申请](https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path=pc%2Fpages%2Fcreate-form%2Findex%3Fid%3D7643825722863143878%26scene%3Ddefinition-share&relaunch=true)的专用原表。 |
+
+**用印字段的取值。** 一般用印从定稿 PDF 取文件名、甲乙方、份数、文件类别、业务类别、简述与文件起止日期，从实际经办关系取部门和经办人，按签署主体及纸质或电子版本选章。原表要求上传 PDF。选「有」涉及金额才按文件填款项类型及合同总额，触发寄送且选择「是」才按实际收件信息填地址。采购章原表要求申请部门、申请人、原因、附件和文件日期。印章外借原表要求申请人、公章主体、出借日期和预计归还时间，陪同人是选填。
+
+**下载并更新模板。** 经办人每次从流程页的「报销相关规范模板」取公司现行 Excel，在本次私有工作目录复制一份填写。工作簿按费用分别设有低价值耗材、设备资产、差旅、交通、交通车辆补贴、福利及招待七张表。选对工作表，核表头、示例、表尾说明与公式，按本次凭证更新工作副本，再按 §3 上传到对应原草稿。目录更换模板时，以现行目录为准，并更新本节链接。
 
 ### 1.1 按公司制度填差旅费用明细表
 
@@ -50,7 +69,20 @@ related:
 | 每笔费用与关联 | 使用本次凭证核用途、分类、实际日期、币种与金额。逐行展开关联选择器或打开原单详情，核实际选中原单的稳定 ID。界面只显示标题时，在本人记录中用定义、发起人、日期、状态及发起时间唯一定位回该 ID；有多个候选就保持待核。 |
 | 附件与总额 | 预先列需要的原件，分清票面金额与行程证明，同一费用只计一次。核订单或路段、日期、金额与付款归属。按币种逐项核加总，上传后核文件身份、件数和完成状态；同名文件用可区分的副本名或文件指纹。 |
 
-对照**当前定义判定为必填的字段与原界面红星的并集**。可滚动但未进入屏幕视口的字段仍须检查。每行条件可以不同；只读公式查计算结果，明细表头的星号落到每个适用行。若有未识别的比较规则、未映射的星号、仍在加载的选项或无法读取的必填值，保留具体缺项。
+**哪些要填。** 核当前分支生效的表单必填项、原界面红星和适用制度明文要求的内容。每张明细表展开到子列和每一行，滚动到底。制度要求提交凭证时，即使附件控件可选，也要附相应原件。一个字段隐藏后，从该分支移除；若制度仍要求提供这项信息，按条款指定的位置或附件承载。只读公式和系统回填字段核结果。
+
+**每格怎么填。** 在本次私有办理记录逐格记「原表字段／明细行｜必填条件或选填｜制度章节、模板列或字段说明｜本次取值原件｜填入、系统带出、留白或缺件」。同一行用发票、行程单、申请原单交叉核对金额和归属。必填缺原件就写具体缺什么，保留草稿。选填且制度未要求的格子留空，尤其是备注。条款要求说明超标、例外或差异时，才在规定位置写事实和凭证。模板明确要求填「有／无」的标记列按说明填，备注勿代填「无」。
+
+**经办人查原表和文件的工具。** 在 Link16 仓库根目录使用登记应用。先查表名，再按返回的 `approval_code` 读取当前定义。下例只读，保留每格的 `required`、`visible`、`display_condition`、选项及 `children`。将条件里的控件 ID、选项值与同一份定义对应，选项变化后重新判定。对外部表单使用查询返回的 `create_link` 查原应用。私有办理记录随表单版本更新。
+
+```powershell
+'{"keyword":"办公用品采购申请","locale":"zh-CN"}' | lark-cli --profile <登记应用> approval approvals search --as user --data -
+lark-cli --profile <登记应用> approval approvals get --approval-code <上一步返回的编码> --as user --jq '.data.form | fromjson'
+python feishu/docio_cli.py --bot <登记应用> read "<公司制度链接>" --into "<私有目录>"
+lark-cli --profile <登记应用> drive +download --as user --file-token <流程页当前模板的文件令牌> --output "<私有目录>/公司明细表.xlsx"
+```
+
+制度未分享给应用时，按飞书技能在原 `docio read` 命令加 `--as-user <登记应用>`。上传型 PDF 在 docio 识别为 `file` 时，从返回的原文件令牌使用官方 `drive +preview --type source_file` 读取可访问的签章正文。财务 Excel 须能作为工作簿重开。本节工具用于查证，草稿保存后的双次回读按 §3–4 执行。
 
 ## 3. 保存、退出、重开
 
