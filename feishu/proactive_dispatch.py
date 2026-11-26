@@ -478,7 +478,7 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
                     evidence=saved.get("delivery") or saved.get("attempt"))
 
 
-def active_overview():
+def active_overview(peers=None):
     """Return this machine's active workers from the same evidence used before dispatch."""
     data = registry.load_registry()
     machine = next((name for name, info in data["machines"].items()
@@ -486,6 +486,9 @@ def active_overview():
     if not machine:
         raise ValueError("本机未绑定已登记机器")
     names = [r["name"] for r in data["agents"] if r.get("verified") and r.get("machine") == machine]
+    if peers is not None:
+        selected = {name.casefold() for name in peers}
+        names = [name for name in names if name.casefold() in selected]
 
     def sample(name):
         try:

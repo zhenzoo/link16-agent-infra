@@ -74,6 +74,24 @@ FAKE_TENANTS = [
 
 
 class TenantRoutingTests(unittest.TestCase):
+    def test_groupless_bot_tenant_is_bound_to_its_own_platform_sender(self):
+        mid = "om_native"
+        sender = {"id": "cli_app", "sender_type": "app", "tenant_key": "personal"}
+        row = {"message_id": mid, "sender": sender}
+        spec = {"app_id_env": "BOT_ID", "app_secret_env": "BOT_SECRET"}
+        with mock.patch("bridge_outbound.read_records", return_value=[{"message_id": mid, "bot": "new"}]), \
+             mock.patch.object(tenant_probe, "_bot_spec", return_value=spec), \
+             mock.patch.object(tenant_probe, "_query_tenant_api", return_value=(None, "no_scope")), \
+             mock.patch.object(tenant_probe, "_query_via_chats", return_value=(None, None, [])), \
+             mock.patch.object(tenant_probe.audit, "_env_val", return_value="cli_app"), \
+             mock.patch.object(tenant_probe.audit, "_token", return_value=("token", None)), \
+             mock.patch.object(tenant_probe.audit, "_req", return_value={"code": 0, "data": {"items": [row]}}):
+            self.assertEqual(tenant_probe.resolve_tenant("new")["tenant_key"], "personal")
+            for subject, field, wrong in [(sender, "id", "cli_other"), (sender, "sender_type", "user"),
+                                          (row, "message_id", "om_other"), (row, "deleted", True)]:
+                with mock.patch.dict(subject, {field: wrong}):
+                    self.assertIsNone(tenant_probe.resolve_tenant("new")["tenant_key"])
+
     def test_chat_refresh_sees_join_after_empty_cached_result(self):
         tenant_probe._CHATS_CACHE.clear()
         spec = {"app_id_env": "NEW_ID", "app_secret_env": "SECRET"}

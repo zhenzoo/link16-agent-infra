@@ -64,6 +64,24 @@ def test_preview_and_repeated_send(sandbox, tmp_path):
     assert sandbox["posts"] == sandbox["gets"] == 1
 
 
+def test_legacy_dm_requires_platform_user_identity_and_exact_chat(sandbox, monkeypatch):
+    old = incoming()
+    old["sender"]["type"] = None
+    monkeypatch.setattr(pr.bridge_inbound, "read_records", lambda *_, **__: [old])
+    sender = {"sender_type": "user", "id_type": "open_id", "id": "ou_owner"}
+    row = {"message_id": "om_in", "chat_id": "oc_owner", "sender": sender}
+    monkeypatch.setattr(pr, "fetch", lambda *_: {"items": [row]})
+    assert pr.owner_dm("lead") == ("ou_owner", "oc_owner")
+    for key, wrong in [("id", "ou_other"), ("id_type", "user_id"), ("sender_type", "app")]:
+        with monkeypatch.context() as ctx:
+            ctx.setitem(sender, key, wrong)
+            with pytest.raises(ValueError):
+                pr.owner_dm("lead")
+    row["chat_id"] = "oc_other"
+    with pytest.raises(ValueError):
+        pr.owner_dm("lead")
+
+
 def test_failed_get_does_not_trigger_another_post(sandbox, tmp_path):
     sandbox["offline"] = True
     with pytest.raises(TimeoutError):

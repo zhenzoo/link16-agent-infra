@@ -90,4 +90,5 @@ class DurableFeishuChannel(FeishuChannel):
             raise RuntimeError("saved message could not be normalized; pending record retained")
         # Arrival time remains the original receipt time across queue/restart.
         msg.link16_received = received
+        msg.link16_sender_type = payload["sender"].get("sender_type")
         await handler(msg)

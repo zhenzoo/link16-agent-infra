@@ -5,10 +5,24 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "feishu"))
 import feishu_web_workbench as wb  # noqa: E402
-import send_as_user_web as web_send  # noqa: E402
+from types import SimpleNamespace
+
+web_send = SimpleNamespace(discover_chrome_direct_browser=None, browser_act_bin=lambda: 'browser-act', run_cmd=None)
 
 
 class TestFeishuWebWorkbench(unittest.TestCase):
+    def test_private_browser_and_tenant_are_optional_and_reported_separately(self):
+        with mock.patch.object(wb, "web_send", None):
+            missing_host = wb.read_web_domain(domain="attendance", host="")
+            missing_adapter = wb.read_web_domain(domain="attendance", host="demo.feishu.cn", browser_id="direct", apply=True)
+        self.assertIn("租户域名", missing_host["error"])
+        self.assertFalse(missing_adapter["ok"])
+        self.assertEqual(missing_adapter["error"], wb.BROWSER_UNAVAILABLE)
+
+    def setUp(self):
+        patcher = mock.patch.object(wb, 'web_send', web_send)
+        patcher.start()
+        self.addCleanup(patcher.stop)
     def test_resolve_domain_urls_formats_tenant_host(self):
         urls = wb.resolve_domain_urls("okr", "https://demo.feishu.cn/")
         self.assertEqual(urls[0], "https://demo.feishu.cn/okr/")
@@ -16,9 +30,9 @@ class TestFeishuWebWorkbench(unittest.TestCase):
         self.assertIn("mail", wb.DOMAIN_ROUTES)
 
     def test_detect_login_wall(self):
-        self.assertTrue(wb.detect_login_wall("请扫码登录飞书", "https://n8r2cr07gk.feishu.cn/mail/"))
+        self.assertTrue(wb.detect_login_wall("请扫码登录飞书", "https://demo.feishu.cn/mail/"))
         self.assertTrue(wb.detect_login_wall("welcome", "https://accounts.feishu.cn/login"))
-        self.assertFalse(wb.detect_login_wall("收件箱 Inbox 写邮件", "https://n8r2cr07gk.feishu.cn/mail/"))
+        self.assertFalse(wb.detect_login_wall("收件箱 Inbox 写邮件", "https://demo.feishu.cn/mail/"))
 
     def test_live_leave_page_requires_records_and_balance_and_does_not_verify_punches(self):
         url = wb.resolve_domain_urls("attendance", "demo.feishu.cn")[0]
@@ -48,8 +62,8 @@ class TestFeishuWebWorkbench(unittest.TestCase):
     def test_attendance_and_okr_dry_run_never_launch_browser(self):
         with mock.patch.object(web_send, "discover_chrome_direct_browser", return_value={"ok": True, "browser_id": "direct_1"}):
             with mock.patch.object(web_send, "run_cmd") as m_run:
-                r1 = wb.read_web_domain(domain="attendance", apply=False)
-                r2 = wb.read_web_domain(domain="okr", apply=False)
+                r1 = wb.read_web_domain(domain="attendance", host="demo.feishu.cn", apply=False)
+                r2 = wb.read_web_domain(domain="okr", host="demo.feishu.cn", apply=False)
         self.assertTrue(r1["ok"])
         self.assertEqual(r1["mode"], "DRY_RUN")
         self.assertTrue(r2["ok"])
@@ -61,7 +75,7 @@ class TestFeishuWebWorkbench(unittest.TestCase):
         self.assertFalse(err["ok"])
         with mock.patch.object(web_send, "discover_chrome_direct_browser", return_value={"ok": True, "browser_id": "direct_1"}):
             with mock.patch.object(web_send, "run_cmd") as m_run:
-                res = wb.send_mail_via_web(to="a@obsbot.com", subject="测试", body="正文", apply=False)
+                res = wb.send_mail_via_web(to="a@example.com", subject="测试", body="正文", host="demo.feishu.cn", apply=False)
         self.assertTrue(res["ok"])
         self.assertEqual(res["mode"], "DRY_RUN")
         self.assertFalse(res["sent"])

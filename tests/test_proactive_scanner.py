@@ -22,6 +22,40 @@ class ProactiveScannerTests(unittest.TestCase):
         self.assertLess(page.index("&lt;5 mm"), page.index("周五"))
         self.assertNotIn("suppressed-draft", page)
 
+    def test_project_timeline_groups_verified_results_and_keeps_legacy_items(self):
+        from bs4 import BeautifulSoup
+        entry = {"at": "2026-11-24 12:00", "project": "甲", "background": "复核原稿",
+                 "topic": "尺寸", "person": "执行者", "result": "<5 mm", "evidence_url": "copy.txt"}
+        records = {"old": entry, "new": dict(entry, at="2026-11-26 10:00", topic="新稿"),
+                   "other": dict(entry, project="乙"), "pending": dict(entry, topic="未验", evidence_url=""),
+                   "unsafe": dict(entry, evidence_url="javascript:alert(1)"),
+                   "legacy": {"at": entry["at"], "person": "同事", "topic": "约时间", "result": "周五"}}
+        soup = BeautifulSoup(ps.render_html({"bot": "desk"}, {"sections": ["files"], "closed_items": records}),
+                             "html.parser")
+        self.assertIsNotNone(soup.select_one('nav a[href="#project-timeline"]'))
+        groups = soup.select("#project-timeline details")
+        self.assertEqual([g.summary.get_text(strip=True) for g in groups], ["甲2 项", "乙1 项"])
+        self.assertEqual([r.select("dd")[1].text for r in groups[0].select("li")], ["新稿", "尺寸"])
+        self.assertEqual(groups[0].select_one("li a")["href"], "copy.txt")
+        self.assertEqual(groups[0].select_one("li").select("dd")[-1].text, "<5 mm")
+        self.assertIn("周五", soup.select_one("#closed").get_text())
+        self.assertNotIn("未验", soup.select_one("#project-timeline").get_text())
+
+    def test_content_files_preview_the_original_media_demo_and_opted_in_text(self):
+        from bs4 import BeautifulSoup
+        pack = {"sections": ["files"], "files": [
+            {"url": "assets/final.mp4", "image": "assets/cover.png"},
+            {"url": "demo.html", "preview_kind": "demo"},
+            {"url": "article.txt", "preview_kind": "text", "preview": "稿件 <1>"}]}
+        soup = BeautifulSoup(ps.render_html({"bot": "desk"}, pack), "html.parser")
+        self.assertEqual([s["id"] for s in soup.select("main > section")], ["files"])
+        self.assertEqual(soup.video["src"], soup.select_one("article a")["href"])
+        self.assertEqual(soup.video["poster"], "assets/cover.png")
+        self.assertTrue(soup.video.has_attr("controls"))
+        self.assertEqual(soup.iframe["sandbox"], ["allow-scripts"])
+        self.assertEqual(soup.iframe["data-review-demo"], "demo.html")
+        self.assertEqual(soup.select_one('a[href="article.txt"]').find_parent("article").p.get_text(), "稿件 <1>")
+
     def test_cross_project_lanes_owners_and_closed_keys(self):
         file_record = {"title": "Spec", "assignment": {"agent": "editor", "machine": "node"}}
         draft = {"id": "q", "target_name": "Editor", "message": "请核对", "source_id": "same"}

@@ -180,7 +180,8 @@ python feishu/preflight.py
 # 5) 建一只飞书 bot（扫码 OAuth·脚本会把凭据写进 .env、自动登记名册）
 #    名字用「机器代号-项目简称」（机器代号由 python feishu/machine_identity.py 给，如 tb26；项目简称=它要干活的仓库名）
 #    --cwd 指向真实项目目录，别给它一个空文件夹
-python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <所选profile> --cwd <项目目录> --tenant-kind <enterprise|personal> --capability core --background
+#    默认加入所选组织的登记共享群。普通终端可用 --notify-bot 指定已在群的发起者；只需私聊时加 --capability core
+python feishu/register_feishu_app.py --name <显示名> --bot <key> --profile <所选profile> --cwd <项目目录> --tenant-kind <enterprise|personal> --background
 python feishu/registration_monitor.py links --job <返回的job> --watch
 
 # 6) 权限发布后 Monitor 自动核账号启动、补起桥并确认连接

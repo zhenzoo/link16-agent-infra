@@ -167,15 +167,20 @@ class DeviceGrantRecoveryTests(unittest.TestCase):
                 register._tenant_kind_from_group("tb26-looking-name-only", registry)
             )
 
-    def test_group_a2a_registration_requires_explicit_group(self):
-        with self.assertRaisesRegex(ValueError, "必须显式给 --group"):
-            register._validate_group_choice(["core", "group-a2a"], None)
-        register._validate_group_choice(
-            ["core", "group-a2a"], "tb24-25交流水吧"
-        )
+    def test_default_group_requires_one_registered_tenant_and_keeps_exact_id(self):
+        personal = {"kind": "personal", "tenant_key": "tenant", "group_chat_id": "oc_water"}
+        company = {"kind": "enterprise", "tenant_key": "company", "group_chat_id": "oc_work"}
+        caps = ["core", "group-a2a"]
+        with mock.patch("tenant_probe.load_tenants", return_value=[personal, company]):
+            self.assertEqual(register._registration_group(caps, None, "personal"), "oc_water")
+            self.assertEqual(register._registration_group(caps, None, "enterprise"), "oc_work")
+        with mock.patch("tenant_probe.load_tenants", return_value=[personal, personal.copy()]):
+            with self.assertRaisesRegex(ValueError, "显式给 --group"):
+                register._registration_group(caps, None, "personal")
+            self.assertEqual(register._registration_group(caps, "oc_selected", "personal"), "oc_selected")
 
     def test_core_only_registration_does_not_require_group(self):
-        register._validate_group_choice(["core"], None)
+        self.assertIsNone(register._registration_group(["core"], None, "personal"))
 
 
 class CredentialSafetyTests(unittest.TestCase):

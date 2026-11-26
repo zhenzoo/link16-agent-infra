@@ -157,6 +157,7 @@ a.context-label { color: var(--action); }
 .source-actions { margin-top: 1.4rem; }
 .source-actions > h3 { margin-bottom: .2rem; }
 .empty { padding: .25rem 0 .65rem; }
+.file-video { display: block; width: min(100%, 54rem); max-height: 65vh; margin-block: .8rem; background: #151719; }
 
 /* Native spreadsheet snapshot, including row numbers, column letters and added cells. */
 .sec-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: .3rem 1rem; margin-block: .55rem; }
@@ -256,6 +257,14 @@ a.context-label { color: var(--action); }
   .control-row > *, .form-preview :is(dt,dd) { padding: .38rem .48rem; }
   .ap-row { flex-wrap: wrap; }
 }
+.timeline-project { border-top: 1px solid var(--line); }
+.timeline-project summary { padding: .8rem 0; font-weight: 650; cursor: pointer; }
+.timeline-project small, .timeline-project time, .timeline-project dt { color: var(--muted); }
+.timeline-project ol { list-style: none; margin: 0 0 1rem .4rem; padding: 0 0 0 1rem; border-left: 2px solid var(--edge); }
+.timeline-project li + li { margin-top: 1.4rem; }
+.timeline-project dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .25rem .8rem; margin: .45rem 0; }
+.timeline-project dd { margin: 0; overflow-wrap: anywhere; }
+#closed { margin-block: 2rem; scroll-margin-block-start: 1rem; }
 #closed { margin-block: 2rem; scroll-margin-block-start: 1rem; }
 #closed > details > summary { font-size: 1.1rem; font-weight: 650; cursor: pointer; padding: .6rem 0; }
 #closed table { width: 100%; border-collapse: collapse; table-layout: fixed; }

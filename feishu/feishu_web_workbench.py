@@ -3,8 +3,7 @@
 """Feishu Web Workbench CLI for Level-4 OpenAPI domains (Attendance, Mail, OKR).
 
 Why this tool exists:
-  In OBSBOT's enterprise Feishu tenant, three domains have all core OpenAPI
-  scopes classified as Level 4 (requiring IT admin approval):
+  An organization may restrict the OpenAPI scopes for these domains:
     1. ``attendance`` — 本人假期余额与休假记录；打卡明细单独报告覆盖状态
     2. ``mail``       — 飞书邮箱读列表/正文/搜索与发邮件 (``mail:user_mailbox.message:*``)
     3. ``okr``        — 飞书 OKR 周期/目标/KR 进展查看 (``okr:*``)
@@ -36,9 +35,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import send_as_user_web as web_send  # noqa: E402
+try:
+    import send_as_user_web as web_send  # optional local browser integration
+except ModuleNotFoundError as exc:
+    if exc.name != "send_as_user_web":
+        raise
+    web_send = None
 
-DEFAULT_FEISHU_HOST = os.environ.get("LINK16_FEISHU_WEB_HOST", "n8r2cr07gk.feishu.cn")
+DEFAULT_FEISHU_HOST = os.environ.get("LINK16_FEISHU_WEB_HOST", "")
+BROWSER_UNAVAILABLE = "本机未配置飞书网页适配器 send_as_user_web"
 
 DOMAIN_ROUTES: dict[str, dict[str, Any]] = {
     "attendance": {
@@ -75,7 +80,11 @@ DOMAIN_ROUTES: dict[str, dict[str, Any]] = {
 
 def resolve_domain_urls(domain: str, host: str = DEFAULT_FEISHU_HOST) -> list[str]:
     spec = DOMAIN_ROUTES[domain]
-    clean_host = host.strip().replace("https://", "").replace("http://", "").strip("/")
+    parsed = urlsplit(host if "://" in host else "https://" + host)
+    clean_host = parsed.hostname or ""
+    if (parsed.scheme != "https" or parsed.netloc != clean_host or parsed.path.strip("/") or parsed.query or parsed.fragment or
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:feishu\.cn|larksuite\.com)", clean_host)):
+        raise ValueError("请用 --host 或 LINK16_FEISHU_WEB_HOST 指定本组织的飞书租户域名")
     return [tpl.format(host=clean_host) for tpl in spec["urls"]]
 
 
@@ -193,7 +202,12 @@ def read_web_domain(
     if domain not in DOMAIN_ROUTES:
         return {"ok": False, "error": f"unsupported domain: {domain}"}
     spec = DOMAIN_ROUTES[domain]
-    urls = resolve_domain_urls(domain, host)
+    try:
+        urls = resolve_domain_urls(domain, host)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    if web_send is None:
+        return {"ok": False, "error": BROWSER_UNAVAILABLE}
 
     resolved_browser = browser_id
     if not resolved_browser:
@@ -292,6 +306,12 @@ def send_mail_via_web(
     """Dry-run preview or confirmed send via Feishu Web Mail (requires ``--send``)."""
     if not to.strip() or not subject.strip() or not body.strip():
         return {"ok": False, "error": "mail send requires non-empty --to, --subject, and --body"}
+    try:
+        mail_url = resolve_domain_urls("mail", host)[0]
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    if web_send is None:
+        return {"ok": False, "error": BROWSER_UNAVAILABLE}
 
     resolved_browser = browser_id
     if not resolved_browser:
@@ -300,7 +320,6 @@ def send_mail_via_web(
             return {"ok": False, "mode": "SEND" if apply else "DRY_RUN", "error": info.get("error")}
         resolved_browser = info["browser_id"]
 
-    mail_url = resolve_domain_urls("mail", host)[0]
     plan = {
         "domain": "mail",
         "action": "send",
@@ -441,7 +460,12 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.cmd == "check":
-        binfo = web_send.discover_chrome_direct_browser()
+        binfo = web_send.discover_chrome_direct_browser() if web_send else {"ok": False, "error": BROWSER_UNAVAILABLE}
+        try:
+            routes = {k: resolve_domain_urls(k, args.host) for k in DOMAIN_ROUTES}
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": str(exc), "browser": binfo}, ensure_ascii=False))
+            return 1
         res = {
             "ok": bool(binfo.get("ok")),
             "browser": binfo,
@@ -451,7 +475,7 @@ def main() -> int:
                     "label": v["label"],
                     "openapi_blocker": v["openapi_blocker"],
                     "read_only": v["read_only"],
-                    "urls": resolve_domain_urls(k, args.host),
+                    "urls": routes[k],
                 }
                 for k, v in DOMAIN_ROUTES.items()
             },

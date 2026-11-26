@@ -62,6 +62,8 @@ description: Link16 飞书/Lark 统一入口。用于读取任何飞书文档、
 
 ## 3. 常用工具
 
+跨仓派工和完工汇报使用仓内 `link16-proactive` 技能。先读 `docs/TASTE-010-proactive-dispatch.md` 的判断规则，再依 `docs/SOP-150-proactive-agent-loop.md` 核验执行者回执与本人私聊交付。
+
 | 用户要做什么 | 确定性入口 |
 |---|---|
 | 给飞书在线链接反查本地 HTML | `python feishu/online_local_html.py "<URL>"`：只读匹配项目 `meta.json` / `*.meta.json` 中的精确在线 URL，区分交互评审页与在线文档正文快照，回读存在的 HTML 与映射来源；无显式映射时如实报告，不按文件名猜 |

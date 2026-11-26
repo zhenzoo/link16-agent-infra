@@ -16,7 +16,7 @@
   1. `/tenant/v2/tenant/query` —— 权威，还带租户显示名；但要 `tenant:tenant:readonly`，
      当前这批 bot 都没开（报 99991672）。开了就自动走这条。
   2. `im/v1/chats` 每条 chat 自带 `tenant_key` —— **免权限、零成本**，但要求 bot 至少在一个群里。
-  3. 仍拿不到 tenant_key 就保持 unknown；注册流程要求人工明确目标群，不从同机 bot 猜。
+  3. 空群列表可回读本应用已发消息的发件 App ID 与 tenant_key；缺证据时保持 unknown。
 
 映射表（tenant_key → 该进哪个群）= `feishu/agent-registry.json` 的 `tenants` 段（SSOT）。
 
@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlencode
@@ -144,10 +145,32 @@ def _query_via_chats(spec, *, refresh=False):
     return out
 
 
+def _tenant_from_own_message(bot, spec):
+    """Read an outgoing message as this application to prove its tenant before its first group."""
+    from bridge_outbound import read_records
+    records = read_records(HERE / "_state", bot)
+    mid = next((r["message_id"] for r in reversed(records) if r.get("bot") == bot
+                and re.fullmatch(r"om_[\w-]+", str(r.get("message_id") or ""))), None)
+    if not mid:
+        return None
+    app_id = audit._env_val(spec["app_id_env"])
+    token, error = audit._token(spec["app_id_env"], spec["app_secret_env"])
+    if error or not token or not app_id:
+        return None
+    result = audit._req("GET", f"{audit.BASE}/im/v1/messages/{mid}", token)
+    if result.get("code") == 0:
+        for item in (result.get("data") or {}).get("items") or []:
+            sender = item.get("sender") or {}
+            if (item.get("message_id") == mid and not item.get("deleted")
+                    and sender.get("sender_type") == "app" and sender.get("id") == app_id):
+                return sender.get("tenant_key")
+    return None
+
+
 def resolve_tenant(bot, *, refresh=False):
     """判定一只 bot 的 tenant_key。返回 dict(tenant_key, source, name, groups, error)。
 
-    source in {tenant-api, chats, unknown}。unknown 不映射到任何群。"""
+    source in {tenant-api, chats, own-message, unknown}。unknown 不映射到任何群。"""
     spec = _bot_spec(bot)
     if not spec:
         return {"bot": bot, "tenant_key": None, "source": "unknown",
@@ -164,9 +187,14 @@ def resolve_tenant(bot, *, refresh=False):
         return {"bot": bot, "tenant_key": key, "source": "chats",
                 "name": None, "groups": items, "error": None}
 
+    if not err and not items:
+        key = _tenant_from_own_message(bot, spec)
+        if key:
+            return {"bot": bot, "tenant_key": key, "source": "own-message",
+                    "name": None, "groups": items, "error": None}
     return {"bot": bot, "tenant_key": None, "source": "unknown", "name": None,
             "groups": items,
-            "error": err or "还没入群且未开 tenant:tenant:readonly；请显式指定目标群"}
+            "error": err or "尚无可核的租户证据，等待本应用私聊回复或内部群成员记录"}
 
 
 def sync_registry_tenant(bot):
@@ -212,7 +240,7 @@ def target_group(bot):
     info["tenant_kind"] = entry.get("kind")
     info["in_target"] = any(
         (entry.get("group_chat_id") and g.get("chat_id") == entry.get("group_chat_id"))
-        or (entry.get("group_name") and entry.get("group_name") in (g.get("name") or ""))
+        or (not entry.get("group_chat_id") and entry.get("group_name") and entry["group_name"] == g.get("name"))
         for g in (info.get("groups") or [])
     )
     return entry.get("group_name"), info

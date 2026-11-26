@@ -256,9 +256,37 @@ def _listening(proxy):
             return True
     except ConnectionRefusedError:
         return False
-    except OSError as exc:
-        # Unknown networking state is not proof that a listener is absent.
-        raise AgentProxyUnavailable("本机代理端口状态无法确认，未执行端口修改。") from exc
+
+
+def _observed_proxy_port(rows):
+    """Match live VPN listeners to Windows proxy settings or a unique common mixed port."""
+    listeners = {port for row in rows for port in row.get("ListenPorts", [])}
+    if not listeners:
+        return None
+    try:
+        system = urllib.request.getproxies_registry()
+    except OSError:
+        system = {}
+    configured = discover_proxy_candidates("", system=system, common_ports=())
+    system_ports = {urllib.parse.urlsplit(candidate.url).port for candidate in configured}
+    matches = listeners & system_ports or listeners.intersection(COMMON_MIXED_PORTS)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _proxy_port_error(expected_port, current_port=None, *, reason=None):
+    current = (f"当前 VPN 监听端口 **{current_port}**。" if current_port is not None
+               else "当前 VPN 端口未能确认。")
+    if current_port == expected_port:
+        action = "请在 VPN 客户端确认本地代理已启用。"
+    elif current_port is None:
+        action = f"请在 VPN 客户端启用本地代理，并确认本地代理端口（Mixed Port）设为 **{expected_port}**。"
+    else:
+        action = f"请打开 VPN 客户端设置，手动把本地代理端口（Mixed Port）改成 **{expected_port}**。"
+    lines = [f"{current} Link16 需要 **{expected_port}**。"]
+    if reason:
+        lines.append(reason)
+    lines.append(action)
+    return AgentProxyUnavailable("\n".join(lines))
 
 
 def _remember_client(rows, port):
@@ -316,7 +344,14 @@ def ensure_agent_proxy(*, apply=False, expected=None, probe_url="https://www.gst
             state = {}
         if not isinstance(state, dict):
             raise AgentProxyUnavailable("代理恢复记录无法读取，未执行自动操作。")
-        if _listening(expected):
+        socket_error = None
+        try:
+            listening = _listening(expected)
+        except OSError as exc:
+            # An inconclusive probe permits a diagnostic read, never an automatic change.
+            socket_error = exc
+            listening = False
+        if listening:
             # Remember the actual running client for a later absent-process recovery.
             if apply and (state.get("launch_attempts")
                           or time.time() - state.get("observed_at", 0) >= 300):
@@ -339,13 +374,18 @@ def ensure_agent_proxy(*, apply=False, expected=None, probe_url="https://www.gst
                 state["launch_attempts"] = 0
                 atomic_write_json(state_path, state)
             return {"status": "listening", "proxy": _proxy_display(expected)}
-        rows = _proxy_processes()
+        try:
+            rows = _proxy_processes()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            raise _proxy_port_error(parsed.port) from exc
+        if socket_error is not None:
+            raise _proxy_port_error(parsed.port, _observed_proxy_port(rows)) from socket_error
         if not rows:
             client = state.get("client")
             if not client or not Path(client).is_file():
-                raise AgentProxyUnavailable("终端代理端口未开启，且没有已验证的代理客户端可启动；原消息保留。")
+                raise _proxy_port_error(parsed.port, reason="终端代理端口未开启，且没有已验证的代理客户端可启动。")
             if state.get("launch_attempts", 0) >= 1:
-                raise AgentProxyUnavailable("已尝试启动代理客户端 1 次，端口仍未恢复；停止自动启动，原消息保留。")
+                raise _proxy_port_error(parsed.port, reason="已尝试启动代理客户端 1 次，端口仍未恢复，停止自动启动。")
             if not apply:
                 return {"status": "would_start", "client": Path(client).name}
             if wmux_session._windows_shutting_down():
@@ -373,15 +413,16 @@ def ensure_agent_proxy(*, apply=False, expected=None, probe_url="https://www.gst
             except (OSError, ValueError, urllib.error.URLError):
                 continue
         if len(cores) != 1:
-            raise AgentProxyUnavailable("终端代理端口不可用，无法唯一确认可控制的代理核心；未改端口或重启程序。")
+            raise _proxy_port_error(parsed.port, _observed_proxy_port(rows),
+                                    reason="无法唯一确认可自动调整的代理核心。")
         row, core, old_port = cores[0]
         current = f"http://127.0.0.1:{old_port}"
         test = probe_route(probe_url, "proxy", current, timeout=4, sample_bytes=128)
         if not test.ok:
-            raise AgentProxyUnavailable("代理程序在运行，但出口验证失败；端口修改无法证明能解决，保留消息等网络恢复。")
+            raise _proxy_port_error(parsed.port, old_port, reason="代理网络出口验证失败，请确认 VPN 已连接。")
         identity = f"{row['ProcessId']}:{row.get('CreationDate')}:{parsed.port}"
         if identity in state.get("port_attempts", []):
-            raise AgentProxyUnavailable("此代理进程已尝试过端口修复，停止重复修改；请核对客户端持久端口设置。")
+            raise _proxy_port_error(parsed.port, old_port, reason="此代理进程已尝试过端口修复，停止重复修改。")
         detail = f"代理运行在 {old_port}，终端配置为 {parsed.port}"
         if not apply:
             return {"status": "would_align", "detail": detail}
@@ -393,7 +434,11 @@ def ensure_agent_proxy(*, apply=False, expected=None, probe_url="https://www.gst
             state["client"] = client
         atomic_write_json(state_path, state)
         # A concurrent owner may already have started a listener. Never take its port.
-        if _listening(expected):
+        try:
+            listening = _listening(expected)
+        except OSError as exc:
+            raise _proxy_port_error(parsed.port, _observed_proxy_port(rows)) from exc
+        if listening:
             return {"status": "listening", "proxy": _proxy_display(expected)}
         try:
             _core_request(core, "PATCH", {"mixed-port": parsed.port})

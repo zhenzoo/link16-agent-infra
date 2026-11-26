@@ -8,7 +8,7 @@ description: Link16 主动工作台。按本人职责分派和追单，收执行
 这是 Link16 仓库级薄路由；流程真源、可移植任务模板与确定性工具都在 Link16 仓库内（解析 `LINK16_AGENT_INFRA_ROOT` 或当前 Link16 仓库根后执行，**不要在业务仓另造重复脚本**）：
 
 - **标准 SOP**：`docs/SOP-150-proactive-agent-loop.md`
-- **调度与审阅**：先读 Link16 的 `docs/TASTE-010-proactive-dispatch.md`，操作读同仓 SOP-150。
+- **调度与审阅**：先读 Link16 的 `docs/TASTE-010-proactive-dispatch.md`，操作与发布检查读同仓 SOP-150。
 - **跨机任务模板**：`feishu/tasks/proactive-loop.yaml`
 - **工具总索引**：`TOOLS.md`
 
@@ -40,13 +40,13 @@ description: Link16 主动工作台。按本人职责分派和追单，收执行
 | 阶段 | 要做什么 | 唯一确定性入口 |
 |---|---|---|
 | **Phase 0 预检** | 按当前应用身份分别检查授权与可读资源，各域保存成功、缺权或部分读取的证据 | `python feishu/proactive_scanner.py --bot <bot> --preflight-only` |
-| **Phase 1 巡检** | 主号派执行者核实本人消息、会议逐字稿、周报、任务和审批。关联原任务与执行回执，同一工作台一个 writer | `python feishu/bridge_cron.py board`，SOP-150 §2 |
-| **Phase 2 审阅与委派** | 主号沿原单分派。业务和审批均使用 TASTE-010 四列，审批链接按 SOP-151 点验，从工作台一次进入该笔原单。七天日轴跨周、跨月，已闭环事项按真实日期与原件去重补录，同日节点纵排、全称可读 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
-| **Phase 3 确认执行** | 按具体授权分派原表更新与审批办理，执行者回读并报结果；主号统一发送获授权的消息 | `docs/SOP-150-proactive-agent-loop.md` §4、当前业务仓原件 |
+| **Phase 1 巡检** | 主号派执行者核实本人消息、日历与临时会议、会议逐字稿、周报手写行、任务和审批。关联原任务与执行回执，同一工作台一个 writer | `python feishu/bridge_cron.py board`，SOP-150 §2 |
+| **Phase 2 审阅与委派** | 主号核目标机运行、额度和在途工作后沿原单分派。消息显示收件人、出处及拟回全文。业务和审批均使用 TASTE-010 四列，审批链接按 SOP-151 点验，从工作台一次进入该笔原单。七天日轴跨周、跨月，已闭环事项按真实日期与原件去重补录，同日节点纵排、全称可读 | `python feishu/proactive_dispatch.py --help`、`python feishu/proactive_scanner.py --bot <bot> --days 7 --actions-json feishu/_state/proactive/<bot>/workbench.json --out-html <业务仓>/docs/proactive-triage-board.html --out-json feishu/_state/proactive/<bot>/latest.json` |
+| **Phase 3 确认执行** | 按具体授权分派原表更新与审批办理，执行者回读并报结果；主号统一发送获授权的消息。本人网页通道须核插件、租户和身份 | `docs/SOP-150-proactive-agent-loop.md` §4、当前业务仓原件 |
 
 ## 2. 不可违背的四条护栏
 
 1. **按能力验权**：每次新机/新 bot 接入先跑 `--preflight-only`，核本人绑定、源数据与具体动作；某域缺口只影响对应动作，已授权来源继续。企业等级、本人授权和业务实测分别记载。
 2. **按租户能力选择通道。** 审批定义与开放范围按应用核实，网页通道按本机安装与登录态核实。缺插件或缺权时保留草稿。
 3. **对外发送与审批按本人授权。** 先预览拟写的原件、待发文案或单据，再按已确认范围处理和回读。主号在本人私聊汇报使用应用身份。
-4. **沿用原工作台。** 业务查看、执行和验收均交给原单执行者或另派的验收人。主号接验收结论及预览，更新条目并向本人私聊发按项编号的交互卡片，点间空一行。业务类别与检查规则读 Link16 TASTE-010，操作读 SOP-150。称呼、来源和原单随私有业务登记。
+4. **沿用原工作台。** 按来源项目和负责人展示成果。业务查看、执行和验收均交给原单执行者或另派的验收人。主号接验收结论及预览，更新条目并向本人私聊发按项编号的交互卡片，点间空一行。业务类别与检查规则读 Link16 TASTE-010，操作读 SOP-150。称呼、来源和原单随私有业务登记。

@@ -50,6 +50,21 @@ def test_file_drawer_carries_only_its_own_selected_original(tmp_path):
         mobile.pack(board_path, tmp_path / "versions")
 
 
+def test_timeline_keeps_verified_text_available_on_mobile(tmp_path):
+    page = tmp_path / "board.html"
+    evidence = tmp_path / "final.txt"
+    evidence.write_text("已验的成稿", encoding="utf8")
+    record = dict(project="文稿", at="2026-11-25 09:00", person="编辑", topic="原文",
+                  background="审阅样稿", result="已核对正文", evidence_url=evidence.name)
+    page.write_text(scanner.render_html({"bot": "desk"}, {"sections": ["files"], "closed_items": {"r1": record}}),
+                    encoding="utf8")
+    site = Path(mobile.pack(page, tmp_path / "mobile", [tmp_path])["site"])
+    soup = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser")
+    assert soup.select_one('nav a[href="#project-timeline"]')
+    target = site / soup.select_one("#project-timeline li a")["href"]
+    assert evidence.read_text("utf8") in target.read_text("utf8")
+
+
 @pytest.mark.parametrize("prefix,manifest_id,keys", [
     ("link16", "link16-asset-sources", ["preview", "detail"]),
     ("link16", "link16-accessory-sources", ["base", "shell", "cover", "port", "wheel", "handle"]),
@@ -168,6 +183,25 @@ def test_file_only_review_stays_file_only_on_mobile(tmp_path):
     assert [section["id"] for section in page.select("main > section.major")] == ["files"]
     assert [a["href"] for a in page.select(".section-nav a")] == ["#files"]
     assert "Example" in page.article.get_text() and "editor" in page.article.get_text()
+
+
+def test_selected_demo_and_text_survive_mobile_export_as_same_card_originals(tmp_path):
+    board_path = tmp_path / "board.html"
+    files = [{"title": "Motion", "url": "demo.html", "preview_kind": "demo"},
+             {"title": "稿件", "url": "draft.txt", "preview_kind": "text"}]
+    board_path.write_text(scanner.render_html({"bot": "demo"}, {"sections": ["files"], "files": files}),
+                          encoding="utf8")
+    (tmp_path / "demo.html").write_text("<button>播放</button>", encoding="utf8")
+    body = "原稿\n<script>示例</script>"
+    (tmp_path / "draft.txt").write_text(body, encoding="utf8")
+    result = mobile.pack(board_path, tmp_path / "build")
+    site = Path(result["site"])
+    page = BeautifulSoup((site / "index.html").read_text("utf8"), "html.parser")
+    frame = page.select_one("article iframe")
+    assert frame["src"] == frame.find_parent("article").a["href"] and frame["sandbox"] == ["allow-scripts"]
+    assert (site / frame["src"]).is_file() and "frame-src 'self'" in page.select_one("meta[http-equiv]")["content"]
+    original = BeautifulSoup((site / page.select_one("a[data-review-text]")["href"]).read_text("utf8"), "html.parser")
+    assert original.pre.get_text() == body and not original.script and result["local_references_marked"] == 0
 
 
 def board(path, original, online=""):

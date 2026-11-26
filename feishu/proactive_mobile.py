@@ -16,6 +16,7 @@ import posixpath
 import re
 import tempfile
 import wave
+from html import escape
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
@@ -147,6 +148,8 @@ class Bundle:
         source = self.board.read_bytes()
         board = BeautifulSoup(source.decode("utf-8-sig"), "html.parser")
         sections = [n.get("id") for n in board.select("main > section.major")]
+        if sections[-1:] == ["project-timeline"]:
+            sections.pop()
         allowed = {"messages", "files", "calendar", "approvals"}
         legacy = sections == ["messages", "files", "reminders", "calendar", "approvals"]
         unified = sections == ["business", "closed"] and board.select_one("#workbench-outcomes") is not None
@@ -215,7 +218,7 @@ class Bundle:
             anchor["aria-expanded"] = "false"
             anchor.parent.append(pointer)
             original_paths.append((pointer, selected))
-        for a in board.select("article a[href], #business tr[data-business-id] a[href], #closed .archive-links a[href]"):
+        for a in board.select("article a[href], #project-timeline a[href], #business tr[data-business-id] a[href], #closed .archive-links a[href]"):
             if a.has_attr("data-archive-version"):
                 continue
             dest = relative_target(self.board, a["href"])
@@ -326,6 +329,18 @@ class Bundle:
 
     def prepare_frames(self, soup, path):
         for frame in soup.find_all("iframe"):
+            if path == self.board and frame.has_attr("data-review-demo"):
+                ref = frame["data-review-demo"]
+                dest = relative_target(path, ref)
+                card = frame.find_parent("article")
+                if (not card or ref != frame.get("src") or dest == path or dest not in self.docs
+                        or not can_read(dest, self.roots, HTML) or not card.find("a", href=ref)):
+                    raise ValueError("Demo 预览须与本卡链接指向同一份获选 HTML")
+                self.has_document_frame = True
+                frame.attrs = {"src": self.docs[dest], "title": frame.get("title", "Demo"),
+                               "class": "chapter-preview", "loading": "lazy", "sandbox": "allow-scripts",
+                               "referrerpolicy": "no-referrer"}
+                continue
             if path == self.board and frame.has_attr("data-review-document"):
                 ref = frame["data-review-document"]
                 parts = urlsplit(ref)
@@ -457,6 +472,21 @@ class Bundle:
             target = archived["entry"] if archived else self.docs.get(dest)
             if not target:
                 target = self.current_archive_exports.get(dest)
+            if (not target and path == self.board and a.get("data-review-text") == "true"
+                    and (a.find_parent("article") or a.find_parent("section", id="project-timeline"))
+                    and can_read(dest, self.roots, {".txt", ".md"})):
+                data = dest.read_bytes()
+                body = data.decode("utf-8-sig")
+                if PRIVATE.search(body) or LOCAL_ADDRESS.search(body):
+                    raise ValueError("原稿含私密数据或本机路径，请先核对：" + dest.name)
+                target = "assets/text-" + digest(data) + ".html"
+                (self.stage / target).write_text(
+                    '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>' + escape(dest.name) + '</title>'
+                    '<pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-width:75ch;margin:2rem auto;'
+                    'padding:0 1rem;font:17px/1.7 system-ui">' + escape(body) + '</pre></html>',
+                    encoding="utf8", newline="")
             if not target and can_read(dest, self.roots, IMAGES):
                 target = self.image(dest)
             if not target and can_read(dest, self.roots, VIDEO):

@@ -547,7 +547,7 @@ class Inbox:
             return True
 
     def due_update(self, mid, *, error=None, delay=0, phase=None, notice=None, failed=False, launch=None,
-                   pending_notice=None):
+                   pending_notice=None, session_reset=False):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
@@ -562,6 +562,8 @@ class Inbox:
                 context['pending_notice'] = pending_notice
             if launch is not None:
                 context['launch'] = launch
+            if session_reset:
+                context['session_reset'] = True
             # Unknown submitted input must remain eligible for a late native receipt.
             state = 'failed' if failed and row['state'] == 'scheduled' else row['state']
             db.execute('UPDATE messages SET schedule=?,error=?,retry_at=?,state=?,updated=? WHERE id=?',
@@ -666,6 +668,15 @@ class Inbox:
     def counts(self):
         with self.connect() as db:
             return dict(db.execute("SELECT state,COUNT(*) FROM messages GROUP BY state").fetchall())
+
+    def has_session_reset_blockers(self, session):
+        """An unresolved handoff for an older native thread does not block this one."""
+        with self.connect() as db:
+            return db.execute("""SELECT 1 FROM messages
+                WHERE state IN ('queued','processing','command') OR
+                (state IN ('submitting','awaiting_confirmation','uncertain')
+                 AND (? IS NULL OR session IS NULL OR session='' OR session=?))
+                LIMIT 1""", (session, session)).fetchone() is not None
 
     def delivery_status(self):
         """Latest ordinary handoff, including its real native receipt (no body)."""

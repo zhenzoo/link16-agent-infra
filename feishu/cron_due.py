@@ -2,6 +2,7 @@
 import hashlib
 import json
 import time
+from contextlib import nullcontext
 
 from bridge_inbox import Inbox, RetryableHandoffError
 import cron_delivery
@@ -13,13 +14,104 @@ MAX_AGE_SEC = 24 * 60 * 60
 
 
 def spec(job):
-    return {k: job.get(k, default) for k, default in (
+    fields = {k: job.get(k, default) for k, default in (
         ('name', None), ('bot', None), ('prompt', None), ('cron', None),
         ('tz', 'Asia/Shanghai'))}
+    fields['fresh_session'] = job.get('fresh_session') is True
+    return fields
+
+
+def _idle_session(fb, bot, inbox):
+    name = bot['name']
+    path = fb.STATE_DIR / f'bridge-session-{name}.json'
+    try:
+        rec = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        rec = {}
+    if not isinstance(rec, dict):
+        raise RuntimeError('会话绑定无法确认')
+    codex = fb.agent_runtime.uses_app_server(bot)
+    native = fb._codex_startup_record(bot) if codex else {}
+    if inbox.has_session_reset_blockers(native.get('thread_id')):
+        raise RuntimeError('当前会话有待处理或尚未确认的消息')
+    if fb.bridge_outbox.picker_load(str(fb.STATE_DIR), name):
+        raise RuntimeError('当前会话正在等待用户选择')
+    windows = fb.wmux_session.workspaces()
+    window = next((w for w in windows if w.get('id') == rec.get('workspace_id')), None)
+    if window is None and any(w.get('name') == f'bot-{name}' for w in windows):
+        raise RuntimeError('存在未绑定的同名工作区')
+    if rec.get('pending_launch'):
+        raise RuntimeError('旧会话仍在启动')
+    if window is None and not rec.get('workspace_id'):
+        return rec, native
+    if (rec.get('profile') != fb.agent_runtime.profile_name(bot, required=True)
+            or not rec.get('pty') or (window and rec['pty'] not in (window.get('ptyIds') or []))):
+        raise RuntimeError('旧会话账号、工作区或终端绑定不一致')
+    if window is None and fb._release_exited_session_unlocked(bot, release=False):
+        return rec, native
+    state = fb.bridge_activity.read_activity(fb.STATE_DIR, bot)
+    if state.get('state') != 'idle':
+        raise RuntimeError(f"旧会话尚未确认空闲：{state.get('reason', state.get('state'))}")
+    if codex and not native.get('worker_pid'):
+        raise RuntimeError('缺少旧 Codex worker 身份')
+    return rec, native
+
+
+def _close_for_fresh_session(fb, bot, job, inbox, log):
+    name = bot['name']
+    rec, native = _idle_session(fb, bot, inbox)
+    old_ws = rec.get('workspace_id')
+    lock = (fb.bridge_injection.injection_lock(fb.STATE_DIR, 'tui-inject', old_ws, timeout=1)
+            if old_ws else nullcontext())
+    with lock:
+        if (rec, native) != _idle_session(fb, bot, inbox):
+            raise RuntimeError('关闭前会话绑定已变化')
+        processes = {}
+        if native.get('worker_pid') and old_ws:
+            rows = fb.kimi_process.inventory()
+            pids = {native.get(k) for k in ('worker_pid', 'observer_pid', 'tui_pid')}
+            processes = fb.kimi_process.descendants(rows, {r['pid']: r for r in rows if r['pid'] in pids})
+        start(fb, bot, job)
+        fb._close_session_unlocked(bot)  # Verifies Wmux closure and reaps any owned Kimi worker.
+        if processes:
+            deadline = time.monotonic() + 15
+            while any(processes.get(r['pid'], {}).get('birth') == r['birth']
+                      for r in fb.kimi_process.inventory() if r['pid'] in processes):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('旧 Codex 进程尚未退出')
+                time.sleep(.25)
+        fb._merge_session(name, {'workspace_id': None, 'pty': None, 'jsonl': None,
+                                 'daemon_fp': None, 'pending_launch': None, 'runtime_processes': None})
+        fb.clear_codex_thread(name)
+        fb.bridge_outbox.pending_clear(str(fb.STATE_DIR), name)
+        fb.session_work.clear(name, fb.STATE_DIR)
+        inbox.due_update(job['_due_id'], session_reset=True)
+        log(f"due[{job['_due_id']}] 已确认旧会话关闭，准备启动新会话")
+
+
+def start_session(fb, bot, job, log):
+    """Use the same start and launch recovery ledger for both session modes."""
+    pending_launch = resume(fb, bot, job)
+    fresh = job.get('fresh_session') is True
+    if fresh and not pending_launch:
+        inbox = Inbox(fb.STATE_DIR, bot['name'])
+        context = json.loads(inbox.get(job['_due_id'])['schedule'])
+        if context.get('session_reset'):
+            if (fb.load_session(bot['name']) or {}).get('workspace_id'):
+                raise RuntimeError('旧会话关闭后已有其他启动，新任务不接管或再关闭该会话')
+            start(fb, bot, job)
+        else:
+            _close_for_fresh_session(fb, bot, job, inbox, log)
+    else:
+        start(fb, bot, job)
+    binding = ensure(fb, bot, job)
+    if fresh and not pending_launch and not binding[2]:
+        raise RuntimeError('本次未创建新会话，等待核对绑定')
+    return binding
 
 
 def start(fb, bot, job):
-    """Called under the lifecycle lock before ensuring the existing session."""
+    """Reserve a startup attempt under the lifecycle lock."""
     if job.get('_due_id'):
         inbox = Inbox(fb.STATE_DIR, bot['name'])
         row = inbox.get(job['_due_id'])

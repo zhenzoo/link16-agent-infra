@@ -333,7 +333,7 @@ def _highlight_mentions(text: str) -> str:
     return re.sub(r"(@[\u4e00-\u9fa5A-Za-z0-9_-]{1,20})", r'<span class="mention">\1</span>', escaped)
 
 
-def _url(value, *, local=False, image=False) -> str:
+def _url(value, *, local=False, image=False, text_file=False) -> str:
     """Only web destinations and reviewed local document/image paths are navigable."""
     value = str(value or "").strip()
     if not value or any(ch in unquote(value) for ch in ("\r", "\n", "\t", "\\", "\x00")):
@@ -348,21 +348,25 @@ def _url(value, *, local=False, image=False) -> str:
         return ""
     allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     if not image:
-        allowed |= {".html", ".htm", ".pdf", ".xlsx", ".docx", ".md", ".csv"}
+        allowed |= {".html", ".htm", ".pdf", ".xlsx", ".docx", ".md", ".mp4", ".csv"}
+        if text_file:
+            allowed.add(".txt")
     return value if Path(unquote(parts.path)).suffix.lower() in allowed else ""
 
 
-def _link(label, value, *, local=False) -> str:
-    url = _url(value, local=local)
+def _link(label, value, *, local=False, text_file=False) -> str:
+    url = _url(value, local=local, text_file=text_file)
     if not url:
         return ""
-    return f'<a class="link-pill" href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">{html.escape(str(label))} ↗</a>'
+    text_preview = ' data-review-text="true"' if text_file else ""
+    return f'<a class="link-pill"{text_preview} href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">{html.escape(str(label))} ↗</a>'
 
 
 def _links(record, *, local=False) -> str:
     links = []
     for item in record.get("links") or []:
-        link = _link(item.get("label") or "原件", item.get("url"), local=local)
+        link = _link(item.get("label") or "原件", item.get("url"), local=local,
+                     text_file=local and item.get("preview_kind") == "text")
         if link and local and item.get("catalog") == "entries":
             link = link.replace("<a ", '<a data-review-catalog="entries" ', 1)
         links.append(link)
@@ -773,8 +777,19 @@ def _render_file(record, output_dir=None) -> str:
         topics.append(f'<details class="review-topic"{ident}><summary>{title}</summary>'
                       f'<p>{esc(topic.get("fact") or "")}</p><dl>{rows}</dl>{decisions}{sources}'
                       f'{_local_document_path(topic, output_dir)}</details>')
-    original = _url(record.get("url"), local=True)
+    text_file = record.get("preview_kind") == "text"
+    original = _url(record.get("url"), local=True, text_file=text_file)
     section = record.get("preview_fragment") or ""
+    local_path = urlsplit(original)
+    suffix = Path(unquote(local_path.path)).suffix.lower() if not local_path.scheme else ""
+    if suffix == ".mp4":
+        poster = _url(record.get("image"), local=True, image=True)
+        poster_attr = f' poster="{esc(poster)}"' if poster else ""
+        frame = (f'<video class="file-video" aria-label="{esc(record.get("title") or "视频")}" '
+                 f'src="{esc(original)}"{poster_attr} controls playsinline preload="metadata"></video>')
+    elif record.get("preview_kind") == "demo" and suffix in {".htm", ".html"} and not section:
+        frame = (f'<iframe class="chapter-preview" data-review-demo="{esc(original)}" title="{esc(record.get("title") or "Demo")}" '
+                 f'src="{esc(original)}" loading="lazy" sandbox="allow-scripts"></iframe>')
     if original and re.fullmatch(r"[a-zA-Z][\w-]{0,64}", section):
         parts = urlsplit(original)
         if not parts.scheme and not parts.query and parts.path.endswith(".html") and parts.fragment == section:
@@ -792,7 +807,7 @@ def _render_file(record, output_dir=None) -> str:
         f'<article class="review-card"{item_id}><div class="record-head">{_priority(record)}<h3>{esc(record.get("title") or "文件")}</h3>'
         f'<span class="status-tag">{esc(record.get("status") or "待核")}</span></div>'
         f'{_owner_entry(record)}{frame or _preview_image(record)}<p class="preview-text">{preview}</p>{"".join(topics)}'
-        f'<div class="record-links">{_link((record.get("_owner_entry") or {}).get("preview_label") or "打开原件", record.get("url"), local=True)} {_links(record, local=True)}</div>'
+        f'<div class="record-links">{_link((record.get("_owner_entry") or {}).get("preview_label") or "打开原件", original, local=True, text_file=text_file)} {_links(record, local=True)}</div>'
         f'{_assignment_line(record, show_missing=False)}</article>'
     )
 
@@ -898,11 +913,24 @@ def _fallback_open_mentions(items: list[dict[str, Any]]) -> str:
 
 def _render_closed_items(records, output_dir=None, *, collapsed=False):
     fields = ("at", "person", "topic", "result")
-    entries = [item for item in records.values() if all(item.get(field) for field in fields)]
+    entries = [item for item in records.values() if isinstance(item, dict)
+               and all(isinstance(item.get(field), str) and item[field].strip() for field in fields)]
     if not entries:
-        return ""
+        return "", ""
+    projects = {}
     rows = []
     for entry in sorted(entries, key=lambda item: item["at"], reverse=True):
+        if "background" in entry or "evidence_url" in entry:
+            evidence_url = entry.get("evidence_url")
+            evidence = _link("查看凭据", evidence_url, local=True,
+                             text_file=str(evidence_url or "").lower().endswith((".txt", ".md")))
+            if all(isinstance(entry.get(k), str) and entry[k].strip() for k in ("project", "background")) and evidence:
+                details = "".join(f"<dt>{label}</dt><dd>{html.escape(entry[key])}</dd>"
+                                  for label, key in (("背景", "background"), ("问题", "topic"),
+                                                     ("答复人", "person"), ("结论", "result")))
+                projects.setdefault(entry["project"], []).append(
+                    f'<li><time>{html.escape(entry["at"])}</time><dl>{details}</dl>{evidence}</li>')
+            continue
         cells = "".join(f"<td>{html.escape(entry[field])}</td>" for field in fields[:-1])
         result = html.escape(entry["result"])
         links = []
@@ -921,12 +949,21 @@ def _render_closed_items(records, output_dir=None, *, collapsed=False):
         result += _local_document_path(entry, output_dir)
         cells += f"<td>{result}</td>"
         rows.append(f"<tr>{cells}</tr>")
+    timeline = ""
+    if projects:
+        groups = "".join(f'<details class="timeline-project"{" open" if i == 0 else ""}>'
+                         f'<summary>{html.escape(project)} <small>{len(nodes)} 项</small></summary>'
+                         f'<ol>{"".join(nodes)}</ol></details>'
+                         for i, (project, nodes) in enumerate(projects.items()))
+        timeline = f'<section class="major" id="project-timeline"><h2>项目时间线</h2>{groups}</section>'
+    if not rows:
+        return timeline, ""
     headers = "".join(f'<th scope="col">{label}</th>' for label in ("时间", "姓名", "事项", "结论"))
     table = f'<table><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table>'
     if collapsed:
-        return (f'<section id="closed" aria-label="已归档"><details><summary>已归档 · {len(rows)} 项</summary>'
+        return timeline, (f'<section id="closed" aria-label="已归档"><details><summary>已归档 · {len(rows)} 项</summary>'
                 f'{table}</details></section>')
-    return f'<section id="closed" aria-labelledby="closed-heading"><h2 id="closed-heading">已闭环</h2>{table}</section>'
+    return timeline, f'<section id="closed" aria-labelledby="closed-heading"><h2 id="closed-heading">已闭环</h2>{table}</section>'
 
 
 def review_key(kind, record):
@@ -1084,6 +1121,8 @@ def _project_timeline(config, closed, tasks, output_dir, *, daily=False):
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     from proactive_business import render, migrate_registered_rows, approval_table
     pack = actions_pack or {}
+    if "sections" in pack and not any(key in pack for key in ("business_rows", "business_round", "outcome_policy", "review_file_ids")):
+        return render_archived_html(payload, pack, output_dir=output_dir)
     if pack.get("outcome_policy") == "one-per-row" and not (pack.get("business_round") or {}).get("outcomes"):
         raise ValueError("此工作台须先登记每行唯一成果")
     timeline = _project_timeline(pack.get("project_timeline"), pack.get("closed_items") or {}, pack.get("work_items") or [], output_dir, daily=True)
@@ -1218,6 +1257,10 @@ def render_archived_html(payload: dict[str, Any], actions_pack: dict[str, Any] |
         reminders_html = f'<div id="reminders">{items}</div>'
     routes = "".join(f'<a href="#{key}"><span class="nav-label">{categories[key][0]}</span>'
                      f'<span class="nav-count">{categories[key][1]}</span></a>' for key in sections)
+    closed_items = actions_pack.get("closed_items") or {}
+    timeline, archive = _render_closed_items(closed_items, output_dir, collapsed=actions_pack.get("archive_collapsed") is True)
+    if timeline:
+        routes += '<a href="#project-timeline"><span class="nav-label">项目时间线</span></a>'
     stylesheet = Path(__file__).with_name("proactive_board.css").read_text(encoding="utf-8")
     online_url = str(actions_pack.get("online_url") or "").strip()
     cloud = ""
@@ -1225,10 +1268,10 @@ def render_archived_html(payload: dict[str, Any], actions_pack: dict[str, Any] |
         cloud = f'<a class="board-cloud" href="{esc(online_url)}" title="打开已登记的线上工作台" target="_blank" rel="noopener noreferrer">云</a>'
 
     empty = '<p class="empty">本轮尚无收录项</p>'
-    archive = _project_timeline(actions_pack.get("project_timeline"), actions_pack.get("closed_items") or {}, tasks, output_dir)
-    timeline_jump = '<a class="timeline-jump" href="#closed">查看项目时间线 ↓</a>' if archive else ''
-    if not archive:
-        archive = _render_closed_items(actions_pack.get("closed_items") or {}, output_dir, collapsed=actions_pack.get("archive_collapsed") is True)
+    scheduled_timeline = _project_timeline(actions_pack.get("project_timeline"), closed_items, tasks, output_dir)
+    timeline_jump = '<a class="timeline-jump" href="#closed">查看项目时间线 ↓</a>' if scheduled_timeline else ''
+    if scheduled_timeline:
+        archive = scheduled_timeline
     message_count = f'{len(drafts)} 待发 · {sent_count} 已发'
     if pending_tasks:
         message_count = f'{len(pending_tasks)} 待跟进 · ' + message_count
@@ -1259,7 +1302,7 @@ def render_archived_html(payload: dict[str, Any], actions_pack: dict[str, Any] |
 {_overview(actions_pack.get("fleet_overview") or [], actions_pack.get("fleet_history") or [])}<div class="rail-updated">更新 <time>{board_time}</time></div></aside>
 <main id="workspace">
   {main_html}
-  {archive}
+  {timeline}{archive}
 </main></div>
 <script>
 const sections = [...document.querySelectorAll("main > .major")];
@@ -1353,6 +1396,7 @@ def main() -> int:
     parser.add_argument("--actions-json", help="含 business_rows、approvals、project_timeline 的工作包；旧包按实际业务迁移")
     parser.add_argument("--out-json", help="保存结构化 JSON 扫描结果路径")
     parser.add_argument("--from-scan", help="以同一本人应用的已存扫描重新渲染，保留上次读取时间")
+    parser.add_argument("--files-only", action="store_true", help="仅用本机文件工作包生成工作台，跳过飞书来源巡检")
     parser.add_argument("--out-html", help="输出本地验收工作台 HTML 路径")
     parser.add_argument("--mobile-out-dir", type=Path, help="从本次 HTML 生成私有手机版目录及核验清单")
     parser.add_argument("--mobile-asset-root", type=Path, action="append", default=[], help="允许随包的额外原件目录")
@@ -1392,7 +1436,13 @@ def main() -> int:
                         (task["preview_url"] if _url(task["preview_url"], local=True, image=True) else ""),
                         "links": task.get("links") or [], "preview_document": True,
                     })
-    if args.from_scan:
+    if args.files_only:
+        if args.from_scan or not actions_pack or actions_pack.get("sections") != ["files"]:
+            parser.error("--files-only 需要仅包含 files 栏目的 --actions-json，不能与 --from-scan 合用")
+        payload = {"bot": args.bot, "owner_name": actions_pack.get("board_name") or args.bot,
+                   "generated_at": dt.datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds"),
+                   "counts": {"files": len(actions_pack.get("files") or [])}, "preflight": {"all_ready": None}}
+    elif args.from_scan:
         payload = json.loads(Path(args.from_scan).read_text(encoding="utf-8-sig"))
         if (not isinstance(payload, dict) or not isinstance(payload.get("generated_at"), str)
                 or not isinstance(payload.get("counts"), dict) or not isinstance(payload.get("preflight"), dict)

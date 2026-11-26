@@ -5,8 +5,8 @@
 跑起来打印授权链接：智能体按SOP-120代办普通确认，自动操作失败才交给主人 → 脚本拿回 client_id/client_secret
 → 自动写进 VibeCoding 的 .env（路径跨机解析·见 bridge_env.resolve_env_path·不写死盘符）。
 
-  首次安装（仅私聊）：
-    python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <已选账号> --tenant-kind <enterprise|personal> --capability core --background
+  首次安装（私聊与登记共享群）：
+    python feishu/register_feishu_app.py --name "<显示名>" --bot <key> --profile <已选账号> --tenant-kind <enterprise|personal> --background
     python feishu/registration_monitor.py links --job <返回的job> --watch
     → 官方页核对组织；本机 .env 保存凭据，local roster 保存所选账号。
 
@@ -311,11 +311,16 @@ def _recovery_app_id(explicit, id_key, bot):
     return chosen
 
 
-def _validate_group_choice(capabilities, group):
-    if "group-a2a" in capabilities and not (group or "").strip():
-        raise ValueError(
-            "group-a2a 注册必须显式给 --group：新 bot 入群前没有 tenant_key，不能从同机 bot 猜"
-        )
+def _registration_group(capabilities, group, tenant_kind):
+    group = (group or "").strip() or None
+    if group or "group-a2a" not in capabilities:
+        return group
+    import tenant_probe
+    entries = [t for t in tenant_probe.load_tenants() if t.get("kind") == tenant_kind]
+    if (len(entries) == 1 and entries[0].get("tenant_key")
+            and re.fullmatch(r"oc_[a-zA-Z0-9_]+", entries[0].get("group_chat_id") or "")):
+        return entries[0]["group_chat_id"]
+    raise ValueError("当前组织未唯一登记目标共享群，请显式给 --group")
 
 
 def _tenant_kind_from_group(group, registry_file=None):
@@ -396,7 +401,7 @@ def main():
     ap.add_argument("--notify-bot", default=None,
                     help="人工步骤完成后唤醒哪只 Link16 bot；不给取 FEISHU_BRIDGE_SESSION")
     ap.add_argument("--group", default=None,
-                    help="group-a2a 的人工入群验收名片段；新 bot 必须按 Device Grant 选中的组织显式给出")
+                    help="覆盖所选组织登记的默认共享群；优先使用确切群 ID")
     ap.add_argument("--tenant-kind", choices=("enterprise", "personal"), default=None,
                     help="已定机器自动按机器选租户；其余按显式类型或登记群确定")
     ap.add_argument("--check-tenant", action="store_true",
@@ -495,7 +500,7 @@ def main():
         ap.error("请指定 --tenant-kind enterprise 或 personal，或提供已登记的目标共享群，以确定本次注册权限清单")
     capabilities = _registration_capabilities(args.capability, tenant_kind)
     try:
-        _validate_group_choice(capabilities, args.group)
+        args.group = _registration_group(capabilities, args.group, tenant_kind)
     except ValueError as exc:
         ap.error(str(exc))
     # SPEC-220: a new bot leaves registration with the whole self-serve baseline,
@@ -528,6 +533,7 @@ def main():
         print(f"profile={selected_profile.name} runtime={runtime}")
         print(f"cwd={selected_cwd or '(repo default)'}")
         print(f"tenant_kind={tenant_kind or 'unknown'}")
+        print(f"group={args.group or '未选择'}")
         if target:
             print(f"machine={target['machine']};expected_console_organization={target['organization']}")
             print("tenant_check=official_console_before_create_and_exact_app_id_before_install")
@@ -566,6 +572,8 @@ def main():
         if not monitor:
             ap.error("--background 需要注册监督器；不要同时给 --no-monitor")
         child_args = [arg for arg in sys.argv[1:] if arg != "--background"]
+        if args.group and not any(arg == "--group" or arg.startswith("--group=") for arg in child_args):
+            child_args += ["--group", args.group]
         child_args += ["--job-id", monitor["job_id"]]
         pid, started = registration_monitor.start_registration_worker(
             monitor["job_id"], [sys.executable, str(Path(__file__).resolve()), *child_args]

@@ -23,7 +23,7 @@ does_not_own:
 read_when:
   - 在一台新电脑上部署本仓
   - 桥装不起来 / 开机不自启需要排错
-last_reviewed: 2026-11-18
+last_reviewed: 2026-11-25
 ---
 # SOP-100 · 把飞书桥装到一台新电脑（新机器部署 runbook）
 
@@ -579,9 +579,9 @@ fi
 - **同一个 app 同时只允许一条长连接** → 同一个 bot 不能两台机同时跑（会抢连接）。
 - **新建本机专属 bot**（推荐 · 跟别的机零冲突）：
   ```bash
-  python feishu/register_feishu_app.py --name 本机助手 --bot local1 --profile <选定账号> --cwd "<项目目录>" --tenant-kind <enterprise|personal> --capability core --background
+  python feishu/register_feishu_app.py --name 本机助手 --bot local1 --profile <选定账号> --cwd "<项目目录>" --tenant-kind <enterprise|personal> --background
   ```
-  agent在已有授权范围内复用已登录浏览器核账号/组织并确认 → 自动写本机`.env`。只有登录失效需要用户扫码/验证码时停；不把普通确认也当人工停点，详细验收见SOP-120。
+  默认接通私聊和本组织登记的共享群。注册会话核实目标组织后，由同租户、已在群的发起 bot 邀请新应用；从普通终端运行时用 `--notify-bot <群内发起者>` 指定。用新 bot 的群列表核对精确群 ID，再发一条群内 @ 并收原单回信。主人只要求私聊时显式加 `--capability core`。首台机器还没有可用的群内发起者时，记录待邀请的 App ID 和目标群，继续私聊验收。账号核验、权限和群邀请步骤见 [SOP-120](SOP-120-feishu-register.md)。
 - **白名单**：`.env` 的 `FEISHU_BRIDGE_ALLOWED_OPEN_IDS`（你的飞书 open_id · 全 bot 共享）。可不填——桥有「首个 @ 它的人自动成 owner」兜底。
 - ~~群喇叭 `FEISHU_XHS_WEBHOOK_URL`~~：**2026-08-30 已废弃**，不用再配。告警一律走 bot 自己的 DM，`notify.py` 已删除（拆除理由见 `ARCH-110` §兜底）。
 - 桥**免代理**（飞书国内端点直连，自动剥 PROXY 环境变量）。
