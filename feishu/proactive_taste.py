@@ -96,6 +96,9 @@ def check_pair_row(row, key, pair):
 def check_registered_board(html, plan):
     from bs4 import BeautifulSoup
     page = BeautifulSoup(html, "html.parser")
+    if "outcomes" in plan or page.select_one("#workbench-outcomes"):
+        from proactive_outcomes import validate
+        return validate(page, plan)
     for key in set(plan.get("artifact_pairs", {})) | set(plan.get("message_policies", {})):
         rows = page.find_all("tr", attrs={"data-business-id": key})
         if len(rows) != 1:

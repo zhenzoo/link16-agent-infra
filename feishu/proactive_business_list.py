@@ -211,7 +211,16 @@ def main(argv=None):
         if args.action == "refresh-members":
             print(f"已核租户群机器人 {refresh_members(args.bot)} 名")
             return
-        rows = assignments(load(args.round_json))
+        plan = load(args.round_json)
+        rows = assignments(plan)
+        if "outcomes" in plan:
+            authors = {key: agent for key, _, agent, _ in rows}
+            specs = plan["outcomes"]
+            if ({s["parent"] for s in specs} != set(authors)
+                    or len({s["id"] for s in specs}) != len(specs)):
+                raise ValueError("清单中有未覆盖的业务或重复结果行")
+            rows = [(s["id"], field(s["name"], "业务项"), authors[s["parent"]],
+                     field(s["expected"], "具体交付物")) for s in specs]
         if args.action == "check":
             check(args.bullets.read_text("utf-8-sig"),rows)
         print("\n".join(bullets(rows)))

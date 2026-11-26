@@ -74,7 +74,13 @@ def result(item, evidence=""):
         return (f'<details class="sent-message"><summary>{text(item["label"])}</summary>'+body
                 + link("打开原私聊", item["url"], True) + '</details>')
     if kind == "links":
-        return '<div class="result-links">' + ''.join(link(l["label"], l["url"], l.get("receipt")) for l in item["items"]) + '</div>'
+        links = []
+        for entry in item["items"]:
+            anchor = link(entry["label"], entry["url"], entry.get("receipt"))
+            if entry.get("review_bundle"):
+                anchor = anchor.replace("<a ", '<a data-result-review="chapters" ', 1)
+            links.append(anchor)
+        return '<div class="result-links">' + ''.join(links) + '</div>'
     if kind == "documents":
         docs = []
         for doc in item["items"]:
@@ -298,18 +304,26 @@ def day_timeline(months, tracks, entries, schedule, render_node):
 def render(owner, timestamp, rows, approvals, timeline, online_url, round_plan=None):
     from proactive_business_contract import apply_round, row_signatures, validate_html
     marker=round_attr=""
+    unified = round_plan is not None and "outcomes" in round_plan
     if round_plan:
         rows=apply_round(rows,round_plan)
+        if unified:
+            from proactive_outcomes import project
+            rows = project(rows, round_plan)
         metadata=json.dumps(row_signatures(rows),ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
         marker=f'<script type="application/json" id="workbench-round-checks">{metadata}</script>'
+        if unified:
+            registry = json.dumps({"url": round_plan["workbench_url"], "rows": round_plan["outcomes"]}, ensure_ascii=False).replace("<", "\\u003c")
+            marker += f'<script type="application/json" id="workbench-outcomes">{registry}</script>'
         round_attr=f' data-round="{text(round_plan["date"])}"'
     css = Path(__file__).with_name("proactive_business.css").read_text(encoding="utf8")
     cloud = f'<a class="board-cloud" href="{address(online_url)}" aria-label="线上工作台">云</a>' if online_url else ""
+    approval_section = "" if unified else f'<section class="major" id="approvals"><h2>审批</h2>{approvals}</section>'
     html=f"""<!doctype html><html lang="zh-CN" data-workbench-layout="business"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{text(owner)}的工作台</title><style>{css}</style>{marker}</head>
 <body><div class="shell"><aside><time datetime="{timestamp.isoformat(timespec='seconds')}">更新于 {timestamp:%m月%d日 %H:%M}</time><h1>{text(owner)}的工作台</h1>
 <nav><a href="#business">业务审批</a><a href="#closed">项目时间线</a></nav></aside><main>{cloud}
 <section class="major" id="business"{round_attr}><h2>业务</h2><div class="business-scroll" tabindex="0"><table class="business"><colgroup><col class="reg"><col class="name"><col class="result"><col class="media"></colgroup><thead><tr><th>执行者</th><th>{"业务 · 预期交付" if round_plan else "业务"}</th><th>{"实交成果 · 本人验收" if round_plan else "结果"}</th><th>附件</th></tr></thead><tbody data-expect-count="{len(rows)}" data-expect-of="登记业务">{business_rows(rows)}</tbody></table></div></section>
-<section class="major" id="approvals"><h2>审批</h2>{approvals}</section>{timeline or '<section class="major project-timeline" id="closed"><h2>项目时间线</h2></section>'}</main></div>
+{approval_section}{timeline or '<section class="major project-timeline" id="closed"><h2>项目时间线</h2></section>'}</main></div>
 <script>const timeline=document.querySelector('.timeline-scroll');document.addEventListener('click',e=>{{const local=e.target.closest('a[data-show-local-path]');if(local){{const path=document.getElementById(local.getAttribute('aria-controls'));if(path){{e.preventDefault();path.classList.toggle('is-visible');local.setAttribute('aria-expanded',String(path.classList.contains('is-visible')));}}return;}}const a=e.target.closest('a[data-flyout-target]');if(a){{const d=document.getElementById(a.dataset.flyoutTarget);if(d){{e.preventDefault();d.showModal();}}}}if(e.target.closest('[data-event-open]'))e.target.closest('article').querySelector('dialog').showModal();if(e.target.closest('[data-close-proposal],[data-event-close]'))e.target.closest('dialog').close();const turn=e.target.closest('[data-week]');if(turn&&timeline)timeline.scrollBy({{left:Math.round(timeline.querySelector('.day').getBoundingClientRect().width*7)*Number(turn.dataset.week)}});}});if(timeline){{const today='{timestamp:%Y-%m-%d}', days=[...timeline.querySelectorAll('.day')],selected=days.find(d=>d.dataset.day===today)||days.find(d=>timeline.querySelector('[data-when="'+d.dataset.day+'"]'));if(selected){{const day=new Date(selected.dataset.day+'T12:00:00Z').getUTCDay();timeline.scrollLeft=Math.max(0,(days.indexOf(selected)-(day+6)%7)*selected.getBoundingClientRect().width);}}}}</script></body></html>"""
     validate_html(html,round_plan)
     return html

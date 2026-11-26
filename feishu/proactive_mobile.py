@@ -149,7 +149,8 @@ class Bundle:
         sections = [n.get("id") for n in board.select("main > section.major")]
         allowed = {"messages", "files", "calendar", "approvals"}
         legacy = sections == ["messages", "files", "reminders", "calendar", "approvals"]
-        business = sections == ["business", "approvals", "closed"]
+        unified = sections == ["business", "closed"] and board.select_one("#workbench-outcomes") is not None
+        business = unified or sections == ["business", "approvals", "closed"]
         if business:
             from proactive_business import result
             from proactive_business_contract import validate_html
@@ -226,6 +227,24 @@ class Bundle:
             sha = digest(source)
             self.docs[dest] = "assets/doc-" + sha + ".html"
             self.originals[dest] = sha
+        if unified:
+            board.html["data-hosted-workbench"] = ""
+        self.review_bundles = set()
+        for anchor in board.select("a[data-result-review=chapters]"):
+            bundle = relative_target(self.board, anchor["href"])
+            if bundle not in self.docs:
+                raise ValueError("提案入口须有受控本地原件")
+            self.review_bundles.add(bundle)
+            catalog = BeautifulSoup(bundle.read_text("utf-8-sig"), "html.parser")
+            entries = catalog.select("article.review-card .record-links > a[href]")
+            if not entries:
+                raise ValueError("提案缺少原表")
+            for link in entries:
+                dest = relative_target(bundle, link["href"])
+                if not can_read(dest, [bundle.parent], HTML):
+                    raise ValueError("提案页只可打包同目录的已登记原表")
+                self.originals[dest] = digest(dest.read_bytes())
+                self.docs[dest] = "assets/doc-" + self.originals[dest] + ".html"
         for path, export in self.docs.items():
             if path == self.board:
                 from proactive_business import DOCUMENT_TYPES
@@ -321,7 +340,7 @@ class Bundle:
                                "src": self.docs[dest] + ("#" + quote(unquote(parts.fragment), safe="") if parts.fragment else ""),
                                "sandbox":"allow-scripts","loading":"lazy","referrerpolicy":"no-referrer"}
                 continue
-            if path != self.board or not frame.has_attr("data-review-fragment"):
+            if (path != self.board and path not in self.review_bundles) or not frame.has_attr("data-review-fragment"):
                 frame.decompose()
                 continue
             ref = frame["data-review-fragment"]
@@ -341,7 +360,7 @@ class Bundle:
             self.frame_ids.setdefault(dest, set()).add(fragment)
             ident = quote(fragment, safe="")
             frame.attrs = {**{k: frame[k] for k in ("class", "title", "height", "width") if k in frame.attrs},
-                           "src": self.docs[dest] + "?preview=" + ident + "#" + ident,
+                           "src": posixpath.relpath(self.docs[dest], posixpath.dirname(self.docs[path]) or ".") + "?preview=" + ident + "#" + ident,
                            "loading": "lazy", "sandbox": "allow-scripts", "referrerpolicy": "no-referrer"}
 
     def copy_accessory_sources(self, soup, path):
@@ -377,6 +396,8 @@ class Bundle:
         for node in soup.find_all(string=lambda s: isinstance(s, Comment)):
             node.extract()
         for tag in soup.select("base, object, embed, form, link[rel~=preconnect], link[rel~=dns-prefetch], .board-cloud"):
+            if path == self.board and "board-cloud" in tag.get("class", []) and soup.select_one("#workbench-outcomes"):
+                continue
             tag.decompose()
         self.prepare_frames(soup, path)
         for meta in soup.select("meta[http-equiv]"):
@@ -387,6 +408,8 @@ class Bundle:
             offset = 1 if container.contents and isinstance(container.contents[0], Doctype) else 0
             container.insert(offset, soup.new_tag("head"))
         policy = POLICY
+        if path in self.review_bundles:
+            policy += "; frame-src 'self'"
         if path in self.catalogs:
             self.format_catalog(soup, path, export)
             policy += "; frame-src 'self'"

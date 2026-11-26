@@ -105,6 +105,9 @@ def row_signatures(rows):
 def validate_html(page,plan=None):
     from proactive_business import result
     dom=page if isinstance(page,BeautifulSoup) else BeautifulSoup(page,"html.parser")
+    if (plan is not None and "outcomes" in plan) or dom.select_one("#workbench-outcomes"):
+        from proactive_outcomes import validate
+        return validate(dom, plan)
     section=dom.select_one("#business")
     if not section:
         if plan:

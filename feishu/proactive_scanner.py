@@ -1084,6 +1084,8 @@ def _project_timeline(config, closed, tasks, output_dir, *, daily=False):
 def render_html(payload: dict[str, Any], actions_pack: dict[str, Any] | None = None, *, output_dir=None) -> str:
     from proactive_business import render, migrate_registered_rows, approval_table
     pack = actions_pack or {}
+    if pack.get("outcome_policy") == "one-per-row" and not (pack.get("business_round") or {}).get("outcomes"):
+        raise ValueError("此工作台须先登记每行唯一成果")
     timeline = _project_timeline(pack.get("project_timeline"), pack.get("closed_items") or {}, pack.get("work_items") or [], output_dir, daily=True)
     owner=payload.get("owner_name") or payload.get("bot") or "本人"
     return render(owner, dt.datetime.now(TZ_SHANGHAI),
