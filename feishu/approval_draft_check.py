@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 import sys
+from urllib.parse import urlsplit
 
 
 class CheckError(ValueError):
@@ -198,6 +199,66 @@ def definition_projection(widgets):
     return fields
 
 
+def check_delivery(report):
+    """Check an observed workbench click against an independently identified business object."""
+    require(isinstance(report.get("delivery"), dict), "缺少从工作台点击到原生业务页的独立证据")
+    proof = report["delivery"]
+    target, trip, landing = proof["expected"], proof["journey"], proof["landing"]
+    intent = target["intent"]
+    require(intent in {"draft_review", "handle_instance", "view_instance"}, "审批交付目的不明")
+    for k in ("object_id", "viewer", "business", "platform", "href"):
+        require(isinstance(target[k], str) and bool(target[k].strip()), "目标、身份、业务或入口缺失")
+    url = urlsplit(target["href"])
+    require(url.scheme in {"https", "lark"} and url.hostname and not url.username and not url.password
+            and any(url.hostname == h or url.hostname.endswith("." + h)
+                    for h in ("feishu.cn", "larksuite.com")), "链接未经官方入口核验")
+    require(trip["origin"] == "workbench" and trip["href"] == target["href"] and
+            trip["platform"] == target["platform"] and isinstance(trip["row"], str) and trip["row"].strip() and
+            trip["previous_object_id"] != target["object_id"], "缺少从工作台独立打开目标行的证据")
+    # A platform handoff can require consent without requiring a second business selection.
+    steps = strings(trip["steps"])
+    require(steps[:1] == ["row_click"] and set(steps[1:]) <= {"auto_redirect", "client_prompt", "open_client"},
+            "工作台点击后仍需业务选单或手动跳转")
+    prompts = sum(step in {"client_prompt", "open_client"} for step in steps)
+    start = datetime.fromisoformat(trip["clicked_at"])
+    end = datetime.fromisoformat(landing["observed_at"])
+    require(start.utcoffset() is not None and end.utcoffset() is not None and start <= end,
+            "点击和页面读回时间无效")
+    require(landing["native"] is True and landing["rendered"] is True and
+            all(landing[k] == target[k] for k in ("object_id", "viewer", "business")),
+            "原生业务页面、实际单据、身份或业务不匹配")
+    require(isinstance(trip["writes"], list) and not trip["writes"], "点验期间存在业务写入或决定")
+    if intent == "draft_review":
+        exp = report["expected"]
+        require(landing["page"] == "draft_editor" and
+                (exp["draft"], exp["owner"]) == (target["object_id"], target["viewer"]),
+                "落点没有绑定原草稿与当前本人")
+        ui = landing["snapshot"]
+        require(datetime.fromisoformat(ui["at"]) == end, "缺少本次点击落点的独立读数")
+        count, rows = check_snapshot(exp, ui, indexed(exp["schema"], "id"))
+        require(landing["node"] == "draft" and target["action"] == "提交", "草稿操作不符")
+        detail = {"required_controls": count, "rows": rows, "attachments": len(ui["attachments"])}
+    else:
+        require(landing["page"] == "instance_detail" and isinstance(target["serial"], str) and
+                bool(target["serial"].strip()) and landing["serial"] == target["serial"] and
+                bool(target["status"]) and landing["status"] == target["status"],
+                "已发起实例的原单编号、状态或详情不符")
+        if intent == "handle_instance":
+            require(isinstance(target["node"], str) and bool(target["node"].strip()) and
+                    landing["node"] == target["node"] and landing["assignee"] == target["viewer"]
+                    and bool(target["task_id"]) and landing["task_id"] == target["task_id"],
+                    "当前办理人、待办或节点不符")
+        detail = {"instance_matched": True}
+    if intent != "view_instance":
+        action = landing["action"]
+        require(isinstance(target["action"], str) and bool(target["action"].strip()) and
+                action["label"] == target["action"] and action["visible"] is True and
+                action["enabled"] is True and action["invoked"] is False, "本人下一步按钮未就绪或已被操作")
+    return {"ok": True, "delivery_verified": True, "business_direct": True, "business_clicks": 1,
+            "client_confirmations": prompts, "human_clicks": 1 + prompts,
+            "prompt_free_one_click": prompts == 0, "intent": intent, **detail}
+
+
 def verify_profile(profile, expected):
     from bridge_scope_audit import user_identity_status
     from proactive_sources import user_read
@@ -216,17 +277,46 @@ def verify_profile(profile, expected):
     require(same, "当前原表定义与验收时的字段或条件不一致")
 
 
+def verify_instance_profile(profile, target):
+    from bridge_scope_audit import user_identity_status
+    from proactive_sources import user_read
+
+    identity = user_identity_status(profile)
+    require(identity.get("owner_matches") is True and identity.get("verified_owner_id") == target["viewer"],
+            "已登记本人和实例查看人不一致")
+    try:
+        data = user_read(profile, ["approval", "instances", "get", "--instance-code", target["api_instance"],
+                                   "--user-id-type", "open_id"])
+    except Exception:
+        raise CheckError("本人接口无法核对当前实例") from None
+    require(data["instance_code"] == target["api_instance"] and data["serial_number"] == target["serial"]
+            and data["status"] == target["status"], "原实例编号或当前状态不符")
+    if target["intent"] == "handle_instance":
+        tasks = data.get("tasks", data.get("task_list", []))
+        require(any(t.get("status") == "PENDING" and t.get("id") == target["task_id"] and
+                    t.get("node_name") == target["node"] and target["viewer"] in (t.get("open_id"), t.get("user_id"))
+                    for t in tasks), "当前本人已无该节点待办")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path, help="私有目录中的脱敏证据 JSON，格式见 SOP-151")
     parser.add_argument("--profile", help="用指定登记身份只读核对当前本人和原表定义")
+    parser.add_argument("--delivery", action="store_true", help="严格核工作台一次点击后实际到达的原生业务页面")
     args = parser.parse_args(argv)
     try:
         report = json.loads(args.evidence.read_text(encoding="utf-8-sig"))
-        result = check(report)
+        if args.delivery:
+            result = check_delivery(report)
+        else:
+            result = {**check(report), "scope": "saved_draft_content", "delivery_verified": False}
         if args.profile:
-            verify_profile(args.profile, report["expected"])
-            result["live_definition_matches"] = True
+            if args.delivery and result["intent"] != "draft_review":
+                verify_instance_profile(args.profile, report["delivery"]["expected"])
+                result["live_instance_matches"] = True
+            else:
+                verify_profile(args.profile, report["expected"])
+                result["live_definition_matches"] = True
     except CheckError as ex:
         print(f"未通过：{ex}", file=sys.stderr)
         return 1

@@ -1,13 +1,14 @@
 ---
 doc_type: SOP
 doc_id: SOP-151
-title: 原生审批草稿填写与重开验收
+title: 原生审批草稿、已发起实例与工作台入口验收
 status: active
 url: ""
-purpose: 沿当前申请人的原生审批草稿填写经核资料，通过退出重开验证必填字段、关联原单、金额及附件。
+purpose: 让本人从工作台一次点击到指定草稿或已有审批实例，核到完整内容和下一步操作，再由本人决定。
 owns:
   - 审批草稿专用的字段来源、条件必填、附件及同一草稿的验收
   - 私有双次读回证据和只读检查工具的使用方法
+  - 逐业务核对工作台入口、原生落点、本人职责与可用操作
 does_not_own:
   - 工作台业务排序与全业务结果检查
   - 审批定义维护、财务裁决与本人最终提交
@@ -19,9 +20,9 @@ related:
   - SOP-150
 ---
 
-# 原生审批草稿填写与重开验收
+# 原生审批草稿、已发起实例与工作台入口验收
 
-**可审的结果是一份能从原系统重新打开的草稿。** 表单内容与来源逐项相符，当前分支的必填控件均有读数，明细、附件及金额与原始材料一致。工作台使用这一份草稿的入口；本机核验记录供本人追溯。
+**本人应能从工作台点一次，看到指定单据的内容和自己下一步可执行的操作。** 先确定业务意图。待本人提交的申请交付已填好的原草稿。待本人处理的采购、报销或其他审批交付当前待办对应的已发起实例。仅供查看的历史单交付指定实例及状态。按实际端分别点验。
 
 ## 1. 找对单据与字段来源
 
@@ -45,10 +46,18 @@ related:
 
 ## 3. 保存、退出、重开
 
-1. 按独立来源先记预期值、明细逐行标识、对应原单 ID、附件清单和总额。保存前取第一次原生读数，与预期比较。提交按钮是否可用不作为校验动作。
+1. 按独立来源先记预期值、明细逐行标识、对应原单 ID、附件清单和总额。保存前取第一次原生读数，与预期比较。检查提交按钮时只读其标签、可见性和启用状态。
 2. 只点击原草稿的「保存草稿」。核「已保存」回执或草稿箱持久化的本次更新时间。退出到没有原草稿 ID 的原表或草稿箱，再从更新时间、表名和唯一条目打开同一草稿。
 3. 在重开的页面重新读取全部生效字段、每行原单选择、金额和附件，单独取第二份证据。再查该时段本人同定义的已发起记录，核对本草稿没有转成正式提交；有其他业务并发时核实其具体实例归属。本人审核提交。收到「只存草稿」的任务时，不点击「提交」、发起实例或处理审批决定。
-4. 交付本人实测可用的原单入口。只能从草稿箱进入的，给出原表、更新时间和唯一定位。报告核验结果和待本人决定的真实缺项，单据与敏感明细留在本人私有目录。
+4. 将内容验收与下面的工作台点验分别留证。只能从草稿箱恢复的，在私有回执登记原表、更新时间与唯一条目，并说明交付入口仍缺。本人仍可自行回看原件。
+
+### 从工作台交付到单据
+
+1. 用本人的登记会话读取草稿或待办。先固定本人、业务、原单身份、所处阶段及目标按钮。对已发起实例同时留官方实例 ID、页面单号、当前状态。待本人办理的实例还要从官方待办核节点、任务 ID 和办理人。采购单曾由本人申请，也可能已流转到本人确认交付。
+2. 草稿优先在编辑页使用客户端自带的分享或复制链接，并检查实际打开的对象。页面分享可能只给模板。可在官方容器用原生编辑页地址做点验。已发起实例取原审批、待办或通知给出的具体详情链接。飞书提供的打开方式见[审批 AppLink 协议](https://open.feishu.cn/document/applink-protocol/supported-protocol/open-an-approval-page?lang=zh-CN)。
+3. 从目标工作台的实际行开始，另开或离开原详情，逐字比对该行 href。记端、构建或页面位置、起止时间、实际单号与全部操作。一次业务点击后，经系统「打开飞书」确认自动到同一单，可验为**业务直达**，另列实际确认次数；完全没有人工确认才同时验为**全程一键**。选草稿、搜索、挑实例或再点「编辑」均是第二次业务操作。已打开的旧窗口须确认此次导航加载了目标对象。网页白屏、模板、审批首页、仅地址相同及 API 成功均留下失败记录。
+4. 在这次点击到达的正式客户端页面重新读内容。草稿核原 ID、五项本人资料（适用时）、动态必填、每行的业务与关联、凭证、总额、附件，以及眼前可用的提交按钮。滚到按钮，不触发。办理实例逐单比对页面单号、业务主题、本人当前节点与可用操作，并记录界面按钮的原文；历史查看核单号与实际状态。报告按钮是否需要本人补选业务选项，保留这一步给本人。
+5. 将实测的 href、对象类型、平台、日期、点击数、结果及脱敏证据位置回工作台主号。需多点一次时，分别报告工作台按钮与额外操作，指明已验证可恢复的原件。等链接来源、客户端或工作台实际行发生变化后重测。结果不足的条目由主号按总规处置。申请提交、确认交付等业务决定均交本人。
 
 ## 4. 执行检查
 
@@ -56,6 +65,7 @@ related:
 
 ```text
 python feishu/approval_draft_check.py --profile <登记应用> <私有双次读回.json>
+python feishu/approval_draft_check.py --delivery --profile <登记应用> <私有工作台点验.json>
 python feishu/approval_draft_check.py tests/fixtures/approval_draft.example.json
 python -m unittest discover -s tests -p test_approval_draft_check.py
 ```
@@ -66,6 +76,49 @@ python -m unittest discover -s tests -p test_approval_draft_check.py
 - `before` 和 `reopened` 各自记录带时区的读回时刻及目标身份。按原生控件映射 `fields`（该控件实际有值）、`stars`（当前星号）、`choices`（选项 ID），逐行也读这三项。隐藏分支的控件不列入当前可见清单；已显示但为空的必填字段要记录为空。`historical` 仅存私下与本人原值比较的布尔结果。
 - `tables` 用定义中的表 ID 作键，行用原件可独立定位的标识。填入实读关联原单 ID、用途、分类及金额；无关联时明确记录空列表。票据或行程单命名只是附件定位依据，不能替代金额与归属核实。`attachments` 为实际上传文件清单。`stable` 用于非敏感且跨保存须一致的读数，例如系统带出的日期；银行值不进入该映射。无此项时用空映射。
 - `events` 依次记录保存、离开和重开观察。保存回执或持久化更新时间记为 `persisted`。只过滤普通浏览动作，保留一切业务写入边界事件；出现发起、提交或审批决定时终止草稿验收。`new_submissions` 取本人已发起记录的实际核对结果。
-- 退出码 0 会给出通过的必填控件数、明细行数和附件数。其余情况返回非零。不在群或仓库保存实际核验输入。
+- 默认命令的范围是保存前后内容，输出 `delivery_verified: false`。工作台入口用 `--delivery` 验收业务直达，成功时分别给出 `business_clicks`、`client_confirmations`、`human_clicks` 和 `prompt_free_one_click`。两种检查失败均返回非零。
+
+**入口证据。** 私有 JSON 的 `delivery` 包含三个对象。样例只使用符号标识，生产证据只留在本人私有目录。
+
+| 对象 | 必须从哪里读、记哪些字段 |
+| --- | --- |
+| `expected` | 从本人业务原单独立确定 `intent`（`draft_review`、`handle_instance`、`view_instance`）、`object_id, viewer, business, platform, href`。草稿的 `action` 是提交；实例另记 `api_instance, serial, status`；待办再记 `node, task_id, action`。 |
+| `journey` | 从实际工作台行记录 `origin="workbench", row, href, platform, previous_object_id, clicked_at, steps, writes`。尚未打开其他对象可将 previous_object_id 留空。步骤依真实顺序记录，例如 `["row_click","auto_redirect"]`、`["row_click","client_prompt"]` 或 `["row_click","select_draft"]`。只读点验时 writes 为空列表。 |
+| `landing` | 目的页的 `observed_at, native, rendered, object_id, viewer, business, page`。草稿为 `draft_editor`，节点记 `draft`，顶层保留原内容的 `expected`，用本次落点的 `snapshot` 按上面原生字段规则重算。实例为 `instance_detail`，记 `serial, status`；办理另记 `assignee, node, task_id`。草稿和办理须有 `action`，含 `label, visible, enabled, invoked`。只读时 invoked 为 false。 |
+
+**反例与分工。** 同一份完整内容经过系统确认到达原单时，业务直达通过，全程一键为否。再分别测试空白落点、人工选草稿、错单号、旧审批节点、按钮不能操作和已执行业务决定，这些情形均须拒绝。工具重算证据的一致性，正式客户端的原生读数由经办人采集。工作台总规、文案 lint、全行业务映射及发布后的实点由主号维护。本 SOP 与检查工具只负责审批。
+
+可复验的脱敏反例：在命令行运行下段，从仓库自带的演示草稿构造一次模拟点击。完整样例的一次系统确认计入总点击。随后仅加入人工选择草稿，校验必须拒绝，两次共用同一组字段、金额和附件。
+
+```python
+import json, sys
+from pathlib import Path
+sys.path.insert(0, "feishu")
+from approval_draft_check import CheckError, check_delivery
+
+report = json.loads(Path("tests/fixtures/approval_draft.example.json").read_text(encoding="utf-8"))
+expected, page = report["expected"], report["reopened"]
+identity = dict(object_id=expected["draft"], viewer=expected["owner"], business="示例申请")
+link = "https://applink.feishu.cn/example"
+trail = dict(origin="workbench", row="示例行", href=link, platform="示例桌面端",
+             previous_object_id=None, clicked_at=report["before"]["at"],
+             steps=["row_click", "client_prompt"], writes=[])
+report["delivery"] = {
+    "expected": dict(identity, intent="draft_review", href=link, platform=trail["platform"], action="提交"),
+    "journey": trail,
+    "landing": dict(identity, observed_at=page["at"], native=True, rendered=True,
+                    page="draft_editor", snapshot=page, node="draft",
+                    action=dict(label="提交", visible=True, enabled=True, invoked=False)),
+}
+result = check_delivery(report)
+assert result["business_direct"] and result["human_clicks"] == 2 and not result["prompt_free_one_click"]
+trail["steps"].append("select_draft")
+try:
+    check_delivery(report)
+except CheckError:
+    pass
+else:
+    raise AssertionError("人工选草稿应被拒绝")
+```
 
 **覆盖与限制。** 检查器重算当前选项驱动的 AND／OR 和 `is` 条件，用定义和原生红星分别找必填项，检查逐行关联、附件清单、金额、保存边界及重开结果。自动校验以采集到的原生证据为输入；付款归属、冲突历史、未获权限的原单和未知定义条件需由经办人核实。回归反例保留同一草稿、全部附件、明细和总额，只将重开后的一项条件红星置空；实际命令须拒绝该证据。
