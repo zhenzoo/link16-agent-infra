@@ -52,3 +52,11 @@ def test_one_actual_object_in_each_visible_row(registered, fault):
     with pytest.raises(ValueError):
         check_registered_board(str(dom), plan)
 
+
+def test_gate_rejects_multiple_objects_inside_a_single_registration(registered):
+    from proactive_outcomes import validate_spec
+    _, plan = registered
+    for bad in (dict(plan["outcomes"][0], pair=True), dict(plan["outcomes"][1], kind="file")):
+        with pytest.raises(ValueError):
+            validate_spec(bad)
+

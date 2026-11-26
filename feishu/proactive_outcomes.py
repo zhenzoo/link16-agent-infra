@@ -8,6 +8,29 @@ from bs4 import BeautifulSoup
 from proactive_taste import artifact_links, check_message, check_pair_row
 
 
+def validate_spec(spec):
+    kind = spec["kind"]
+    if kind not in {"file", "message", "approval"}:
+        raise ValueError("成果只能登记为消息、文件或审批")
+    forms = [key for key in ("href", "pair", "recipient") if key in spec]
+    if spec.get("empty"):
+        if forms:
+            raise ValueError("空结果不应登记入口")
+        return
+    if len(forms) != 1:
+        raise ValueError("每行只准登记一个交付对象")
+    if "recipient" in spec and (kind != "message" or not re.fullmatch(r"[0-9a-f]{64}", spec.get("text_sha256", ""))):
+        raise ValueError("消息草稿缺收件身份或原文指纹")
+    if "pair" in spec and (kind != "file" or spec["pair"] is not True):
+        raise ValueError("只有同版文件可登记双入口")
+    if "href" in spec:
+        target = urlsplit(spec["href"])
+        if not target.path or target.scheme and target.scheme != "https" or target.username or target.password:
+            raise ValueError("成果入口无效")
+        if kind == "file" and target.hostname in {"applink.feishu.cn", "approval.feishu.cn"}:
+            raise ValueError("消息或审批入口不能登记为文件")
+
+
 def project(rows, plan):
     source = {row["id"]: row for row in rows}
     specs = plan["outcomes"]
@@ -19,8 +42,9 @@ def project(rows, plan):
     alias_owners = {alias: s["id"] for s in specs for alias in s.get("aliases", [])}
     for s in specs:
         key, parent, kind = s["id"], s["parent"], s["kind"]
-        if key in seen_ids or kind not in {"file", "message", "approval"}:
-            raise ValueError("业务行重复或成果类别无效")
+        validate_spec(s)
+        if key in seen_ids:
+            raise ValueError("业务行重复")
         seen_ids.add(key)
         row = source[parent]
         data = {"id": key, "name": s["name"], "expected": s["expected"], "agent": row["agent"],
@@ -30,8 +54,6 @@ def project(rows, plan):
             previous = [a for a in row.get("aliases", []) if alias_owners.get(a, key) == key]
             data["aliases"] = list(dict.fromkeys([*data["aliases"], *previous]))
         if s.get("empty"):
-            if any(k in s for k in ("href", "pair", "recipient")):
-                raise ValueError("空结果不应登记入口")
             output.append(data)
             continue
         if "recipient" in s:
@@ -100,6 +122,7 @@ def validate(dom, plan):
     hosted = dom.html.has_attr("data-hosted-workbench")
     for index, (row, s, sig) in enumerate(zip(rows, specs, signatures), 1):
         key = s["id"]
+        validate_spec(s)
         cells = row.find_all(["th","td"], recursive=False)
         if len(cells) != 4 or row.get("data-business-id") != key or sig["id"] != key:
             raise ValueError("行位置或业务不符：" + key)
