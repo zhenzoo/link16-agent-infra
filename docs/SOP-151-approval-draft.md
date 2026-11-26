@@ -35,7 +35,7 @@ related:
 
 ### 制度与表单阅读路线（Roadmap）
 
-先选业务，再读对应条款和当前表单。下表中的审批入口来自本人可发起目录，用于查表样。办理已有单据时从原草稿或原实例继续。新业务先在[公司制度专区「常用管理办法指路」](https://n8r2cr07gk.feishu.cn/wiki/RTezwUIZGiQv0EkndxRcPeEinag)按职能找现行制度，再用下方工具按正式名称查表。
+先选业务，再读对应条款和当前表单。下表中的审批入口来自本人可发起目录，用于查表样。办理已有单据时从原草稿或原实例继续。遇到其他审批，先在[公司制度专区「常用管理办法指路」](https://n8r2cr07gk.feishu.cn/wiki/RTezwUIZGiQv0EkndxRcPeEinag)按职能查找，或用 §2 的知识库查询按业务词搜索。读到生效正文后，把适用章节、模板和正式表名补回该业务行。若只有目录标题，继续查正文与原表，保留尚未核实的条款。
 
 | 办什么 | 先读哪份原件 | 哪些要填，依据什么填 |
 | --- | --- | --- |
@@ -76,6 +76,7 @@ related:
 **经办人查原表和文件的工具。** 在 Link16 仓库根目录使用登记应用。先查表名，再按返回的 `approval_code` 读取当前定义。下例只读，保留每格的 `required`、`visible`、`display_condition`、选项及 `children`。将条件里的控件 ID、选项值与同一份定义对应，选项变化后重新判定。对外部表单使用查询返回的 `create_link` 查原应用。私有办理记录随表单版本更新。
 
 ```powershell
+'{"query":"用印","space_id":"7576186296587078873"}' | lark-cli --profile <登记应用> api POST /open-apis/wiki/v2/nodes/search --as user --data -
 '{"keyword":"办公用品采购申请","locale":"zh-CN"}' | lark-cli --profile <登记应用> approval approvals search --as user --data -
 lark-cli --profile <登记应用> approval approvals get --approval-code <上一步返回的编码> --as user --jq '.data.form | fromjson'
 python feishu/docio_cli.py --bot <登记应用> read "<公司制度链接>" --into "<私有目录>"
