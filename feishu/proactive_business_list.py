@@ -9,7 +9,7 @@ from pathlib import Path
 import registry
 from bot_names import labels, normalize
 from bridge_env import bots_config_path, registry_path, EXAMPLE_REGISTRY_NAME
-from bridge_injection import atomic_write_json
+from bridge_injection import atomic_write_json, injection_lock
 
 
 HERE = Path(__file__).resolve().parent
@@ -34,7 +34,7 @@ def peer_cache(bot):
     return HERE / "_state" / "proactive" / bot / "business-members.json"
 
 
-def refresh_members(bot):
+def read_members(bot):
     tenant = tenant_for(bot, registry.load_registry())
     group = tenant["group_chat_id"]
     args = [shutil.which("lark-cli") or "lark-cli", "--profile", bot, "im", "+chat-members-list",
@@ -48,8 +48,40 @@ def refresh_members(bot):
                row.get("member_id") and row.get("app_id") and row.get("name")]
     if not members:
         raise ValueError("原租户群缺少已核身份的机器人")
-    atomic_write_json(peer_cache(bot), {"bot": bot, "chat_id": group, "members": members})
-    return len(members)
+    return {"bot": bot, "chat_id": group, "members": members}
+
+
+def refresh_members(bot):
+    directory = read_members(bot)
+    atomic_write_json(peer_cache(bot), directory)
+    return len(directory["members"])
+
+
+def verified_member_address(bot, peer, group=None):
+    """Use the sender's registered group and its own live membership view."""
+    if not isinstance(bot, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", bot):
+        raise ValueError("发送方代号无效")
+    path = peer_cache(bot)
+    if not path.is_file():
+        return None
+    cached = load(path)
+    if cached.get("bot") != bot or (group and group != cached.get("chat_id")):
+        return None
+    def matching(directory):
+        return {(row["app_id"], row["member_id"]) for row in directory.get("members", [])
+                if row.get("name", "").casefold() == peer.casefold()
+                and re.fullmatch(r"cli_[A-Za-z0-9]+", row.get("app_id") or "")
+                and re.fullmatch(r"ou_[A-Za-z0-9]+", row.get("member_id") or "")}
+    before = matching(cached)
+    if not before:
+        return None
+    if len(before) != 1:
+        raise ValueError("同群有多个同名应用，请先核对收件人")
+    current = read_members(bot)
+    if (current["chat_id"] != cached["chat_id"] or current["bot"] != bot
+            or matching(current) != before):
+        raise ValueError("群或收件应用的登记已变化，请重新核实派单对象")
+    return current["chat_id"], next(iter(before))[1]
 
 
 def roster_names(local, federated, members):
@@ -197,10 +229,101 @@ def check(text, assigned):
             raise ValueError(f"第 {index} 行与原业务、登记作者、具体交付或格式不符。应为 {wanted}")
 
 
+def dispatch_parts(plan, bot):
+    """Rebuild the entire owner message before releasing any part of a batch."""
+    import bridge_inbound
+    from feishu_bridge import STATE_DIR, load_owner_record
+    if bot != plan.get("dispatch_bot"):
+        raise ValueError("本轮业务登记属于另一主号")
+    source_mid = plan.get("source_mid")
+    if not isinstance(source_mid, str) or not re.fullmatch(r"om_[A-Za-z0-9_-]+", source_mid):
+        raise ValueError("分派缺少本人原消息编号")
+    owner = load_owner_record(bot)
+    if not owner or not owner.get("open_id") or owner.get("provisional"):
+        raise ValueError("主号尚未核实本人身份")
+    record = next((r for r in reversed(bridge_inbound.read_records(STATE_DIR, bot, strict=True))
+                   if r.get("message_id") == source_mid and r.get("source") == bridge_inbound.NATIVE_SOURCE
+                   and r.get("bot") == bot and r.get("chat_type") in {"p2p", "private"}
+                   and (r.get("sender") or {}).get("open_id") == owner["open_id"]
+                   and r["sender"].get("is_bot") is False), None)
+    if not record or not record.get("raw_text"):
+        raise ValueError("未找到主号收到的本人原文")
+    incoming = {r["id"] for r in plan["items"]}
+    owners = {key: agent for key, _, agent, _ in assignments(plan) if key in incoming}
+    quotes = {key: [] for key in owners}
+    segments = plan.get("source_parts")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("缺少原文分段与事项对应表")
+    original = []
+    for section in segments:
+        if not isinstance(section, dict):
+            raise ValueError("每段须提供原文和实际事项")
+        body, items = section.get("text"), section.get("items")
+        if (not isinstance(body, str) or not body.strip() or not isinstance(items, list) or not items
+                or any(not isinstance(key, str) or key not in quotes for key in items)
+                or len(set(items)) != len(items)):
+            raise ValueError("每段原文须指定本批的实际事项")
+        body = body.replace("\r\n", "\n")
+        original.append(body)
+        for key in items:
+            quotes[key].append(body)
+    if "".join(original) != record["raw_text"].replace("\r\n", "\n") or not all(quotes.values()):
+        raise ValueError("分段未按原顺序覆盖完整来信，或事项没有原文")
+    return {key: (owners[key], parts) for key, parts in quotes.items()}
+
+
+def check_recipient(jobs, item, peer, text):
+    if item not in jobs or normalize(jobs[item][0]) != normalize(peer):
+        raise ValueError("收件人与该段原文的登记执行者不符")
+    remaining = text.replace("\r\n", "\n")
+    for part in jobs[item][1]:
+        _, found, remaining = remaining.partition(part)
+        if not found:
+            raise ValueError("派单正文未按序保留分给此执行者的原文")
+
+
+def review_outgoing(path, bot, item, peer, text):
+    plan = load(path)
+    jobs = dispatch_parts(plan, bot)
+    check_recipient(jobs, item, peer, text)
+    return plan["source_mid"]
+
+
+def round_index(state, bot):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", bot):
+        raise ValueError("主号代号无效")
+    return Path(state) / "proactive" / bot / "dispatch-rounds.json"
+
+
+def register_round(state, path, plan, jobs):
+    bot = plan["dispatch_bot"]
+    index = round_index(state, bot)
+    with injection_lock(state, "dispatch-rounds", bot):
+        active = load(index) if index.is_file() else {}
+        for key in jobs:
+            active[key] = {"path": str(path.resolve()), "mid": plan["source_mid"]}
+        atomic_write_json(index, active)
+
+
+def pending_round(state, bot, item):
+    import bridge_outbound
+    index = round_index(state, bot)
+    entry = load(index).get(item) if index.is_file() else None
+    if not entry:
+        return None
+    if any(r["route"].get("source_mid") == entry["mid"] and r["route"].get("item") == item
+           for r in bridge_outbound.read_records(state, bot)):
+        return None
+    path = Path(entry["path"])
+    if load(path).get("source_mid") != entry["mid"]:
+        raise ValueError("登记的批次文件已更换，请用原消息重新核对本轮业务")
+    return path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="action", required=True)
-    for action in ("arrange","check"):
+    for action in ("arrange","check","audit-sends"):
         sub = subs.add_parser(action)
         sub.add_argument("--round-json", type=Path, required=True)
         if action == "check":
@@ -212,6 +335,26 @@ def main(argv=None):
             print(f"已核租户群机器人 {refresh_members(args.bot)} 名")
             return
         plan = load(args.round_json)
+        if args.action == "audit-sends":
+            from bridge_history import STATE_DIR
+            import bridge_outbound
+            bot = plan["dispatch_bot"]
+            jobs = dispatch_parts(plan, bot)
+            records = bridge_outbound.read_records(STATE_DIR, bot)
+            for item, (peer, parts) in jobs.items():
+                mids = set()
+                for row in records:
+                    route = row.get("route") or {}
+                    if (route.get("source_mid") == plan["source_mid"] and route.get("item") == item
+                            and normalize(route.get("peer") or "") == normalize(peer) and row.get("message_id")):
+                        check_recipient(jobs, item, peer, row["text"])
+                        mids.add(row["message_id"])
+                if len(mids) != 1:
+                    raise ValueError(f"{item} 应有一条已核派单，实际 {len(mids)} 条")
+            print(f"本批 {len(jobs)} 项均已向登记作者投递，各有唯一飞书消息编号。")
+            return
+        batch = "source_mid" in plan or "source_parts" in plan
+        jobs = dispatch_parts(plan, plan["dispatch_bot"]) if batch else {}
         rows = assignments(plan)
         if "outcomes" in plan:
             authors = {key: agent for key, _, agent, _ in rows}
@@ -223,6 +366,9 @@ def main(argv=None):
                      field(s["expected"], "具体交付物")) for s in specs]
         if args.action == "check":
             check(args.bullets.read_text("utf-8-sig"),rows)
+        elif batch:
+            from bridge_history import STATE_DIR
+            register_round(STATE_DIR, args.round_json, plan, jobs)
         print("\n".join(bullets(rows)))
     except (ValueError, KeyError, StopIteration, TypeError, OSError, subprocess.CalledProcessError) as exc:
         parser.exit(1,f"业务清单未通过：{exc}\n")

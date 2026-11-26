@@ -547,8 +547,10 @@ def project_short_name(name: str, taken: set[str] | None = None) -> str:
     return tokens[0]
 
 
-def suggest_bots(projects: list[dict], prefix: str, existing_names: set[str] | None = None) -> list[dict]:
+def suggest_bots(projects: list[dict], prefix: str, existing_names: set[str] | None = None,
+                 existing_projects: set[Path] | None = None) -> list[dict]:
     out, used = [], set(existing_names or ())
+    represented = set(existing_projects or ())
     taken_short = {n[len(prefix) + 1:] for n in used if n.startswith(prefix + "-")}
     for p in projects:
         short = project_short_name(p["name"], taken_short)
@@ -559,20 +561,22 @@ def suggest_bots(projects: list[dict], prefix: str, existing_names: set[str] | N
             bot = f"{prefix}-{short}-{n}"
             n += 1
         used.add(bot)
-        out.append({"bot": bot, "display_name": bot, "cwd": p["path"], "project": p["name"], "reason": p["reason"]})
+        root = Path(p["path"]).resolve()
+        role = "部署智能体" if root == HERE.parent else "项目执行者" if root in represented else "项目 0 号位"
+        out.append({"bot": bot, "display_name": bot, "cwd": p["path"], "project": p["name"], "reason": p["reason"],
+                    "recommended_role": role})
+        represented.add(root)
     return out
 
 
-def _existing_bot_names() -> set[str]:
-    names = set()
-    for fname in ("bridge-bots.local.json", "bridge-bots.json"):
-        try:
-            for b in json.loads((HERE / fname).read_text(encoding="utf-8")).get("bots") or []:
-                if isinstance(b, dict) and b.get("name"):
-                    names.add(str(b["name"]))
-        except (OSError, ValueError):
-            continue
-    return names
+def existing_projects():
+    from bridge_env import bots_config_path
+    from feishu_bridge import _expand_cd_path
+    config = json.loads(bots_config_path(HERE.parent).read_text(encoding="utf-8-sig"))
+    bots = config["bots"]
+    default = (config.get("defaults") or {}).get("cwd")
+    directories = {Path(_expand_cd_path(b.get("cwd", default)) or HERE.parent).resolve() for b in bots}
+    return {b["name"] for b in bots}, directories
 
 
 # ---------------------------------------------------------------- 目标 profile
@@ -618,7 +622,8 @@ def scan(roots=None, days=7, top=3, exports=None, profile=None) -> dict:
     roots = [Path(r) for r in roots] if roots else default_roots()
     projects = active_projects(roots, days, top, claude_home.get("sessions") or [])
     prefix = machine_prefix()
-    bots = suggest_bots(projects, prefix["prefix"], _existing_bot_names())
+    names, directories = existing_projects()
+    bots = suggest_bots(projects, prefix["prefix"], names, directories)
     return {
         "schema": SCHEMA,
         "generated_at": _iso(time.time()),
@@ -673,7 +678,7 @@ def render(report: dict) -> str:
     mp = report["machine_prefix"]
     lines.append(f"③ 建议的智能体（机器代号 {mp['prefix']} · 来源：{mp['source']}）")
     for b in report["suggested_bots"]:
-        lines.append(f"  · {b['bot']}   工作目录 {b['cwd']}")
+        lines.append(f"  · {b['bot']}   工作目录 {b['cwd']}   建议岗位 {b.get('recommended_role', '待选择')}")
     if not report["suggested_bots"]:
         lines.append("  （没有活跃项目就不建议 bot；可手动 --cwd 指定）")
     t = report["targets"]

@@ -178,6 +178,7 @@ def test_only_sdk_sender_and_trailing_stamp_for_same_request_prove_remote_return
         assert d.remote_reply("manager", "worker", out) is None
     monkeypatch.setattr(d.bridge_history.bridge_inbound, "read_records", lambda *_: [reply])
     assert d.remote_reply("manager", "worker", out)["reply_mid"] == "reply"
+    assert d.remote_reply("Manager", "Worker", out)["reply_mid"] == "reply"
     assert "ready" not in d.remote_reply("manager", "worker", out)
 
 

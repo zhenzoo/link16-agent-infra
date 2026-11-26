@@ -230,7 +230,7 @@ def _apply_roster_defaults(spec, defaults):
     runtime = str(spec.get("agent") or spec.get("runtime") or "claude").lower()
     merged = {
         k: v for k, v in defaults.items()
-        if k not in identity_keys and k != "profiles" and not k.startswith("_")
+        if k not in identity_keys and k not in {"profiles", "project_controls"} and not k.startswith("_")
     }
     merged.update(spec)
     if any(spec.get(k) for k in identity_keys):
@@ -329,6 +329,7 @@ def load_bots():
             "profile": profile,
             "agent": runtime,
             "display_name": s.get("display_name"),
+            "project_controls": s.get("project_controls", {}),
             "codex_transport": s.get("codex_transport"),
             "delivery_contract": s.get("delivery_contract"),
             "agent_cmd": s.get("agent_cmd"),
@@ -928,9 +929,9 @@ def _peer_slash_request(text, target):
     if not sep or not body.startswith("/") or "\n" in body or "\r" in body:
         return None
     peer, arrow, recipient = header.partition(" → ")
-    if not arrow or recipient != target or not re.fullmatch(r"[\w-]+", peer):
+    if not arrow or recipient.casefold() != target.casefold() or not re.fullmatch(r"[\w-]+", peer):
         return None
-    tail = f" [飞书_from_{peer}_to_{target}]"
+    tail = f" [飞书_from_{peer}_to_{recipient}]"
     if not body.endswith(tail):
         return None
     command = body[:-len(tail)]
@@ -940,16 +941,19 @@ def _peer_slash_request(text, target):
 
 
 def _verify_peer_app(bot, peer, mid, chat, expected_text):
-    """Read the signed-in recipient's platform record and bind it to a local app."""
+    """Return the platform-authenticated App ID, bound to this recipient and message."""
+    import agent_grant
     import feishu_rest
     import tenant_probe
     import bridge_scope_audit
     if not re.fullmatch(r"om_[a-zA-Z0-9_-]+", mid or ""):
         return False
-    spec = tenant_probe._bot_spec(peer)
-    if not spec:
-        return False
-    app = bridge_scope_audit._env_val(spec["app_id_env"])
+    rule = agent_grant.project_rule(bot, peer)
+    if rule is None:
+        spec = tenant_probe._bot_spec(peer)
+        app = bridge_scope_audit._env_val(spec["app_id_env"]) if spec else None
+    else:
+        app = rule.get("app_id") if rule.get("target") == bot["name"] and rule.get("chat_id") == chat else None
     if not app:
         return False
     token = _tenant_token(bot["app_id"], bot["app_secret"])
@@ -965,11 +969,13 @@ def _verify_peer_app(bot, peer, mid, chat, expected_text):
                 key = mention.get("key")
                 if key and body.startswith(key + " "):
                     body = body[len(key):].lstrip()
-            return body == expected_text
+            if rule is not None and author.get("id_type") != "app_id":
+                return False
+            return app if body == expected_text else False
     return False
 
 
-def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None):
+def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None, verified_app=None, chat=None):
     """群内破坏性命令放不放行 → (bool, 原因)。三条放行路径，其余一律拒：
       ① 主人本人在群里下的（sender == 本 bot 的 owner）——他本来就是老大。
       ② agent 关自己（解析出来就是我）——自己关自己无风险，主人 2026-08-03 拍板永远放行。
@@ -982,7 +988,7 @@ def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None):
     等于「谁都关不了」。标准 peer 命令从飞书原消息核对发件 App ID；文字戳只用于关联。"""
     cap = cmd.lstrip("/")
     cap = _CAP_ALIAS.get(cap, cap)
-    if sender and sender == load_owner(bot["name"]):
+    if not verified_peer and sender and sender == load_owner(bot["name"]):
         return True, "主人本人"
     try:
         from registry import name_for_open_id
@@ -993,14 +999,13 @@ def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None):
             name_for_open_id = None
     who = verified_peer or (name_for_open_id(sender, default=None) if name_for_open_id and sender else None)
     src = "飞书发件应用" if verified_peer else "open_id"
+    import agent_grant
+    if who and agent_grant.project_rule(bot, who) is not None:
+        return agent_grant.review_control(bot, who, verified_app, chat, text or cmd)
     if who and who == bot["name"]:
         return True, "自己关自己（永远放行）"
     if not who:
         return False, "发信应用身份未核实"
-    try:
-        import agent_grant
-    except ImportError:
-        return False, "授权模块不可用·fail closed"
     if agent_grant.has_cap(who, cap, STATE_DIR, target=bot["name"]):
         return True, f"{who} 持有 {cap} 授权（认人来源：{src}）"
     return False, f"{who} 没有 `{cap}` 授权（主人私聊它一句、它自己 claim 即可）"
@@ -3167,7 +3172,7 @@ def _run_bot(bot_name=None):
             await respond(chat_id, f"📂 已选目录 `{target_dir}`（账号 `{_acc}`）· **会话还没起** —— 发下一条正式消息（你的提示词）我就在这儿起会话。")
 
         async def handle_slash(chat_id, text, sender=None, from_group=False, arrived=None, inbound_id=None,
-                               created=None, verified_peer=None, reply=reply):
+                               created=None, verified_peer=None, verified_app=None, reply=reply):
             cmd = text.split()[0].lower()
             arg = text[len(cmd):].strip()
             if verified_peer and cmd.lstrip("/") in _GATED_CAPS and not created:
@@ -3185,7 +3190,8 @@ def _run_bot(bot_name=None):
             #   （close 关会话 / clear 抹光我上下文 / cd 改我工作目录 / account 换我账号 / new / stop）。
             #   这不是新开的口子，是**早就大敞、今天才装闸**。私聊(非群)不受影响：私聊已过 is_allowed=只有主人。
             if from_group and (cmd.lstrip("/") in _GATED_CAPS or (verified_peer and cmd == "/screen")):
-                verdict, why = _gate_verdict(bot, sender, cmd, text, verified_peer=verified_peer)
+                verdict, why = _gate_verdict(bot, sender, cmd, text, verified_peer=verified_peer,
+                                             verified_app=verified_app, chat=chat_id)
                 if not verdict:
                     blog(bot["name"], f"🚧 拒绝群内 {cmd}：{why}")
                     receipt(bot["name"], {"tid": "gate", "kind": "slash_denied", "cmd": cmd,
@@ -3879,7 +3885,9 @@ def _run_bot(bot_name=None):
                     cmd = command.split()[0].lower()
                     durable_inbox.boundary(msg.id)
                     try:
-                        authenticated = (getattr(msg.sender, "is_bot", False) and not resources and
+                        app_event = getattr(msg, "link16_sender_type", None)
+                        is_app = app_event in {"app", "bot"} if app_event else getattr(msg.sender, "is_bot", False)
+                        authenticated = (is_app and not resources and
                                          await asyncio.to_thread(_verify_peer_app, bot, peer, msg.id, msg.chat_id, text))
                     except (OSError, ValueError, RuntimeError, KeyError, SystemExit):
                         authenticated = False
@@ -3895,7 +3903,7 @@ def _run_bot(bot_name=None):
 
                     if cmd.lstrip("/") in _GATED_CAPS or cmd in ("/help", "/screen"):
                         await handle_slash(msg.chat_id, command, sender=sender, from_group=True,
-                                           arrived=time.time(), inbound_id=msg.id, verified_peer=peer,
+                                           arrived=time.time(), inbound_id=msg.id, verified_peer=peer, verified_app=authenticated,
                                            created=bridge_inbound.event_ts(getattr(msg, "create_time", None), 0.0),
                                            reply=collect_result)
                     else:

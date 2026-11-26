@@ -236,8 +236,8 @@ def recorded_mid(sender, peer, task_id, saved, registered_peer=None):
 
 def is_request(row, peer, registered_peer=None):
     route = row.get("route") or {}
-    return (route.get("kind") in ("a2a", "a2a-webhook") and route.get("peer") in {peer, registered_peer}
-            and bool(route.get("peer")) and not route.get("reply_to"))
+    return (route.get("kind") in ("a2a", "a2a-webhook") and not route.get("reply_to")
+            and any(same_bot_name(route.get("peer"), name) for name in (peer, registered_peer)))
 
 
 def sdk_stamp(sender, peer, route, item):
@@ -248,7 +248,8 @@ def sdk_stamp(sender, peer, route, item):
         return None
     raw = str(item.get("raw_text") or "").rstrip()
     stamps = list(turn_delivery_guard.PEER_STAMP_RE.finditer(raw))
-    if stamps and stamps[-1].end() == len(raw) and stamps[-1].groups()[:2] == (peer, sender):
+    if (stamps and stamps[-1].end() == len(raw) and same_bot_name(stamps[-1][1], peer)
+            and same_bot_name(stamps[-1][2], sender)):
         return stamps[-1]
     return None
 
@@ -372,7 +373,7 @@ def dispatch_prompt(sender, task_id, prompt, artifacts):
     return product_brief(f"[Proactive {identifier(task_id)}]\n" + prompt + "\n\n" + instruction, artifacts)
 
 
-def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *, item=None):
+def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *, item=None, round_json=None):
     bridge_env.assert_sender_identity(sender)
     path = task_path(sender, task_id)
     if not item:
@@ -442,6 +443,11 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
         from user_text import require_text
         try:
             require_text(outgoing)
+            from proactive_business_list import pending_round
+            round_json = round_json or pending_round(STATE, sender, item)
+            if round_json:
+                from proactive_business_list import review_outgoing
+                review_outgoing(round_json, sender, item, peer, outgoing)
             with ItemOwners(STATE).author(sender, item, peer, task_id):
                 pass
         except ValueError as exc:
@@ -453,6 +459,7 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
         try:
             sent = subprocess.run([sys.executable, str(HERE / "send_feishu_msg.py"), "--bot", sender, "--to-agent", peer,
                                    "--item", item, "--task-id", task_id,
+                                   *(["--round-json", str(round_json)] if round_json else []),
                                    "--text", outgoing, "--json"],
                                   capture_output=True, text=True, encoding="utf-8")
         except OSError as exc:
@@ -519,6 +526,8 @@ def main():
     preview.add_argument("--item", required=True, type=identifier)
     preview.add_argument("--prompt-file", required=True, type=Path)
     preview.add_argument("--artifact", action="append", default=[])
+    preview.add_argument("--peer", type=identifier)
+    preview.add_argument("--round-json", type=Path)
     for command in ("check", "status", "send"):
         cmd = sub.add_parser(command)
         cmd.add_argument("--peer", required=True, type=identifier)
@@ -531,6 +540,7 @@ def main():
         if command == "send":
             cmd.add_argument("--item", type=identifier, help="同一物品或业务事项的稳定标识，新派单必填")
             cmd.add_argument("--prompt-file")
+            cmd.add_argument("--round-json", type=Path)
             cmd.add_argument("--next-check", help="首次追踪时刻，含时区；省略时短单10分钟、长单30分钟查一次")
         if command != "check":
             cmd.add_argument("--request-mid")
@@ -541,6 +551,15 @@ def main():
         if args.command == "preview":
             with args.prompt_file.open(encoding="utf-8-sig", newline="") as source:
                 result = {"item":args.item,"would_send":False,"text":dispatch_prompt(args.bot,args.task_id,source.read(),args.artifact)}
+            from user_text import require_text
+            require_text(result["text"])
+            from proactive_business_list import pending_round
+            args.round_json = args.round_json or pending_round(STATE, args.bot, args.item)
+            if args.round_json:
+                if not args.peer:
+                    raise ValueError("分段预览需要实际收件人 --peer")
+                from proactive_business_list import review_outgoing
+                result["source_mid"] = review_outgoing(args.round_json, args.bot, args.item, args.peer, result["text"])
         elif args.command == "overview":
             result = active_overview()
         elif args.command == "check":
@@ -550,7 +569,8 @@ def main():
             sender = identifier(args.bot)
             interval = 600 if args.size == "short" else 1800
             due = timestamp(args.next_check) if args.next_check else time.time() + interval
-            result = send(sender, args.peer, args.task_id, args.size, args.prompt_file, args.artifact, args.request_mid, item=args.item)
+            result = send(sender, args.peer, args.task_id, args.size, args.prompt_file, args.artifact,
+                          args.request_mid, item=args.item, round_json=args.round_json)
             saved = read_object(task_path(sender, args.task_id))
             if saved.get("request_mid") and result.get("request_mid") == saved["request_mid"] and result.get("ready") is not False:
                 tracker = Followup(sender)

@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -386,6 +387,15 @@ def peer_text(bot, peer, text, *, reply_to=None):
     return f"{bot} → {peer}\n\n{text} [飞书_from_{bot}_to_{peer}{relation}]"
 
 
+def peer_address(bot, peer, xt, in_chat=None):
+    if not xt and not _is_local(peer):
+        from proactive_business_list import verified_member_address
+        verified = verified_member_address(bot, peer, in_chat)
+        if verified:
+            return verified
+    return (xt["chat_id"] if xt else shared_group(bot, peer, in_chat)), resolve_open_id(peer)
+
+
 def send_agent_message(bot, peer, text, *, reply_to=None, in_chat=None,
                        message_uuid=None, resolved=None):
     """Shared transport for CLI requests and bridge automatic peer results.
@@ -393,10 +403,13 @@ def send_agent_message(bot, peer, text, *, reply_to=None, in_chat=None,
     No turn guard or ledger here: callers own their existing delivery gate/ACK.
     Returned evidence never contains webhook URLs or credentials.
     """
+    if not reply_to:
+        from user_text import require_text
+        require_text(text)
     if resolved is None:
         xt = cross_tenant_route(bot, peer)
-        ats = [resolve_open_id(peer)]
-        target = xt["chat_id"] if xt else shared_group(bot, peer, in_chat)
+        target, member = peer_address(bot, peer, xt, in_chat)
+        ats = [member]
     else:
         xt, ats, target = resolved["xt"], resolved["ats"], resolved["target"]
     stamped = peer_text(bot, peer, text, reply_to=reply_to)
@@ -446,6 +459,7 @@ def main():
     ap.add_argument("--reply-to", help="显式回信所关联的原消息 mid；收到回信不自动反射回复")
     ap.add_argument("--item", help="Proactive 生产派单的物品或业务事项；同一成品沿用一个标识")
     ap.add_argument("--task-id", help="同一事项的原任务或续单标识")
+    ap.add_argument("--round-json", type=Path, help="按本人原消息逐段核对本批派单")
     ap.add_argument("--coordination", choices=["handoff","receipt","publish","compute","control"],
                     help="只做停笔交接、收回执、发布已验版本、运行既定计算或平台控制")
     a = ap.parse_args()
@@ -464,13 +478,10 @@ def main():
         raise SystemExit("❌ 需要 --bot <发送方>")
     if not a.text:
         raise SystemExit("❌ 需要 --text <正文>")
-    from user_text import require_text
-    try:
-        require_text(a.text)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
     if a.reply_to and not a.to_agent:
         raise SystemExit("❌ --reply-to 必须配 --to-agent")
+    if a.round_json and not (a.to_agent and a.item and a.task_id):
+        raise SystemExit("分段派单需要 --to-agent、--item 和 --task-id")
     if a.coordination and (not a.to_agent or a.item or a.task_id or a.reply_to):
         raise SystemExit("--coordination 仅用于独立的非生产联络")
     marker = re.match(r"^\s*\[Proactive\s+([^\]\s]+)\]", a.text, re.I)
@@ -486,15 +497,33 @@ def main():
     ownership_registry = ItemOwners(STATE_DIR)
     if a.item:
         a.text = product_brief(a.text)
+    from user_text import require_text
+    source_mid = None
+    try:
+        require_text(a.text)
+        if a.item:
+            from proactive_business_list import pending_round, review_outgoing
+            batch = pending_round(STATE_DIR, a.bot, a.item)
+            if batch and a.round_json and batch.resolve() != a.round_json.resolve():
+                raise ValueError("该事项已登记另一派单批次")
+            if batch or a.round_json:
+                source_mid = review_outgoing(batch or a.round_json, a.bot, a.item, a.to_agent, a.text)
+    except (ValueError, KeyError, OSError, TypeError) as exc:
+        raise SystemExit(str(exc)) from exc
     if a.to_agent and not (a.item or a.coordination or a.reply_to) and ownership_registry.manages(a.bot):
         raise SystemExit("此主号的生产派单须给 --item 和 --task-id。交接、询证、上架、既定计算或平台控制请标 --coordination。")
 
     ats = list(a.at) + [resolve_open_id(nm) for nm in a.at_agent]
     target = a.to
     xt = cross_tenant_route(a.bot, a.to_agent) if a.to_agent and not a.in_chat else None
+    if xt and a.coordination == "control":
+        raise SystemExit("会话控制需要可由目标验证的应用身份。此跨租户 webhook 无法提供该身份。")
     if a.to_agent:
-        ats.append(resolve_open_id(a.to_agent))
-        target = xt["chat_id"] if xt else shared_group(a.bot, a.to_agent, a.in_chat)
+        try:
+            target, member = peer_address(a.bot, a.to_agent, xt, a.in_chat)
+        except (ValueError, OSError, KeyError, subprocess.SubprocessError) as exc:
+            raise SystemExit(f"收件人核验失败：{exc}") from exc
+        ats.append(member)
     if not target:
         target = a.in_chat or _session_chat(a.bot)
     if not target:
@@ -523,8 +552,15 @@ def main():
                      if a.item else nullcontext())
         try:
             with ownership:
+                options = {}
+                if source_mid:
+                    import uuid
+                    if any(r["route"].get("source_mid") == source_mid and r["route"].get("item") == a.item
+                           for r in bridge_outbound.read_records(STATE_DIR, a.bot)):
+                        raise ValueError("该段原文已有飞书派单回执，请沿原消息核对")
+                    options["message_uuid"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"link16:{a.bot}/{source_mid}/{a.item}"))
                 sent = send_agent_message(a.bot, a.to_agent, a.text, reply_to=a.reply_to,
-                                          resolved={"target": target, "ats": ats, "xt": xt})
+                                          resolved={"target": target, "ats": ats, "xt": xt}, **options)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         ok, info, mirror = sent["ok"], sent["message_id"] or sent["err"], sent["mirror"]
@@ -541,6 +577,8 @@ def main():
         route.update({"peer": a.to_agent})
         if a.item:
             route.update(item=a.item, task_id=a.task_id)
+        if source_mid:
+            route["source_mid"] = source_mid
         if a.coordination:
             route["coordination"] = a.coordination
         if a.reply_to:

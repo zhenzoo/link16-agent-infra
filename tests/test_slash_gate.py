@@ -133,13 +133,13 @@ class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
         handler = self.handler()
         result = mock.AsyncMock()
         now = time.time()
-        args = dict(sender="app_sender", from_group=True, verified_peer="lead", arrived=now, reply=result)
+        args = dict(sender="app_sender", from_group=True, verified_peer="lead", verified_app="cli_lead", arrived=now, reply=result)
         await handler("group", "/close", **args)
         self.env["_gate_verdict"].assert_not_called()
         self.env["clear_session"].assert_not_called()
         await handler("group", "/close", created=now, **args)
         self.env["_gate_verdict"].assert_called_once_with(
-            self.env["bot"], "app_sender", "/close", "/close", verified_peer="lead")
+            self.env["bot"], "app_sender", "/close", "/close", verified_peer="lead", verified_app="cli_lead", chat="group")
         self.env["clear_session"].assert_called_once_with("unit")
         self.assertIn("已关闭会话", result.call_args.args[1])
         self.env["command_card"].assert_not_awaited()
@@ -372,11 +372,50 @@ class GateVerdictTest(unittest.TestCase):
         self.assertTrue(feishu_bridge._gate_verdict(self.BOT, None, "/model", verified_peer="peer")[0])
         self.assertFalse(feishu_bridge._gate_verdict({"name": "other"}, None, "/close", verified_peer="peer")[0])
 
+    def test_project_grant_requires_exact_target_app_group_command_and_time(self):
+        rule = dict(target="worker", app_id="cli_lead", chat_id="oc_team", expires_at=time.time()+600,
+                    commands=["/new", "/account selected"])
+        bot = {"name": "worker", "project_controls": {"lead": rule}}
+        self._grant("lead", ["*"])  # A broader legacy record cannot widen this target's policy.
+        def gate(command="/new", app="cli_lead", chat="oc_team"):
+            return feishu_bridge._gate_verdict(bot, None, command.split()[0], command,
+                       verified_peer="lead", verified_app=app, chat=chat)[0]
+        with mock.patch("agent_runtime.account_aliases", return_value=["selected"]):
+            self.assertTrue(gate())
+            self.assertTrue(gate("/account selected"))
+            for command in ("/close", "/clear", "/account other", "/account selected ../other"):
+                self.assertFalse(gate(command))
+        self.assertFalse(gate(app="cli_other"))
+        self.assertFalse(gate(chat="oc_other"))
+        bot["name"] = "other"
+        self.assertFalse(gate())
+        bot["name"] = "worker"
+        rule["expires_at"] = time.time()-1
+        self.assertFalse(gate())
+
+    def test_remote_project_app_verifies_without_remote_credentials(self):
+        from send_feishu_msg import peer_text
+        cmd = peer_text("lead", "worker", "/new")
+        bot = {"name":"worker", "app_id":"cli_worker", "app_secret":"fixture",
+               "project_controls":{"lead":{"app_id":"cli_lead","target":"worker","chat_id":"oc_team"}}}
+        row = {"message_id":"om_request", "chat_id":"oc_team", "msg_type":"text",
+               "sender":{"sender_type":"app","id_type":"app_id","id":"cli_lead"},
+               "body":{"content":json.dumps({"text":cmd})}}
+        with (mock.patch("tenant_probe._bot_spec", side_effect=AssertionError("remote roster access")),
+              mock.patch.object(feishu_bridge, "_tenant_token", return_value="fixture"),
+              mock.patch("feishu_rest.api", return_value={"code":0,"data":{"items":[row]}})):
+            self.assertEqual(feishu_bridge._verify_peer_app(bot, "lead", "om_request", "oc_team", cmd), "cli_lead")
+            row["sender"]["id"] = "cli_other"
+            self.assertFalse(feishu_bridge._verify_peer_app(bot, "lead", "om_request", "oc_team", cmd))
+        merged = feishu_bridge._apply_roster_defaults({"name":"other"}, bot)
+        self.assertNotIn("project_controls", merged)
+
     def test_peer_sender_wire_format_preserves_arguments_and_ignores_replies(self):
         from send_feishu_msg import peer_text
         parse = feishu_bridge._peer_slash_request
         request = peer_text("lead", "worker", "/account  example")
         self.assertEqual(parse(request, "worker"), ("lead", "/account  example"))
+        self.assertEqual(parse(request, "Worker"), ("lead", "/account  example"))
         self.assertIsNone(parse(request, "other"))
         self.assertIsNone(parse(peer_text("lead", "worker", "/close", reply_to="om_old"), "worker"))
         self.assertIsNone(parse(peer_text("lead", "worker", "请解释 /model"), "worker"))

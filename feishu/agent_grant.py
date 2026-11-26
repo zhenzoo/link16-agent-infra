@@ -20,7 +20,9 @@
 """
 import argparse
 import json
+import math
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -72,6 +74,54 @@ def has_cap(grantee, cap, state_dir=None, *, target=None):
             return False
     caps = grant.get("caps") or []
     return isinstance(caps, list) and (cap in caps or "*" in caps)
+
+
+def project_rule(bot, peer):
+    """Read the receiver's own policy. An invalid entry shadows legacy grants."""
+    rules = bot.get("project_controls", {})
+    if not isinstance(rules, dict):
+        return {}
+    if peer not in rules:
+        return None
+    rule = rules[peer]
+    return rule if isinstance(rule, dict) else {}
+
+
+def review_control(bot, peer, app, chat, command):
+    rule = project_rule(bot, peer)
+    if not rule or rule.get("target") != bot["name"]:
+        return False, "目标机未给此项目主号登记该执行者"
+    if (not isinstance(app, str) or not re.fullmatch(r"cli_[A-Za-z0-9]+", app)
+            or app != rule.get("app_id") or not isinstance(chat, str)
+            or not re.fullmatch(r"oc_[A-Za-z0-9]+", chat) or chat != rule.get("chat_id")):
+        return False, "发件应用或协作群与该执行者的授权不符"
+    expiry = rule.get("expires_at")
+    if (type(expiry) not in (float, int) or (type(expiry) is float and not math.isfinite(expiry))
+            or expiry <= time.time()):
+        return False, "该执行者的项目授权已到期或缺少有效期限"
+    commands = rule.get("commands")
+    if (not isinstance(command, str) or not isinstance(commands, list) or command not in commands or
+            not re.fullmatch(r"/(?:close|new|account [a-z0-9][a-z0-9_-]{0,63})", command)):
+        return False, "该执行者未授权此命令及参数"
+    if command.startswith("/account "):
+        import agent_runtime
+        if command.split()[1] not in agent_runtime.account_aliases():
+            return False, "该账号尚未在执行者所在机器登记"
+    return True, "接收方已核对主号、群、执行者、命令参数和授权期限"
+
+
+def cmd_review(args):
+    from bridge_env import bots_config_path
+    from bot_names import find_entry
+    config = json.loads(bots_config_path(Path(__file__).resolve().parent.parent).read_text(encoding="utf-8"))
+    bot = find_entry(config["bots"], args.target)
+    if not bot:
+        print("本机没有该执行者，请在目标机核验。")
+        return 2
+    rule = project_rule(bot, args.bot) or {}
+    ok, reason = review_control(bot, args.bot, rule.get("app_id"), rule.get("chat_id"), args.command)
+    print(json.dumps({"configured": ok, "target": bot["name"], "reason": reason, "executed": False}, ensure_ascii=False))
+    return 0 if ok else 1
 
 
 def owner_dm_evidence(bot_name, window_sec=DEFAULT_WINDOW_SEC, state_dir=None):
@@ -180,6 +230,11 @@ def main():
     s = sub.add_parser("status", help="谁现在有授权")
     s.add_argument("--state-dir", default=None)
     s.set_defaults(func=cmd_status)
+    review = sub.add_parser("review", help="只读核查目标机为这条完整命令配置的项目授权")
+    review.add_argument("--bot", required=True)
+    review.add_argument("--target", required=True)
+    review.add_argument("--command", required=True)
+    review.set_defaults(func=cmd_review)
     args = ap.parse_args()
     sys.exit(args.func(args))
 

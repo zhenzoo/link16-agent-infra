@@ -1,5 +1,6 @@
 """Business arrangement is opt-in, verified against registered identities and independent dispatch."""
 import copy
+import json
 from pathlib import Path
 import sys
 
@@ -103,3 +104,71 @@ def test_ordinary_reports_are_outside_this_mode():
     p["mode"]="report"
     with pytest.raises(ValueError,match="仅在"):
         arranged(p)
+
+
+def test_eight_part_round_checks_actual_inbound_dispatch_and_provider_receipts(tmp_path, monkeypatch):
+    import bridge_history, bridge_inbound, feishu_bridge
+    import proactive_business_list as business
+    import send_feishu_msg as sender
+    bot = "leader"
+    parts = [f"第{i}项核对原表。\n" for i in range(8)]
+    sections = [{"text": s, "items": [f"item{i}"]} for i, s in enumerate(parts)]
+    p = dict(mode="arrange_business", dispatch_bot=bot, previous=[], source_mid="om_original",
+             source_parts=sections, items=[dict(id=f"item{i}", name=f"事项{i}", agent=f"worker-{i}",
+                                               expected="经核对的原表") for i in range(8)])
+    monkeypatch.setattr(business, "registered_names", lambda bot: {f"worker-{i}" for i in range(8)})
+    monkeypatch.setattr(business, "dispatch_ledgers", lambda bot: LEDGERS)
+    for module in (bridge_history, feishu_bridge, sender):
+        monkeypatch.setattr(module, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(feishu_bridge, "load_owner_record", lambda bot: {"open_id": "ou_owner"})
+    original = dict(schema=bridge_inbound.SCHEMA, kind="inbound", source=bridge_inbound.NATIVE_SOURCE,
+                    bot=bot, message_id="om_original", chat_type="p2p",
+                    raw_text="".join(parts), sender={"open_id": "ou_owner", "is_bot": False})
+    bridge_inbound.append_record(tmp_path, bot, original)
+    path = tmp_path / "round.json"
+    path.write_text(json.dumps(p), encoding="utf-8")
+    for bad in (sections[:-1], list(reversed(sections)), [{}]):
+        with pytest.raises(ValueError):
+            business.dispatch_parts(dict(p, source_parts=bad), bot)
+    business.main(["arrange", "--round-json", str(path)])
+    monkeypatch.setattr(sender, "local_name", lambda bot: bot)
+    monkeypatch.setattr(sender, "assert_sender_identity", lambda bot: None)
+    monkeypatch.setattr(sender, "peer_address", lambda *args: ("oc_group", "ou_worker"))
+    calls = []
+    def send(bot, peer, text, **options):
+        calls.append(options["message_uuid"])
+        return {"ok": True, "message_id": f"om_sent{len(calls)}", "mirror": None}
+    monkeypatch.setattr(sender, "send_agent_message", send)
+    def run(i, peer, text, *extra):
+        monkeypatch.setattr(sys, "argv", ["send", "--bot", bot, "--to-agent", peer, "--item", f"item{i}",
+                                         "--task-id", f"task{i}", "--in", "oc_group", "--text", text, *extra])
+        with pytest.raises(SystemExit) as done:
+            sender.main()
+        return done.value.code
+    assert run(0, "worker-1", parts[0]) != 0
+    assert run(0, "worker-0", parts[1]) != 0
+    assert not calls
+    for i, part in enumerate(parts):
+        assert run(i, f"worker-{i}", part) == 0
+    assert run(0, "worker-0", parts[0], "--round-json", str(path)) != 0
+    assert len(set(calls)) == 8
+    business.main(["audit-sends", "--round-json", str(path)])
+    monkeypatch.setattr(feishu_bridge, "load_owner_record", lambda bot: {"open_id": "ou_other"})
+    with pytest.raises(ValueError, match="本人原文"):
+        business.dispatch_parts(p, bot)
+
+
+def test_remote_group_address_requires_same_live_application(tmp_path, monkeypatch):
+    import proactive_business_list as business
+    cache = tmp_path / "members.json"
+    row = dict(name="Remote-Model-2", app_id="cli_worker", member_id="ou_member")
+    stored = dict(bot="lead", chat_id="oc_group", members=[row])
+    cache.write_text(json.dumps(stored), encoding="utf-8")
+    monkeypatch.setattr(business, "peer_cache", lambda bot: cache)
+    monkeypatch.setattr(business, "read_members", lambda bot: stored)
+    assert business.verified_member_address("lead", "remote-model-2") == ("oc_group", "ou_member")
+    assert business.verified_member_address("lead", "remote-model") is None
+    monkeypatch.setattr(business, "read_members", lambda bot: dict(stored, members=[dict(row, app_id="cli_other")]))
+    with pytest.raises(ValueError, match="登记已变化"):
+        business.verified_member_address("lead", "remote-model-2")
+    assert json.loads(cache.read_text(encoding="utf-8")) == stored
