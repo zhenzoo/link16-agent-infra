@@ -29,6 +29,26 @@ def nested_bridge_function(name, env):
     return env[name]
 
 
+class PrimaryPolicyTests(unittest.TestCase):
+    def test_missing_malformed_and_revoked_machine_policy(self):
+        reg = mock.MagicMock()
+        reg.REG_SZ = 1
+        seat = {"bot": "primary", "app_id": "cli_primary", "chat_id": "oc_group"}
+        with (mock.patch.object(agent_grant.os, "name", "nt"),
+              mock.patch.dict(sys.modules, {"winreg": reg})):
+            reg.OpenKey.side_effect = FileNotFoundError
+            self.assertIsNone(agent_grant.primary_policy())
+            reg.OpenKey.side_effect = None
+            reg.QueryValueEx.side_effect = FileNotFoundError
+            self.assertEqual(agent_grant.primary_policy(), {})
+            reg.QueryValueEx.side_effect = None
+            for rows in ([], [seat, seat], [{**seat, "chat_id": ""}]):
+                reg.QueryValueEx.return_value = (json.dumps(rows), reg.REG_SZ)
+                self.assertEqual(agent_grant.primary_policy(), {})
+            reg.QueryValueEx.return_value = (json.dumps([seat]), reg.REG_SZ)
+            self.assertEqual(agent_grant.primary_policy(), {"primary": ("cli_primary", "oc_group")})
+
+
 class ExplicitCloseTests(unittest.IsolatedAsyncioTestCase):
     async def test_interrupted_close_edits_original_card_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -409,6 +429,39 @@ class GateVerdictTest(unittest.TestCase):
             self.assertFalse(feishu_bridge._verify_peer_app(bot, "lead", "om_request", "oc_team", cmd))
         merged = feishu_bridge._apply_roster_defaults({"name":"other"}, bot)
         self.assertNotIn("project_controls", merged)
+
+    def test_machine_policy_is_role_based_and_rechecked_on_every_target(self):
+        from send_feishu_msg import peer_text
+        policy = {"primary": ("cli_primary", "oc_team")}
+        row = {"message_id": "om_request", "chat_id": "oc_team", "msg_type": "text",
+               "sender": {"sender_type": "app", "id_type": "app_id", "id": "cli_primary"}}
+        self._grant("worker", ["*"])
+        with (mock.patch.object(agent_grant, "primary_policy", return_value=policy),
+              mock.patch("agent_runtime.account_aliases", return_value=["cxp2"]),
+              mock.patch.object(feishu_bridge, "_tenant_token", return_value="fixture"),
+              mock.patch("feishu_rest.api", return_value={"code": 0, "data": {"items": [row]}})):
+            for target in ("infra", "configuration", "newly-registered-worker"):
+                bot = {"name": target, "app_id": "cli_receiver", "app_secret": "fixture"}
+                for cmd in ("/new", "/close", "/account cxp2"):
+                    wire = peer_text("primary", target, cmd)
+                    row["body"] = {"content": json.dumps({"text": wire})}
+                    app = feishu_bridge._verify_peer_app(bot, "primary", "om_request", "oc_team", wire)
+                    self.assertEqual(app, "cli_primary")
+                    self.assertTrue(feishu_bridge._gate_verdict(
+                        bot, None, cmd.split()[0], cmd, verified_peer="primary",
+                        verified_app=app, chat="oc_team")[0])
+            for peer, app, chat, cmd in (
+                    ("worker", "cli_primary", "oc_team", "/close"),
+                    ("primary", "cli_other", "oc_team", "/new"),
+                    ("primary", "cli_primary", "oc_elsewhere", "/close"),
+                    ("primary", "cli_primary", "oc_team", "/account unknown"),
+                    ("primary", "cli_primary", "oc_team", "/account cxp2 ../path"),
+                    ("worker", "cli_worker", "oc_team", "/handoff cxp2")):
+                self.assertFalse(feishu_bridge._gate_verdict(
+                    bot, None, cmd.split()[0], cmd, verified_peer=peer, verified_app=app, chat=chat)[0])
+            policy.clear()
+            self.assertFalse(feishu_bridge._gate_verdict(
+                bot, None, "/close", verified_peer="primary", verified_app="cli_primary", chat="oc_team")[0])
 
     def test_peer_sender_wire_format_preserves_arguments_and_ignores_replies(self):
         from send_feishu_msg import peer_text

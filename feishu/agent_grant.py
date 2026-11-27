@@ -87,6 +87,67 @@ def project_rule(bot, peer):
     return rule if isinstance(rule, dict) else {}
 
 
+def primary_policy():
+    """The machine administrator owns this policy. Bot registration cannot assign a seat."""
+    if os.name != "nt":
+        return None
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SOFTWARE\Policies\Link16\SessionControl", 0,
+                             winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+    except FileNotFoundError:
+        return None  # An installation which has never enabled machine-wide policy.
+    except OSError:
+        return {}
+    try:
+        with key:
+            raw, kind = winreg.QueryValueEx(key, "PrimaryApplications")
+        rows = json.loads(raw) if kind == winreg.REG_SZ else None
+        if not isinstance(rows, list):
+            return {}
+        policy = {}
+        apps = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                return {}
+            peer, app, chat = (row.get(k) for k in ("bot", "app_id", "chat_id"))
+            if (not all(isinstance(v, str) for v in (peer, app, chat))
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", peer)
+                    or not re.fullmatch(r"cli_[a-zA-Z0-9]+", app)
+                    or not re.fullmatch(r"oc_[a-zA-Z0-9]+", chat)
+                    or peer in policy or app in apps):
+                return {}
+            policy[peer] = (app, chat)
+            apps.add(app)
+        return policy
+    except (OSError, ValueError, TypeError):
+        return {}  # Active but missing/invalid policy means that nobody holds the role.
+
+
+def primary_command(command):
+    words = command.split() if isinstance(command, str) else []
+    # Other lifecycle commands also replace a workspace. They must not fall
+    # through to a legacy wildcard grant when a primary policy is installed.
+    return bool(words and words[0].lower() in (
+        "/new", "/close", "/account", "/acc", "/账号", "/cd", "/clear",
+        "/handoff", "/交接", "/接手"))
+
+
+def review_primary(policy, peer, app, chat, command):
+    binding = policy.get(peer)
+    if not binding or binding != (app, chat):
+        return False, "此命令只接受指定协作群内经飞书核实的 0 号位应用"
+    if command in ("/new", "/close"):
+        return True, "已核实机器策略指定的 0 号位、发件应用和协作群"
+    account = re.fullmatch(r"/(?:account|acc|账号) ([a-z0-9][a-z0-9_-]{0,63})", command)
+    if account:
+        import agent_runtime
+        if account[1] in agent_runtime.account_aliases():
+            return True, "已核实 0 号位和目标机已登记的账号"
+    return False, "命令或账号参数不在 0 号位的会话控制范围内"
+
+
 def review_control(bot, peer, app, chat, command):
     rule = project_rule(bot, peer)
     if not rule or rule.get("target") != bot["name"]:
@@ -118,8 +179,13 @@ def cmd_review(args):
     if not bot:
         print("本机没有该执行者，请在目标机核验。")
         return 2
-    rule = project_rule(bot, args.bot) or {}
-    ok, reason = review_control(bot, args.bot, rule.get("app_id"), rule.get("chat_id"), args.command)
+    policy = primary_policy() if primary_command(args.command) else None
+    if policy is not None:
+        app, chat = policy.get(args.bot, (None, None))
+        ok, reason = review_primary(policy, args.bot, app, chat, args.command)
+    else:
+        rule = project_rule(bot, args.bot) or {}
+        ok, reason = review_control(bot, args.bot, rule.get("app_id"), rule.get("chat_id"), args.command)
     print(json.dumps({"configured": ok, "target": bot["name"], "reason": reason, "executed": False}, ensure_ascii=False))
     return 0 if ok else 1
 

@@ -105,3 +105,14 @@ def test_same_author_can_update_original_task_through_tenant_with_product_format
             sender.main()
         assert sent.value.code == 0
     assert len(captured)==2 and all(peer=="elected" and PRODUCT_STYLE in text for peer,text in captured)
+
+
+def test_non_primary_cannot_send_control_with_delegated_identity(monkeypatch):
+    import agent_grant
+    monkeypatch.setenv("FEISHU_BRIDGE_SESSION", "worker")
+    monkeypatch.setattr(agent_grant, "primary_policy", lambda: {"primary": ("cli_primary", "oc_team")})
+    monkeypatch.setattr(sender, "local_name", lambda name: name)
+    monkeypatch.setattr(sender, "send_msg", lambda *args: pytest.fail("control sent"))
+    for identity in ("worker", "primary"):
+        with pytest.raises(ValueError, match="0 号位"):
+            sender.send_agent_message(identity, "recipient", "/close")

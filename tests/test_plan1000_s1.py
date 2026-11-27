@@ -71,6 +71,17 @@ class S17RegistryStubTests(unittest.TestCase):
         self.assertEqual([a["name"] for a in data["agents"]], ["tb99-demo"])
         self.assertEqual(data["agents"][0]["machine"], "tb99")
         self.assertEqual(data["agents"][0]["open_id"], "ou_1")
+        self.assertEqual(data["agents"][0]["app_id"], "cli_1")
+
+    def test_verified_legacy_identity_gains_only_address_binding(self):
+        original = {"name": "tb99-demo", "open_id": "ou_1", "role": "existing"}
+        _, data = self._run(json.dumps({"agents": [original]}))
+        self.assertEqual(data["agents"], [dict(original, app_id="cli_1")])
+
+    def test_conflicting_identity_cannot_rebind_existing_agent(self):
+        for mismatch in ({"app_id": "cli_other"}, {"open_id": "ou_other"}):
+            with self.subTest(mismatch=mismatch), self.assertRaises(ValueError):
+                self._run(json.dumps({"agents": [dict(name="tb99-demo", **mismatch)]}))
 
     def test_agents_not_last_array_still_appends_to_agents(self):
         stub, data = self._run(json.dumps({

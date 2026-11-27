@@ -198,3 +198,17 @@ def test_local_alias_uses_app_id_and_senders_own_group_address(monkeypatch):
     members.pop(0)
     with pytest.raises(ValueError, match="唯一成员地址"):
         sender.peer_address("lead", "worker", None, "oc_team")
+
+
+def test_new_remote_registration_is_addressable_after_join_without_a_cached_directory(monkeypatch):
+    import proactive_business_list as business
+    import registry
+    import send_feishu_msg as sender
+    monkeypatch.setattr(sender, "_roster", lambda: [])
+    monkeypatch.setattr(registry, "find", lambda peer: {"app_id": "cli_new"})
+    members = [{"app_id": "cli_new", "member_id": "ou_senderView", "name": "Display"}]
+    monkeypatch.setattr(business, "read_members", lambda bot, group: {"chat_id": "oc_team", "members": members})
+    assert sender.peer_address("primary", "new-worker", None) == ("oc_team", "ou_senderView")
+    members.clear()
+    with pytest.raises(ValueError, match="唯一成员地址"):
+        sender.peer_address("primary", "new-worker", None)

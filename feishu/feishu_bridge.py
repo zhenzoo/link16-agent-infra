@@ -945,7 +945,13 @@ def _verify_peer_app(bot, peer, mid, chat, expected_text):
     if not re.fullmatch(r"om_[a-zA-Z0-9_-]+", mid or ""):
         return False
     rule = agent_grant.project_rule(bot, peer)
-    if rule is None:
+    request = _peer_slash_request(expected_text, bot["name"])
+    policy = agent_grant.primary_policy() if request and agent_grant.primary_command(request[1]) else None
+    if policy is not None:
+        app, required_chat = policy.get(peer, (None, None))
+        if required_chat != chat:
+            return False
+    elif rule is None:
         spec = tenant_probe._bot_spec(peer)
         app = bridge_scope_audit._env_val(spec["app_id_env"]) if spec else None
     else:
@@ -965,7 +971,7 @@ def _verify_peer_app(bot, peer, mid, chat, expected_text):
                 key = mention.get("key")
                 if key and body.startswith(key + " "):
                     body = body[len(key):].lstrip()
-            if rule is not None and author.get("id_type") != "app_id":
+            if (policy is not None or rule is not None) and author.get("id_type") != "app_id":
                 return False
             return app if body == expected_text else False
     return False
@@ -986,6 +992,11 @@ def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None, verified_a
     cap = _CAP_ALIAS.get(cap, cap)
     if not verified_peer and sender and sender == load_owner(bot["name"]):
         return True, "主人本人"
+    import agent_grant
+    if agent_grant.primary_command(cmd):
+        policy = agent_grant.primary_policy()
+        if policy is not None:
+            return agent_grant.review_primary(policy, verified_peer, verified_app, chat, text or cmd)
     try:
         from registry import name_for_open_id
     except ImportError:
@@ -995,7 +1006,6 @@ def _gate_verdict(bot, sender, cmd, text=None, *, verified_peer=None, verified_a
             name_for_open_id = None
     who = verified_peer or (name_for_open_id(sender, default=None) if name_for_open_id and sender else None)
     src = "飞书发件应用" if verified_peer else "open_id"
-    import agent_grant
     if who and agent_grant.project_rule(bot, who) is not None:
         return agent_grant.review_control(bot, who, verified_app, chat, text or cmd)
     if who and who == bot["name"]:
@@ -3192,9 +3202,7 @@ def _run_bot(bot_name=None):
                     blog(bot["name"], f"🚧 拒绝群内 {cmd}：{why}")
                     receipt(bot["name"], {"tid": "gate", "kind": "slash_denied", "cmd": cmd,
                                           "sender": sender, "reason": why, "delivered": False})
-                    await reply(chat_id, f"🚧 我拒绝了这条 `{cmd}`：{why}\n"
-                                         f"（破坏性命令需要主人授权 · 见 ARCH-140 · "
-                                         f"授权办法：主人私聊那个 agent 说一句，它自己跑 `agent_grant.py claim`）")
+                    await reply(chat_id, f"已拒绝 `{cmd}`。{why}")
                     return
                 blog(bot["name"], f"🚧 放行群内 {cmd}：{why}")
                 receipt(bot["name"], {"tid": "gate", "kind": "slash_allowed", "cmd": cmd,

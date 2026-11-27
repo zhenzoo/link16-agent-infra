@@ -45,11 +45,15 @@ last_reviewed: 2026-11-26
 
 原作者读业务原件、制作成品并自验。主号登记和派单，沿原单收取结论、同版预览和限制，再更新工作台、交给本人。独立复核者只读原件，成品和获准发送的消息仍由原作者负责。
 
-**会话控制。** 项目主号通过登记的飞书应用向同群目标发送单条命令，目标用自己的应用回读原消息。本人可在目标机私有 bot 名册的对应执行者条目登记 `project_controls`。每个主号单独列出目标内部代号 `target`、发件应用 `app_id`、协作群 `chat_id`、到期时间 `expires_at`（Unix 秒）以及允许的完整 `commands`。例如只准重开就只填 `["/new"]`，允许切账号时填写目标机已登记的具体账号。先在目标机运行 `python feishu/agent_grant.py review --bot <主号> --target <执行者> --command "/new"`。结果只说明该命令的配置，实际执行以目标桥关联原消息的回执为准。
+**会话控制。** 管理员在受管 Windows 机器上统一指定 0 号位的飞书应用和协作群。接收桥逐条回读飞书原消息，核对发件应用、群、目标、原文和发送时间。0 号位可对同群的本机执行者使用 `/close`、`/new` 和 `/account <本机已登记的账号>`。角色长期有效，撤销后下一条命令即按新策略核验。新注册的普通执行者自动继承接收规则。
+
+两个受管主机可使用同一份 Windows 计算机策略。管理员在 64 位 `HKLM\SOFTWARE\Policies\Link16\SessionControl` 下维护字符串值 `PrimaryApplications`。值为 JSON 数组，每项用 `bot`、`app_id` 和 `chat_id` 绑定一个正式指定的发令应用。空数组撤销全部 0 号位，保留策略键即可继续拒绝旧的逐目标授权。策略只允许管理员修改。启用前须确保普通执行者无法读取主号发件凭据或修改接收桥。只有普通执行者以自身应用发令被拒、主号凭据隔离且接收桥受保护，才能确认角色隔离生效。
+
+未启用计算机策略的旧安装沿用原有的逐目标 `project_controls`。在目标机运行 `python feishu/agent_grant.py review --bot <主号> --target <执行者> --command "/new"` 可只读核验有效配置，实际执行结果以原单回执为准。
 
 **派发多段原文。** 在本轮业务 JSON 填入本人私聊的 `source_mid` 和按原顺序排列的 `source_parts`。每段用 `text` 保留原文及换行，用 `items` 列出负责该段的业务编号，共用要求可对应多项。运行 `proactive_business_list.py arrange --round-json <本轮文件>` 后，预览和实际派单都会按事项读取登记。保留该文件至派单完成。主号将各段交给登记的作者，补写交付条件。运行 `proactive_business_list.py audit-sends --round-json <本轮文件>` 可核每项对应的正文、接收者和唯一飞书消息编号。平台接受、目标会话提交、作者交付分别沿原单追踪。附件沿原有文件交接流程另验。
 
-**跨机交接。** 先用 `proactive_business_list.py refresh-members --bot <主号>` 读取登记群。异机生产派单走 `send_feishu_msg.py --bot <主号> --to-agent <作者> --item <事项> --task-id <原单> --text <正文>`。主号用自己的应用核对同群成员；查进度用 `proactive_dispatch.py status` 带原消息编号。空闲、额度和产物由目标机验收。
+**跨机交接。** 新应用登记后，通讯录保存飞书 App ID。发件应用按这个编号在目标群实时取得它所见的成员地址。旧记录缺少 App ID 时，沿用 `proactive_business_list.py refresh-members --bot <主号>` 核对原群成员。异机生产派单走 `send_feishu_msg.py --bot <主号> --to-agent <作者> --item <事项> --task-id <原单> --text <正文>`。查进度用 `proactive_dispatch.py status` 带原消息编号。空闲、额度和产物由目标机验收。
 
 **增补执行者。** 先向本人说明现有执行者的缺口、拟建名称、目标机器、仓库和账号。本人同意这次登记后，由目标机的 Link16 按 SOP-120 启动后台注册。`--notify-bot` 指向目标机接回调的登记智能体，同时用 `--return-request <主号原派单消息编号>` 绑定同群发件应用。监督器结束时沿原单发回注册任务编号和终态，以飞书返回的消息编号记账。认主、授权链接、浏览器及错误详情留在经办机。已结束的旧任务可由原经办应用在主号查询时运行 `registration_monitor.py status --job <注册任务编号> --return-request <本次查询消息编号>`。主号另核执行者是否入群及实际收发结果。
 

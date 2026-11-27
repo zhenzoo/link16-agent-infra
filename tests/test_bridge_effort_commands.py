@@ -25,7 +25,7 @@ def handler(home, *, alive=True, screen="busy", runtime="codex"):
     environment = dict(vars(bridge))
     environment.update(
         bot={"name": "unit"}, STATE_DIR=home, reply=mock.AsyncMock(), load_session=lambda _: rec,
-        _gate_verdict=lambda *args: (True, "authorized agent"), receipt=mock.Mock(), blog=mock.Mock(),
+        _gate_verdict=mock.Mock(return_value=(True, "authorized agent")), receipt=mock.Mock(), blog=mock.Mock(),
         load_owner=lambda _: "owner", ALLOWED_OPEN_IDS=set(),
         wmux_session=SimpleNamespace(pty_alive=lambda _: alive),
         bridge_activity=SimpleNamespace(read_activity=lambda *args: {"state": "idle"}),

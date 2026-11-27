@@ -391,6 +391,9 @@ def peer_address(bot, peer, xt, in_chat=None):
         app_id = _env(key).get(key) if key else None
         if key and not app_id:
             raise ValueError("本机登记的执行者缺少应用编号")
+        if not entry and not peer.startswith("ou_"):
+            import registry
+            app_id = (registry.find(peer) or {}).get("app_id")
         verified = verified_member_address(bot, peer, in_chat, app_id=app_id)
         if verified:
             return verified
@@ -404,7 +407,15 @@ def send_agent_message(bot, peer, text, *, reply_to=None, in_chat=None,
     No turn guard or ledger here: callers own their existing delivery gate/ACK.
     Returned evidence never contains webhook URLs or credentials.
     """
+    primary_binding = None
     if not reply_to:
+        from agent_grant import primary_command, primary_policy
+        policy = primary_policy() if primary_command(text) else None
+        if policy is not None:
+            session = os.environ.get("FEISHU_BRIDGE_SESSION")
+            primary_binding = policy.get(bot)
+            if not primary_binding or (session and local_name(session) != local_name(bot)):
+                raise ValueError("会话控制必须由指定的 0 号位以自己的应用身份发送")
         from user_text import require_text
         require_text(text)
     if resolved is None:
@@ -413,6 +424,8 @@ def send_agent_message(bot, peer, text, *, reply_to=None, in_chat=None,
         ats = [member]
     else:
         xt, ats, target = resolved["xt"], resolved["ats"], resolved["target"]
+    if primary_binding and (xt or primary_binding != (resolve_app_id(bot), target)):
+        raise ValueError("发件应用或协作群与机器策略指定的 0 号位不符")
     stamped = peer_text(bot, peer, text, reply_to=reply_to)
     mirror = None
     if xt:
