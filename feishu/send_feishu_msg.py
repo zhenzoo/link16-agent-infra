@@ -384,9 +384,14 @@ def peer_text(bot, peer, text, *, reply_to=None):
 
 
 def peer_address(bot, peer, xt, in_chat=None):
-    if not xt and not _is_local(peer):
+    if not xt:
         from proactive_business_list import verified_member_address
-        verified = verified_member_address(bot, peer, in_chat)
+        entry = {} if peer.startswith("ou_") else find_entry(_roster(), peer) or {}
+        key = entry.get("app_id_env")
+        app_id = _env(key).get(key) if key else None
+        if key and not app_id:
+            raise ValueError("本机登记的执行者缺少应用编号")
+        verified = verified_member_address(bot, peer, in_chat, app_id=app_id)
         if verified:
             return verified
     return (xt["chat_id"] if xt else shared_group(bot, peer, in_chat)), resolve_open_id(peer)

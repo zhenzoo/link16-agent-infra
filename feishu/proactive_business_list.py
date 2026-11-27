@@ -23,7 +23,7 @@ def load(path):
 
 def tenant_for(bot, fleet):
     local = load(bots_config_path(HERE.parent))["bots"]
-    if not any(row["name"] == bot for row in local) or not SLUG.fullmatch(bot):
+    if not any(row["name"] == bot for row in local) or not SLUG.fullmatch(bot.lower()):
         raise ValueError("请指定本机登记的主号")
     matches = [row for row in fleet["agents"] if normalize(bot) in labels(row)]
     if len(matches) != 1:
@@ -35,9 +35,9 @@ def peer_cache(bot):
     return HERE / "_state" / "proactive" / bot / "business-members.json"
 
 
-def read_members(bot):
+def read_members(bot, group=None):
     tenant = tenant_for(bot, registry.load_registry())
-    group = tenant["group_chat_id"]
+    group = group or tenant["group_chat_id"]
     args = [shutil.which("lark-cli") or "lark-cli", "--profile", bot, "im", "+chat-members-list",
             "--as", "bot", "--member-types", "bot", "--chat-id", group, "--page-all"]
     response = json.loads(subprocess.run(args, check=True, capture_output=True).stdout)
@@ -58,10 +58,17 @@ def refresh_members(bot):
     return len(directory["members"])
 
 
-def verified_member_address(bot, peer, group=None):
+def verified_member_address(bot, peer, group=None, *, app_id=None):
     """Use the sender's registered group and its own live membership view."""
     if not isinstance(bot, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", bot):
         raise ValueError("发送方代号无效")
+    if app_id:
+        current = read_members(bot, group)
+        addresses = {m["member_id"] for m in current["members"] if m["app_id"] == app_id
+                     and re.fullmatch(r"ou_[A-Za-z0-9]+", m.get("member_id") or "")}
+        if len(addresses) != 1:
+            raise ValueError("发送应用在目标群未读到该执行者的唯一成员地址")
+        return current["chat_id"], addresses.pop()
     path = peer_cache(bot)
     if not path.is_file():
         return None

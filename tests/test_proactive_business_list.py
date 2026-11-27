@@ -183,3 +183,18 @@ def test_remote_group_address_requires_same_live_application(tmp_path, monkeypat
     with pytest.raises(ValueError, match="登记已变化"):
         business.verified_member_address("lead", "remote-model-2")
     assert json.loads(cache.read_text(encoding="utf-8")) == stored
+
+
+def test_local_alias_uses_app_id_and_senders_own_group_address(monkeypatch):
+    import proactive_business_list as business
+    import send_feishu_msg as sender
+    monkeypatch.setattr(sender, "_roster", lambda: [dict(name="worker", app_id_env="WORKER_APP_ID")])
+    monkeypatch.setattr(sender, "_env", lambda key: {key: "cli_worker"})
+    monkeypatch.setattr(sender, "resolve_open_id", lambda *_: pytest.fail("recipient-scoped address used"))
+    members = [dict(name="Display Name", app_id="cli_worker", member_id="ou_senderView"),
+               dict(name="worker", app_id="cli_other", member_id="ou_wrong")]
+    monkeypatch.setattr(business, "read_members", lambda bot, group: dict(chat_id=group, members=members))
+    assert sender.peer_address("lead", "worker", None, "oc_team") == ("oc_team", "ou_senderView")
+    members.pop(0)
+    with pytest.raises(ValueError, match="唯一成员地址"):
+        sender.peer_address("lead", "worker", None, "oc_team")
