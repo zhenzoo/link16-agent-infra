@@ -23,3 +23,9 @@ def require_text(text, fmt="markdown"):
     issues = problems(text, fmt)
     if issues:
         raise ValueError("text-lint\n" + "\n".join(issues[:12]))
+
+
+def proposal(name, source):
+    """Apply shared wording rules, then let the product check its approved meanings."""
+    from proposal_wording import Proposal
+    return Proposal(name, source, [f"{name} {issue}" for issue in problems(source, "html")])
