@@ -175,55 +175,48 @@ def _resolve_machine(slug, name, machines):
 
 
 def append_registry_stub(app_id, app_secret, bot_arg, cli_name):
-    """建完【自动】往 agent-registry.json 补一条 stub —— 把「登记协议」从『靠人记得回写』变成『脚本自动做』。
-    open_id/显示名现查·verified 按是否查到·幂等(已有同名跳过)。repo/machine 让运行的 agent 核对补全(脚本不知道它管哪个仓)。"""
-    import json
-    # 路径统一走 bridge_env.registry_path()（local→committed→example）——**别在这里自己拼**：
-    # 写进 committed、却从 local 读（或反过来）= 注册完查不到。见 PLAN-926 §S1.1。
+    """Record the SDK's public App ID for addressing. Registration grants no sender role."""
+    from bot_names import find_entry
     from bridge_env import writable_registry_path
-    # 自动登记会【写】名册。陌生人首次注册时本机还没有名册，registry_path() 会落到
-    # 随仓发布的脱敏样例上 —— 那样会把他的真 open_id 写进仓库样例文件。写入闸负责
-    # 改用 profile home 的推荐位置，必要时落一份空骨架。
+    from bridge_injection import ProcessFileLock, atomic_write_json
+
     reg = writable_registry_path()
-    if not reg.exists():
-        print("\n⚠️ 没找到 agent 名册（agent-registry.local.json / .json / .example.json 都不在）"
-              " → 跳过自动登记（请手动加一条）", flush=True)
-        return None
-    oid, disp = _bot_identity(app_id, app_secret)
-    name = disp or cli_name
-    slug = (bot_arg or "").upper().replace("-", "_")
-    send_key = slug.lower().replace("_", "-") if slug else (name or "")
-    try:
+    oid, display = _bot_identity(app_id, app_secret)
+    name = display or cli_name
+    send_key = (bot_arg or name).lower().replace("_", "-")
+    # Share the read/modify/write lock used when the monitor fills in tenant_key.
+    with ProcessFileLock(reg.with_suffix(".tenant.lck"), timeout=5):
         data = json.loads(reg.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        print(f"\n⚠️ agent-registry.json 解析失败({e}) → 跳过自动登记（手动加）", flush=True)
-        return None
-    machines = data.get("machines", {})
-    machine = _resolve_machine(slug, name, machines)
+        agents = data["agents"]
+        if not isinstance(agents, list):
+            raise ValueError("舰队通讯录的 agents 字段无效")
+        by_name = find_entry(agents, name)
+        by_key = find_entry(agents, send_key)
+        if by_name is not None and by_key is not None and by_name is not by_key:
+            raise ValueError("应用名称和发送代号对应不同的登记记录")
+        existing = by_key or by_name
+        if any(row.get("app_id") == app_id and row is not existing for row in agents):
+            raise ValueError("此应用编号已绑定其他智能体")
+        if existing is not None:
+            previous = existing.get("app_id")
+            if previous and previous != app_id:
+                raise ValueError("现有智能体绑定了不同的应用编号")
+            if not previous:
+                if existing.get("open_id") and oid and existing["open_id"] != oid:
+                    raise ValueError("同名登记与官方返回的机器人身份不同")
+                if oid and existing.get("open_id") == oid:
+                    existing["app_id"] = app_id
+                    atomic_write_json(reg, data)
+            return existing
+        machine = _resolve_machine(send_key.upper().replace("-", "_"), name, data.get("machines", {}))
+        stub = {"name": name, "machine": machine, "send_key": send_key, "app_id": app_id,
+                "open_id": oid or "", "at_name": f"@{name}", "repo": "", "shared": False,
+                "role": "", "verified": bool(oid)}
+        agents.append(stub)
+        atomic_write_json(reg, data)
+    print(f"已登记 {name} 的飞书应用编号。", flush=True)
     if not machine:
-        print(f"\n⚠️ 判不出 '{name}' 在哪台机：bot 名前缀没命中 machines 的任何 key，"
-              f"本机 hostname '{socket.gethostname()}' 也没在名册登记过。"
-              f"\n   → machine 先留空，**请手工补**（已知机器：{', '.join(sorted(machines)) or '(空)'}）。"
-              f"\n   正解通常是把 bot 起成 `<machine>-<用途>`（如 tuf19-cad），或给本机那条补 hostname。",
-              flush=True)
-    if any(a.get("name") == name for a in data.get("agents", [])):
-        print(f"\n✅ agent-registry.json 已有 '{name}' → 跳过（幂等·没重复加）", flush=True)
-        return next(a for a in data.get("agents", []) if a.get("name") == name)
-    stub = {"name": name, "machine": machine, "send_key": send_key, "open_id": oid or "",
-            "at_name": f"@{name}", "repo": "", "shared": False,
-            "role": "", "verified": bool(oid)}
-    # 2026-09-08 机器 3050：空骨架把数组写成一行 `"agents": []`，旧的字符串定位（找换行加两空格加 `]`）
-    # 命中不了就静默跳过。改为按结构追加、整文件 JSON 回写（indent=2·保 key 顺序·不引入依赖）。
-    agents = data.get("agents")
-    if not isinstance(agents, list):
-        print("\n⚠️ agent-registry.json 结构异常(agents 不是数组) → 跳过（手动加）", flush=True)
-        return None
-    agents.append(stub)
-    data["agents"] = agents
-    reg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"\n✅ 已【自动】登记进 agent-registry.json：{name}"
-          f"（machine={machine} · send_key={send_key} · open_id={oid or '❌现查失败·待补'} · verified={bool(oid)}）", flush=True)
-    print("   ⚠️ 运行本脚本的 agent 请核对/补两字段：**repo**(它分管哪个仓·脚本不知道) + 必要时 **machine**；是共享仓则改 shared:true。", flush=True)
+        print("当前机器与通讯录未匹配，machine 留空。", flush=True)
     return stub
 
 
@@ -680,12 +673,12 @@ def main():
 
 def _persist_registration(args, selected_profile, selected_cwd, runtime, id_key, sec_key,
                           app_id, secret, monitor, tenant_kind):
+    stub = append_registry_stub(app_id, secret, args.bot, args.name)
     write_env(app_id, secret, id_key, sec_key)
     action = "续接成功" if args.app_id else "创建成功"
     print(f"\n✅ 应用「{args.name}」{action} · App ID = {app_id} · 已写入 .env 的 {id_key} / {sec_key}", flush=True)
 
     # 自动登记进 agent-registry.json（登记协议自动化·不靠人记得回写）
-    stub = append_registry_stub(app_id, secret, args.bot, args.name)
     runtime_bot_name = (stub or {}).get("send_key") or args.bot or args.name
     at_name = (stub or {}).get("at_name") or f"@{args.name}"
     row = agent_runtime.upsert_runtime_bot(
