@@ -473,6 +473,7 @@ def main():
     ap.add_argument("--reply-to", help="显式回信所关联的原消息 mid；收到回信不自动反射回复")
     ap.add_argument("--item", help="Proactive 生产派单的物品或业务事项；同一成品沿用一个标识")
     ap.add_argument("--task-id", help="同一事项的原任务或续单标识")
+    ap.add_argument("--size", choices=["short", "long"], default="long", help="按任务时长核执行者额度，默认 long")
     ap.add_argument("--round-json", type=Path, help="按本人原消息逐段核对本批派单")
     ap.add_argument("--coordination", choices=["handoff","receipt","publish","compute","control"],
                     help="只做停笔交接、收回执、发布已验版本、运行既定计算或平台控制")
@@ -524,8 +525,33 @@ def main():
                 source_mid = review_outgoing(batch or a.round_json, a.bot, a.item, a.to_agent, a.text)
     except (ValueError, KeyError, OSError, TypeError) as exc:
         raise SystemExit(str(exc)) from exc
-    if a.to_agent and not (a.item or a.coordination or a.reply_to) and ownership_registry.manages(a.bot):
-        raise SystemExit("此主号的生产派单须给 --item 和 --task-id。交接、询证、上架、既定计算或平台控制请标 --coordination。")
+    if a.to_agent and not (a.item or a.coordination or a.reply_to):
+        from agent_grant import primary_policy
+        if ownership_registry.manages(a.bot) or a.bot in (primary_policy() or {}):
+            raise SystemExit("此主号的生产派单须给 --item 和 --task-id。交接、询证、上架、既定计算或平台控制请标 --coordination。")
+
+    preflight = None
+    if a.item or a.coordination in {"compute", "publish"}:
+        from proactive_dispatch import check
+        try:
+            checked = check(a.to_agent, a.size)
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as exc:
+            checked = {"ready": False, "reason": f"执行者状态核验失败（{type(exc).__name__}）"}
+        identity = checked.get("target", {})
+        preflight = dict(ready=checked["ready"], reason=checked["reason"], size=a.size,
+                         checked_at=checked.get("checked_at"), peer=identity.get("peer", a.to_agent),
+                         machine=identity.get("machine"), profile=identity.get("profile"), runtime=identity.get("runtime"),
+                         bridge=checked.get("bridge"), session=(checked.get("session") or {}).get("state"),
+                         quota=checked.get("quota"))
+        if not preflight["ready"]:
+            if a.json:
+                print(json.dumps(dict(ok=False, sent=False, dispatch_check=preflight), ensure_ascii=False))
+            else:
+                print(f"派单已暂缓 · {preflight['peer']} · {preflight['profile'] or '账号待核'} · {preflight['reason']}")
+                for key, window in (preflight["quota"] or {}).get("windows", {}).items():
+                    if window["remaining_percent"] is not None:
+                        print(f"{key} 剩余 {window['remaining_percent']}%，恢复时间 {window['reset'] or '待服务端返回'}")
+            raise SystemExit(2)
 
     ats = list(a.at) + [resolve_open_id(nm) for nm in a.at_agent]
     target = a.to
@@ -589,6 +615,8 @@ def main():
         route = {"kind": "direct", "dest": target}
     if a.to_agent:
         route.update({"peer": a.to_agent})
+        if preflight:
+            route["dispatch_check"] = preflight
         if a.item:
             route.update(item=a.item, task_id=a.task_id)
         if source_mid:
@@ -609,6 +637,8 @@ def main():
            "message_id": info if ok else None, "err": None if ok else info,
            "proactive_override": a.proactive, "guard": guard,
            "history_recorded": history_recorded if ok else False}
+    if preflight:
+        out["dispatch_check"] = preflight
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     else:

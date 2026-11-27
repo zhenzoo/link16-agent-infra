@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from unittest import mock
@@ -9,6 +10,7 @@ sys.path.insert(0, str(ROOT / "feishu"))
 
 import send_feishu_msg as sender  # noqa: E402
 import turn_delivery_guard as guard  # noqa: E402
+import proactive_dispatch as dispatch  # noqa: E402
 
 
 def test_same_active_group_is_rejected_before_send_api(tmp_path, monkeypatch):
@@ -71,6 +73,7 @@ def test_managed_dispatcher_cannot_bypass_product_owner_at_tenant_send(tmp_path,
     with ItemOwners(tmp_path).author("desk","example","elected","original"):
         pass
     monkeypatch.setattr(sender, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(dispatch, "check", lambda *_: {"ready": True, "reason": "就绪"})
     monkeypatch.setattr(sender, "local_name", lambda name:name)
     monkeypatch.setattr(sender, "assert_sender_identity", lambda name:None)
     monkeypatch.setattr(sender, "resolve_open_id", lambda name:"ou_other")
@@ -88,6 +91,7 @@ def test_same_author_can_update_original_task_through_tenant_with_product_format
     with ItemOwners(tmp_path).author("desk","example","elected","original"):
         pass
     monkeypatch.setattr(sender,"STATE_DIR",tmp_path)
+    monkeypatch.setattr(dispatch, "check", lambda *_: {"ready": True, "reason": "就绪"})
     monkeypatch.setattr(sender,"local_name",lambda n:n)
     monkeypatch.setattr(sender,"assert_sender_identity",lambda n:None)
     monkeypatch.setattr(sender,"resolve_open_id",lambda n:"ou_writer")
@@ -105,6 +109,38 @@ def test_same_author_can_update_original_task_through_tenant_with_product_format
             sender.main()
         assert sent.value.code == 0
     assert len(captured)==2 and all(peer=="elected" and PRODUCT_STYLE in text for peer,text in captured)
+
+
+@pytest.mark.parametrize("args", [
+    ["--item", "example", "--task-id", "stable"], ["--coordination", "compute"], ["--coordination", "publish"],
+])
+def test_direct_work_refuses_before_ownership_or_feishu(tmp_path, monkeypatch, capsys, args):
+    from proactive_ownership import ItemOwners
+    monkeypatch.setattr(sender, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(sender, "assert_sender_identity", lambda _: None)
+    def check(peer, size):
+        assert (peer, size) == ("worker", "long")
+        return dict(ready=False, reason="周额度已满", target=dict(profile="cxp"), bridge=dict(online=True))
+    monkeypatch.setattr(dispatch, "check", check)
+    monkeypatch.setattr(sender, "peer_address", lambda *_: pytest.fail("contacted Feishu"))
+    monkeypatch.setattr(sys, "argv", ["send", "--bot", "desk", "--to-agent", "worker", "--text", "核对原件",
+                                     "--json", *args])
+    with pytest.raises(SystemExit) as stopped:
+        sender.main()
+    result = json.loads(capsys.readouterr().out)
+    assert stopped.value.code == 2 and result["sent"] is False
+    assert result["dispatch_check"]["profile"] == "cxp" and result["dispatch_check"]["bridge"]["online"]
+    assert not ItemOwners(tmp_path).read()["items"]
+
+
+def test_primary_seat_must_classify_first_dispatch(tmp_path, monkeypatch):
+    import agent_grant
+    monkeypatch.setattr(agent_grant, "primary_policy", lambda: {"desk": ("app", "group")})
+    monkeypatch.setattr(sender, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(sender, "assert_sender_identity", lambda _: None)
+    monkeypatch.setattr(sys, "argv", ["send", "--bot", "desk", "--to-agent", "worker", "--text", "工作"])
+    with pytest.raises(SystemExit, match="--item"):
+        sender.main()
 
 
 def test_non_primary_cannot_send_control_with_delegated_identity(monkeypatch):

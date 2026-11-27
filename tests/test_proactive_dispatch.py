@@ -86,10 +86,10 @@ def test_unique_case_variant_uses_original_local_worker_for_state_profile_and_pr
     monkeypatch.setattr(d, "read_object", record)
     monkeypatch.setattr(q, "collect", lambda names: [dict(profile=names[0], runtime="codex", status="ok", verdict="够用",
                                                            session_percent=12, weekly_percent=41)])
-    def require_local_process(script, bot):
+    def require_local_bridge(bot):
         assert bot == peer
-        return [123]
-    monkeypatch.setattr(bridge_process, "service_pids", require_local_process)
+        return {"online": True}
+    monkeypatch.setattr(d, "bridge_view", require_local_bridge)
     result = d.check(supplied, "long")
     assert result["ready"] and result["target"]["peer"] == peer
     assert result["target"]["registered_peer"] == registered[index]["name"]
@@ -120,6 +120,39 @@ def test_case_matching_refuses_ambiguous_similar_and_conflicting_identities(case
     assert issue and bot is None and "profile" not in target
 
 
+def test_explicit_send_key_binds_unique_local_runtime(case_roster):
+    registered, local, write = case_roster
+    name = local[1]["name"]
+    registered[1].update(name="public-worker", send_key=name)
+    local[1]["at_name"] = "@public-worker"
+    write()
+    for label in ("public-worker", name):
+        target, _, reason = d.target_identity(label)
+        assert reason is None and target["peer"] == name and target["profile"] == "second"
+    registered[0]["aliases"] = [name]
+    assert d.target_identity("public-worker")[2]
+
+
+def test_bridge_checks_sdk_disconnect_even_while_process_and_inbox_stay_ready(tmp_path, monkeypatch):
+    import bridge_control
+    monkeypatch.setattr(d, "STATE", tmp_path)
+    monkeypatch.setattr(d, "HERE", tmp_path)
+    pids = ["123"]
+    monkeypatch.setattr(bridge_process, "service_pids", lambda *args, **kw: pids)
+    record = dict(contract=bridge_control.CONTRACT, pid=123, bot="worker", nonce="run", state="ready")
+    bridge_control.control_path(tmp_path, 123).write_text(json.dumps(record), encoding="utf-8")
+    (tmp_path / "_logs").mkdir()
+    log = tmp_path / "_logs/bridge-worker.log"
+    assert d.bridge_view("worker")["online"] is None
+    log.write_text("[Lark] [2026-11-27 10:00:01,100] [INFO] connected to wss://example\n", encoding="utf-8")
+    assert d.bridge_view("worker")["online"] is True
+    with log.open("a", encoding="utf-8") as out:
+        out.write("[Lark] [2026-11-27 10:10:01,100] [INFO] disconnected to wss://example\n")
+    assert d.bridge_view("worker")["online"] is False
+    pids.clear()
+    assert d.bridge_view("worker")["online"] is False
+
+
 @pytest.fixture
 def local(monkeypatch, tmp_path):
     target = dict(peer="worker", machine="local", hostname="THIS", observed_on="THIS", profile="p", runtime="codex", cwd=str(tmp_path))
@@ -134,7 +167,7 @@ def local(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "target_identity", lambda _: (target, {"name": "worker"}, None))
     monkeypatch.setattr(d, "session_view", lambda *_: dict(state=seen["session"], binding="actual", reason=seen["session"]))
     monkeypatch.setattr(q, "collect", collect)
-    monkeypatch.setattr(bridge_process, "service_pids", lambda *args, **kw: [12])
+    monkeypatch.setattr(d, "bridge_view", lambda _: dict(online=True))
     monkeypatch.setattr(d.bridge_history, "_outbound_from_ledger", lambda sender: list(ledger.get(sender, [])))
     monkeypatch.setattr(d.bridge_history.bridge_inbound, "read_records", lambda *_: [])
     monkeypatch.setattr(d.bridge_env, "assert_sender_identity", lambda *_: None)
@@ -278,6 +311,24 @@ def test_dispatch_without_transport_receipt_is_never_automatically_retried(local
     assert d.send("manager", "worker", "stable", "short", prompt, [])["request_mid"] == "original"
     assert d.read_object(d.task_path("manager", "stable"))["request_mid"] == "original"
     assert calls == [1]
+
+
+def test_changed_readiness_before_delivery_can_retry_without_claim(local, monkeypatch):
+    _, _, root = local
+    prompt = root / "prompt"
+    prompt.write_text("task", encoding="utf-8")
+    responses = iter([dict(ok=False, sent=False, dispatch_check=dict(ready=False, reason="额度已满")),
+                      dict(ok=True, message_id="original")])
+    def send(args, **kwargs):
+        assert args[args.index("--size") + 1] == "short"
+        return SimpleNamespace(stdout=json.dumps(next(responses)), returncode=0)
+    monkeypatch.setattr(d.subprocess, "run", send)
+    def attempt():
+        return d.send("manager", "worker", "stable", "short", prompt, [], item="item-a")
+    assert attempt()["reason"] == "额度已满"
+    assert not d.ItemOwners(root).read()["items"]
+    assert d.pending_peer_claim("worker", "manager", "other")[1] is None
+    assert attempt()["request_mid"] == "original"
 
 
 def test_adopting_existing_mid_checks_peer_and_never_sends_or_invents_baseline(local, monkeypatch):

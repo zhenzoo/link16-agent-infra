@@ -110,6 +110,8 @@ def test_eight_part_round_checks_actual_inbound_dispatch_and_provider_receipts(t
     import bridge_env, bridge_history, bridge_inbound, feishu_bridge
     import proactive_business_list as business
     import send_feishu_msg as sender
+    import proactive_dispatch as dispatch
+    monkeypatch.setattr(dispatch, "check", lambda *_: dict(ready=True, reason="就绪"))
     bot = "leader"
     parts = [f"第{i}项核对原表。\n" for i in range(8)]
     sections = [{"text": s, "items": [f"item{i}"]} for i, s in enumerate(parts)]

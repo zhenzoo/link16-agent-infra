@@ -81,11 +81,17 @@ def target_identity(peer):
     config = read_object(bridge_env.bots_config_path(HERE.parent))
     try:
         local = registry.find_entry(config.get("bots", []), target["peer"])
+        if local and not same_bot_name(local.get("name"), target["peer"]):
+            # A registered send_key can be the actual local runtime name.
+            # Require a unique mapping in both rosters, never a display alias alone.
+            name = local["name"]
+            if (not same_bot_name(name, row.get("send_key"))
+                    or registry.find_entry(registry_data["agents"], name) != row
+                    or registry.find_entry(config["bots"], name) != local):
+                local = None
     except ValueError:
         return target, None, "本机运行名册没有唯一匹配的 bot"
-    # The registry and runtime roster may differ only in case. A display alias,
-    # normalized separator or similar bot alone cannot bind a local control target.
-    if not local or not same_bot_name(local.get("name"), target["peer"]):
+    if not local:
         return target, None, "本机运行代号与跨机登记名称不一致"
     if (local.get("machine") and str(local["machine"]).casefold() != str(machine).casefold()) or any(
             row.get(key) and local.get(key) and row[key] != local[key] for key in ("app_id", "open_id", "tenant_key")):
@@ -177,6 +183,39 @@ def quota_view(target):
                 has_long=has_long, provider_allows=row.get("provider_allows"))
 
 
+def bridge_view(peer):
+    import bridge_control
+    from bridge_process import service_pids
+    pids = service_pids(HERE / "feishu_bridge.py", bot=peer)
+    view = dict(online=None, process_count=None if pids is None else len(pids))
+    if not pids or len(pids) != 1:
+        return dict(view, online=False if pids == [] else None, reason="目标桥进程未唯一验活")
+    pid = int(pids[0])
+    record = read_object(bridge_control.control_path(STATE, pid))
+    if (record.get("contract") != bridge_control.CONTRACT or record.get("pid") != pid
+            or record.get("bot") != peer or not record.get("nonce")):
+        return dict(view, reason="当前桥进程缺少对应的运行记录")
+    view["state"] = record.get("state")
+    if view["state"] not in {"ready", "handling"} or read_object(
+            bridge_control.control_path(STATE, pid, request=True)).get("nonce") == record["nonce"]:
+        return dict(view, online=False, reason="目标桥尚未就绪或正在退出")
+    # The SDK reconnects inside the same PID. A ready inbox alone does not
+    # establish that the Feishu WebSocket is still connected.
+    event = re.compile(rb"^\[Lark\] \[[0-9-]+ [0-9:,]+\] \[INFO\] (connected|disconnected) to wss://")
+    connected = None
+    try:
+        with (HERE / "_logs" / f"bridge-{peer}.log").open("rb") as log:
+            for line in log:
+                match = event.match(line)
+                if match:
+                    connected = match[1] == b"connected"
+    except OSError:
+        connected = None
+    if connected is not True:
+        return dict(view, online=connected, reason="飞书长连接已断开" if connected is False else "未核实飞书长连接")
+    return dict(view, online=True)
+
+
 def check(peer, size):
     target, bot, reason = target_identity(peer)
     out = dict(target=target, size=size, checked_at=time.time(), ready=False)
@@ -184,7 +223,10 @@ def check(peer, size):
         return dict(out, reason=reason)
     session = session_view(bot, target)
     quota = quota_view(target)
-    out.update(session=session, quota=quota)
+    bridge = bridge_view(target["peer"])
+    out.update(session=session, quota=quota, bridge=bridge)
+    if bridge["online"] is not True:
+        return dict(out, reason=bridge["reason"])
     if session["state"] not in {"cold", "idle"}:
         return dict(out, reason=session.get("reason") or "目标尚未证实空闲")
     if quota["provider_allows"] is False:
@@ -195,10 +237,6 @@ def check(peer, size):
         return dict(out, reason="短时窗口未返回，服务端也未确认当前可用")
     if quota["verdict"] != "够用" and not (size == "short" and quota["verdict"] == "紧张"):
         return dict(out, reason=f'{size} 任务当前额度{quota["verdict"]}；保留原会话，按窗口恢复时刻复核')
-    from bridge_process import service_pids
-    pids = service_pids(HERE / "feishu_bridge.py", bot=target["peer"])
-    if pids is None or len(pids) != 1:
-        return dict(out, reason="目标桥进程未唯一验活")
     return dict(out, ready=True, reason="目标机、实名册、空闲状态与所需额度已核实")
 
 
@@ -276,6 +314,8 @@ def progress(sender, peer, mid, *, paths=(), saved=None, reconcile=False, peer_o
     outgoing = next((r for r in bridge_history._outbound_from_ledger(sender) if mid and r.get("message_id") == mid), None)
     acknowledged = bool(mid and saved.get("request_mid") == mid and saved.get("delivery"))
     if saved and not mid:
+        if saved.get("preflight_refused"):
+            return dict(result, state="核验暂缓，尚未投递", reason=saved["preflight_refused"]["reason"])
         result.update(state="此前已尝试发送，尚无可核回执", last_signal_at=saved.get("at"), attempt=saved.get("attempt"))
     elif acknowledged and not outgoing:
         result.update(state="平台返回了消息 ID，本机发送账本缺记录", last_signal_at=saved["delivery"]["at"])
@@ -350,6 +390,8 @@ def pending_peer_claim(peer, sender, task_id):
     if not claim or (claim["sender"], claim["task_id"]) == (sender, task_id):
         return claim_path, None
     prior = read_object(task_path(claim["sender"], claim["task_id"]))
+    if prior.get("preflight_refused"):
+        return claim_path, None
     mid = recorded_mid(claim["sender"], peer, claim["task_id"], prior)
     route = turn_delivery_guard.read_route(STATE, peer) or {}
     running = (mid and route.get("mid") == mid and route.get("peer") == claim["sender"] and route.get("active"))
@@ -395,7 +437,8 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
     with (bridge_injection.injection_lock(STATE, "proactive-task", lock_id),
           bridge_injection.injection_lock(STATE, "proactive-peer", peer)):
         saved = read_object(path)
-        if saved and (not saved.get("peer") or saved["peer"] not in {peer, target.get("registered_peer")}):
+        if (saved and not saved.get("preflight_refused") and
+                (not saved.get("peer") or saved["peer"] not in {peer, target.get("registered_peer")})):
             return dict(ready=False, reason="同一任务已有目标；核其原回执", peer=saved.get("peer"), request_mid=saved.get("request_mid"))
         if saved.get("item") and item != saved["item"]:
             return dict(ready=False, reason="同一任务已绑定其他物品")
@@ -420,7 +463,7 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
                     if not blocked:
                         bridge_injection.atomic_write_json(claim_path, dict(sender=sender, peer=peer, task_id=task_id))
             return report
-        if saved:
+        if saved and not saved.get("preflight_refused"):
             return dict(progress(sender, peer, None, saved=saved, paths=artifacts), ready=False)
         if issue:
             return dict(ready=False, target=target, reason=issue)
@@ -448,7 +491,7 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
             if round_json:
                 from proactive_business_list import review_outgoing
                 review_outgoing(round_json, sender, item, peer, outgoing)
-            with ItemOwners(STATE).author(sender, item, peer, task_id):
+            with ItemOwners(STATE).author(sender, item, peer, task_id, reserve=False):
                 pass
         except ValueError as exc:
             return dict(ready=False, reason=str(exc))
@@ -458,7 +501,7 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
         bridge_injection.atomic_write_json(claim_path, dict(sender=sender, peer=peer, task_id=task_id))
         try:
             sent = subprocess.run([sys.executable, str(HERE / "send_feishu_msg.py"), "--bot", sender, "--to-agent", peer,
-                                   "--item", item, "--task-id", task_id,
+                                   "--item", item, "--task-id", task_id, "--size", size,
                                    *(["--round-json", str(round_json)] if round_json else []),
                                    "--text", outgoing, "--json"],
                                   capture_output=True, text=True, encoding="utf-8")
@@ -470,6 +513,12 @@ def send(sender, peer, task_id, size, prompt_file, artifacts, prior_mid=None, *,
             receipt = json.loads(sent.stdout)
         except ValueError:
             receipt = {}
+        refused = receipt.get("dispatch_check") or {}
+        if receipt.get("sent") is False and refused.get("ready") is False:
+            saved["preflight_refused"] = refused
+            bridge_injection.atomic_write_json(path, saved)
+            bridge_injection.atomic_write_json(claim_path, {})
+            return dict(ready=False, state="核验暂缓，尚未投递", reason=refused["reason"], dispatch_check=refused)
         mid = receipt.get("message_id") if receipt.get("ok") is True else None
         if mid:
             saved["request_mid"] = mid

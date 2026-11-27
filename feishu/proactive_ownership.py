@@ -52,7 +52,7 @@ class ItemOwners:
         return any(task.startswith(prefix) for task in self.read()["tasks"])
 
     @contextmanager
-    def author(self, sender, item, peer, task, address=None):
+    def author(self, sender, item, peer, task, address=None, *, reserve=True):
         item, peer = key(item), key(peer)
         task_key = key(sender) + "/" + key(task)
         address_key = key(sender) + "/" + key(address) if address else None
@@ -68,12 +68,13 @@ class ItemOwners:
                     raise ValueError(f"{item} 的唯一责任人是 {record['owner']}；先收原作者停笔交接")
                 if record["owner"] != peer and not peer.startswith("ou_"):
                     raise ValueError("收件账号与原作者名称不一致")
-                if address_key and address_key not in record["addresses"]:
-                    record["addresses"].append(address_key)
-                record["touched_at"] = time.time()
-                data["items"][item] = record
-                data["tasks"][task_key] = item
-                bridge_injection.atomic_write_json(self.path, data)
+                if reserve:
+                    if address_key and address_key not in record["addresses"]:
+                        record["addresses"].append(address_key)
+                    record["touched_at"] = time.time()
+                    data["items"][item] = record
+                    data["tasks"][task_key] = item
+                    bridge_injection.atomic_write_json(self.path, data)
             yield record
 
     def stop(self, item, old_peer, stop_mid):
