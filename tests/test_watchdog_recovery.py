@@ -70,7 +70,7 @@ def run_scenes(monkeypatch, tmp_path, scenes, *, esc_ok=True, nudge_ok=True, con
                                                           dict(current().get("activity", UNKNOWN))))
     monkeypatch.setattr(w, "interrupt_pane", lambda *a: events.append(("esc", cursor["i"])) or esc_ok)
     monkeypatch.setattr(w, "nudge_pane", lambda *a: events.append(("nudge", cursor["i"])) or nudge_ok)
-    monkeypatch.setattr(w, "notify", lambda b, k, t: events.append((k, cursor["i"])) or True)
+    monkeypatch.setattr(w, "notify", lambda b, k, t, **kw: events.append((k, cursor["i"])) or True)
     monkeypatch.setattr(w, "_alerts_load", lambda: {})
     monkeypatch.setattr(w, "_alerts_save", lambda *a: None)
     monkeypatch.setattr(w, "hwm_corrupt_unseen", lambda *a: (0, ""))

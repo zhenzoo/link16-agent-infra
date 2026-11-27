@@ -57,8 +57,8 @@ MUTATIONS = [
 
     ("选号闸：把「问不到」的号也放进候选",
      FEISHU / "agent_quota.py",
-     'ok = [r for r in rows if r["verdict"] in ("够用", "紧张") and r["profile"] not in set(exclude)]',
-     'ok = [r for r in rows if r["profile"] not in set(exclude)]',
+     '        if (not is_usable(r) or r["profile"] in excluded',
+     '        if (r["profile"] in excluded',
      "test_选号_问不到的绝不选"),
 
     ("陈旧检测闸：源码比进程新也不报",
@@ -118,8 +118,8 @@ MUTATIONS = [
 
     ("R5 接线闸：判据认出来了但循环里不动手",
      FEISHU / "bridge_watchdog.py",
-     "                if not dead:",
-     "                if True:",
+     "                    if handle_failed_turn(bot_obj, dead, last_turn, auto=auto):",
+     "                    if False:",
      "test_r5_端到端_跑一轮真循环_确认真的会注入并告警"),
 
     # ---- R6（2026-08-30 洪水事故的读取方：那条损坏日志此前只有写入方）----

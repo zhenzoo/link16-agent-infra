@@ -163,8 +163,9 @@ def test_自动候选范围_拼错profile时拒绝选号(monkeypatch):
         q.auto_failover_profiles()
 
 
-def test_选号_问不到的绝不选():
+def test_选号_问不到的绝不选(monkeypatch):
     """宁可不换，也不换到一个不知深浅的号 —— 换过去再撞一次比不换更糟。"""
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: None)
     rows = [_row("ccp2", "claude", 100, "满"),
             {"profile": "cc", "runtime": "claude", "session_percent": None,
              "weekly_percent": None, "verdict": "问不到", "status": "unknown"}]
@@ -871,7 +872,7 @@ def test_r5_端到端_跑一轮真循环_确认真的会注入并告警(monkeypa
          'error': {'message': 'Connection failed: error sending request'}}))
     monkeypatch.setattr(w, 'codex_thread_id', lambda *a, **kw: 'thread')
     monkeypatch.setattr(w, "nudge_pane", lambda pty, text=None: 注了.append((pty, text)) or True)
-    monkeypatch.setattr(w, "notify", lambda bot, kind, text: 喊了.append((bot, kind)) or True)
+    monkeypatch.setattr(w, "notify", lambda bot, kind, text, **kw: 喊了.append((bot, kind)) or True)
 
     def _炸(_s):
         raise _一轮就够
@@ -1100,7 +1101,7 @@ def _revive_env(monkeypatch, tmp_path, states, running=()):
     monkeypatch.setattr(w.bridge_process, "select_pids", lambda rows, script, bot: ["1"] if bot in running else [])
     started, told = [], []
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: started.append(cmd[-1]))
-    monkeypatch.setattr(w, "notify", lambda bot, kind, text: told.append((bot, text)) or True)
+    monkeypatch.setattr(w, "notify", lambda bot, kind, text, **kw: told.append((bot, text)) or True)
     return started, told
 
 
@@ -1137,3 +1138,21 @@ def test_r6_及各巡检用到fb的函数都自带惰性import():
         imports = any(isinstance(n, ast.Import) and any(a.asname == "fb" for a in n.names)
                       for n in ast.walk(fn))
         assert not uses or imports, f"{fn.name} 用了 fb 却没有 import feishu_bridge as fb"
+
+
+def test_同一额度事故跨轮询跨告警类型也只通知一次(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "ALERTS_PATH", tmp_path / "a.json")
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    sent = []
+    clock = [10000.0]
+    monkeypatch.setattr(w.time, "time", lambda: clock[0])
+    monkeypatch.setattr(w.subprocess, "run",
+                        lambda *a, **k: sent.append(k.get("env")) or type(
+                            "R", (), {"returncode": 0, "stderr": "", "stdout": ""})())
+    w.notify("bot-x", "limit", "第一次发现", incident="session-a|weekly")
+    clock[0] += 7200
+    w.notify("bot-x", "no_target", "轮询后的重复事故", incident="session-a|weekly")
+    assert len(sent) == 1
+    assert w._alerts_load()["bot-x:quota_notice"]["last_notice_ok"] is True
+    w.notify("bot-x", "no_target", "新的额度周期", incident="session-a|weekly-next")
+    assert len(sent) == 2

@@ -43,6 +43,7 @@ import bridge_env          # noqa: E402
 import agent_runtime       # noqa: E402
 import agent_quota         # noqa: E402
 import bridge_activity
+import quota_recovery
 import turn_recovery
 
 bridge_env.force_utf8_std()
@@ -56,7 +57,7 @@ PID_NAME = "bridge_watchdog.py"
 
 POLL_SECONDS = 120           # 与 xhs 看门狗同频，别更密（读屏是有成本的）
 STUCK_CONFIRM = 2            # 面板「限流 + 静止」连续这么多轮才动手（防它其实还在用 usage-credits 跑）
-ALERT_COOLDOWN = 1800        # 状态类告警（撞限流）每 bot 30min 最多一条
+ALERT_COOLDOWN = 1800        # 非额度状态类告警每 bot 30min 最多一条；额度事故按 incident 去重
 FAILOVER_MAX_PER_DAY = 2     # 同一 bot 24h 内最多自动换号次数
 HEARTBEAT_EVERY = 15         # 每这么多轮打一行心跳（约 30min · 减噪）
 TAIL_LINES = 40
@@ -780,7 +781,7 @@ def _alert_target(bot_name):
     return None                             # 交给调用方如实报失败，别静默
 
 
-def notify(bot_name, kind, text):
+def notify(bot_name, kind, text, *, incident=None):
     """发到【主人与这个 bot 的 DM】。用哪个 bot 发就等于说明是哪条线，主人不用猜。
 
     这是本 plan 相对旧看门狗最重要的一处改动：旧的调 xhs `scripts/notify.py`，
@@ -792,8 +793,16 @@ def notify(bot_name, kind, text):
     2026-08-30 主人拍板拆掉 webhook 退路：兜底给失败开了一条特殊通道，让「没送到」
     长得像「送到了」。发不到主人自己会察觉（bot 不吭声就是信号），届时他直接找 link16
     或上机器看。所以这里 DM 失败就是失败，不改投任何地方。"""
-    if kind in _STATEFUL_KINDS:
-        alerts = _alerts_load()
+    alerts = _alerts_load()
+    if incident is not None:
+        key = f"{bot_name}:quota_notice"
+        previous = alerts.get(key) or {}
+        if previous.get("incident") == incident:
+            log(f"[{bot_name}] 同一额度事故已通知，不再重复发")
+            return False
+        alerts[key] = {"incident": incident, "kind": kind, "claimed": time.time()}
+        _alerts_save(alerts)
+    elif kind in _STATEFUL_KINDS:
         key = f"{bot_name}:{kind}"
         last = float(alerts.get(key, {}).get("last", 0))
         if time.time() - last < ALERT_COOLDOWN:
@@ -818,7 +827,13 @@ def notify(bot_name, kind, text):
                            errors="replace", timeout=90, cwd=str(PROJECT),
                            env=env, creationflags=NO_WINDOW)
         ok = r.returncode == 0
-        if ok and kind in _STATEFUL_KINDS:
+        if incident is not None:
+            alerts = _alerts_load()
+            key = f"{bot_name}:quota_notice"
+            if (alerts.get(key) or {}).get("incident") == incident:
+                alerts[key].update(last=time.time(), last_notice_ok=ok)
+                _alerts_save(alerts)
+        elif ok and kind in _STATEFUL_KINDS:
             alerts = _alerts_load()
             alerts.setdefault(f'{bot_name}:{kind}', {})['last'] = time.time()
             _alerts_save(alerts)
@@ -835,6 +850,13 @@ def notify(bot_name, kind, text):
 
 
 # ---------- R2 · 短时额度的一次性恢复点（由现有 watchdog 轮询，无第二个计划任务）----------
+
+def _quota_incident(bot_name, profile, pane_text, row=None):
+    rec = session_record(bot_name)
+    session = rec.get("session_id") or rec.get("jsonl") or rec.get("pty") or "unknown-session"
+    reset = (row or {}).get("weekly_reset") or "unknown-reset"
+    return f"{session}|{profile}|{find_pane_limit(pane_text) or 'quota'}|{reset}"
+
 
 def _short_waits_load():
     if not SHORT_WAIT_PATH.exists():
@@ -881,18 +903,18 @@ def _short_due(row, now):
     return float(stamp) if isinstance(stamp, (int, float)) and stamp > now else now + POLL_SECONDS
 
 
-def _arm_short_wait(bot_name, rec, row, jobs, now):
+def _arm_short_wait(bot_name, rec, row, jobs, now, *, incident=None):
     identity = _short_identity(rec)
     if not all(identity.get(key) for key in ("profile", "pty", "workspace_id")):
         notify(bot_name, "short_wait_failed",
                f"⚠️ {bot_name} 被短时限额挡住，但会话身份不完整，无法安全安排到点唤醒；"
-               f"{_weekly_balance(row)}。看门狗不会切账号。")
+               f"{_weekly_balance(row)}。看门狗不会切账号。", incident=incident)
         return False
     inbound_size = _inbound_size(bot_name)
     if inbound_size is None:
         notify(bot_name, "short_wait_failed",
                f"⚠️ {bot_name} 被短时限额挡住，但无法读取后续消息记录，"
-               "不能安全安排自动唤醒；看门狗不会切账号。")
+               "不能安全安排自动唤醒；看门狗不会切账号。", incident=incident)
         return False
     due = _short_due(row, now)
     job = jobs.get(bot_name)
@@ -910,10 +932,11 @@ def _arm_short_wait(bot_name, rec, row, jobs, now):
         reset = row.get("session_reset") or "—"
         time_note = (f"预计 {reset} 恢复" if row.get("session_reset_at")
                      else "接口未给恢复时间；每 2 分钟复查")
-        job["notified"] = notify(bot_name, "short_wait",
-                                 f"🟡 {bot_name} 的 {rec['profile']} **短时会话限额**挡住了当前任务；"
-                                 f"{time_note}。{_weekly_balance(row)}。"
-                                 "看门狗保留原会话，恢复后只唤醒一次，不切账号。")
+        notify(bot_name, "short_wait",
+               f"🟡 {bot_name} 的 {rec['profile']} **短时会话限额**挡住了当前任务；"
+               f"{time_note}。{_weekly_balance(row)}。"
+               "看门狗保留原会话，恢复后只唤醒一次，不切账号。", incident=incident)
+        job["notified"] = True
         _short_waits_save(jobs)
     return True
 
@@ -1596,7 +1619,49 @@ def _bridge_cmd(args, timeout=180):
                           creationflags=NO_WINDOW)
 
 
-def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
+def _failover_accounts_exhausted(curr, rows):
+    targets = []
+    for row in rows:
+        if row.get("profile") == curr.get("profile"):
+            continue
+        try:
+            if agent_quota.failover_priority(curr, row) is not None:
+                targets.append(row)
+        except ValueError:
+            return False
+    return all(row.get("status") == "ok"
+               and float(row.get("weekly_percent") or 0) >= agent_quota.CRIT_PERCENT
+               for row in targets)
+
+
+def _terminate_exhausted_session(bot_name, bot, curr, incident):
+    try:
+        if quota_recovery.get(STATE_DIR, bot_name).get("incident") == incident:
+            return False
+        pack = snapshot_handoff(bot_name, reason="所有获准接手的账号周额度均已耗尽")
+        saved = persist_handoff_pack(pack)
+        quota_recovery.stop(STATE_DIR, bot_name, curr["profile"], incident, handoff=saved)
+    except Exception as exc:
+        notify(bot_name, "no_target",
+               f"🔴 {bot_name} 的所有可接手账号周额度均已耗尽，但终止前保存交接状态失败：{exc}。"
+               "原会话保留，本次事故不再重复提醒。", incident=incident)
+        return False
+    try:
+        import feishu_bridge as fb
+        fb.close_session_runtime(bot)
+    except Exception as exc:
+        notify(bot_name, "no_target",
+               f"🔴 {bot_name} 的所有可接手账号周额度均已耗尽；会话关闭未确认：{exc}。"
+               f"交接包已保存到 {saved}，Cron 已停止自动投递，本次事故不再重复提醒。", incident=incident)
+        return False
+    notify(bot_name, "no_target",
+           f"🔴 {bot_name} 的 {curr['profile']} 及所有可接手账号周额度均已耗尽，当前会话已终止。"
+           f"交接包：{saved}\nCron 不再自动重启这个满额账号；额度恢复或换号后可继续。"
+           "本次事故只提醒这一次。", incident=incident)
+    return True
+
+
+def failover(bot_name, target=None, dry_run=False, reason="撞额度上限", *, incident=None):
     """把 bot_name 从当前号换到有额度的号，并把原任务交接给新会话。
 
     八步，③ 之后每一步失败都要播报，绝不静默。"""
@@ -1640,12 +1705,22 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     else:
         chosen = agent_quota.pick(candidate_rows, exclude=[cur], source=curr)
     if not chosen:
+        incident = incident or f"{cur}|{curr.get('weekly_reset') or 'unknown-reset'}"
+        if dry_run:
+            print(json.dumps({"bot": bot_name, "from": cur, "to": None,
+                              "all_accounts_exhausted": _failover_accounts_exhausted(curr, rows)},
+                             ensure_ascii=False, indent=1))
+            return False
+        if _failover_accounts_exhausted(curr, rows):
+            return _terminate_exhausted_session(bot_name, bot, curr, incident)
         notify(bot_name, "no_target",
                f"🔴 {bot_name} 的 {cur} 周额度到限额，但**同系列及明确获准的备用账号**"
-               "没有可用且获准自动接手的号；原会话未关闭。\n"
+               "没有可用且获准自动接手的号；额度未全部确认耗尽，原会话保留。本次事故只提醒一次。\n"
                + "\n".join(f"· {r['profile']} {r['verdict']} · {_weekly_balance(r)}"
-                           for r in candidate_rows if agent_quota.failover_priority(curr, r) is not None))
+                           for r in candidate_rows if agent_quota.failover_priority(curr, r) is not None),
+               incident=incident)
         return False
+    incident = incident or f"{cur}|{curr.get('weekly_reset') or 'unknown-reset'}"
     tgt = chosen["profile"]
     log(f"选号：{cur}（{curr.get('verdict')}）→ {tgt}（{chosen['verdict']}·周{chosen['weekly_percent']}%"
         f"·{chosen.get('route') and '经' + chosen['route'] or ''}）")
@@ -1653,7 +1728,9 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
     # ② 闸
     ok, why = _failover_gate(bot_name)
     if not ok:
-        notify(bot_name, "gate_blocked", f"🟡 {bot_name} 撞额度上限但**没自动换号**：{why}。要换请回 `/account {tgt}`。")
+        notify(bot_name, "gate_blocked",
+               f"🟡 {bot_name} 撞额度上限但**没自动换号**：{why}。要换请回 `/account {tgt}`。",
+               incident=incident)
         return False
 
     # ③ 交接包（必须在关会话之前）
@@ -1676,7 +1753,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
            f"🔴 {bot_name} 的 {cur} **周额度**挡住了当前会话；"
            f"{_weekly_balance(curr)}，预计 {curr.get('weekly_reset')} 重置。\n"
            f"→ 切到{selection} {tgt}（{_weekly_balance(chosen)}），"
-           "并把原任务交给新会话接手。")
+           "并把原任务交给新会话接手。", incident=incident)
 
     # ④ 写名册
     try:
@@ -1735,6 +1812,10 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限"):
         return False
 
     _record_failover(bot_name)
+    try:
+        quota_recovery.clear(STATE_DIR, bot_name)
+    except (OSError, ValueError) as exc:
+        log(f"[{bot_name}] 换号已完成，旧额度终止状态无法清理：{exc}")
     _bg = pack.get("background") or {}
     bgn = len(_bg.get("procs") or []) + len(_bg.get("files") or [])
     told = notify(bot_name, "handed",
@@ -1947,20 +2028,23 @@ def cmd_run(auto=True):
                                            else (False, "认不出是哪个 bot", False))
                 kind = limit_kind(text, quota.get(prof)) if limited else None
                 row = quota.get(prof) or {}
+                incident = (_quota_incident(bot_name, prof, text, row)
+                            if bot_name and prof and find_pane_limit(text) else None)
                 screen_short = _screen_short_reset(text, now) if prof else None
                 if kind is None and screen_short is not None and (
                         row.get("status") != "ok" or row.get("session_percent") is None):
                     kind = "short"  # only schedules a wait; API must recover before any injection
                 # 「说不准」= 屏上明明写着撞限流、但账号那一路答不上来（额度接口自己被限流等）。
                 # **不敢换号（不知道切到哪安全），但绝不静默** —— 静默正是这套东西要根治的病。
-                # 走状态类告警（30min 冷却），且不进 lim_stuck 计数、不触发 failover。
+                # 按额度事故只告警一次，且不进 lim_stuck 计数、不触发 failover。
                 if uncertain and bot_name and kind != "short":
                     notify(bot_name, "limit",
                            f"⚠️ {bot_name} 疑似撞额度上限，但**我不敢自动换号**\n"
                            f"· 面板 {ws} 屏上有限流提示\n"
                            f"· 但账号 `{prof}` 的额度**问不到** —— 不知道切到哪个号是安全的\n"
                            f"· 详情：{why}\n"
-                           f"· 你可以：`/account <别的号>` 手动切，或跑 `python feishu/agent_quota.py` 看是谁答不上来")
+                           f"· 你可以：`/account <别的号>` 手动切，或跑 `python feishu/agent_quota.py` 看是谁答不上来",
+                           incident=incident)
                     log(f"⚠️ {ws}/{bot_name} 屏命中限流但额度问不到（{prof}）→ 只告警不换号")
                 elif uncertain and kind == "short":
                     log(f"⚠️ {ws}/{bot_name} 短时限额屏可读、额度接口问不到 → 等恢复点，绝不换号")
@@ -1972,13 +2056,14 @@ def cmd_run(auto=True):
                         wait_row = dict(row)
                         if screen_short is not None and row.get("status") != "ok":
                             wait_row.update(screen_short)
-                        _arm_short_wait(bot_name, session_record(bot_name), wait_row, short_waits, now)
+                        _arm_short_wait(bot_name, session_record(bot_name), wait_row, short_waits, now,
+                                        incident=incident)
                     elif auto:
-                        failover(bot_name, reason="周额度到限额")
+                        failover(bot_name, reason="周额度到限额", incident=incident)
                     else:
                         notify(bot_name, "limit",
                                f"🔴 {bot_name} 的 {prof} 周额度到限额，{_weekly_balance(row)}；"
-                               "自动换号已关，原会话未关闭。")
+                               "自动换号已关，原会话未关闭。", incident=incident)
                     st["lim_stuck"] = 0
                     acted += 1
                     continue
@@ -1988,7 +2073,7 @@ def cmd_run(auto=True):
                     if limited and kind is None and bot_name:
                         notify(bot_name, "limit",
                                f"⚠️ {bot_name} 屏上有限额提示，但短时/周额度与提示未能对上；"
-                               "不切账号，继续复查。")
+                               "不切账号，继续复查。本次事故不再重复提醒。", incident=incident)
                     continue
 
                 bot_obj = bots.get(bot_name) if bot_name else None

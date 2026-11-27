@@ -94,7 +94,7 @@ def test_session_limit_with_45_percent_weekly_is_short_and_notice_names_correct_
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(w, "SHORT_WAIT_PATH", tmp_path / "short-waits.json")
     messages = []
-    monkeypatch.setattr(w, "notify", lambda bot, kind, body: messages.append((kind, body)) or True)
+    monkeypatch.setattr(w, "notify", lambda bot, kind, body, **kw: messages.append((kind, body)) or True)
     assert w.limit_kind(SESSION_SCREEN, row()) == "short"
     jobs = {}
     assert w._arm_short_wait("voiceover", REC, row(), jobs, 10000)
@@ -111,7 +111,7 @@ def test_session_limit_with_45_percent_weekly_is_short_and_notice_names_correct_
 def test_due_short_wait_survives_restart_injects_once_then_removes_job(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(w, "SHORT_WAIT_PATH", tmp_path / "short-waits.json")
-    monkeypatch.setattr(w, "notify", lambda *a: True)
+    monkeypatch.setattr(w, "notify", lambda *a, **kw: True)
     monkeypatch.setattr(w, "session_record", lambda bot: dict(REC))
     monkeypatch.setattr(w, "read_pane", lambda pty: SESSION_SCREEN)
     monkeypatch.setattr(w, "at_picker", lambda *a: False)
@@ -135,7 +135,7 @@ def test_due_short_wait_survives_restart_injects_once_then_removes_job(monkeypat
 def test_short_wait_does_not_nudge_replaced_or_already_resumed_session(monkeypatch, tmp_path, change, screen):
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(w, "SHORT_WAIT_PATH", tmp_path / "short-waits.json")
-    monkeypatch.setattr(w, "notify", lambda *a: True)
+    monkeypatch.setattr(w, "notify", lambda *a, **kw: True)
     monkeypatch.setattr(w, "session_record", lambda bot: dict(REC, **change))
     monkeypatch.setattr(w, "read_pane", lambda pty: screen)
     monkeypatch.setattr(w, "at_picker", lambda *a: False)
@@ -150,7 +150,7 @@ def test_short_wait_does_not_nudge_replaced_or_already_resumed_session(monkeypat
 def test_short_wait_keeps_waiting_when_api_has_not_recovered(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(w, "SHORT_WAIT_PATH", tmp_path / "short-waits.json")
-    monkeypatch.setattr(w, "notify", lambda *a: True)
+    monkeypatch.setattr(w, "notify", lambda *a, **kw: True)
     monkeypatch.setattr(w, "session_record", lambda bot: dict(REC))
     monkeypatch.setattr(w, "read_pane", lambda pty: pytest.fail("quota still full; must not read or inject"))
     w._arm_short_wait("voiceover", REC, row(), {}, 10000)
@@ -162,7 +162,7 @@ def test_short_wait_keeps_waiting_when_api_has_not_recovered(monkeypatch, tmp_pa
 def test_new_owner_message_cancels_pending_automatic_wakeup(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(w, "SHORT_WAIT_PATH", tmp_path / "short-waits.json")
-    monkeypatch.setattr(w, "notify", lambda *a: True)
+    monkeypatch.setattr(w, "notify", lambda *a, **kw: True)
     monkeypatch.setattr(w, "session_record", lambda bot: dict(REC))
     monkeypatch.setattr(w, "read_pane", lambda pty: pytest.fail("owner took control; must not read or inject"))
     w._arm_short_wait("voiceover", REC, row(), {}, 10000)
@@ -176,7 +176,7 @@ def test_new_owner_message_cancels_pending_automatic_wakeup(monkeypatch, tmp_pat
 def test_unreadable_inbound_ledger_cannot_arm_or_fire_a_wakeup(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(w, "SHORT_WAIT_PATH", tmp_path / "short-waits.json")
-    monkeypatch.setattr(w, "notify", lambda *a: True)
+    monkeypatch.setattr(w, "notify", lambda *a, **kw: True)
     monkeypatch.setattr(w, "_inbound_size", lambda bot: None)
     assert not w._arm_short_wait("voiceover", REC, row(), {}, 10000)
     assert not w.SHORT_WAIT_PATH.exists()
@@ -188,7 +188,7 @@ def test_restarted_watchdog_never_repeats_a_wakeup_with_uncertain_submit(monkeyp
     monkeypatch.setattr(w, "session_record", lambda bot: dict(REC))
     monkeypatch.setattr(w, "read_pane", lambda pty: pytest.fail("firing job must not retry"))
     messages = []
-    monkeypatch.setattr(w, "notify", lambda bot, kind, body: messages.append(kind) or True)
+    monkeypatch.setattr(w, "notify", lambda bot, kind, body, **kw: messages.append(kind) or True)
     jobs = {"voiceover": {"identity": dict(REC), "due_at": 10400,
                           "notified": True, "status": "firing"}}
     assert w._short_waits_save(jobs)
@@ -331,3 +331,86 @@ def test_live_watchdog_loop_routes_short_wait_and_weekly_failover(
     events = run_scenes(monkeypatch, tmp_path, [{"screen": screen}, {"screen": screen}], configure=configure)
     assert (expected, 1) in events
     assert ("failover", 1) in events if expected == "failover" else not any(e[0] == "failover" for e in events)
+
+
+def _codex_quota(profile, weekly, verdict=None):
+    return {"profile": profile, "runtime": "codex", "status": "ok",
+            "session_percent": 0, "weekly_percent": weekly,
+            "weekly_reset": "12-04 08:00", "verdict": verdict or ("满" if weekly >= 95 else "够用")}
+
+
+@pytest.mark.parametrize("with_backup", [False, True])
+def test_exhausted_codex_accounts_terminate_once_and_block_cron(
+        monkeypatch, tmp_path, with_backup):
+    import feishu_bridge as fb
+    import quota_recovery
+    source = _codex_quota("cxp", 100)
+    backup = _codex_quota("cxp2", 100)
+    rows = [source, backup] if with_backup else [source]
+    bot = {"name": "voiceover", "profile": "cxp"}
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(fb, "load_bots", lambda: [bot])
+    monkeypatch.setattr(w, "session_record", lambda _: {"profile": "cxp", "pty": "pty-old"})
+    monkeypatch.setattr(q, "collect", lambda: rows)
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: frozenset({"cxp", "cxp2"}))
+    monkeypatch.setattr(w, "snapshot_handoff", lambda *a, **kw: {"bot": "voiceover"})
+    monkeypatch.setattr(w, "persist_handoff_pack", lambda pack: tmp_path / "handoff.json")
+    closed, messages = [], []
+    monkeypatch.setattr(fb, "close_session_runtime", lambda bot: closed.append(bot["name"]))
+    monkeypatch.setattr(w, "notify", lambda bot, kind, body, **kw: messages.append((kind, body)) or True)
+
+    assert w.failover("voiceover", incident="codex-weekly-1") is True
+    assert closed == ["voiceover"] and len(messages) == 1
+    assert "当前会话已终止" in messages[0][1]
+    assert quota_recovery.blocked(tmp_path, "voiceover", "cxp", source) is True
+    assert w.failover("voiceover", incident="codex-weekly-1") is False
+    assert closed == ["voiceover"] and len(messages) == 1
+
+    recovered = dict(source, weekly_percent=10, verdict="够用")
+    assert quota_recovery.blocked(tmp_path, "voiceover", "cxp", recovered) is False
+    assert quota_recovery.get(tmp_path, "voiceover") == {}
+
+
+def test_unknown_backup_quota_never_terminates_original_session(monkeypatch, tmp_path):
+    import feishu_bridge as fb
+    import quota_recovery
+    source = _codex_quota("cxp", 100)
+    backup = _codex_quota("cxp2", 0, "问不到")
+    backup.update(status="unknown", weekly_percent=None)
+    monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(fb, "load_bots", lambda: [{"name": "voiceover", "profile": "cxp"}])
+    monkeypatch.setattr(w, "session_record", lambda _: {"profile": "cxp"})
+    monkeypatch.setattr(q, "collect", lambda: [source, backup])
+    monkeypatch.setattr(q, "auto_failover_profiles", lambda: frozenset({"cxp", "cxp2"}))
+    monkeypatch.setattr(fb, "close_session_runtime",
+                        lambda bot: pytest.fail("unknown quota must not close the session"))
+    messages = []
+    monkeypatch.setattr(w, "notify", lambda bot, kind, body, **kw: messages.append(body) or True)
+
+    assert w.failover("voiceover", incident="codex-weekly-unknown") is False
+    assert "原会话保留" in messages[0]
+    assert quota_recovery.get(tmp_path, "voiceover") == {}
+
+
+def test_live_loop_exhausted_codex_closes_and_notifies_only_once(monkeypatch, tmp_path):
+    import feishu_bridge as fb
+    source = _codex_quota("cxp", 100)
+    backup = _codex_quota("cxp2", 100)
+    bot = {"name": "review-bot", "profile": "cxp"}
+    closed = []
+
+    def configure(events):
+        monkeypatch.setattr(w, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(w, "_profile_of", lambda *a: "cxp")
+        monkeypatch.setattr(w, "session_record", lambda _: {
+            "profile": "cxp", "pty": "fake-pty", "workspace_id": "fake-workspace"})
+        monkeypatch.setattr(q, "collect", lambda: [source, backup])
+        monkeypatch.setattr(q, "auto_failover_profiles", lambda: frozenset({"cxp", "cxp2"}))
+        monkeypatch.setattr(fb, "load_bots", lambda: [bot])
+        monkeypatch.setattr(w, "snapshot_handoff", lambda *a, **kw: {"bot": "review-bot"})
+        monkeypatch.setattr(w, "persist_handoff_pack", lambda pack: tmp_path / "handoff.json")
+        monkeypatch.setattr(fb, "close_session_runtime", lambda current: closed.append(current["name"]))
+
+    events = run_scenes(monkeypatch, tmp_path, [{"screen": WEEKLY_SCREEN}] * 5, configure=configure)
+    assert closed == ["review-bot"]
+    assert [event for event in events if event[0] == "no_target"] == [("no_target", 1)]
