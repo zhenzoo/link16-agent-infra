@@ -53,6 +53,45 @@ class _MonitorCase(unittest.TestCase):
         return monitor.record_stage(state["job_id"], "registered", app_id="cli_safe")
 
 
+class RegistrationPeerReceiptTests(_MonitorCase):
+    def test_only_original_native_application_gets_one_terminal_receipt(self):
+        import bridge_inbound
+        import bridge_outbound
+        import turn_delivery_guard
+        job = self.arm()["job_id"]
+        operator = "tb26-link16"
+        request = "om_inbound"
+        route = dict(kind="a2a", peer="project-lead", mid=request, at="ou_member", dest="oc_group")
+        turn_delivery_guard.activate(self.state_dir, operator, route)
+        bridge_inbound.append_record(self.state_dir, operator, dict(
+            schema=bridge_inbound.SCHEMA, kind="inbound", source=bridge_inbound.NATIVE_SOURCE,
+            bot=operator, message_id=request, chat_type="group", chat_id="oc_group",
+            mentioned_bot=True, sender={"is_bot": True, "open_id": "ou_member"}))
+        member = dict(name="Project Lead", app_id="cli_lead", member_id="ou_member")
+        directory = dict(chat_id="oc_group", members=[member])
+        state = monitor._mutate(job, lambda r: r.update(status="ready", last_error="PRIVATE_SENTINEL"))
+        with (mock.patch.dict(os.environ, {"FEISHU_BRIDGE_SESSION": operator}),
+              mock.patch("registry.find", return_value=dict(name="project-lead", display_name="Project Lead")),
+              mock.patch("proactive_business_list.read_members", return_value=directory),
+              mock.patch("send_feishu_msg.send_agent_message", return_value=dict(
+                  ok=True, message_id="om_outbound", route=dict(kind="a2a", reply_to=request))) as send):
+            with self.assertRaises(ValueError):
+                monitor.return_existing_status(state, "om_wrong")
+            directory["members"].append(dict(member, app_id="cli_duplicate", member_id="ou_other"))
+            with self.assertRaises(ValueError):
+                monitor.return_existing_status(state, request)
+            directory["members"].pop()
+            sent = monitor.return_existing_status(state, request)
+            monitor._emit_terminal_receipt(sent)
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs["resolved"], dict(xt=None, ats=["ou_member"], target="oc_group"))
+            self.assertEqual(send.call_args.kwargs["reply_to"], request)
+            self.assertNotIn("PRIVATE_SENTINEL", send.call_args.args[2])
+            self.assertIn(job, send.call_args.args[2])
+            self.assertEqual(sent["peer_receipt"]["message_id"], "om_outbound")
+            self.assertEqual(bridge_outbound.read_records(self.state_dir, operator)[0]["route"]["reply_to"], request)
+
+
 class EnterpriseBusinessConsentTests(_MonitorCase):
     def test_guarded_job_keeps_creation_link_local_to_verified_window_and_requires_app_proof(self):
         state = self.arm(["core"])

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -52,6 +53,8 @@ def _iso(ts=None):
 
 
 def _state_path(job_id):
+    if not isinstance(job_id, str) or not job_id or job_id in {".", ".."} or re.search(r"[\\/:\x00-\x1f]", job_id):
+        raise ValueError("非法注册任务编号")
     return STATE_DIR / f"bridge-registration-{job_id}.json"
 
 
@@ -151,6 +154,10 @@ def _arm_job(
             and (not app_id or not existing.get("app_id") or existing.get("app_id") == app_id)
             and (not context or not existing.get("registration_context") or existing.get("registration_context") == context)
         )
+        bound = (existing.get("registration_context") or {}).get("return_to_request")
+        requested = (context or {}).get("return_to_request")
+        if bound or requested:
+            same_contract = same_contract and bound == requested and existing.get("notify_bot") == notify_bot
         if existing.get("status") in ACTIVE_STATUSES and not same_contract:
             raise ValueError("该 bot 有未完成且参数不同的注册任务；先读取并取消原任务，再恢复同一应用")
         if existing.get("status") in ACTIVE_STATUSES and same_contract:
@@ -770,11 +777,110 @@ def _event_text(state, milestone, permission_review=None):
     )
 
 
+def receipt_route(operator, request_mid):
+    """Bind a status-only reply to the actual requesting application in this turn."""
+    import bridge_inbound
+    import registry
+    import turn_delivery_guard
+    from bot_names import labels, normalize
+    from bridge_env import assert_sender_identity
+    from proactive_business_list import read_members
+
+    if not operator or not re.fullmatch(r"om_[A-Za-z0-9_-]+", request_mid or ""):
+        raise ValueError("注册回执需要本机经办应用与飞书原请求编号")
+    if os.environ.get("FEISHU_BRIDGE_SESSION") not in {None, "", operator}:
+        raise ValueError("只能绑定当前经办应用自己的原请求")
+    assert_sender_identity(operator)
+    route = turn_delivery_guard.read_route(STATE_DIR, operator) or {}
+    if (not route.get("active") or route.get("kind") != "a2a" or route.get("reply_to")
+            or route.get("mid") != request_mid or not route.get("peer")):
+        raise ValueError("回执只能绑定经办应用当前收到的原始同群派单")
+    incoming = next((row for row in bridge_inbound.read_records(STATE_DIR, operator, strict=True)
+                     if row.get("message_id") == request_mid and row.get("bot") == operator
+                     and row.get("source") == bridge_inbound.NATIVE_SOURCE and row.get("chat_type") == "group"
+                     and row.get("mentioned_bot") is True), {})
+    sender = incoming.get("sender") or {}
+    if (sender.get("is_bot") is not True or not sender.get("open_id") or sender["open_id"] != route.get("at")
+            or not incoming.get("chat_id") or incoming["chat_id"] != route.get("dest")):
+        raise ValueError("原消息发件应用或群与当前回执路由不一致")
+    members = read_members(operator)
+    known = registry.find(route["peer"]) or {"name": route["peer"]}
+    matches = [row for row in members["members"] if normalize(row["name"]) in labels(known)]
+    if members["chat_id"] != route["dest"] or len(matches) != 1 or matches[0]["member_id"] != sender["open_id"]:
+        raise ValueError("原请求者未唯一绑定到经办应用的登记群")
+    return {"mid": request_mid, "peer": route["peer"], "at": sender["open_id"],
+            "dest": route["dest"], "app_id": matches[0]["app_id"]}
+
+
+def _terminal_receipt_pending(state):
+    return (state.get("status") in TERMINAL_STATUSES
+            and (state.get("registration_context") or {}).get("return_to_request")
+            and not (state.get("peer_receipt") or {}).get("message_id"))
+
+
+def return_existing_status(state, request_mid):
+    if state.get("status") not in TERMINAL_STATUSES:
+        raise ValueError("原注册任务尚未结束")
+    route = receipt_route(state.get("notify_bot"), request_mid)
+    def bind(item):
+        context = item.get("registration_context") or {}
+        previous = context.get("return_to_request")
+        if previous and previous != route:
+            raise ValueError("该注册任务已经绑定另一条原派单")
+        item["registration_context"] = {**context, "return_to_request": route}
+    return _emit_terminal_receipt(_mutate(state["job_id"], bind))
+
+
+def _emit_terminal_receipt(state):
+    if not _terminal_receipt_pending(state):
+        return state
+    import bridge_outbound
+    from bridge_env import assert_sender_identity
+    from proactive_business_list import read_members
+    from send_feishu_msg import send_agent_message
+    from user_text import require_text
+    job = state["job_id"]
+    with bridge_injection.injection_lock(STATE_DIR, "registration-peer-receipt", job):
+        state = get_job(job)
+        if not _terminal_receipt_pending(state):
+            return state
+        old = state.get("peer_receipt") or {}
+        if old.get("retry_after", 0) > _now():
+            return state
+        route = state["registration_context"]["return_to_request"]
+        operator = state["notify_bot"]
+        status = {"ready": "已就绪", "failed": "失败", "expired": "已过期", "cancelled": "已取消"}[state["status"]]
+        # Registration state, traces and local handoff links stay on the target machine.
+        body = f"注册任务 {job} 的终态为{status}。"
+        try:
+            assert_sender_identity(operator)
+            require_text(body)
+            members = read_members(operator)
+            if members["chat_id"] != route["dest"] or not any(
+                    r["app_id"] == route["app_id"] and r["member_id"] == route["at"] for r in members["members"]):
+                raise ValueError("登记群或原请求者身份已变化")
+            sent = send_agent_message(operator, route["peer"], body, reply_to=route["mid"],
+                                      resolved={"xt": None, "ats": [route["at"]], "target": route["dest"]},
+                                      message_uuid=str(uuid.uuid5(uuid.NAMESPACE_URL, f"link16:registration:{job}:{route['mid']}")))
+            mid = sent.get("message_id")
+            if not sent.get("ok") or not re.fullmatch(r"om_[A-Za-z0-9_-]+", mid or ""):
+                raise ValueError("未取得原生飞书消息编号")
+        except (KeyError, ValueError, OSError, RuntimeError, subprocess.SubprocessError, SystemExit) as exc:
+            attempts = old.get("attempts", 0) + 1
+            return _mutate(job, lambda row: row.update(peer_receipt={
+                "attempts": attempts, "error": type(exc).__name__, "retry_after": _now() + min(300, 10 * attempts)}))
+        state = _mutate(job, lambda row: row.update(peer_receipt={"message_id": mid, "request_mid": route["mid"]}))
+        bridge_outbound.append_delivery(STATE_DIR, operator, origin="registration_monitor", route=sent["route"],
+                                        target=route["dest"], text=body, message_id=mid)
+        return state
+
+
 def _emit_pending(job_id):
     state = get_job(job_id)
     notify_bot = state.get("notify_bot") if state else None
     if not state or not notify_bot:
         return state
+    state = _emit_terminal_receipt(state)
     for milestone in EVENT_ORDER:
         event = state.get("events", {}).get(milestone)
         if not event or event.get("delivered_at"):
@@ -998,6 +1104,7 @@ def run(job_id, interval=10):
     while True:
         state = check_once(job_id, emit=True)
         if (state.get("status") in TERMINAL_STATUSES
+                and not _terminal_receipt_pending(state)
                 and (not state.get("notify_bot") or not pending_event_names(state))):
             return 0 if state.get("status") == "ready" else 1
         time.sleep(max(1, interval))
@@ -1026,6 +1133,7 @@ def main():
     status = sub.add_parser("status", help="读取监督状态")
     status.add_argument("--job", "--job-id", dest="job")
     status.add_argument("--bot")
+    status.add_argument("--return-request", help="向本机经办应用当前收到的同群原请求回传已有任务终态")
     links = sub.add_parser("links", help="读取当前授权/权限链接或下一人工动作（首次安装无 bot 也可用）")
     links.add_argument("--job", required=True)
     links.add_argument("--watch", action="store_true", help="状态变化时持续输出；退出不会终止后台注册")
@@ -1067,6 +1175,19 @@ def main():
         state = get_job(args.job, args.bot)
         if not state:
             parser.error("找不到 registration job")
+        if args.return_request:
+            if not args.job:
+                parser.error("回传已有注册结果需要精确的 --job")
+            try:
+                state = return_existing_status(state, args.return_request)
+            except (ValueError, OSError, KeyError, subprocess.SubprocessError) as exc:
+                parser.error(str(exc))
+            receipt = state.get("peer_receipt") or {}
+            print(json.dumps({"job_id": state["job_id"], "status": state["status"],
+                              "message_id": receipt.get("message_id")}, ensure_ascii=False))
+            if not receipt.get("message_id"):
+                raise SystemExit(1)
+            return
     print(json.dumps(state, ensure_ascii=False, indent=2))
 
 

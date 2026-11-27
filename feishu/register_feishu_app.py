@@ -400,6 +400,7 @@ def main():
                     help="注册能力包，可重复；不给=core + group-a2a，不默认申请 broad Drive")
     ap.add_argument("--notify-bot", default=None,
                     help="人工步骤完成后唤醒哪只 Link16 bot；不给取 FEISHU_BRIDGE_SESSION")
+    ap.add_argument("--return-request", help="将注册终态回给本机经办应用当前同群派单的原消息")
     ap.add_argument("--group", default=None,
                     help="覆盖所选组织登记的默认共享群；优先使用确切群 ID")
     ap.add_argument("--tenant-kind", choices=("enterprise", "personal"), default=None,
@@ -527,6 +528,20 @@ def main():
             reuse_grants = not any(permission_plan.values())
     except (ValueError, registration_transport.RegistrationTransportError) as exc:
         ap.error(str(exc))
+    return_context = {}
+    if args.return_request:
+        if args.no_monitor:
+            ap.error("跨机注册终态回执需要注册监督器")
+        if monitor:
+            route = (monitor.get("registration_context") or {}).get("return_to_request") or {}
+            if route.get("mid") != args.return_request:
+                ap.error("原请求编号与已创建的注册任务不符")
+        else:
+            try:
+                operator = args.notify_bot or os.environ.get("FEISHU_BRIDGE_SESSION")
+                return_context["return_to_request"] = registration_monitor.receipt_route(operator, args.return_request)
+            except (KeyError, ValueError, OSError, subprocess.SubprocessError) as exc:
+                ap.error(str(exc))
     if args.dry_run:
         print("=== register dry-run（零写入）===")
         print(f"bot={args.bot or args.name}")
@@ -558,6 +573,7 @@ def main():
             launch=True,
             context={"name": args.name, "profile": selected_profile.name,
                      "cwd": selected_cwd, "tenant_kind": tenant_kind, "auto_group": True,
+                     **return_context,
                      **({"tenant_target": target} if target else {}),
                      **({"verify_owner_consent": True} if tenant_kind == "enterprise" else {})},
             start_bridge=not args.no_start_bridge,
