@@ -119,7 +119,7 @@ def _opener(use_proxy):
 _WORKING_ROUTE = {}
 
 
-def _get_json_dual(url, headers, prefer_proxy, runtime):
+def _get_json_dual(url, headers, prefer_proxy, runtime, *, error_codes=None):
     """**两条线路都试**：先试首选，不通就自动换另一条重试一次。返回 (data, err, 走通的线路)。
 
     🩸 为什么必须这样（2026-08-20 tb25-link16 实证，两台机结论【正好相反】）：
@@ -139,26 +139,28 @@ def _get_json_dual(url, headers, prefer_proxy, runtime):
         routes = [w] + [r for r in routes if r != w]
     errs = []
     for use_proxy in routes:
-        data, err = _get_json(url, headers, use_proxy)
+        data, err, code = _get_json(url, headers, use_proxy)
         name = "代理" if use_proxy else "直连"
         if data is not None:
             _WORKING_ROUTE[runtime] = use_proxy
             return data, None, name
+        if code and error_codes is not None:
+            error_codes.add(code)
         errs.append(f"{name}: {err}")
     # 两条都不通 → 把两条的原始错都带出来，别让人只看到其中一条去猜
     return None, " | ".join(errs), None
 
 
 def _get_json(url, headers, use_proxy):
-    """→ (data, err)。err 是给人看的一句话；data 是 dict。两者必有其一。"""
+    """Return data or diagnostic text, with a machine-readable auth error when known."""
     req = urllib.request.Request(url, headers=headers)
     try:
         with _opener(use_proxy).open(req, timeout=TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8", "replace")), None
+            return json.loads(resp.read().decode("utf-8", "replace")), None, None
     except urllib.error.HTTPError as e:
         body = ""
         try:
-            body = e.read().decode("utf-8", "replace")[:160]
+            body = e.read(4096).decode("utf-8", "replace")
         except Exception:                              # noqa: BLE001
             pass
         # 🩸 2026-08-20 tb25 实证：原来 401/403 一律写成「凭据失效·去该号跑一次让它刷新」
@@ -168,13 +170,22 @@ def _get_json(url, headers, use_proxy):
         # = 这台机上这个号的 token 就没有该端点的权限，跟"过期"毫无关系。
         # tb25 照那句提示去查凭据，白花十分钟。⇒ **越是会误导的那一档，越要把原始证据带上。**
         if e.code == 401:
-            return None, f"凭据过期(401)·去该号跑一次让它刷新 · {body}"
+            try:
+                error = json.loads(body).get("error")
+            except (ValueError, AttributeError):
+                error = None
+            expired = isinstance(error, dict) and (
+                error.get("code") == "token_expired"
+                or str(error.get("message", "")).startswith("Provided authentication token is expired.")
+            )
+            code = "token_expired" if expired else "authentication_failed"
+            return None, f"HTTP 401 {body[:160]}", code
         if e.code == 403:
-            return None, (f"该号无此端点权限(403)·**不是过期**（先看 body 再动手）· {body}"
-                          if body else "该号无此端点权限(403)·**不是过期**（服务端没给 body）")
-        return None, f"HTTP {e.code} {body}"
+            return None, (f"该号无此端点权限(403)·**不是过期**（先看 body 再动手）· {body[:160]}"
+                          if body else "该号无此端点权限(403)·**不是过期**（服务端没给 body）"), None
+        return None, f"HTTP {e.code} {body[:160]}", None
     except Exception as e:                             # noqa: BLE001
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}: {e}", None
 
 
 # ---------- 时间 ----------
@@ -262,15 +273,21 @@ def _codex_quota(home: Path):
     if not token:
         return {"status": "no_creds", "note": "凭据里没有 access_token"}
 
+    error_codes = set()
     data, err, route = _get_json_dual(CODEX_USAGE_URL, {
         "Authorization": f"Bearer {token}",
         "chatgpt-account-id": tokens.get("account_id") or "",
         "User-Agent": "codex_cli_rs (link16 agent_quota)",
         "originator": "codex_cli_rs",
         "Accept": "application/json",
-    }, prefer_proxy=True, runtime="codex")             # 首选代理（墙外），不通自动换直连重试
+    }, prefer_proxy=True, runtime="codex", error_codes=error_codes)
     if data is None:
-        return {"status": "unknown", "note": err}
+        row = {"status": "unknown", "note": err}
+        for code in ("token_expired", "authentication_failed"):
+            if code in error_codes:
+                row["error_code"] = code
+                break
+        return row
 
     return _codex_window_usage(data, route)
 
@@ -535,6 +552,19 @@ def is_usable(row):
     return isinstance(row, dict) and row.get("verdict") in USABLE_VERDICTS
 
 
+def login_hint(row):
+    """Describe a verified Codex authentication failure without forwarding HTTP bodies."""
+    if row.get("runtime") != "codex" or not row.get("profile"):
+        return None
+    cause = {
+        "token_expired": "登录令牌已过期",
+        "authentication_failed": "登录验证失败",
+    }.get(row.get("error_code"))
+    if not cause:
+        return None
+    return f"{cause}。请在 Git Bash 输入 `{row['profile']} login` 重新登录。"
+
+
 def same_failover_series(source, target):
     """The first choice stays inside one runtime and one numbered profile series."""
     if not isinstance(source, dict) or not isinstance(target, dict):
@@ -642,11 +672,13 @@ def _print_table(rows):
         # 说明里可能带着 API 的原始 JSON body（多行）—— **压成一行 + 截断只在这里做**，
         # 数据层（collect()/--json）保持完整。同 eval_plan931._run 的教训：
         # 截断只允许发生在展示层，否则会把证据本身砍掉、让结论建立在残缺数据上。
-        note = " ".join((r.get("note") or "").split())
+        hint = login_hint(r)
+        verdict = "需登录" if hint else r["verdict"]
+        note = hint or " ".join((r.get("note") or "").split())
         if len(note) > 96:
             note = note[:96] + "…（全文见 --json）"
         print(f"{r['profile']:8} {r['runtime']:7} {s:>6} {w:>6} "
-              f"{r['session_reset']:>12} {r['weekly_reset']:>12}  {mark}{r['verdict']:4} {note}")
+              f"{r['session_reset']:>12} {r['weekly_reset']:>12}  {mark}{verdict:4} {note}")
 
 
 def main():

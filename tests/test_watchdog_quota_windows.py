@@ -3,7 +3,10 @@
 import json
 import sys
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -371,12 +374,32 @@ def test_exhausted_codex_accounts_terminate_once_and_block_cron(
     assert quota_recovery.get(tmp_path, "voiceover") == {}
 
 
-def test_unknown_backup_quota_never_terminates_original_session(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("error", "expected", "unexpected"), [
+    ("token_expired", "登录令牌已过期。请在 Git Bash 输入 `cxp2 login` 重新登录", "周额度占用未知"),
+    ("token_invalidated", "登录验证失败。请在 Git Bash 输入 `cxp2 login` 重新登录", "登录令牌已过期"),
+    (None, "周额度占用未知", "`cxp2 login`"),
+])
+def test_unknown_backup_quota_never_terminates_original_session(
+        monkeypatch, tmp_path, error, expected, unexpected):
     import feishu_bridge as fb
     import quota_recovery
     source = _codex_quota("cxp", 100)
-    backup = _codex_quota("cxp2", 0, "问不到")
-    backup.update(status="unknown", weekly_percent=None)
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"tokens": {"access_token": "test-token"}}), encoding="utf-8")
+
+    def open_usage(request, timeout):
+        if error:
+            body = BytesIO(json.dumps({"error": {"code": error, "message": "test-only"}}).encode())
+            raise HTTPError(request.full_url, 401, "Unauthorized", {}, body)
+        raise URLError("network timeout")
+
+    def open_direct(request, timeout):
+        raise URLError("network timeout")
+
+    monkeypatch.setattr(q, "_opener", lambda use_proxy: SimpleNamespace(
+        open=open_usage if use_proxy else open_direct))
+    backup = {"profile": "cxp2", "runtime": "codex", **q._codex_quota(tmp_path)}
+    backup["verdict"] = q._verdict(backup)
     monkeypatch.setattr(w, "STATE_DIR", tmp_path)
     monkeypatch.setattr(fb, "load_bots", lambda: [{"name": "voiceover", "profile": "cxp"}])
     monkeypatch.setattr(w, "session_record", lambda _: {"profile": "cxp"})
@@ -389,6 +412,9 @@ def test_unknown_backup_quota_never_terminates_original_session(monkeypatch, tmp
 
     assert w.failover("voiceover", incident="codex-weekly-unknown") is False
     assert "原会话保留" in messages[0]
+    assert expected in messages[0]
+    assert unexpected not in messages[0]
+    assert "test-only" not in messages[0]
     assert quota_recovery.get(tmp_path, "voiceover") == {}
 
 

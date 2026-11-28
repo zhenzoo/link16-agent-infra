@@ -211,6 +211,12 @@ def _weekly_balance(row):
     return f"周额度已用 {used:.0f}%，剩余 {max(0, 100 - used):.0f}%" + (f"；{month_text}" if month_text else "")
 
 
+def _quota_alert_line(row):
+    hint = agent_quota.login_hint(row)
+    detail = hint or f"{row['verdict']} · {_weekly_balance(row)}"
+    return f"· {row['profile']} · {detail}"
+
+
 def _screen_short_reset(pane_text, now):
     """An explicit session-limit banner can schedule a safe wait when quota API is blind."""
     lines = (pane_text or "").splitlines()[-12:]
@@ -1716,7 +1722,7 @@ def failover(bot_name, target=None, dry_run=False, reason="撞额度上限", *, 
         notify(bot_name, "no_target",
                f"🔴 {bot_name} 的 {cur} 周额度到限额，但**同系列及明确获准的备用账号**"
                "没有可用且获准自动接手的号；额度未全部确认耗尽，原会话保留。本次事故只提醒一次。\n"
-               + "\n".join(f"· {r['profile']} {r['verdict']} · {_weekly_balance(r)}"
+               + "\n".join(_quota_alert_line(r)
                            for r in candidate_rows if agent_quota.failover_priority(curr, r) is not None),
                incident=incident)
         return False
@@ -2038,12 +2044,12 @@ def cmd_run(auto=True):
                 # **不敢换号（不知道切到哪安全），但绝不静默** —— 静默正是这套东西要根治的病。
                 # 按额度事故只告警一次，且不进 lim_stuck 计数、不触发 failover。
                 if uncertain and bot_name and kind != "short":
+                    hint = agent_quota.login_hint(row)
+                    detail = (f"· 账号 `{prof}` {hint}" if hint else
+                              f"· 账号 `{prof}` 的额度查询失败。\n"
+                              "· 运行 `python feishu/agent_quota.py` 查看查询错误")
                     notify(bot_name, "limit",
-                           f"⚠️ {bot_name} 疑似撞额度上限，但**我不敢自动换号**\n"
-                           f"· 面板 {ws} 屏上有限流提示\n"
-                           f"· 但账号 `{prof}` 的额度**问不到** —— 不知道切到哪个号是安全的\n"
-                           f"· 详情：{why}\n"
-                           f"· 你可以：`/account <别的号>` 手动切，或跑 `python feishu/agent_quota.py` 看是谁答不上来",
+                           f"⚠️ {bot_name} 的面板 {ws} 出现限流提示，原会话保留。\n{detail}",
                            incident=incident)
                     log(f"⚠️ {ws}/{bot_name} 屏命中限流但额度问不到（{prof}）→ 只告警不换号")
                 elif uncertain and kind == "short":
