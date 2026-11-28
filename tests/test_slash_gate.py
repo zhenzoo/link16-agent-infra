@@ -6,6 +6,7 @@
 import json
 import ast
 import asyncio
+import os
 import sys
 import tempfile
 import time
@@ -655,14 +656,17 @@ class RosterProfileResolvesAfterLoadTest(unittest.TestCase):
     别只看一台机绿就下结论。
     """
 
+    machine_registry = feishu_bridge.agent_runtime.profile_registry_path()
+
     def test_every_loaded_bot_resolves_a_profile(self):
         import agent_runtime
         if not (ROOT / "feishu" / "bridge-bots.local.json").exists():
             self.skipTest("本机没有 bridge-bots.local.json（每机各自维护·gitignored）")
         bad = []
-        for b in feishu_bridge.load_bots():
-            try:
-                agent_runtime.profile_name(b, required=True)
-            except Exception as e:  # noqa: BLE001
-                bad.append(f"{b.get('name')}: {e}")
+        with mock.patch.dict(os.environ, {agent_runtime.PROFILE_REGISTRY_ENV: str(self.machine_registry)}):
+            for b in feishu_bridge.load_bots():
+                try:
+                    agent_runtime.profile_name(b, required=True)
+                except Exception as e:  # noqa: BLE001
+                    bad.append(f"{b.get('name')}: {e}")
         self.assertEqual(bad, [], "这些 bot 解析不出 profile → 它们起不了会话")

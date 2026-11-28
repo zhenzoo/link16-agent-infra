@@ -171,7 +171,7 @@ class InboundRecoveryBoundaryTests(unittest.TestCase):
         recover = Mock(return_value="检测到 WMUX 未运行，已发起启动；待终端就绪后自动继续原消息。")
         card = AsyncMock()
         context = dict(
-            asyncio=asyncio, bridge_inbox=bridge_inbox,
+            asyncio=asyncio, bridge_inbox=bridge_inbox, network_route=bridge.network_route,
             wmux_session=SimpleNamespace(recover_transport=recover),
             control=Mock(), durable_inbox=Mock(get=Mock(return_value=row)),
             ch=SimpleNamespace(dispatch_saved=AsyncMock(side_effect=UNAVAILABLE)),
