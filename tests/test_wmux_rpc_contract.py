@@ -171,7 +171,10 @@ const server = net.createServer((sock) => {
   });
 });
 server.listen(addr, () => {
-  const child = spawn(process.execPath, [process.env.RPC, "paste", "daemon-test", process.env.PROMPT, "--allow-ws", "ws-test",
+  const child = process.env.TEST_LAUNCHER ? spawn(process.env.TEST_PYTHON, ["-c",
+    "import sys, os; sys.path.insert(0, os.environ['TEST_FEISHU']); import wmux_session as w; w.send_command('daemon-test', 'ws-test', os.environ['PROMPT'])"],
+    {env: {...process.env, WMUX_SOCKET_PATH: addr, WMUX_AUTH_TOKEN: "tok", WMUX_RPC_PATH: process.env.RPC}}) :
+    spawn(process.execPath, [process.env.RPC, "paste", "daemon-test", process.env.PROMPT, "--allow-ws", "ws-test",
     ...(process.env.FAKE_REPLACE === "1" ? ["--replace-draft"] : []),
     ...(process.env.FAKE_WIN32 === "1" ? ["--win32-input"] : [])],
     { env: { ...process.env, WMUX_SOCKET_PATH: addr, WMUX_AUTH_TOKEN: "tok" } });
@@ -192,8 +195,10 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         (self.tmp / "fake_paste_pipe.js").write_text(FAKE_PASTE_PIPE, encoding="utf-8")
 
     def via_paste(self, prompt, *, initial="", concurrent=False, inserted=False, screen="",
-                  replace=False, approval=False, win32_input=False):
+                  replace=False, approval=False, win32_input=False, launcher=False):
         env = {**os.environ, "RPC": str(RPC_PATH), "PROMPT": prompt,
+               "TEST_LAUNCHER": "1" if launcher else "", "TEST_PYTHON": sys.executable,
+               "TEST_FEISHU": str(RPC_PATH.parents[1] / "feishu"),
                "FAKE_INITIAL": initial, "FAKE_CONCURRENT": "1" if concurrent else "0",
                "FAKE_INSERT": "1" if inserted else "0", "FAKE_SCREEN": screen,
                "FAKE_REPLACE": "1" if replace else "0",
@@ -203,9 +208,24 @@ class WmuxRpcPasteRecoveryTests(unittest.TestCase):
         out = subprocess.run(["node", str(self.tmp / "fake_paste_pipe.js")], env=env,
                              capture_output=True, text=True, encoding="utf-8", timeout=30)
         got = json.loads(out.stdout)
-        self.assertEqual(got["keys"], [], "paste must never clear, interrupt, or submit input")
+        if not launcher:
+            self.assertEqual(got["keys"], [], "paste must never clear, interrupt, or submit input")
         self.assertEqual(got["screens"], [], "paste must not infer draft state from rendered text")
         return got
+
+    def test_shell_line_wire_bytes_and_rejected_input(self):
+        good = 'bash "D:/space 名/launcher.sh"'
+        got = self.via_paste(good, launcher=True)
+        self.assertEqual(got["code"], 0, got["stderr"])
+        self.assertEqual(got["keys"], ["enter"])
+        writes = [r["params"] for r in got["requests"] if r["method"] == "input.send"]
+        self.assertEqual(writes, [{"text": good, "raw": True, "ptyId": "daemon-test", "workspaceId": "ws-test"}])
+        for bad in ("[200~" + good, "\x1b[200~" + good, good + "\nwhoami"):
+            with self.subTest(bad=bad):
+                got = self.via_paste(bad, launcher=True)
+                self.assertNotEqual(got["code"], 0)
+                self.assertEqual(got["keys"], [])
+                self.assertFalse(any(r["method"] == "input.send" for r in got["requests"]))
 
     def test_mid_paste_failure_preserves_partial_input_without_retry_proof(self):
         got = self.via_paste("a" * 150 + "FAIL" + "b" * 100)
@@ -449,7 +469,7 @@ class WmuxSessionCreateRecoveryTests(unittest.TestCase):
                 raise wmux_session.WmuxOutcomeUnknown("response lost")
             raise AssertionError(method)
 
-        for command in ("claude-worker", "codex-worker", "kimi-worker"):
+        for command in ("claude-worker", "codex-worker", "kimi-worker", "agy-worker"):
             with self.subTest(command=command), \
                     mock.patch.object(wmux_session, "_rpc", side_effect=rpc), \
                     mock.patch.object(wmux_session, "_wait_first_pty", return_value="pty-new"), \
@@ -460,7 +480,10 @@ class WmuxSessionCreateRecoveryTests(unittest.TestCase):
                 self.assertEqual(result["workspace_id"], "ws-new")
                 self.autonomy.assert_called_with("ws-new")
                 self.assertEqual(wmux.call_count, 2)
-                wmux.assert_any_call("paste", "pty-new", command, "--allow-ws", "ws-new")
+                method, op, payload, *scope = wmux.call_args_list[0].args
+                self.assertEqual((method, op, scope), ("rpc", "input.send", ["--allow-ws", "ws-new"]))
+                self.assertEqual(json.loads(payload), {"text": command, "raw": True, "ptyId": "pty-new",
+                                                       "workspaceId": "ws-new"})
                 wmux.assert_any_call("enter", "pty-new", "--allow-ws", "ws-new")
                 rows.pop()
 

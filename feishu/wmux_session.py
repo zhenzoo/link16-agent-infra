@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -508,18 +509,38 @@ def enable_autonomy(workspace_id):
 
 
 def send_command(pty, workspace_id, command):
-    """Submit one launcher command with throttled bracketed paste, then Enter."""
-    _wmux("paste", pty, command, "--allow-ws", workspace_id)
+    """A shell receives one printable line. Only a successful write gets Enter."""
+    if not command.strip() or re.search(r"[\x00-\x1f\x7f-\x9f]|\[20[01]~", command):
+        raise ValueError("启动行为空或带有控制字符、粘贴标记，未发送至终端")
+    params = {"ptyId": pty, "workspaceId": workspace_id, "text": command, "raw": True}
+    _wmux("rpc", "input.send", json.dumps(params), "--allow-ws", workspace_id)
     _wmux("enter", pty, "--allow-ws", workspace_id)
 
 
+def write_launcher(path, body):
+    """Check the exact UTF-8 script with Bash before making it launchable."""
+    if os.name == "nt":
+        from preflight import _git_bash_path
+        bash = _git_bash_path()
+    else:
+        bash = shutil.which("bash")
+    if not bash:
+        raise ValueError("未找到可做启动脚本语法检查的 Bash")
+    script = ("#!/usr/bin/env bash\n" + body + "\n").encode("utf-8")
+    result = subprocess.run([bash, "-n"], input=script, capture_output=True,
+                            timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if result.returncode:
+        raise ValueError("启动脚本未通过 Bash 语法检查，未发送至终端")
+    path.write_bytes(script)
+    return f'bash "{path.as_posix()}"'
+
+
 def _short_launcher(command):
-    if len(command) <= 240:
+    if len(command) <= 240 and "\n" not in command and "\r" not in command:
         return command
     launcher = PROJECT / "feishu" / "_state" / f"agent-launch-wmux-{time.time_ns()}.sh"
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text("#!/usr/bin/env bash\n" + command + "\n", encoding="utf-8")
-    return f'bash "{launcher.as_posix()}"'
+    return write_launcher(launcher, command)
 
 
 class WmuxLaunchPending(RuntimeError):

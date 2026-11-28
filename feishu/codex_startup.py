@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from itertools import product
 import os
 from pathlib import Path
 import threading
@@ -14,6 +15,34 @@ from bridge_events import normalize_codex_notification
 CONTRACT = "codex-startup-v2"
 STARTUP_TIMEOUT_SEC = 60
 ACCOUNT_DISCOVERY_ATTEMPTS = 3
+
+
+def recovery_action(draft, process_tree, worker_seen):
+    """Select the only permitted terminal write for one failed startup."""
+    if worker_seen:
+        return None
+    if process_tree == "leaf":
+        if draft == "owned":
+            return "enter"
+        if draft in ("empty", "rejected"):
+            return "launch"
+    if process_tree == "shells" and draft == "rejected":
+        return "launch"
+    return None
+
+
+def verify_recovery_contract():
+    """Check the loaded decision function against the complete allowed relation."""
+    permitted = {
+        ("owned", "leaf", False): "enter",
+        ("empty", "leaf", False): "launch",
+        ("rejected", "leaf", False): "launch",
+        ("rejected", "shells", False): "launch",
+    }
+    for state in product(("owned", "empty", "rejected", "other"),
+                         ("leaf", "shells", "unverified"), (False, True)):
+        if recovery_action(*state) != permitted.get(state):
+            raise RuntimeError(f"Codex 启动恢复规则未通过有限状态核验：{state}。停止启动。")
 
 
 def state_path(state_dir, bot, kind="startup"):

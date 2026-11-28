@@ -604,8 +604,11 @@ class ProfileLaunchIntegrityTests(unittest.TestCase):
     那一层逻辑**：解析顺序、fail closed、输出契约。
     """
 
+    # Resolve before pytest installs its per-test compatibility registry. The
+    # real local roster test must pair two files from the same installation.
+    machine_registry = agent_runtime.profile_registry_path()
+
     def setUp(self):
-        self.machine_registry = agent_runtime.profile_registry_path()
         fixture = patch.object(agent_runtime, "PROFILE_REGISTRY_LOCAL_PATH",
                                ROOT / "tests" / "absent-profile-registry.json")
         fixture.start()

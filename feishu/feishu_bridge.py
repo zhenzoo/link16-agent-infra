@@ -1300,6 +1300,17 @@ def _claude_state_file(bot):
         return "所选 Claude 账号的 .claude.json"
 
 
+def _paste_rejected_launcher(screen, command):
+    """Only the exact current launcher, Bash error and returned prompt count."""
+    before, error, tail = screen.rpartition("bash: [200~bash: command not found")
+    if not error or not re.fullmatch(r"\s*[^\n]*MINGW64[^\n]*\n\$\s*", tail):
+        return False
+    _, prompt, echoed = before.rpartition("\n$ [200~")
+    return bool(prompt) and echoed.strip().replace("\n", "").replace("\r", "") in (
+        command + "~", command + "[201~", command,
+    )
+
+
 def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
     """Wait for one worker startup and perform at most one evidence-gated retry."""
     startup_started = float(started) if started is not None else time.time()
@@ -1316,19 +1327,32 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
         # No current worker receipt + a verified idle shell permits one retry.
         # An exact owned launcher draft needs Enter only; never paste it twice.
         retried = False
-        if (not record and bot.get("_startup_id")
-                and _startup_retryable_shell(bot, pty, screen)
-                and wmux_session.shell_has_no_children(pty)):
+        rejected_launcher = False
+        if not record and bot.get("_startup_id") and _startup_retryable_shell(bot, pty, screen):
             launcher = STATE_DIR / f"agent-launch-{bot['name']}-{bot['_startup_id']}.sh"
             command = f'bash "{launcher.as_posix()}"'
+            rejected_launcher = _paste_rejected_launcher(screen, command)
             last = screen.rstrip().rsplit("\n", 1)[-1].strip()
-            if last == "$" or last == "$ " + command:
-                # Recheck the worker receipt immediately before touching input.
-                if not _codex_startup_record(bot):
+            # A Git Bash login shell may own an interactive Bash child. Accept
+            # that tree only after this attempt's exact command-not-found error.
+            draft = "other"
+            if last == "$":
+                draft = "rejected" if rejected_launcher else "empty"
+            elif last == "$ " + command:
+                draft = "owned"
+            if draft != "other":
+                tree = "unverified"
+                if wmux_session.shell_has_no_children(pty):
+                    tree = "leaf"
+                elif rejected_launcher and wmux_session.shell_tree_idle(pty):
+                    tree = "shells"
+                _check_startup_cancelled(bot)
+                action = codex_startup.recovery_action(draft, tree, bool(_codex_startup_record(bot)))
+                if action:
                     retried = True
-                    blog(bot["name"], "启动仍停在无子进程的 shell，自动恢复一次；原业务消息尚未提交")
+                    blog(bot["name"], "已核对本次启动仍在空闲 shell，自动恢复一次；原业务消息尚未提交")
                     try:
-                        if last == "$ " + command:
+                        if action == "enter":
                             wmux("enter", pty, "--allow-ws", workspace_id)
                         else:
                             wmux_session.send_command(pty, workspace_id, command)
@@ -1345,6 +1369,8 @@ def _finish_worker_startup(bot, workspace_id, pty, cwd, started=None):
                     except RuntimeError:
                         pass
         detail = record.get("detail") or "启动命令已提交，但 worker 未确认开始执行"
+        if rejected_launcher and not record:
+            detail = "Git Bash 把粘贴起始符读成了命令名的一部分，启动脚本没有执行"
         if retried:
             detail += "；已按裸 shell 证据自动恢复一次，仍未就绪"
         if record.get("stage") != "failed":
@@ -1710,13 +1736,8 @@ def _update_progress_callback(channel, chat_id, bot_name):
 def _worker_launcher(bot, cwd):
     """Use the proven Codex bootstrap shape for every runtime."""
     launcher = STATE_DIR / f"agent-launch-{bot['name']}-{bot.get('_startup_id') or 'retry'}.sh"
-    launcher.write_text(
-        "#!/usr/bin/env bash\n"
-        + "cd -- " + shlex.quote(str(cwd).replace("\\", "/")) + " || exit $?\n"
-        + _worker_cmd(bot, cwd) + "\n",
-        encoding="utf-8",
-    )
-    return f'bash "{launcher.as_posix()}"'
+    body = "cd -- " + shlex.quote(str(cwd).replace("\\", "/")) + " || exit $?\n" + _worker_cmd(bot, cwd)
+    return wmux_session.write_launcher(launcher, body)
 
 
 def _reuse_check(bot, rec):
@@ -1843,6 +1864,8 @@ def _ensure_session_unlocked(bot):
     # Permission bypass flags do not bypass either runtime's directory-trust gate.
     agent_runtime.ensure_launch_cwd_trust(bot, cwd)
     startup_bot = {**bot, "_startup_id": (pending_launch or {}).get("startup_id") or uuid.uuid4().hex}
+    if agent_runtime.uses_app_server(bot):
+        codex_startup.verify_recovery_contract()
     if not pending_launch:
         _prepare_worker_update(bot)
     _check_startup_cancelled(bot)
