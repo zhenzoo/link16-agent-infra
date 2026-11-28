@@ -24,6 +24,7 @@ from bridge_events import (
 )
 
 CONTRACT = "milestone-v1"
+INVOCATION_POLICY_TAG = "[Link16 Antigravity bridge policy]"
 
 _USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
 _TRAILING_META_RE = re.compile(
@@ -173,15 +174,26 @@ def _is_user_turn_start(rec: dict) -> bool:
 
 
 def _current_turn_slice(rows: list[tuple[int, dict]]) -> tuple[int, list[tuple[int, dict]]]:
-    """Return (user_step_index, slice_of_records_from_last_user_input)."""
+    """A background task can start a new invocation under the same user input."""
     last_idx = -1
     for idx, (_line_no, rec) in enumerate(rows):
         if _is_user_turn_start(rec):
             last_idx = idx
     if last_idx < 0:
         return 0, rows
-    line_no, user_rec = rows[last_idx]
-    step_idx = user_rec.get("step_index")
+    # Only our PreInvocation policy in an SDK-authored system step marks a
+    # boundary. A tool result or quoted policy in user/model text cannot do so.
+    saw_policy = False
+    for idx in range(last_idx + 1, len(rows)):
+        rec = rows[idx][1]
+        if (rec.get("type") == "SYSTEM_MESSAGE" and rec.get("source") == "SYSTEM_SDK"
+                and any(line.startswith(INVOCATION_POLICY_TAG)
+                        for line in str(rec.get("content") or "").splitlines())):
+            if saw_policy:
+                last_idx = idx
+            saw_policy = True
+    line_no, boundary = rows[last_idx]
+    step_idx = boundary.get("step_index")
     return (int(step_idx) if isinstance(step_idx, int) else line_no), rows[last_idx:]
 
 

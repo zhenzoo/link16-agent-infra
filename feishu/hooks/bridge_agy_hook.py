@@ -37,7 +37,7 @@ import session_work  # noqa: E402
 import turn_delivery_guard  # noqa: E402
 
 AGY_BRIDGE_POLICY = (
-    "[Link16 Antigravity bridge policy] 本会话由飞书/wmux 托管。"
+    f"{agy_events.INVOCATION_POLICY_TAG} 本会话由飞书/wmux 托管。"
     "1) 绝对不要调用 ask_question 弹终端选择题；授权范围内的可逆决定直接执行，"
     "确需主人决定时改用普通文字说明选项与推荐并回复。"
     "2) 私有 thinking 不会展示在飞书卡片中；多步任务进行中请在调用工具时输出简短公开进度"
@@ -146,6 +146,12 @@ def _handle_pre_invocation(sd: Path, bot: str, inp: dict) -> None:
     cid = str(inp.get("conversationId") or "")
     bridge_inbox.confirm_prompt(sd, bot, prompt, cid or None)
     route = turn_delivery_guard.route_from_prompt(prompt)
+    if not prompt:
+        # A task notification may wake the same conversation without a user
+        # envelope. Carry its pinned destination, including peer reply metadata.
+        previous = turn_delivery_guard.read_route(sd, bot)
+        if previous and previous.get("session") == cid:
+            route = turn_delivery_guard.public_route(previous)
     active = None
     try:
         gate_on = session_work.enabled()
@@ -248,7 +254,6 @@ def _handle_post_tool_use(sd: Path, bot: str, inp: dict) -> None:
 
 
 def _handle_stop(sd: Path, bot: str, inp: dict) -> None:
-    _save_session_binding(sd, bot, inp)
     cid = str(inp.get("conversationId") or "")
     tp = inp.get("transcriptPath")
     term_reason = str(inp.get("terminationReason") or "NO_TOOL_CALL")
@@ -261,6 +266,10 @@ def _handle_stop(sd: Path, bot: str, inp: dict) -> None:
         active_route = None
 
     turn_key = str((active_route or {}).get("turn_key") or "")
+    if active_route and active_route.get("session") and active_route["session"] != cid:
+        _emit({"decision": "stop"})
+        return
+    _save_session_binding(sd, bot, inp)
     # 1. Synchronous feishu-workline + stuck-delivery gate (normal completion only).
     if (
         session_work.enabled()
@@ -338,7 +347,8 @@ def main() -> int:
     elif event == "PostToolUse":
         _handle_post_tool_use(sd, bot, inp)
     elif event == "Stop":
-        _handle_stop(sd, bot, inp)
+        with bridge_injection.injection_lock(sd, "agy-stop", bot):
+            _handle_stop(sd, bot, inp)
     else:
         _noop(event)
     return 0

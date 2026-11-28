@@ -315,6 +315,31 @@ class AgyHookAndProfileTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_THINK", json.dumps(lines, ensure_ascii=False))
             self.assertIn("foo.py 已完成修改。", lines[1]["text"])
 
+            # A task notification wakes the same user step. The old cursor and
+            # first answer must survive an upgrade without losing the new one.
+            marker = {"type": "SYSTEM_MESSAGE", "source": "SYSTEM_SDK",
+                      "content": "PreInvocation hook:\n" + agy_events.INVOCATION_POLICY_TAG}
+            rows = [json.loads(line) for line in tp.read_text(encoding="utf-8").splitlines()]
+            rows.insert(1, {**marker, "step_index": 0})
+            rows.extend([{**marker, "step_index": 4},
+                         {"step_index": 5, "type": "SYSTEM_MESSAGE", "source": "SYSTEM",
+                          "content": "private task output"},
+                         {"step_index": 6, "type": "PLANNER_RESPONSE", "status": "DONE",
+                          "content": "成品已经可以观看。"}])
+            tp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            run_hook({"hookEventName": "PreInvocation", "invocationNum": 0,
+                      "conversationId": "conv-e2e", "transcriptPath": str(tp)}, bridge_bot="testbot")
+            stop = {"hookEventName": "Stop", "conversationId": "conv-e2e",
+                    "transcriptPath": str(tp), "terminationReason": "NO_TOOL_CALL",
+                    "continuationActive": True}
+            for _ in range(2):
+                self.assertEqual(run_hook(stop, bridge_bot="testbot")["decision"], "stop")
+            final_rows = [json.loads(line) for line in
+                          (state_dir / "bridge-outbox-testbot.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(final_rows), 3)
+            self.assertNotEqual(final_rows[-1]["anchor"], final_rows[-2]["anchor"])
+            self.assertEqual(final_rows[-1]["text"], "成品已经可以观看。\n\n---\n✅ 已完成")
+
     def test_profile_commands_trust_and_fail_closed_quota(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
